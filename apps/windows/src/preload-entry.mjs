@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateRequest, validateCreationResult, validatePassword,
-  validateProfile, validateOpenedDocument } from "./contracts.mjs";
+  validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
+  canonicalizeDocumentText } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -17,4 +18,8 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:open", validatePassword(password));
     return value === null ? null : validateOpenedDocument(value);
   },
+  enterEditMode: async () => validateEditMode(
+    await ipcRenderer.invoke("document:enter-edit-mode")),
+  saveDocument: async (content) => validateSaveResult(
+    await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
 }));

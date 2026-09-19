@@ -36,6 +36,8 @@ app.whenReady().then(() => {
     if (chosen.canceled || chosen.filePaths.length !== 1) return null;
     return service.openDocument(chosen.filePaths[0], password);
   });
+  ipcMain.handle("document:enter-edit-mode", () => service.enterEditMode());
+  ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
   window = new BrowserWindow({
     width: 920,
     height: 700,

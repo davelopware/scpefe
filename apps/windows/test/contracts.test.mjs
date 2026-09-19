@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateCreateRequest, validateCreationResult, validateOpenedDocument,
-  validateProfile } from "../src/contracts.mjs";
+import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult,
+  validateOpenedDocument, validateProfile } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
@@ -32,9 +32,17 @@ test("requires irrecoverability and independent recovery acknowledgements", () =
 });
 
 test("accepts only validated read-only native results", () => {
-  assert.deepEqual(validateOpenedDocument({ content: "secret", readOnly: true }),
-    { content: "secret", readOnly: true });
+  assert.deepEqual(validateOpenedDocument({ content: "secret", readOnly: true,
+    canEdit: true }), { content: "secret", readOnly: true, canEdit: true });
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: false }));
+});
+
+test("canonicalizes a BOM and common line endings without trimming", () => {
+  assert.equal(canonicalizeDocumentText("\ufeff first \r\nsecond\r\n"),
+    " first \nsecond\n");
+  assert.equal(canonicalizeDocumentText("no final newline\r"), "no final newline\n");
+  assert.equal(canonicalizeDocumentText("  whitespace  "), "  whitespace  ");
+  assert.throws(() => canonicalizeDocumentText("bad\ud800text"), /valid UTF-8/);
 });
 
 test("creation results cannot expose host filesystem paths", () => {

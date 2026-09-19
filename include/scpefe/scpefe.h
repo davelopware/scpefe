@@ -85,6 +85,33 @@ typedef struct scpefe_unlocked_container_v1 {
     size_t encoded_snapshot_revision_size;
 } scpefe_unlocked_container_v1;
 
+/* Borrowed policy and identity of the password slot used for this unlock. */
+typedef struct scpefe_unlocked_slot_access_v1 {
+    uint32_t struct_size;
+    const uint8_t *slot_id;
+    size_t slot_id_size;
+    int can_edit;
+    int recovery_slot;
+} scpefe_unlocked_slot_access_v1;
+
+/* Validated inputs used to seal and publish a child snapshot revision. */
+typedef struct scpefe_manual_save_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *password;
+    size_t password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    const char *content;
+    size_t content_size;
+    uint64_t timestamp_ms;
+} scpefe_manual_save_v1;
+
 /* Validated inputs used to publish a new owner-protected document. */
 typedef struct scpefe_new_document_v1 {
     uint32_t struct_size;
@@ -225,6 +252,14 @@ SCPEFE_API scpefe_status scpefe_new_document_create(
     size_t *output_size
 );
 
+/* Seals a child revision and returns a replacement self-contained container. */
+SCPEFE_API scpefe_status scpefe_manual_save(
+    const scpefe_manual_save_v1 *save,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
 /* Authenticates an owner password and unlocks the encrypted snapshot. */
 SCPEFE_API scpefe_status scpefe_password_container_unlock(
     const uint8_t *container,
@@ -248,6 +283,12 @@ SCPEFE_API scpefe_status scpefe_password_container_unlock_with_limits(
 SCPEFE_API scpefe_status scpefe_unlocked_container_view(
     const scpefe_unlocked_container *unlocked,
     scpefe_unlocked_container_v1 *view
+);
+
+/* Borrows the authenticated slot access until the unlocked owner is destroyed. */
+SCPEFE_API scpefe_status scpefe_unlocked_container_slot_access(
+    const scpefe_unlocked_container *unlocked,
+    scpefe_unlocked_slot_access_v1 *access
 );
 
 /* Releases unlocked container values and clears their storage. */

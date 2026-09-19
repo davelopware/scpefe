@@ -1,5 +1,29 @@
 const MAX_TEXT_BYTES = 16 * 1024 * 1024;
 
+function hasUnpairedSurrogate(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return true;
+  }
+  return false;
+}
+
+export function canonicalizeDocumentText(value) {
+  if (typeof value !== "string" || hasUnpairedSurrogate(value)) {
+    throw new TypeError("content must be valid UTF-8 text");
+  }
+  const withoutBom = value.startsWith("\ufeff") ? value.slice(1) : value;
+  const canonical = withoutBom.replace(/\r\n?/g, "\n");
+  if (Buffer.byteLength(canonical, "utf8") > MAX_TEXT_BYTES) {
+    throw new TypeError("content must be UTF-8 text within the size limit");
+  }
+  return canonical;
+}
+
 function requiredText(value, field, maximum = 512) {
   if (typeof value !== "string") throw new TypeError(`${field} must be text`);
   const normalized = value.trim();
@@ -44,11 +68,8 @@ export function validateCreateRequest(value) {
   if (recoveryPassword && value.storedRecoverySeparately !== true) {
     throw new TypeError("recovery password storage must be acknowledged");
   }
-  if (typeof value.content !== "string"
-      || Buffer.byteLength(value.content, "utf8") > MAX_TEXT_BYTES) {
-    throw new TypeError("content must be UTF-8 text within the size limit");
-  }
-  return { ownerPassword, recoveryPassword, content: value.content };
+  return { ownerPassword, recoveryPassword,
+    content: canonicalizeDocumentText(value.content) };
 }
 
 export function validatePassword(value) {
@@ -57,10 +78,27 @@ export function validatePassword(value) {
 
 export function validateOpenedDocument(value) {
   if (!value || typeof value !== "object" || value.readOnly !== true
-      || typeof value.content !== "string") {
+      || typeof value.content !== "string" || typeof value.canEdit !== "boolean") {
     throw new TypeError("native bridge returned an invalid document");
   }
-  return Object.freeze({ content: value.content, readOnly: true });
+  return Object.freeze({ content: value.content, readOnly: true,
+    canEdit: value.canEdit });
+}
+
+export function validateEditMode(value) {
+  if (!value || typeof value !== "object" || value.readOnly !== false
+      || value.canEdit !== true || typeof value.content !== "string") {
+    throw new TypeError("host did not enter edit mode");
+  }
+  return Object.freeze({ content: value.content, readOnly: false, canEdit: true });
+}
+
+export function validateSaveResult(value) {
+  if (!value || typeof value !== "object" || value.saved !== true
+      || typeof value.content !== "string" || Object.keys(value).length !== 2) {
+    throw new TypeError("host returned an invalid save result");
+  }
+  return Object.freeze({ saved: true, content: value.content });
 }
 
 export function validateCreationResult(value) {

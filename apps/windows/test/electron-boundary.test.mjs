@@ -33,6 +33,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "createDocument", "openDocument",
+    "enterEditMode", "saveDocument",
   ]);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",

@@ -1,12 +1,14 @@
 import path from "node:path";
-import { validateCreateRequest, validateOpenedDocument, validatePassword,
-  validateProfile } from "./contracts.mjs";
+import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
+  validateOpenedDocument, validatePassword, validateProfile,
+  validateSaveResult } from "./contracts.mjs";
 
 export class DocumentService {
   constructor({ native, fs, profilePath }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
+    this.active = null;
   }
 
   async loadProfile() {
@@ -46,8 +48,46 @@ export class DocumentService {
 
   async openDocument(target, password) {
     const bytes = await this.fs.readFile(target);
-    return validateOpenedDocument(
-      this.native.openDocument(bytes, validatePassword(password)));
+    const validatedPassword = validatePassword(password);
+    const opened = validateOpenedDocument(
+      this.native.openDocument(bytes, validatedPassword));
+    this.active = { target, password: validatedPassword, opened, editMode: false };
+    return opened;
+  }
+
+  enterEditMode() {
+    if (!this.active) throw new Error("Open a document first");
+    if (!this.active.opened.canEdit) {
+      throw new Error("The active password slot does not permit editing");
+    }
+    this.active.editMode = true;
+    return validateEditMode({ ...this.active.opened, readOnly: false });
+  }
+
+  async saveDocument(content) {
+    if (!this.active) throw new Error("Open a document first");
+    if (!this.active.editMode) throw new Error("Enter edit mode before saving");
+    if (!this.active.opened.canEdit) {
+      throw new Error("The active password slot does not permit editing");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const canonical = canonicalizeDocumentText(content);
+    const current = await this.fs.readFile(this.active.target);
+    const candidate = this.native.saveDocument(current, this.active.password, {
+      ...profile, content: canonical, timestampMs: Date.now(),
+    });
+    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      throw new Error("Native bridge did not produce a container");
+    }
+    await this.#atomicWrite(this.active.target, candidate, true);
+    const published = await this.fs.readFile(this.active.target);
+    if (!published.equals(candidate)) throw new Error("Published container verification failed");
+    const reopened = validateOpenedDocument(
+      this.native.openDocument(published, this.active.password));
+    if (reopened.content !== canonical) throw new Error("Saved document verification failed");
+    this.active.opened = reopened;
+    return validateSaveResult({ saved: true, content: canonical });
   }
 
   async #atomicWrite(target, bytes, replace) {
