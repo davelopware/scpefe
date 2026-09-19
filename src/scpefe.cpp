@@ -2,22 +2,68 @@
 
 #include <new>
 
-struct scpefe_context {
-    scpefe_host_services_v1 host_services;
-};
-
 namespace {
 
 constexpr const char *library_version = SCPEFE_VERSION_STRING;
 
-bool has_complete_host_services(const scpefe_host_services_v1 *host_services)
+bool has_complete_host_services(const scpefe_host_services_v1 *services)
 {
-    return host_services != nullptr
-        && host_services->struct_size >= sizeof(scpefe_host_services_v1)
-        && host_services->monotonic_time_ms != nullptr;
+    return services != nullptr
+        && services->struct_size >= sizeof(scpefe_host_services_v1)
+        && services->monotonic_time_ms != nullptr;
 }
 
 } // namespace
+
+namespace scpefe::core {
+
+class HostServices {
+public:
+    explicit HostServices(const scpefe_host_services_v1 &services)
+        : instance_data_(services.instance_data),
+          monotonic_time_ms_(services.monotonic_time_ms) {}
+
+    bool read_monotonic_time_ms(uint64_t &time_ms) const
+    {
+        return monotonic_time_ms_(instance_data_, &time_ms) == SCPEFE_STATUS_OK;
+    }
+
+private:
+    void *instance_data_;
+    scpefe_monotonic_time_ms_fn monotonic_time_ms_;
+};
+
+struct HealthInfo {
+    uint64_t host_monotonic_time_ms;
+};
+
+class Context {
+public:
+    explicit Context(const scpefe_host_services_v1 &services)
+        : host_services_(services) {}
+
+    bool read_health(HealthInfo &health_info) const
+    {
+        uint64_t host_time = 0;
+        if (!host_services_.read_monotonic_time_ms(host_time)) {
+            return false;
+        }
+        health_info.host_monotonic_time_ms = host_time;
+        return true;
+    }
+
+private:
+    HostServices host_services_;
+};
+
+} // namespace scpefe::core
+
+struct scpefe_context {
+    explicit scpefe_context(const scpefe_host_services_v1 &services)
+        : implementation(services) {}
+
+    scpefe::core::Context implementation;
+};
 
 uint32_t scpefe_abi_version(void)
 {
@@ -43,7 +89,7 @@ scpefe_status scpefe_context_create(
         return SCPEFE_STATUS_UNSUPPORTED_ABI;
     }
 
-    auto *created = new (std::nothrow) scpefe_context{*host_services};
+    auto *created = new (std::nothrow) scpefe_context(*host_services);
     if (created == nullptr) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
@@ -67,22 +113,17 @@ scpefe_status scpefe_context_health(
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
 
-    uint64_t host_time = 0;
-    const scpefe_status host_status = context->host_services.monotonic_time_ms(
-        context->host_services.instance_data,
-        &host_time
-    );
-    if (host_status != SCPEFE_STATUS_OK) {
+    scpefe::core::HealthInfo internal_health{};
+    if (!context->implementation.read_health(internal_health)) {
         return SCPEFE_STATUS_HOST_ERROR;
     }
-
     *health_info = scpefe_health_info_v1{
         sizeof(scpefe_health_info_v1),
         SCPEFE_ABI_VERSION,
         SCPEFE_VERSION_MAJOR,
         SCPEFE_VERSION_MINOR,
         SCPEFE_VERSION_PATCH,
-        host_time,
+        internal_health.host_monotonic_time_ms,
     };
     return SCPEFE_STATUS_OK;
 }

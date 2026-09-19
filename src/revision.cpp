@@ -8,7 +8,73 @@
 #include <string>
 #include <vector>
 
-struct scpefe_decoded_snapshot_revision {
+namespace scpefe::format {
+
+enum class RevisionError {
+    invalid_argument,
+    malformed_cbor,
+    limit_exceeded,
+    unsupported_format,
+};
+
+struct RevisionFailure {
+    RevisionError error;
+};
+
+class RevisionLimits {
+public:
+    explicit RevisionLimits(const scpefe_revision_limits_v1 &limits)
+        : max_input_bytes_(limits.max_input_bytes),
+          max_nesting_depth_(limits.max_nesting_depth),
+          max_collection_entries_(limits.max_collection_entries),
+          max_text_bytes_(limits.max_text_bytes),
+          max_byte_string_bytes_(limits.max_byte_string_bytes),
+          max_parent_count_(limits.max_parent_count) {}
+
+    std::size_t max_input_bytes() const { return max_input_bytes_; }
+    std::size_t max_nesting_depth() const { return max_nesting_depth_; }
+    std::size_t max_collection_entries() const {
+        return max_collection_entries_;
+    }
+    std::size_t max_text_bytes() const { return max_text_bytes_; }
+    std::size_t max_byte_string_bytes() const {
+        return max_byte_string_bytes_;
+    }
+    std::size_t max_parent_count() const { return max_parent_count_; }
+
+private:
+    std::size_t max_input_bytes_;
+    std::size_t max_nesting_depth_;
+    std::size_t max_collection_entries_;
+    std::size_t max_text_bytes_;
+    std::size_t max_byte_string_bytes_;
+    std::size_t max_parent_count_;
+};
+
+class SnapshotRevision {
+public:
+    static void validate_view(
+        const scpefe_snapshot_revision_v1 &revision,
+        const RevisionLimits &limits
+    );
+    static SnapshotRevision from_view(
+        const scpefe_snapshot_revision_v1 &revision,
+        const RevisionLimits &limits
+    );
+    static SnapshotRevision decode(
+        const std::uint8_t *encoded,
+        std::size_t encoded_size,
+        const RevisionLimits &limits
+    );
+
+    std::vector<std::uint8_t> encode() const;
+    std::string diagnostic_json(bool include_content) const;
+    void populate_view(scpefe_snapshot_revision_v1 &view) const;
+
+private:
+    SnapshotRevision() = default;
+    explicit SnapshotRevision(const scpefe_snapshot_revision_v1 &revision);
+
     std::vector<std::uint8_t> parent_revision_ids;
     std::uint64_t timestamp_ms{};
     std::vector<std::uint8_t> slot_id;
@@ -20,8 +86,6 @@ struct scpefe_decoded_snapshot_revision {
     std::vector<std::uint8_t> content_hash;
     std::string content;
 };
-
-namespace {
 
 constexpr std::size_t default_max_input_bytes = 16u * 1024u * 1024u;
 constexpr std::size_t default_max_nesting_depth = 8u;
@@ -104,7 +168,7 @@ bool valid_canonical_document_text(const char *data, std::size_t size)
     return std::find(data, data + size, '\r') == data + size;
 }
 
-class cbor_writer {
+class CborWriter {
 public:
     void unsigned_integer(std::uint64_t value) { head(0, value); }
     void array(std::size_t size) { head(4, size); }
@@ -151,16 +215,12 @@ private:
     std::vector<std::uint8_t> output_;
 };
 
-struct parse_failure {
-    scpefe_status status;
-};
-
-class cbor_reader {
+class CborReader {
 public:
-    cbor_reader(
+    CborReader(
         const std::uint8_t *data,
         std::size_t size,
-        const scpefe_revision_limits_v1 &limits
+        const RevisionLimits &limits
     ) : data_(data), size_(size), limits_(limits) {}
 
     std::uint64_t unsigned_integer() { return head(0); }
@@ -170,11 +230,11 @@ public:
     std::vector<std::uint8_t> bytes(std::size_t required_size = 0)
     {
         const std::uint64_t length = head(2);
-        if (length > limits_.max_byte_string_bytes) {
-            fail(SCPEFE_STATUS_LIMIT_EXCEEDED);
+        if (length > limits_.max_byte_string_bytes()) {
+            fail(RevisionError::limit_exceeded);
         }
         if (required_size != 0 && length != required_size) {
-            fail(SCPEFE_STATUS_MALFORMED_CBOR);
+            fail(RevisionError::malformed_cbor);
         }
         require_available(length);
         std::vector<std::uint8_t> value(data_ + position_, data_ + position_ + length);
@@ -185,13 +245,13 @@ public:
     std::string text()
     {
         const std::uint64_t length = head(3);
-        if (length > limits_.max_text_bytes) {
-            fail(SCPEFE_STATUS_LIMIT_EXCEEDED);
+        if (length > limits_.max_text_bytes()) {
+            fail(RevisionError::limit_exceeded);
         }
         require_available(length);
         const char *value = reinterpret_cast<const char *>(data_ + position_);
         if (!valid_utf8(value, static_cast<std::size_t>(length))) {
-            fail(SCPEFE_STATUS_MALFORMED_CBOR);
+            fail(RevisionError::malformed_cbor);
         }
         position_ += static_cast<std::size_t>(length);
         return std::string(value, static_cast<std::size_t>(length));
@@ -200,24 +260,27 @@ public:
     bool finished() const { return position_ == size_; }
 
 private:
-    [[noreturn]] static void fail(scpefe_status status) { throw parse_failure{status}; }
+    [[noreturn]] static void fail(RevisionError error)
+    {
+        throw RevisionFailure{error};
+    }
 
     void require_available(std::uint64_t count)
     {
         if (count > size_ - position_) {
-            fail(SCPEFE_STATUS_MALFORMED_CBOR);
+            fail(RevisionError::malformed_cbor);
         }
     }
 
     std::size_t collection(std::uint8_t major, std::size_t depth)
     {
-        if (depth > limits_.max_nesting_depth) {
-            fail(SCPEFE_STATUS_LIMIT_EXCEEDED);
+        if (depth > limits_.max_nesting_depth()) {
+            fail(RevisionError::limit_exceeded);
         }
         const std::uint64_t count = head(major);
-        if (count > limits_.max_collection_entries
+        if (count > limits_.max_collection_entries()
             || count > std::numeric_limits<std::size_t>::max()) {
-            fail(SCPEFE_STATUS_LIMIT_EXCEEDED);
+            fail(RevisionError::limit_exceeded);
         }
         return static_cast<std::size_t>(count);
     }
@@ -229,7 +292,7 @@ private:
         const std::uint8_t major = initial >> 5u;
         const std::uint8_t info = initial & 0x1fu;
         if (major != expected_major || info >= 28) {
-            fail(SCPEFE_STATUS_MALFORMED_CBOR);
+            fail(RevisionError::malformed_cbor);
         }
         if (info < 24) {
             return info;
@@ -244,7 +307,7 @@ private:
         const std::uint64_t minimum = count == 1 ? 24u : count == 2 ? 0x100u
             : count == 4 ? 0x10000u : 0x100000000ull;
         if (value < minimum) {
-            fail(SCPEFE_STATUS_MALFORMED_CBOR);
+            fail(RevisionError::malformed_cbor);
         }
         return value;
     }
@@ -252,12 +315,12 @@ private:
     const std::uint8_t *data_;
     std::size_t size_;
     std::size_t position_{};
-    const scpefe_revision_limits_v1 &limits_;
+    const RevisionLimits &limits_;
 };
 
-scpefe_status validate_revision(
+void SnapshotRevision::validate_view(
     const scpefe_snapshot_revision_v1 &revision,
-    const scpefe_revision_limits_v1 &limits
+    const RevisionLimits &limits
 )
 {
     if (revision.struct_size < sizeof(scpefe_snapshot_revision_v1)
@@ -276,22 +339,22 @@ scpefe_status validate_revision(
         || !span_is_valid(revision.device_name, revision.device_name_size)
         || !span_is_valid(revision.content_hash, revision.content_hash_size)
         || !span_is_valid(revision.content, revision.content_size)) {
-        return SCPEFE_STATUS_INVALID_ARGUMENT;
+        throw RevisionFailure{RevisionError::invalid_argument};
     }
-    if (revision.parent_count > limits.max_parent_count
-        || revision.parent_count > limits.max_collection_entries
-        || limits.max_collection_entries < 11
-        || revision.slot_identity_name_size > limits.max_text_bytes
-        || revision.slot_identity_email_size > limits.max_text_bytes
-        || revision.client_profile_name_size > limits.max_text_bytes
-        || revision.client_profile_email_size > limits.max_text_bytes
-        || revision.device_name_size > limits.max_text_bytes
-        || revision.content_size > limits.max_text_bytes
-        || SCPEFE_REVISION_ID_SIZE > limits.max_byte_string_bytes
-        || SCPEFE_SLOT_ID_SIZE > limits.max_byte_string_bytes
-        || SCPEFE_CONTENT_HASH_SIZE > limits.max_byte_string_bytes
-        || limits.max_nesting_depth < 2) {
-        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (revision.parent_count > limits.max_parent_count()
+        || revision.parent_count > limits.max_collection_entries()
+        || limits.max_collection_entries() < 11
+        || revision.slot_identity_name_size > limits.max_text_bytes()
+        || revision.slot_identity_email_size > limits.max_text_bytes()
+        || revision.client_profile_name_size > limits.max_text_bytes()
+        || revision.client_profile_email_size > limits.max_text_bytes()
+        || revision.device_name_size > limits.max_text_bytes()
+        || revision.content_size > limits.max_text_bytes()
+        || SCPEFE_REVISION_ID_SIZE > limits.max_byte_string_bytes()
+        || SCPEFE_SLOT_ID_SIZE > limits.max_byte_string_bytes()
+        || SCPEFE_CONTENT_HASH_SIZE > limits.max_byte_string_bytes()
+        || limits.max_nesting_depth() < 2) {
+        throw RevisionFailure{RevisionError::limit_exceeded};
     }
     if (!valid_utf8(revision.slot_identity_name, revision.slot_identity_name_size)
         || !valid_utf8(revision.slot_identity_email, revision.slot_identity_email_size)
@@ -299,68 +362,125 @@ scpefe_status validate_revision(
         || !valid_utf8(revision.client_profile_email, revision.client_profile_email_size)
         || !valid_utf8(revision.device_name, revision.device_name_size)
         || !valid_canonical_document_text(revision.content, revision.content_size)) {
-        return SCPEFE_STATUS_INVALID_ARGUMENT;
+        throw RevisionFailure{RevisionError::invalid_argument};
     }
-    return SCPEFE_STATUS_OK;
 }
 
-std::vector<std::uint8_t> encode_revision(const scpefe_snapshot_revision_v1 &revision)
+SnapshotRevision::SnapshotRevision(
+    const scpefe_snapshot_revision_v1 &revision
+) : timestamp_ms(revision.timestamp_ms)
 {
-    cbor_writer writer;
+    if (revision.parent_count != 0) {
+        parent_revision_ids.assign(
+            revision.parent_revision_ids,
+            revision.parent_revision_ids
+                + revision.parent_count * SCPEFE_REVISION_ID_SIZE
+        );
+    }
+    slot_id.assign(
+        revision.slot_id, revision.slot_id + revision.slot_id_size
+    );
+    if (revision.slot_identity_name_size != 0) {
+        slot_identity_name.assign(
+            revision.slot_identity_name, revision.slot_identity_name_size
+        );
+    }
+    if (revision.slot_identity_email_size != 0) {
+        slot_identity_email.assign(
+            revision.slot_identity_email, revision.slot_identity_email_size
+        );
+    }
+    if (revision.client_profile_name_size != 0) {
+        client_profile_name.assign(
+            revision.client_profile_name, revision.client_profile_name_size
+        );
+    }
+    if (revision.client_profile_email_size != 0) {
+        client_profile_email.assign(
+            revision.client_profile_email, revision.client_profile_email_size
+        );
+    }
+    if (revision.device_name_size != 0) {
+        device_name.assign(revision.device_name, revision.device_name_size);
+    }
+    content_hash.assign(
+        revision.content_hash,
+        revision.content_hash + revision.content_hash_size
+    );
+    if (revision.content_size != 0) {
+        content.assign(revision.content, revision.content_size);
+    }
+}
+
+SnapshotRevision SnapshotRevision::from_view(
+    const scpefe_snapshot_revision_v1 &revision,
+    const RevisionLimits &limits
+)
+{
+    validate_view(revision, limits);
+    return SnapshotRevision(revision);
+}
+
+std::vector<std::uint8_t> SnapshotRevision::encode() const
+{
+    CborWriter writer;
     writer.map(11);
-    writer.unsigned_integer(1); writer.unsigned_integer(revision.format_version);
-    writer.unsigned_integer(2); writer.array(revision.parent_count);
-    for (std::size_t index = 0; index < revision.parent_count; ++index) {
+    writer.unsigned_integer(1);
+    writer.unsigned_integer(SCPEFE_REVISION_FORMAT_VERSION);
+    const std::size_t parent_count = parent_revision_ids.size()
+        / SCPEFE_REVISION_ID_SIZE;
+    writer.unsigned_integer(2); writer.array(parent_count);
+    for (std::size_t index = 0; index < parent_count; ++index) {
         writer.bytes(
-            revision.parent_revision_ids + index * SCPEFE_REVISION_ID_SIZE,
+            parent_revision_ids.data() + index * SCPEFE_REVISION_ID_SIZE,
             SCPEFE_REVISION_ID_SIZE
         );
     }
-    writer.unsigned_integer(3); writer.unsigned_integer(revision.timestamp_ms);
-    writer.unsigned_integer(4); writer.bytes(revision.slot_id, revision.slot_id_size);
-    writer.unsigned_integer(5); writer.text(revision.slot_identity_name, revision.slot_identity_name_size);
-    writer.unsigned_integer(6); writer.text(revision.slot_identity_email, revision.slot_identity_email_size);
-    writer.unsigned_integer(7); writer.text(revision.client_profile_name, revision.client_profile_name_size);
-    writer.unsigned_integer(8); writer.text(revision.client_profile_email, revision.client_profile_email_size);
-    writer.unsigned_integer(9); writer.text(revision.device_name, revision.device_name_size);
-    writer.unsigned_integer(10); writer.bytes(revision.content_hash, revision.content_hash_size);
+    writer.unsigned_integer(3); writer.unsigned_integer(timestamp_ms);
+    writer.unsigned_integer(4); writer.bytes(slot_id.data(), slot_id.size());
+    writer.unsigned_integer(5); writer.text(slot_identity_name.data(), slot_identity_name.size());
+    writer.unsigned_integer(6); writer.text(slot_identity_email.data(), slot_identity_email.size());
+    writer.unsigned_integer(7); writer.text(client_profile_name.data(), client_profile_name.size());
+    writer.unsigned_integer(8); writer.text(client_profile_email.data(), client_profile_email.size());
+    writer.unsigned_integer(9); writer.text(device_name.data(), device_name.size());
+    writer.unsigned_integer(10); writer.bytes(content_hash.data(), content_hash.size());
     writer.unsigned_integer(11); writer.map(3);
     writer.unsigned_integer(1); writer.unsigned_integer(0);
-    writer.unsigned_integer(2); writer.unsigned_integer(revision.content_size);
-    writer.unsigned_integer(3); writer.text(revision.content, revision.content_size);
+    writer.unsigned_integer(2); writer.unsigned_integer(content.size());
+    writer.unsigned_integer(3); writer.text(content.data(), content.size());
     return writer.output();
 }
 
-void expect_key(cbor_reader &reader, std::uint64_t expected)
+void expect_key(CborReader &reader, std::uint64_t expected)
 {
     if (reader.unsigned_integer() != expected) {
-        throw parse_failure{SCPEFE_STATUS_MALFORMED_CBOR};
+        throw RevisionFailure{RevisionError::malformed_cbor};
     }
 }
 
-scpefe_decoded_snapshot_revision decode_revision(
+SnapshotRevision SnapshotRevision::decode(
     const std::uint8_t *encoded,
     std::size_t encoded_size,
-    const scpefe_revision_limits_v1 &limits
+    const RevisionLimits &limits
 )
 {
-    cbor_reader reader(encoded, encoded_size, limits);
+    CborReader reader(encoded, encoded_size, limits);
     if (reader.map(1) != 11) {
-        throw parse_failure{SCPEFE_STATUS_MALFORMED_CBOR};
+        throw RevisionFailure{RevisionError::malformed_cbor};
     }
     expect_key(reader, 1);
     if (reader.unsigned_integer() != SCPEFE_REVISION_FORMAT_VERSION) {
-        throw parse_failure{SCPEFE_STATUS_UNSUPPORTED_FORMAT};
+        throw RevisionFailure{RevisionError::unsupported_format};
     }
-    scpefe_decoded_snapshot_revision revision;
+    SnapshotRevision revision;
     expect_key(reader, 2);
     const std::size_t parent_count = reader.array(2);
-    if (parent_count > limits.max_parent_count) {
-        throw parse_failure{SCPEFE_STATUS_LIMIT_EXCEEDED};
+    if (parent_count > limits.max_parent_count()) {
+        throw RevisionFailure{RevisionError::limit_exceeded};
     }
     if (parent_count
         > std::numeric_limits<std::size_t>::max() / SCPEFE_REVISION_ID_SIZE) {
-        throw parse_failure{SCPEFE_STATUS_LIMIT_EXCEEDED};
+        throw RevisionFailure{RevisionError::limit_exceeded};
     }
     revision.parent_revision_ids.reserve(parent_count * SCPEFE_REVISION_ID_SIZE);
     for (std::size_t index = 0; index < parent_count; ++index) {
@@ -379,11 +499,11 @@ scpefe_decoded_snapshot_revision decode_revision(
     expect_key(reader, 10); revision.content_hash = reader.bytes(SCPEFE_CONTENT_HASH_SIZE);
     expect_key(reader, 11);
     if (reader.map(2) != 3) {
-        throw parse_failure{SCPEFE_STATUS_MALFORMED_CBOR};
+        throw RevisionFailure{RevisionError::malformed_cbor};
     }
     expect_key(reader, 1);
     if (reader.unsigned_integer() != 0) {
-        throw parse_failure{SCPEFE_STATUS_UNSUPPORTED_FORMAT};
+        throw RevisionFailure{RevisionError::unsupported_format};
     }
     expect_key(reader, 2);
     const std::uint64_t uncompressed_size = reader.unsigned_integer();
@@ -393,7 +513,7 @@ scpefe_decoded_snapshot_revision decode_revision(
             revision.content.data(), revision.content.size()
         )
         || !reader.finished()) {
-        throw parse_failure{SCPEFE_STATUS_MALFORMED_CBOR};
+        throw RevisionFailure{RevisionError::malformed_cbor};
     }
     return revision;
 }
@@ -436,38 +556,99 @@ void append_hex(std::string &json, const std::uint8_t *data, std::size_t size)
     json.push_back('"');
 }
 
-std::string diagnostic_json(
-    const scpefe_decoded_snapshot_revision &revision,
-    bool include_content
-)
+std::string SnapshotRevision::diagnostic_json(bool include_content) const
 {
     std::string json = "{\"format_version\":1,\"parent_revision_ids\":[";
-    const std::size_t parent_count = revision.parent_revision_ids.size()
+    const std::size_t parent_count = parent_revision_ids.size()
         / SCPEFE_REVISION_ID_SIZE;
     for (std::size_t index = 0; index < parent_count; ++index) {
         if (index != 0) json.push_back(',');
-        append_hex(json, revision.parent_revision_ids.data()
+        append_hex(json, parent_revision_ids.data()
             + index * SCPEFE_REVISION_ID_SIZE, SCPEFE_REVISION_ID_SIZE);
     }
-    json += "],\"timestamp_ms\":" + std::to_string(revision.timestamp_ms);
-    json += ",\"slot_id\":"; append_hex(json, revision.slot_id.data(), revision.slot_id.size());
-    json += ",\"slot_identity_name\":"; append_json_string(json, revision.slot_identity_name.data(), revision.slot_identity_name.size());
-    json += ",\"slot_identity_email\":"; append_json_string(json, revision.slot_identity_email.data(), revision.slot_identity_email.size());
-    json += ",\"client_profile_name\":"; append_json_string(json, revision.client_profile_name.data(), revision.client_profile_name.size());
-    json += ",\"client_profile_email\":"; append_json_string(json, revision.client_profile_email.data(), revision.client_profile_email.size());
-    json += ",\"device_name\":"; append_json_string(json, revision.device_name.data(), revision.device_name.size());
-    json += ",\"content_hash\":"; append_hex(json, revision.content_hash.data(), revision.content_hash.size());
+    json += "],\"timestamp_ms\":" + std::to_string(timestamp_ms);
+    json += ",\"slot_id\":"; append_hex(json, slot_id.data(), slot_id.size());
+    json += ",\"slot_identity_name\":"; append_json_string(json, slot_identity_name.data(), slot_identity_name.size());
+    json += ",\"slot_identity_email\":"; append_json_string(json, slot_identity_email.data(), slot_identity_email.size());
+    json += ",\"client_profile_name\":"; append_json_string(json, client_profile_name.data(), client_profile_name.size());
+    json += ",\"client_profile_email\":"; append_json_string(json, client_profile_email.data(), client_profile_email.size());
+    json += ",\"device_name\":"; append_json_string(json, device_name.data(), device_name.size());
+    json += ",\"content_hash\":"; append_hex(json, content_hash.data(), content_hash.size());
     json += ",\"snapshot\":{\"codec\":\"none\",\"uncompressed_length\":"
-        + std::to_string(revision.content.size());
+        + std::to_string(content.size());
     if (include_content) {
         json += ",\"content\":";
-        append_json_string(json, revision.content.data(), revision.content.size());
+        append_json_string(json, content.data(), content.size());
     }
     json += "}}";
     return json;
 }
 
-} // namespace
+void SnapshotRevision::populate_view(scpefe_snapshot_revision_v1 &view) const
+{
+    const std::uint32_t struct_size = view.struct_size;
+    view = scpefe_snapshot_revision_v1{
+        struct_size,
+        SCPEFE_REVISION_FORMAT_VERSION,
+        parent_revision_ids.data(),
+        parent_revision_ids.size() / SCPEFE_REVISION_ID_SIZE,
+        timestamp_ms,
+        slot_id.data(),
+        slot_id.size(),
+        slot_identity_name.data(),
+        slot_identity_name.size(),
+        slot_identity_email.data(),
+        slot_identity_email.size(),
+        client_profile_name.data(),
+        client_profile_name.size(),
+        client_profile_email.data(),
+        client_profile_email.size(),
+        device_name.data(),
+        device_name.size(),
+        content_hash.data(),
+        content_hash.size(),
+        content.data(),
+        content.size(),
+    };
+}
+
+scpefe_status external_status(RevisionError error)
+{
+    switch (error) {
+    case RevisionError::invalid_argument:
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    case RevisionError::malformed_cbor:
+        return SCPEFE_STATUS_MALFORMED_CBOR;
+    case RevisionError::limit_exceeded:
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    case RevisionError::unsupported_format:
+        return SCPEFE_STATUS_UNSUPPORTED_FORMAT;
+    }
+    return SCPEFE_STATUS_INVALID_ARGUMENT;
+}
+
+} // namespace scpefe::format
+
+using scpefe::format::RevisionError;
+using scpefe::format::RevisionFailure;
+using scpefe::format::RevisionLimits;
+using scpefe::format::SnapshotRevision;
+using scpefe::format::default_max_byte_string_bytes;
+using scpefe::format::default_max_collection_entries;
+using scpefe::format::default_max_input_bytes;
+using scpefe::format::default_max_nesting_depth;
+using scpefe::format::default_max_parent_count;
+using scpefe::format::default_max_text_bytes;
+using scpefe::format::external_status;
+using scpefe::format::has_complete_limits;
+using scpefe::format::span_is_valid;
+
+struct scpefe_decoded_snapshot_revision {
+    explicit scpefe_decoded_snapshot_revision(SnapshotRevision value)
+        : implementation(std::move(value)) {}
+
+    SnapshotRevision implementation;
+};
 
 scpefe_status scpefe_revision_limits_default(scpefe_revision_limits_v1 *limits)
 {
@@ -499,13 +680,13 @@ scpefe_status scpefe_snapshot_revision_encode(
         || output_size == nullptr) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
-    const scpefe_status validation = validate_revision(*revision, *limits);
-    if (validation != SCPEFE_STATUS_OK) {
-        return validation;
-    }
     try {
-        const std::vector<std::uint8_t> encoded = encode_revision(*revision);
-        if (encoded.size() > limits->max_input_bytes) {
+        const RevisionLimits internal_limits(*limits);
+        const SnapshotRevision value = SnapshotRevision::from_view(
+            *revision, internal_limits
+        );
+        const std::vector<std::uint8_t> encoded = value.encode();
+        if (encoded.size() > internal_limits.max_input_bytes()) {
             return SCPEFE_STATUS_LIMIT_EXCEEDED;
         }
         *output_size = encoded.size();
@@ -514,6 +695,8 @@ scpefe_status scpefe_snapshot_revision_encode(
         }
         std::memcpy(output, encoded.data(), encoded.size());
         return SCPEFE_STATUS_OK;
+    } catch (const RevisionFailure &failure) {
+        return external_status(failure.error);
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
@@ -531,11 +714,14 @@ scpefe_status scpefe_snapshot_revision_decode(
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
     *revision = nullptr;
-    if (encoded_size > limits->max_input_bytes) {
+    const RevisionLimits internal_limits(*limits);
+    if (encoded_size > internal_limits.max_input_bytes()) {
         return SCPEFE_STATUS_LIMIT_EXCEEDED;
     }
     try {
-        auto decoded = decode_revision(encoded, encoded_size, *limits);
+        auto decoded = SnapshotRevision::decode(
+            encoded, encoded_size, internal_limits
+        );
         auto *owned = new (std::nothrow) scpefe_decoded_snapshot_revision(
             std::move(decoded)
         );
@@ -544,8 +730,8 @@ scpefe_status scpefe_snapshot_revision_decode(
         }
         *revision = owned;
         return SCPEFE_STATUS_OK;
-    } catch (const parse_failure &failure) {
-        return failure.status;
+    } catch (const RevisionFailure &failure) {
+        return external_status(failure.error);
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
@@ -560,30 +746,7 @@ scpefe_status scpefe_decoded_snapshot_revision_view(
         || view->struct_size < sizeof(scpefe_snapshot_revision_v1)) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
-    const std::uint32_t struct_size = view->struct_size;
-    *view = scpefe_snapshot_revision_v1{
-        struct_size,
-        SCPEFE_REVISION_FORMAT_VERSION,
-        revision->parent_revision_ids.data(),
-        revision->parent_revision_ids.size() / SCPEFE_REVISION_ID_SIZE,
-        revision->timestamp_ms,
-        revision->slot_id.data(),
-        revision->slot_id.size(),
-        revision->slot_identity_name.data(),
-        revision->slot_identity_name.size(),
-        revision->slot_identity_email.data(),
-        revision->slot_identity_email.size(),
-        revision->client_profile_name.data(),
-        revision->client_profile_name.size(),
-        revision->client_profile_email.data(),
-        revision->client_profile_email.size(),
-        revision->device_name.data(),
-        revision->device_name.size(),
-        revision->content_hash.data(),
-        revision->content_hash.size(),
-        revision->content.data(),
-        revision->content.size(),
-    };
+    revision->implementation.populate_view(*view);
     return SCPEFE_STATUS_OK;
 }
 
@@ -604,19 +767,21 @@ scpefe_status scpefe_snapshot_revision_diagnostic_json(
     std::size_t *output_size
 )
 {
-    if (output_size == nullptr) {
+    if (!span_is_valid(encoded, encoded_size) || encoded_size == 0
+        || !has_complete_limits(limits) || output_size == nullptr) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
-    scpefe_decoded_snapshot_revision *decoded = nullptr;
-    const scpefe_status decode_status = scpefe_snapshot_revision_decode(
-        encoded, encoded_size, limits, &decoded
-    );
-    if (decode_status != SCPEFE_STATUS_OK) {
-        return decode_status;
+    const RevisionLimits internal_limits(*limits);
+    if (encoded_size > internal_limits.max_input_bytes()) {
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
     }
     try {
-        const std::string json = diagnostic_json(*decoded, include_content != 0);
-        scpefe_decoded_snapshot_revision_destroy(decoded);
+        const SnapshotRevision revision = SnapshotRevision::decode(
+            encoded, encoded_size, internal_limits
+        );
+        const std::string json = revision.diagnostic_json(
+            include_content != 0
+        );
         *output_size = json.size();
         if (output == nullptr || output_capacity <= json.size()) {
             return SCPEFE_STATUS_BUFFER_TOO_SMALL;
@@ -624,8 +789,9 @@ scpefe_status scpefe_snapshot_revision_diagnostic_json(
         std::memcpy(output, json.data(), json.size());
         output[json.size()] = '\0';
         return SCPEFE_STATUS_OK;
+    } catch (const RevisionFailure &failure) {
+        return external_status(failure.error);
     } catch (const std::bad_alloc &) {
-        scpefe_decoded_snapshot_revision_destroy(decoded);
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
 }
