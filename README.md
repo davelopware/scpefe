@@ -30,3 +30,19 @@ ctest --test-dir build --output-on-failure
 The health operation crosses the public, versioned C ABI. Its clock value comes
 from a deterministic in-memory host adapter registered with that CLI's explicit
 SCPEFE context.
+
+The common core also exposes bounded C ABI functions for deterministic-CBOR
+snapshot revision encoding, decoding, and diagnostic JSON. The v1 record schema
+is documented in `docs/format/snapshot-revision-v1.cddl`. To inspect an encoded
+already-decrypted record through the same common-core parser:
+
+```bash
+./build/scpefe-diagnostic revision snapshot.cbor
+./build/scpefe-diagnostic revision snapshot.cbor --include-content
+```
+
+Snapshot content is omitted from diagnostic JSON unless `--include-content` is
+explicitly supplied. This developer operation consumes a decrypted revision
+record for format/conformance work; it does not open or authenticate an
+encrypted container. Container-level diagnostic dumps will require successful
+authentication when that layer is implemented.

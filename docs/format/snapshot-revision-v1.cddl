@@ -1,0 +1,26 @@
+; SCPEFE snapshot revision record, format version 1.
+; Maps use integer keys in the order shown and RFC 8949 deterministic encoding.
+
+snapshot-revision-v1 = {
+  1: 1,                         ; record format version
+  2: [* revision-id],           ; parent revision IDs
+  3: uint,                      ; Unix timestamp in milliseconds
+  4: slot-id,                   ; authoring password slot
+  5: tstr,                      ; registered slot identity name
+  6: tstr,                      ; registered slot identity email
+  7: tstr,                      ; current client profile name
+  8: tstr,                      ; current client profile email
+  9: tstr,                      ; device name
+  10: content-hash,
+  11: snapshot-v1,
+}
+
+snapshot-v1 = {
+  1: 0,                         ; codec: none
+  2: uint,                      ; validated uncompressed UTF-8 byte length
+  3: tstr,                      ; canonical document text
+}
+
+revision-id = bytes .size 32
+slot-id = bytes .size 16
+content-hash = bytes .size 32

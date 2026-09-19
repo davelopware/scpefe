@@ -10,6 +10,7 @@ project(
 include(CTest)
 
 add_library(scpefe SHARED
+    src/revision.cpp
     src/scpefe.cpp
 )
 add_library(SCPEFE::scpefe ALIAS scpefe)
@@ -30,6 +31,8 @@ target_include_directories(scpefe
 )
 set_target_properties(scpefe PROPERTIES
     CXX_EXTENSIONS OFF
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
 )
@@ -56,10 +59,40 @@ if(BUILD_TESTING)
     )
     target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 
+    add_executable(scpefe_revision_test
+        tests/revision_test.c
+    )
+    target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
+
     add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
+    add_test(
+        NAME scpefe.revision-round-trip
+        COMMAND scpefe_revision_test
+            "${CMAKE_CURRENT_BINARY_DIR}/snapshot-revision-v1.cbor"
+    )
+    add_test(
+        NAME scpefe.diagnostic-revision
+        COMMAND scpefe_diagnostic revision
+            "${CMAKE_CURRENT_BINARY_DIR}/snapshot-revision-v1.cbor"
+    )
+    add_test(
+        NAME scpefe.diagnostic-revision-content
+        COMMAND scpefe_diagnostic revision
+            "${CMAKE_CURRENT_BINARY_DIR}/snapshot-revision-v1.cbor"
+            --include-content
+    )
     add_test(NAME scpefe.diagnostic-health COMMAND scpefe_diagnostic health)
     set_tests_properties(scpefe.diagnostic-health PROPERTIES
         PASS_REGULAR_EXPRESSION
             "\"status\":\"ok\".*\"abi_version\":1.*\"host_monotonic_time_ms\":424242"
+    )
+    set_tests_properties(scpefe.diagnostic-revision PROPERTIES
+        DEPENDS scpefe.revision-round-trip
+        PASS_REGULAR_EXPRESSION "\"slot_identity_name\":\"Ada Lovelace\""
+        FAIL_REGULAR_EXPRESSION "\"content\":"
+    )
+    set_tests_properties(scpefe.diagnostic-revision-content PROPERTIES
+        DEPENDS scpefe.revision-round-trip
+        PASS_REGULAR_EXPRESSION "\"content\":\"first line\\\\nsecond line\""
     )
 endif()
