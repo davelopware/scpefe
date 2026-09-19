@@ -1,50 +1,118 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # Password container envelope version 1
 
 Status: implementation milestone format; independent cryptographic and format
 review remains required before production release.
 
-The version-1 password container is one self-contained byte sequence. All
-integers are unsigned little-endian values. Offsets and sizes are bytes.
+This document is the normative binary grammar for the bytes emitted by
+`scpefe_password_container_create`. All multibyte integers in the envelope are
+unsigned and little-endian. Sizes and offsets are in octets. No padding,
+alignment octets, or trailing data are permitted.
 
-| Offset | Size | Meaning |
+## Binary grammar
+
+The notation `name[n]` means exactly `n` octets. `u32le(value)` and
+`u64le(value)` constrain both width and value. `opaque[n]` has no structure
+visible before authentication.
+
+```text
+password-container-v1 =
+    magic[8]                         ; 53 43 50 45 46 45 00 01
+    u32le(envelope-version)          ; 1
+    u32le(password-kdf)              ; 2 = Argon2id v1.3
+    u64le(kdf-operations-limit)      ; 2
+    u64le(kdf-memory-limit)          ; 67108864 octets
+    owner-salt[16]
+    u32le(owner-slot-aead)           ; 1 = XChaCha20-Poly1305-IETF
+    owner-slot-nonce[24]
+    u32le(snapshot-aead)             ; 1 = XChaCha20-Poly1305-IETF
+    snapshot-nonce[24]
+    u32le(wrapped-owner-slot-length) ; 65
+    u64le(encrypted-snapshot-length) ; 32 + encoded-revision-length
+    wrapped-owner-slot[65]
+    encrypted-snapshot[encrypted-snapshot-length]
+
+wrapped-owner-slot =
+    opaque[49]                       ; encrypted owner-slot-plaintext
+    owner-slot-tag[16]
+
+encrypted-snapshot =
+    opaque[encrypted-snapshot-length - 16]
+    snapshot-tag[16]
+
+owner-slot-plaintext =
+    document-key[32]
+    owner-slot-id[16]
+    owner-permissions[1]             ; 07
+
+snapshot-plaintext =
+    document-id[16]
+    encoded-snapshot-revision[encrypted-snapshot-length - 32]
+```
+
+The corresponding offset table is:
+
+| Offset | Size | Field |
 |---:|---:|---|
-| 0 | 8 | Magic `53 43 50 45 46 45 00 01` |
-| 8 | 4 | Envelope version (`1`) |
-| 12 | 4 | Password KDF (`2`, Argon2id v1.3) |
-| 16 | 8 | Argon2id operations limit (`2`) |
-| 24 | 8 | Argon2id memory limit (`67108864`) |
-| 32 | 16 | Random owner-slot salt |
-| 48 | 4 | Owner-slot AEAD (`1`, XChaCha20-Poly1305-IETF) |
-| 52 | 24 | Random owner-slot nonce |
-| 76 | 4 | Snapshot AEAD (`1`, XChaCha20-Poly1305-IETF) |
-| 80 | 24 | Random snapshot nonce |
-| 104 | 4 | Wrapped owner-slot ciphertext length (`65`) |
-| 108 | 8 | Encrypted snapshot payload length |
-| 116 | 65 | Wrapped owner-slot ciphertext and authentication tag |
-| 181 | variable | Encrypted snapshot payload and authentication tag |
+| 0 | 8 | `magic` |
+| 8 | 4 | `envelope-version` |
+| 12 | 4 | `password-kdf` |
+| 16 | 8 | `kdf-operations-limit` |
+| 24 | 8 | `kdf-memory-limit` |
+| 32 | 16 | `owner-salt` |
+| 48 | 4 | `owner-slot-aead` |
+| 52 | 24 | `owner-slot-nonce` |
+| 76 | 4 | `snapshot-aead` |
+| 80 | 24 | `snapshot-nonce` |
+| 104 | 4 | `wrapped-owner-slot-length` |
+| 108 | 8 | `encrypted-snapshot-length` |
+| 116 | 65 | `wrapped-owner-slot` |
+| 181 | variable | `encrypted-snapshot` |
 
-The complete 116-byte header is authenticated as additional data by both AEAD
-operations. The owner password derives a 256-bit wrapping key directly through
-Argon2id. The wrapped owner-slot plaintext is the random 256-bit document key,
-a random 128-bit slot ID, and the owner permission byte (`0x07`: edit, add
-passwords, and remove passwords).
+The total container size is therefore
+`181 + encrypted-snapshot-length`, or equivalently
+`213 + encoded-snapshot-revision-length`. The encrypted snapshot length must be
+at least 32 and must consume the exact remainder of the container.
 
-The snapshot key is derived from the document key with Libsodium `crypto_kdf`,
-subkey ID `1`, and context `SCPSNAP1`. Its plaintext is a random permanent
-128-bit document ID followed by one canonical snapshot revision record. Thus
-the document ID, slot ID, permissions, revision metadata, and document text are
-not visible before successful authentication.
+## Cryptographic construction
 
-Passwords enter `libscpefe` only as caller-owned byte spans. The container API
-does not accept passwords through command-line arguments or emit them through
-diagnostics. Sensitive intermediate key buffers are explicitly cleared after
-use.
+The password is an uninterpreted caller-owned octet string. Argon2id v1.3 uses
+the 16-octet `owner-salt`, operations limit 2, memory limit 67,108,864 octets,
+and produces the 32-octet wrapping key. Empty passwords are representable;
+password policy is outside this grammar.
 
-Readers reject an unknown envelope version, KDF, or AEAD as unsupported before
-performing password derivation or allocating payload storage. Version-1 KDF
-costs are mandatory values, not attacker-controlled tuning inputs: a reader
-must never retry a failed allocation with weaker Argon2id parameters. Lengths
-and the encrypted snapshot's CBOR sizes, collection counts, and nesting depth
-are checked against caller-selected limits before the corresponding allocation.
-All unlock failures expose no document ID, revision bytes, or other partially
-authenticated document state.
+Both AEAD operations use XChaCha20-Poly1305-IETF. The complete 116-octet header
+is the additional authenticated data for both operations. The wrapped owner
+slot uses `owner-slot-nonce` and the wrapping key. Its 49-octet plaintext is a
+fresh random 32-octet document key, a fresh random 16-octet owner slot ID, and
+the permission octet `07` (`canEdit`, `canAddPasswords`, and
+`canRemovePasswords`). Bits 3 through 7 are zero.
+
+The snapshot key is a 32-octet Libsodium `crypto_kdf` subkey derived from the
+document key with subkey ID 1 and the exact eight-octet context `SCPSNAP1`.
+The encrypted snapshot uses `snapshot-nonce` and contains a fresh random
+16-octet permanent document ID followed by exactly one deterministic CBOR
+`snapshot-revision-v1` record defined by
+[`snapshot-revision-v1.cddl`](snapshot-revision-v1.cddl).
+
+The AEAD tags are the final 16 octets of their respective ciphertexts. Salt,
+nonces, document key, slot ID, and document ID are independently generated with
+the cryptographic random source for every create operation.
+
+## Reader requirements and diagnostics
+
+Readers reject an unknown envelope version, KDF, or AEAD and any non-mandatory
+KDF cost as unsupported before password derivation or payload allocation. They
+must never retry allocation with weaker Argon2id parameters. Lengths and the
+decrypted CBOR sizes, collection counts, and nesting depth are checked against
+caller-selected limits before the corresponding allocation.
+
+Any header mutation is authenticated even when it remains structurally valid.
+Authentication failures expose no document ID, revision bytes, password,
+wrapping key, document key, or partially authenticated state. Diagnostic JSON
+for the decrypted revision omits document content unless explicitly requested;
+it never contains password or key material.
+
+The executable CC0 vectors and their expected common-core results are in
+[`tests/vectors/draft-v1`](../../tests/vectors/draft-v1/README.md).

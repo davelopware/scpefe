@@ -84,8 +84,17 @@ if(BUILD_TESTING)
     )
     target_link_libraries(scpefe_container_test PRIVATE SCPEFE::scpefe)
 
+    add_executable(scpefe_format_contract_test
+        tests/format_contract_test.c
+    )
+    target_link_libraries(scpefe_format_contract_test PRIVATE SCPEFE::scpefe)
+
     add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
     add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
+    add_test(
+        NAME scpefe.format-contract
+        COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     add_test(
         NAME scpefe.revision-round-trip
         COMMAND scpefe_revision_test

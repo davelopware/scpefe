@@ -50,3 +50,6 @@ The common core also creates and unlocks the initial self-contained,
 single-owner password container through byte-span C APIs. Passwords are never
 accepted as command-line arguments. The milestone envelope is documented in
 [docs/format/password-container-v1.md](docs/format/password-container-v1.md).
+Its CC0 valid and invalid interoperability vectors live under
+[`tests/vectors/draft-v1`](tests/vectors/draft-v1/README.md) and are executed
+through the public common-core APIs by the native test suite.
