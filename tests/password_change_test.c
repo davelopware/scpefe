@@ -68,6 +68,25 @@ static int rejects_password(
     return 0;
 }
 
+static int rejects_weak_change_without_output(
+    const uint8_t *container, size_t container_size,
+    const char *current_password, const char *weak_password,
+    uint8_t *output
+)
+{
+    size_t output_size = 777;
+    memset(output, 0xa5, container_size);
+    CHECK(scpefe_password_container_change_password(
+        container, container_size,
+        (const uint8_t *)current_password, strlen(current_password),
+        (const uint8_t *)weak_password, strlen(weak_password), output,
+        container_size, &output_size) == SCPEFE_STATUS_WEAK_PASSWORD);
+    CHECK(output_size == 777);
+    CHECK(output[0] == 0xa5 && output[container_size / 2] == 0xa5
+        && output[container_size - 1] == 0xa5);
+    return 0;
+}
+
 int main(void)
 {
     static const char owner[] = "owner passphrase with independent words";
@@ -146,14 +165,24 @@ int main(void)
     CHECK(memcmp(recovery_slot_id, changed_slot_id, sizeof(recovery_slot_id)) == 0);
     free(ignored_revision);
 
-    memset(recovery_changed, 0xa5, container_size);
-    changed_size = 777;
-    CHECK(scpefe_password_container_change_password(
-        owner_changed, container_size,
-        (const uint8_t *)owner_new, strlen(owner_new),
-        (const uint8_t *)"short", strlen("short"), recovery_changed,
-        container_size, &changed_size) == SCPEFE_STATUS_WEAK_PASSWORD);
-    CHECK(recovery_changed[0] == 0xa5 && recovery_changed[container_size - 1] == 0xa5);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "short", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "abcdefghijkl", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "1234567890123456", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "abcdefghijklm", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "ABCDEFGHIJKL", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "password123456", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "qwertyuiopasdf", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "abcabcabcabc", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "orange orange orange orange orange", recovery_changed) == 0);
     CHECK(scpefe_password_container_change_password(
         owner_changed, container_size,
         (const uint8_t *)owner_new, strlen(owner_new),
