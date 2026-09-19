@@ -10,8 +10,16 @@ project(
 include(CTest)
 
 add_library(scpefe SHARED
-    src/revision.cpp
-    src/scpefe.cpp
+    src/abi/context_abi.cpp
+    src/abi/revision_abi.cpp
+    src/core/context.cpp
+    src/core/host_services.cpp
+    src/format/cbor_reader.cpp
+    src/format/cbor_writer.cpp
+    src/format/diagnostic_json_writer.cpp
+    src/format/revision_limits.cpp
+    src/format/snapshot_revision.cpp
+    src/format/text_validation.cpp
 )
 add_library(SCPEFE::scpefe ALIAS scpefe)
 
@@ -28,6 +36,8 @@ target_include_directories(scpefe
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 set_target_properties(scpefe PROPERTIES
     CXX_EXTENSIONS OFF

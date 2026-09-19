@@ -1,0 +1,28 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace scpefe::format {
+
+inline constexpr std::uint32_t snapshot_revision_format_version = 1u;
+inline constexpr std::size_t revision_id_size = 32u;
+inline constexpr std::size_t slot_id_size = 16u;
+inline constexpr std::size_t content_hash_size = 32u;
+
+struct SnapshotRevisionData {
+    std::vector<std::uint8_t> parent_revision_ids;
+    std::uint64_t timestamp_ms{};
+    std::vector<std::uint8_t> slot_id;
+    std::string slot_identity_name;
+    std::string slot_identity_email;
+    std::string client_profile_name;
+    std::string client_profile_email;
+    std::string device_name;
+    std::vector<std::uint8_t> content_hash;
+    std::string content;
+};
+
+} // namespace scpefe::format
