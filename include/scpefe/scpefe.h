@@ -85,6 +85,24 @@ typedef struct scpefe_unlocked_container_v1 {
     size_t encoded_snapshot_revision_size;
 } scpefe_unlocked_container_v1;
 
+/* Validated inputs used to publish a new owner-protected document. */
+typedef struct scpefe_new_document_v1 {
+    uint32_t struct_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    const char *content;
+    size_t content_size;
+    uint64_t timestamp_ms;
+    const uint8_t *owner_password;
+    size_t owner_password_size;
+    const uint8_t *recovery_password;
+    size_t recovery_password_size;
+} scpefe_new_document_v1;
+
 /* All byte counts are limits applied before allocating or copying data. */
 typedef struct scpefe_revision_limits_v1 {
     uint32_t struct_size;
@@ -194,6 +212,14 @@ SCPEFE_API scpefe_status scpefe_password_container_create(
     size_t password_size,
     const uint8_t *encoded_snapshot_revision,
     size_t encoded_snapshot_revision_size,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Creates a complete initial document; NULL recovery_password omits recovery. */
+SCPEFE_API scpefe_status scpefe_new_document_create(
+    const scpefe_new_document_v1 *document,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size

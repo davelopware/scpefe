@@ -1,0 +1,25 @@
+{
+  "name": "@scpefe/windows",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/main.mjs",
+  "scripts": {
+    "build": "vite build && npm run build:preload",
+    "build:preload": "vite build --config vite.preload.config.ts",
+    "test": "npm run build:preload && node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "44.4.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0"
+  }
+}

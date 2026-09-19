@@ -1,6 +1,7 @@
 #include "container/password_container.hpp"
 
 #include "container/container_error.hpp"
+#include "container/recoverable_password_container.hpp"
 #include "format/revision_error.hpp"
 #include "format/revision_limits.hpp"
 #include "format/snapshot_revision.hpp"
@@ -316,6 +317,11 @@ UnlockedContainerData PasswordContainer::unlock(
     const format::RevisionLimits &limits
 )
 {
+    if (RecoverablePasswordContainer::recognizes(container, container_size)) {
+        return RecoverablePasswordContainer::unlock(
+            container, container_size, password, password_size, limits
+        );
+    }
     constexpr std::size_t minimum_size = header_size + wrapped_slot_size
         + document_id_size + tag_size;
     constexpr std::size_t fixed_size = header_size + wrapped_slot_size

@@ -3,6 +3,8 @@
 #include "container/container_error.hpp"
 #include "container/password_container.hpp"
 #include "container/unlocked_container_data.hpp"
+#include "document/new_document.hpp"
+#include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 #include "format/revision_limits.hpp"
 
@@ -107,6 +109,77 @@ scpefe_status scpefe_password_container_create(
         return SCPEFE_STATUS_OK;
     } catch (const ContainerFailure &failure) {
         return external_status(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_new_document_create(
+    const scpefe_new_document_v1 *document,
+    std::uint8_t *output,
+    std::size_t output_capacity,
+    std::size_t *output_size
+)
+{
+    if (document == nullptr
+        || document->struct_size < sizeof(scpefe_new_document_v1)
+        || output_size == nullptr
+        || document->profile_name_size == 0
+        || document->profile_email_size == 0
+        || document->device_name_size == 0
+        || document->owner_password_size == 0
+        || !scpefe::format::span_is_valid(
+            document->owner_password, document->owner_password_size)
+        || !scpefe::format::span_is_valid(
+            document->recovery_password, document->recovery_password_size)
+        || (document->recovery_password == nullptr
+            && document->recovery_password_size != 0)
+        || (document->recovery_password != nullptr
+            && document->recovery_password_size == 0)
+        || !scpefe::format::valid_utf8(
+            document->profile_name, document->profile_name_size)
+        || !scpefe::format::valid_utf8(
+            document->profile_email, document->profile_email_size)
+        || !scpefe::format::valid_utf8(
+            document->device_name, document->device_name_size)
+        || !scpefe::format::valid_canonical_document_text(
+            document->content, document->content_size)
+        || (document->recovery_password != nullptr
+            && document->owner_password_size == document->recovery_password_size
+            && std::memcmp(document->owner_password, document->recovery_password,
+                document->owner_password_size) == 0)) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        const std::size_t required_size = scpefe::document::NewDocument::encoded_size(
+            {document->profile_name, document->profile_name_size},
+            {document->profile_email, document->profile_email_size},
+            {document->device_name, document->device_name_size},
+            {document->content, document->content_size},
+            document->timestamp_ms,
+            document->recovery_password != nullptr
+        );
+        *output_size = required_size;
+        if (output == nullptr || output_capacity < required_size)
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        const std::vector<std::uint8_t> encoded =
+            scpefe::document::NewDocument::create(
+                {document->profile_name, document->profile_name_size},
+                {document->profile_email, document->profile_email_size},
+                {document->device_name, document->device_name_size},
+                {document->content, document->content_size},
+                document->timestamp_ms,
+                document->owner_password, document->owner_password_size,
+                document->recovery_password, document->recovery_password_size
+            );
+        *output_size = encoded.size();
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) {
+        return external_status(failure.error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return failure.error == scpefe::format::RevisionError::limit_exceeded
+            ? SCPEFE_STATUS_LIMIT_EXCEEDED : SCPEFE_STATUS_INVALID_ARGUMENT;
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }

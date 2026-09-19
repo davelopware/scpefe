@@ -9,6 +9,8 @@ project(
 
 include(CTest)
 
+option(SCPEFE_BUILD_NODE_ADDON "Build the Electron Node-API bridge" OFF)
+
 set(SCPEFE_PORTABLE_FORMAT_SOURCES
     src/abi/revision_abi.cpp
     src/format/cbor_reader.cpp
@@ -30,8 +32,10 @@ else()
         src/abi/container_abi.cpp
         src/abi/context_abi.cpp
         src/container/password_container.cpp
+        src/container/recoverable_password_container.cpp
         src/core/context.cpp
         src/core/host_services.cpp
+        src/document/new_document.cpp
     )
 endif()
 add_library(SCPEFE::scpefe ALIAS scpefe)
@@ -62,6 +66,27 @@ set_target_properties(scpefe PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
 )
+
+if(SCPEFE_BUILD_NODE_ADDON)
+    if(NOT NODE_API_INCLUDE_DIR)
+        message(FATAL_ERROR "NODE_API_INCLUDE_DIR is required for the Node-API bridge")
+    endif()
+    add_library(scpefe_electron_native MODULE apps/windows/native/addon.cpp)
+    target_compile_features(scpefe_electron_native PRIVATE cxx_std_20)
+    target_include_directories(scpefe_electron_native PRIVATE ${NODE_API_INCLUDE_DIR})
+    target_link_libraries(scpefe_electron_native PRIVATE SCPEFE::scpefe)
+    if(WIN32)
+        if(NOT NODE_API_LIBRARY)
+            message(FATAL_ERROR "NODE_API_LIBRARY is required on Windows")
+        endif()
+        target_link_libraries(scpefe_electron_native PRIVATE ${NODE_API_LIBRARY})
+    endif()
+    set_target_properties(scpefe_electron_native PROPERTIES
+        PREFIX ""
+        SUFFIX ".node"
+        CXX_EXTENSIONS OFF
+    )
+endif()
 
 if(MSVC)
     target_compile_options(scpefe PRIVATE /W4 /permissive-)
@@ -122,8 +147,12 @@ if(BUILD_TESTING)
         add_executable(scpefe_format_contract_test tests/format_contract_test.c)
         target_link_libraries(scpefe_format_contract_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_new_document_test tests/new_document_test.c)
+        target_link_libraries(scpefe_new_document_test PRIVATE SCPEFE::scpefe)
+
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
+        add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"

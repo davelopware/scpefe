@@ -225,6 +225,8 @@ static int checks_licensing_markers(const char *root)
     size_t index = 0;
     CHECK(snprintf(path, sizeof(path), "%s/docs/format/password-container-v1.md", root) > 0);
     CHECK(file_contains(path, "SPDX-License-Identifier: CC-BY-4.0") == 0);
+    CHECK(snprintf(path, sizeof(path), "%s/docs/format/password-container-v2.md", root) > 0);
+    CHECK(file_contains(path, "SPDX-License-Identifier: CC-BY-4.0") == 0);
     for (index = 0; index < sizeof(cc0_files) / sizeof(cc0_files[0]); ++index) {
         CHECK(snprintf(path, sizeof(path), "%s/%s", root, cc0_files[index]) > 0);
         CHECK(file_contains(path, "SPDX-License-Identifier: CC0-1.0") == 0);
