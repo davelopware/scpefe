@@ -62,3 +62,11 @@ export function validateOpenedDocument(value) {
   }
   return Object.freeze({ content: value.content, readOnly: true });
 }
+
+export function validateCreationResult(value) {
+  if (!value || typeof value !== "object" || value.created !== true
+      || Object.keys(value).length !== 1) {
+    throw new TypeError("host returned an invalid creation result");
+  }
+  return Object.freeze({ created: true });
+}

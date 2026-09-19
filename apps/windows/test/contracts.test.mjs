@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateCreateRequest, validateOpenedDocument,
+import { validateCreateRequest, validateCreationResult, validateOpenedDocument,
   validateProfile } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
@@ -35,4 +35,11 @@ test("accepts only validated read-only native results", () => {
   assert.deepEqual(validateOpenedDocument({ content: "secret", readOnly: true }),
     { content: "secret", readOnly: true });
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: false }));
+});
+
+test("creation results cannot expose host filesystem paths", () => {
+  assert.deepEqual(validateCreationResult({ created: true }), { created: true });
+  assert.throws(() => validateCreationResult({
+    created: true, target: "C:\\Users\\Ada\\secret.scpefe",
+  }));
 });

@@ -7,7 +7,7 @@ type Opened = { content: string; readOnly: true };
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
   saveProfile(profile: Profile): Promise<Profile>;
-  createDocument(request: object): Promise<{ target: string } | null>;
+  createDocument(request: object): Promise<{ created: true } | null>;
   openDocument(password: string): Promise<Opened | null>;
 }; } }
 
@@ -41,7 +41,7 @@ function App() {
         understandsIrrecoverable: data.get("understandsIrrecoverable") === "on",
         storedRecoverySeparately: data.get("storedRecoverySeparately") === "on",
       });
-      if (result) setMessage(`Encrypted document published to ${result.target}`);
+      if (result) setMessage("Encrypted document published successfully.");
     } catch (error) { showError(error); }
   }
 

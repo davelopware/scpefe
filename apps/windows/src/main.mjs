@@ -43,7 +43,7 @@ app.whenReady().then(() => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      preload: path.join(here, "preload.mjs"),
+      preload: path.join(here, "..", "dist", "preload.cjs"),
     },
   });
   window.loadFile(path.join(here, "..", "dist", "index.html"));

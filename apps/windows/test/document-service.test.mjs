@@ -29,7 +29,7 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
   await assert.rejects(service.createDocument(target, request), /Configure/);
   await service.saveProfile({ name: "Ada", email: "ada@example.test",
     deviceName: "Desk PC" });
-  await service.createDocument(target, request);
+  assert.deepEqual(await service.createDocument(target, request), { created: true });
   assert.equal(calls.length, 1);
   assert.deepEqual(await service.openDocument(target, "owner password words"),
     { content: "hello", readOnly: true });

@@ -41,7 +41,7 @@ export class DocumentService {
     await this.#atomicWrite(target, candidate, false);
     const published = await this.fs.readFile(target);
     if (!published.equals(candidate)) throw new Error("Published container verification failed");
-    return { target };
+    return { created: true };
   }
 
   async openDocument(target, password) {
