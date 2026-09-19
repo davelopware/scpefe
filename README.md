@@ -53,3 +53,30 @@ accepted as command-line arguments. The milestone envelope is documented in
 Its CC0 valid and invalid interoperability vectors live under
 [`tests/vectors/draft-v1`](tests/vectors/draft-v1/README.md) and are executed
 through the public common-core APIs by the native test suite.
+
+## Windows desktop milestone
+
+`apps/windows` contains the Electron/React Windows frontend for configuring a
+local profile, publishing a new encrypted document, and reopening it read-only.
+The sandboxed renderer sees only four validated preload operations; passwords,
+container bytes, native bindings, filesystem paths, and publication remain in
+the Electron host. New desktop documents use the backward-compatible
+[recoverable v2 envelope](docs/format/password-container-v2.md), while the core
+continues to read the draft v1 vectors.
+
+Build the Node-API bridge alongside the native library by supplying the header
+directory from the Node/Electron SDK used for packaging:
+
+```bash
+cmake -S . -B build -DSCPEFE_BUILD_NODE_ADDON=ON \
+  -DNODE_API_INCLUDE_DIR=/path/to/node/include
+cmake --build build
+cd apps/windows
+npm install
+npm test
+npm run build
+```
+
+On Windows, also pass `NODE_API_LIBRARY` for the matching SDK import library.
+Copy the resulting `scpefe_electron_native.node` beside `apps/windows/native`
+as part of packaging; production packaging details remain a release task.
