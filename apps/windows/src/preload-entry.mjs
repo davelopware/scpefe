@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
+  validatePlaintextExportRequest, validatePlaintextExportResult,
   canonicalizeDocumentText } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
@@ -22,4 +23,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:enter-edit-mode")),
   saveDocument: async (content) => validateSaveResult(
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
+  exportPlaintext: async (request) => {
+    const value = await ipcRenderer.invoke(
+      "document:export-plaintext", validatePlaintextExportRequest(request));
+    return value === null ? null : validatePlaintextExportResult(value);
+  },
 }));

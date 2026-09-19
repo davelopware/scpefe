@@ -1,13 +1,16 @@
 import path from "node:path";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
+  validatePlaintextExportRequest, validatePlaintextExportResult,
   validateSaveResult } from "./contracts.mjs";
 
 export class DocumentService {
-  constructor({ native, fs, profilePath }) {
+  constructor({ native, fs, profilePath,
+    nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n" }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
+    this.nativeLineEnding = nativeLineEnding;
     this.active = null;
   }
 
@@ -88,6 +91,16 @@ export class DocumentService {
     if (reopened.content !== canonical) throw new Error("Saved document verification failed");
     this.active.opened = reopened;
     return validateSaveResult({ saved: true, content: canonical });
+  }
+
+  async exportPlaintext(target, request) {
+    if (!this.active) throw new Error("Open a document first");
+    const validated = validatePlaintextExportRequest(request);
+    const content = validated.lineEndings === "native"
+      ? validated.content.replace(/\n/g, this.nativeLineEnding)
+      : validated.content;
+    await this.fs.writeFile(target, Buffer.from(content, "utf8"));
+    return validatePlaintextExportResult({ exported: true });
   }
 
   async #atomicWrite(target, bytes, replace) {
