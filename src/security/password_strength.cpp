@@ -190,13 +190,22 @@ double brute_force_bits(const std::uint8_t *password, std::size_t size)
     bool space = false;
     bool symbol = false;
     bool non_ascii = false;
-    std::array<bool, 256> seen{};
+    std::array<std::size_t, 256> frequencies{};
     std::size_t unique = 0;
+    std::size_t runs = size == 0 ? 0 : 1;
+    std::size_t current_run = size == 0 ? 0 : 1;
+    std::size_t longest_run = current_run;
     for (std::size_t index = 0; index < size; ++index) {
         const std::uint8_t value = password[index];
-        if (!seen[value]) {
-            seen[value] = true;
-            ++unique;
+        if (frequencies[value]++ == 0) ++unique;
+        if (index != 0) {
+            if (value == password[index - 1]) {
+                ++current_run;
+                longest_run = std::max(longest_run, current_run);
+            } else {
+                ++runs;
+                current_run = 1;
+            }
         }
         lower = lower || (value >= 'a' && value <= 'z');
         upper = upper || (value >= 'A' && value <= 'Z');
@@ -209,12 +218,22 @@ double brute_force_bits(const std::uint8_t *password, std::size_t size)
         non_ascii = non_ascii || value >= 0x80;
     }
     if (unique < 2) return 0.0;
+    if (longest_run >= 4 && runs <= unique * 2) return 0.0;
     const std::size_t observed_alphabet = (lower ? 26u : 0u)
         + (upper ? 26u : 0u) + (digit ? 10u : 0u) + (space ? 1u : 0u)
         + (symbol ? 32u : 0u) + (non_ascii ? 128u : 0u);
     const std::size_t estimated_alphabet = std::min(
         observed_alphabet, std::max<std::size_t>(2, unique * 2));
-    return size * std::log2(static_cast<double>(estimated_alphabet));
+    double sampled_bits = 0.0;
+    for (const std::size_t frequency : frequencies) {
+        if (frequency == 0) continue;
+        sampled_bits += frequency * std::log2(
+            static_cast<double>(size) / static_cast<double>(frequency));
+    }
+    const double unseen_symbol_allowance = 1.5 * static_cast<double>(unique);
+    return std::min(
+        size * std::log2(static_cast<double>(estimated_alphabet)),
+        sampled_bits + unseen_symbol_allowance);
 }
 
 } // namespace

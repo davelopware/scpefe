@@ -183,6 +183,10 @@ int main(void)
         owner_new, "abcabcabcabc", recovery_changed) == 0);
     CHECK(rejects_weak_change_without_output(owner_changed, container_size,
         owner_new, "orange orange orange orange orange", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "aaaaaaaaaaaaabbbbbbbbbbbbb", recovery_changed) == 0);
+    CHECK(rejects_weak_change_without_output(owner_changed, container_size,
+        owner_new, "11111111111111222222222222", recovery_changed) == 0);
     CHECK(scpefe_password_container_change_password(
         owner_changed, container_size,
         (const uint8_t *)owner_new, strlen(owner_new),
