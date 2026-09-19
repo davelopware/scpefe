@@ -43,6 +43,10 @@ already-decrypted record through the same common-core parser:
 
 Snapshot content is omitted from diagnostic JSON unless `--include-content` is
 explicitly supplied. This developer operation consumes a decrypted revision
-record for format/conformance work; it does not open or authenticate an
-encrypted container. Container-level diagnostic dumps will require successful
-authentication when that layer is implemented.
+record for format/conformance work; it does not accept a password or open an
+encrypted container.
+
+The common core also creates and unlocks the initial self-contained,
+single-owner password container through byte-span C APIs. Passwords are never
+accepted as command-line arguments. The milestone envelope is documented in
+[docs/format/password-container-v1.md](docs/format/password-container-v1.md).
