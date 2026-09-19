@@ -262,6 +262,14 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
     if (!recognizes(container, container_size) || container_size < header_size)
         throw ContainerFailure{ContainerError::malformed_container};
     const std::uint32_t version = read_u32(container + 8);
+    const bool has_legacy_magic = std::equal(
+        legacy_magic.begin(), legacy_magic.end(), container);
+    const bool has_current_magic = std::equal(
+        magic.begin(), magic.end(), container);
+    if ((has_legacy_magic && version != legacy_format_version)
+        || (has_current_magic && version != format_version)) {
+        throw ContainerFailure{ContainerError::malformed_container};
+    }
     if ((version != legacy_format_version && version != format_version)
         || read_u32(container + 12) != argon2id13_algorithm
         || read_u64(container + 16) != operations_limit
@@ -356,7 +364,10 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
 {
     validate_snapshot(encoded_snapshot_revision, encoded_snapshot_revision_size,
         format::RevisionLimits::defaults(), ContainerError::invalid_argument);
-    if (!recognizes(container, container_size) || container_size < header_size
+    if (!recognizes(container, container_size) || container_size < header_size) {
+        throw ContainerFailure{ContainerError::unsupported_format};
+    }
+    if (!std::equal(magic.begin(), magic.end(), container)
         || read_u32(container + 8) != format_version) {
         throw ContainerFailure{ContainerError::unsupported_format};
     }

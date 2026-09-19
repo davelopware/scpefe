@@ -80,6 +80,22 @@ int main(void)
     ) == SCPEFE_STATUS_OK);
     CHECK(opens_with(container, container_size, owner) == 0);
     CHECK(opens_with(container, container_size, recovery) == 0);
+    container[7] = 2; /* Version-2 magic with a version-3 integer is invalid. */
+    unlocked = (scpefe_unlocked_container *)(uintptr_t)1;
+    CHECK(scpefe_password_container_unlock(
+        container, container_size, (const uint8_t *)owner, sizeof(owner) - 1,
+        &unlocked
+    ) == SCPEFE_STATUS_MALFORMED_CONTAINER);
+    CHECK(unlocked == NULL);
+    container[7] = 3;
+    container[8] = 2; /* Version-3 magic with a version-2 integer is invalid. */
+    unlocked = (scpefe_unlocked_container *)(uintptr_t)1;
+    CHECK(scpefe_password_container_unlock(
+        container, container_size, (const uint8_t *)owner, sizeof(owner) - 1,
+        &unlocked
+    ) == SCPEFE_STATUS_MALFORMED_CONTAINER);
+    CHECK(unlocked == NULL);
+    container[8] = 3;
     CHECK(scpefe_password_container_unlock(
         container, container_size, (const uint8_t *)"wrong password", 14,
         &unlocked
