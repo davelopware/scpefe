@@ -39,3 +39,12 @@ Passwords enter `libscpefe` only as caller-owned byte spans. The container API
 does not accept passwords through command-line arguments or emit them through
 diagnostics. Sensitive intermediate key buffers are explicitly cleared after
 use.
+
+Readers reject an unknown envelope version, KDF, or AEAD as unsupported before
+performing password derivation or allocating payload storage. Version-1 KDF
+costs are mandatory values, not attacker-controlled tuning inputs: a reader
+must never retry a failed allocation with weaker Argon2id parameters. Lengths
+and the encrypted snapshot's CBOR sizes, collection counts, and nesting depth
+are checked against caller-selected limits before the corresponding allocation.
+All unlock failures expose no document ID, revision bytes, or other partially
+authenticated document state.

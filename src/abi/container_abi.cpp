@@ -4,6 +4,7 @@
 #include "container/password_container.hpp"
 #include "container/unlocked_container_data.hpp"
 #include "format/text_validation.hpp"
+#include "format/revision_limits.hpp"
 
 #include <cstring>
 #include <new>
@@ -16,6 +17,7 @@ using scpefe::container::ContainerError;
 using scpefe::container::ContainerFailure;
 using scpefe::container::PasswordContainer;
 using scpefe::container::UnlockedContainerData;
+using scpefe::format::RevisionLimits;
 
 namespace {
 
@@ -29,6 +31,8 @@ scpefe_status external_status(ContainerError error)
         return SCPEFE_STATUS_MALFORMED_CONTAINER;
     case ContainerError::unsupported_format:
         return SCPEFE_STATUS_UNSUPPORTED_FORMAT;
+    case ContainerError::limit_exceeded:
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
     case ContainerError::authentication_failed:
         return SCPEFE_STATUS_AUTHENTICATION_FAILED;
     case ContainerError::out_of_memory:
@@ -37,6 +41,27 @@ scpefe_status external_status(ContainerError error)
         return SCPEFE_STATUS_CRYPTO_ERROR;
     }
     return SCPEFE_STATUS_CRYPTO_ERROR;
+}
+
+/* Validates and converts caller-provided revision and allocation limits. */
+bool read_limits(
+    const scpefe_revision_limits_v1 *limits,
+    RevisionLimits &result
+)
+{
+    if (limits == nullptr
+        || limits->struct_size < sizeof(scpefe_revision_limits_v1)) {
+        return false;
+    }
+    result = RevisionLimits(
+        limits->max_input_bytes,
+        limits->max_nesting_depth,
+        limits->max_collection_entries,
+        limits->max_text_bytes,
+        limits->max_byte_string_bytes,
+        limits->max_parent_count
+    );
+    return true;
 }
 
 } // namespace
@@ -95,6 +120,30 @@ scpefe_status scpefe_password_container_unlock(
     scpefe_unlocked_container **unlocked
 )
 {
+    const RevisionLimits defaults = RevisionLimits::defaults();
+    const scpefe_revision_limits_v1 limits{
+        sizeof(scpefe_revision_limits_v1),
+        defaults.max_input_bytes(),
+        defaults.max_nesting_depth(),
+        defaults.max_collection_entries(),
+        defaults.max_text_bytes(),
+        defaults.max_byte_string_bytes(),
+        defaults.max_parent_count(),
+    };
+    return scpefe_password_container_unlock_with_limits(
+        container, container_size, password, password_size, &limits, unlocked
+    );
+}
+
+scpefe_status scpefe_password_container_unlock_with_limits(
+    const std::uint8_t *container,
+    std::size_t container_size,
+    const std::uint8_t *password,
+    std::size_t password_size,
+    const scpefe_revision_limits_v1 *limits,
+    scpefe_unlocked_container **unlocked
+)
+{
     if (!scpefe::format::span_is_valid(container, container_size)
         || container_size == 0
         || !scpefe::format::span_is_valid(password, password_size)
@@ -102,9 +151,13 @@ scpefe_status scpefe_password_container_unlock(
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
     *unlocked = nullptr;
+    RevisionLimits internal_limits = RevisionLimits::defaults();
+    if (!read_limits(limits, internal_limits)) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
     try {
         UnlockedContainerData data = PasswordContainer::unlock(
-            container, container_size, password, password_size
+            container, container_size, password, password_size, internal_limits
         );
         *unlocked = new scpefe_unlocked_container(std::move(data));
         return SCPEFE_STATUS_OK;

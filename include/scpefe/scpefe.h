@@ -208,6 +208,16 @@ SCPEFE_API scpefe_status scpefe_password_container_unlock(
     scpefe_unlocked_container **unlocked
 );
 
+/* Authenticates and unlocks while enforcing caller-selected allocation limits. */
+SCPEFE_API scpefe_status scpefe_password_container_unlock_with_limits(
+    const uint8_t *container,
+    size_t container_size,
+    const uint8_t *password,
+    size_t password_size,
+    const scpefe_revision_limits_v1 *limits,
+    scpefe_unlocked_container **unlocked
+);
+
 /* Borrows authenticated container values until the unlocked owner is destroyed. */
 SCPEFE_API scpefe_status scpefe_unlocked_container_view(
     const scpefe_unlocked_container *unlocked,

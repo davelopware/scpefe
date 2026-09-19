@@ -162,6 +162,25 @@ static int rejects_malformed_records_and_limit_violations(void)
     ) == SCPEFE_STATUS_MALFORMED_CBOR);
 
     memcpy(mutated, valid, valid_size);
+    mutated[2] = 2; /* Unknown mandatory record version. */
+    CHECK(scpefe_snapshot_revision_decode(
+        mutated, valid_size, &limits, &decoded
+    ) == SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, valid, valid_size);
+    for (index = 0; index + 5 <= valid_size; ++index) {
+        static const uint8_t codec_prefix[] = {0x0b, 0xa3, 0x01, 0x00, 0x02};
+        if (memcmp(mutated + index, codec_prefix, sizeof(codec_prefix)) == 0) {
+            mutated[index + 3] = 1; /* Unsupported snapshot codec. */
+            break;
+        }
+    }
+    CHECK(index + 5 <= valid_size);
+    CHECK(scpefe_snapshot_revision_decode(
+        mutated, valid_size, &limits, &decoded
+    ) == SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, valid, valid_size);
     for (index = 0; index + strlen("first line") <= valid_size; ++index) {
         if (memcmp(mutated + index, "first line", strlen("first line")) == 0) {
             mutated[index] = '\r'; /* Canonical text uses LF, never CR. */
