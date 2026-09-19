@@ -53,3 +53,21 @@ accepted as command-line arguments. The milestone envelope is documented in
 Its CC0 valid and invalid interoperability vectors live under
 [`tests/vectors/draft-v1`](tests/vectors/draft-v1/README.md) and are executed
 through the public common-core APIs by the native test suite.
+
+## WebAssembly conformance build
+
+The platform-neutral snapshot format is also compiled with Emscripten and run
+under Node.js against the same valid and invalid vectors. The native and
+WebAssembly conformance executables share one runner and emit the same
+structured JSON result, making status and byte-for-byte encoding differences
+visible:
+
+```bash
+emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-wasm --target scpefe_wasm_conformance
+ctest --test-dir build-wasm -R scpefe.wasm-format-conformance --output-on-failure
+```
+
+This secondary target deliberately excludes password/container cryptography,
+publication, lease, and host-service behavior. Those responsibilities remain
+native-only and continue to be covered by the native test suite.

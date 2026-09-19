@@ -10,6 +10,11 @@ The executable `scpefe.format-contract` test reads these files and submits the
 represented bytes to the same public common-core C APIs used by applications.
 It does not contain a second parser.
 
+The native and WebAssembly snapshot conformance targets run the snapshot rows
+through one shared runner and emit equivalent structured JSON results. Password
+container rows are native-only; publication, lease, and host behavior are also
+outside the WebAssembly target.
+
 | Vector | API | Expected result |
 |---|---|---|
 | `valid/snapshot-revision.hex` | snapshot decode, encode, diagnostic JSON | success; byte-identical re-encoding |
