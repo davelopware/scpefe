@@ -48,6 +48,16 @@ public:
         const std::uint8_t *encoded_snapshot_revision,
         std::size_t encoded_snapshot_revision_size
     );
+
+    /* Re-wraps the slot selected by its current password with a strong new password. */
+    static std::vector<std::uint8_t> change_password(
+        const std::uint8_t *container,
+        std::size_t container_size,
+        const std::uint8_t *current_password,
+        std::size_t current_password_size,
+        const std::uint8_t *new_password,
+        std::size_t new_password_size
+    );
 };
 
 } // namespace scpefe::container

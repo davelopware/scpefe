@@ -2,6 +2,7 @@
 
 #include "container/container_error.hpp"
 #include "container/password_container.hpp"
+#include "container/recoverable_password_container.hpp"
 #include "container/unlocked_container_data.hpp"
 #include "document/new_document.hpp"
 #include "document/manual_save.hpp"
@@ -19,6 +20,7 @@ extern "C" void sodium_memzero(void *buffer, std::size_t size);
 using scpefe::container::ContainerError;
 using scpefe::container::ContainerFailure;
 using scpefe::container::PasswordContainer;
+using scpefe::container::RecoverablePasswordContainer;
 using scpefe::container::UnlockedContainerData;
 using scpefe::format::RevisionLimits;
 
@@ -38,6 +40,10 @@ scpefe_status external_status(ContainerError error)
         return SCPEFE_STATUS_LIMIT_EXCEEDED;
     case ContainerError::authentication_failed:
         return SCPEFE_STATUS_AUTHENTICATION_FAILED;
+    case ContainerError::weak_password:
+        return SCPEFE_STATUS_WEAK_PASSWORD;
+    case ContainerError::password_already_in_use:
+        return SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE;
     case ContainerError::out_of_memory:
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     case ContainerError::crypto_error:
@@ -254,6 +260,43 @@ scpefe_status scpefe_manual_save(
     } catch (const scpefe::format::RevisionFailure &failure) {
         return failure.error == scpefe::format::RevisionError::limit_exceeded
             ? SCPEFE_STATUS_LIMIT_EXCEEDED : SCPEFE_STATUS_INVALID_ARGUMENT;
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_password_container_change_password(
+    const std::uint8_t *container,
+    std::size_t container_size,
+    const std::uint8_t *current_password,
+    std::size_t current_password_size,
+    const std::uint8_t *new_password,
+    std::size_t new_password_size,
+    std::uint8_t *output,
+    std::size_t output_capacity,
+    std::size_t *output_size
+)
+{
+    if (!scpefe::format::span_is_valid(container, container_size)
+        || container_size == 0
+        || !scpefe::format::span_is_valid(current_password, current_password_size)
+        || current_password_size == 0
+        || !scpefe::format::span_is_valid(new_password, new_password_size)
+        || new_password_size == 0 || output_size == nullptr) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        const std::vector<std::uint8_t> changed =
+            RecoverablePasswordContainer::change_password(
+                container, container_size, current_password, current_password_size,
+                new_password, new_password_size);
+        *output_size = changed.size();
+        if (output == nullptr || output_capacity < changed.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        std::memcpy(output, changed.data(), changed.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) {
+        return external_status(failure.error);
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }

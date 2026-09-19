@@ -9,6 +9,8 @@ enum class ContainerError {
     unsupported_format,
     limit_exceeded,
     authentication_failed,
+    weak_password,
+    password_already_in_use,
     out_of_memory,
     crypto_error,
 };
