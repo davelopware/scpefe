@@ -102,6 +102,132 @@ static int create_container(
     return 0;
 }
 
+static void write_u32(uint8_t *output, uint32_t value)
+{
+    size_t index = 0;
+    for (index = 0; index < 4; ++index) {
+        output[index] = (uint8_t)(value >> (index * 8));
+    }
+}
+
+static void write_u64(uint8_t *output, uint64_t value)
+{
+    size_t index = 0;
+    for (index = 0; index < 8; ++index) {
+        output[index] = (uint8_t)(value >> (index * 8));
+    }
+}
+
+static int rejects_hostile_containers_and_limits(void)
+{
+    static const uint8_t password[] = "owner passphrase has several words";
+    uint8_t *snapshot = NULL;
+    size_t snapshot_size = 0;
+    uint8_t *container = NULL;
+    size_t container_size = 0;
+    uint8_t *mutated = NULL;
+    scpefe_unlocked_container *unlocked = NULL;
+    scpefe_revision_limits_v1 limits = {0};
+
+    CHECK(encode_snapshot(&snapshot, &snapshot_size) == 0);
+    CHECK(create_container(
+        password, sizeof(password) - 1, snapshot, snapshot_size,
+        &container, &container_size
+    ) == 0);
+    mutated = (uint8_t *)malloc(container_size);
+    CHECK(mutated != NULL);
+
+#define EXPECT_REJECTED(status) \
+    do { \
+        unlocked = (scpefe_unlocked_container *)(uintptr_t)1; \
+        CHECK(scpefe_password_container_unlock( \
+            mutated, container_size, password, sizeof(password) - 1, &unlocked \
+        ) == (status)); \
+        CHECK(unlocked == NULL); \
+    } while (0)
+
+    memcpy(mutated, container, container_size);
+    mutated[0] ^= 0x01;
+    EXPECT_REJECTED(SCPEFE_STATUS_MALFORMED_CONTAINER);
+
+    memcpy(mutated, container, container_size);
+    write_u32(mutated + 8, 2);
+    EXPECT_REJECTED(SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, container, container_size);
+    write_u32(mutated + 12, 99);
+    EXPECT_REJECTED(SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, container, container_size);
+    write_u64(mutated + 24, 1); /* Never weaken Argon2id memory cost. */
+    EXPECT_REJECTED(SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, container, container_size);
+    write_u32(mutated + 48, 99);
+    EXPECT_REJECTED(SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, container, container_size);
+    write_u32(mutated + 76, 99);
+    EXPECT_REJECTED(SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+
+    memcpy(mutated, container, container_size);
+    write_u32(mutated + 104, 64);
+    EXPECT_REJECTED(SCPEFE_STATUS_MALFORMED_CONTAINER);
+
+    memcpy(mutated, container, container_size);
+    write_u64(mutated + 108, (uint64_t)container_size);
+    EXPECT_REJECTED(SCPEFE_STATUS_MALFORMED_CONTAINER);
+
+    memcpy(mutated, container, container_size);
+    mutated[32] ^= 0x01;
+    EXPECT_REJECTED(SCPEFE_STATUS_AUTHENTICATION_FAILED);
+
+    memcpy(mutated, container, container_size);
+    mutated[116] ^= 0x01;
+    EXPECT_REJECTED(SCPEFE_STATUS_AUTHENTICATION_FAILED);
+
+    memcpy(mutated, container, container_size);
+    mutated[container_size - 1] ^= 0x01;
+    EXPECT_REJECTED(SCPEFE_STATUS_AUTHENTICATION_FAILED);
+
+#undef EXPECT_REJECTED
+
+    limits.struct_size = sizeof(limits);
+    CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
+    limits.max_input_bytes = snapshot_size - 1;
+    unlocked = (scpefe_unlocked_container *)(uintptr_t)1;
+    CHECK(scpefe_password_container_unlock_with_limits(
+        container, container_size, password, sizeof(password) - 1,
+        &limits, &unlocked
+    ) == SCPEFE_STATUS_LIMIT_EXCEEDED);
+    CHECK(unlocked == NULL);
+
+    limits.struct_size = sizeof(limits);
+    CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
+    limits.max_nesting_depth = 1;
+    unlocked = (scpefe_unlocked_container *)(uintptr_t)1;
+    CHECK(scpefe_password_container_unlock_with_limits(
+        container, container_size, password, sizeof(password) - 1,
+        &limits, &unlocked
+    ) == SCPEFE_STATUS_LIMIT_EXCEEDED);
+    CHECK(unlocked == NULL);
+
+    limits.struct_size = sizeof(limits);
+    CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
+    limits.max_collection_entries = 10;
+    unlocked = (scpefe_unlocked_container *)(uintptr_t)1;
+    CHECK(scpefe_password_container_unlock_with_limits(
+        container, container_size, password, sizeof(password) - 1,
+        &limits, &unlocked
+    ) == SCPEFE_STATUS_LIMIT_EXCEEDED);
+    CHECK(unlocked == NULL);
+
+    free(mutated);
+    free(container);
+    free(snapshot);
+    return 0;
+}
+
 static int creates_and_unlocks_private_container(void)
 {
     static const uint8_t password[] = "owner passphrase has several words";
@@ -185,7 +311,8 @@ static int creates_and_unlocks_private_container(void)
 
 int main(void)
 {
-    const int result = creates_and_unlocks_private_container();
+    int result = creates_and_unlocks_private_container();
+    if (result == 0) result = rejects_hostile_containers_and_limits();
     if (result != 0) {
         fprintf(stderr, "container test failed at line %d\n", result);
     }

@@ -7,6 +7,7 @@ enum class ContainerError {
     invalid_argument,
     malformed_container,
     unsupported_format,
+    limit_exceeded,
     authentication_failed,
     out_of_memory,
     crypto_error,

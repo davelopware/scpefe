@@ -164,6 +164,7 @@ void derive_snapshot_key(
 void validate_snapshot(
     const std::uint8_t *encoded_snapshot_revision,
     std::size_t encoded_snapshot_revision_size,
+    const format::RevisionLimits &limits,
     ContainerError invalid_error
 )
 {
@@ -171,9 +172,17 @@ void validate_snapshot(
         format::SnapshotRevision::decode(
             encoded_snapshot_revision,
             encoded_snapshot_revision_size,
-            format::RevisionLimits::defaults()
+            limits
         );
-    } catch (const format::RevisionFailure &) {
+    } catch (const format::RevisionFailure &failure) {
+        if (invalid_error == ContainerError::malformed_container) {
+            if (failure.error == format::RevisionError::unsupported_format) {
+                throw ContainerFailure{ContainerError::unsupported_format};
+            }
+            if (failure.error == format::RevisionError::limit_exceeded) {
+                throw ContainerFailure{ContainerError::limit_exceeded};
+            }
+        }
         throw ContainerFailure{invalid_error};
     }
 }
@@ -232,7 +241,7 @@ std::vector<std::uint8_t> PasswordContainer::create(
 )
 {
     validate_snapshot(encoded_snapshot_revision, encoded_snapshot_revision_size,
-        ContainerError::invalid_argument);
+        format::RevisionLimits::defaults(), ContainerError::invalid_argument);
     require_sodium();
 
     std::array<std::uint8_t, key_size> document_key{};
@@ -303,24 +312,31 @@ UnlockedContainerData PasswordContainer::unlock(
     const std::uint8_t *container,
     std::size_t container_size,
     const std::uint8_t *password,
-    std::size_t password_size
+    std::size_t password_size,
+    const format::RevisionLimits &limits
 )
 {
     constexpr std::size_t minimum_size = header_size + wrapped_slot_size
         + document_id_size + tag_size;
+    constexpr std::size_t fixed_size = header_size + wrapped_slot_size
+        + document_id_size + tag_size;
     if (container_size < minimum_size
-        || container_size > encoded_size(
-            format::RevisionLimits::defaults().max_input_bytes()
-        )
-        || !std::equal(magic.begin(), magic.end(), container)
-        || read_u32(container + 8) != format_version
+        || !std::equal(magic.begin(), magic.end(), container)) {
+        throw ContainerFailure{ContainerError::malformed_container};
+    }
+    if (read_u32(container + 8) != format_version
         || read_u32(container + 12) != argon2id13_algorithm
         || read_u64(container + 16) != operations_limit
         || read_u64(container + 24) != memory_limit
         || read_u32(container + 48) != xchacha20_poly1305_algorithm
-        || read_u32(container + 76) != xchacha20_poly1305_algorithm
-        || read_u32(container + 104) != wrapped_slot_size) {
+        || read_u32(container + 76) != xchacha20_poly1305_algorithm) {
+        throw ContainerFailure{ContainerError::unsupported_format};
+    }
+    if (read_u32(container + 104) != wrapped_slot_size) {
         throw ContainerFailure{ContainerError::malformed_container};
+    }
+    if (container_size - fixed_size > limits.max_input_bytes()) {
+        throw ContainerFailure{ContainerError::limit_exceeded};
     }
     const std::uint64_t encrypted_snapshot_size = read_u64(container + 108);
     if (encrypted_snapshot_size < document_id_size + tag_size
@@ -371,7 +387,7 @@ UnlockedContainerData PasswordContainer::unlock(
 
         const std::size_t revision_size = snapshot_plaintext.size() - document_id_size;
         validate_snapshot(snapshot_plaintext.data() + document_id_size,
-            revision_size, ContainerError::malformed_container);
+            revision_size, limits, ContainerError::malformed_container);
         UnlockedContainerData result;
         std::copy_n(snapshot_plaintext.data(), result.document_id.size(),
             result.document_id.begin());
