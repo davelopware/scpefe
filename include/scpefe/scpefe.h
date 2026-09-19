@@ -40,6 +40,7 @@ typedef enum scpefe_status {
 #define SCPEFE_SLOT_ID_SIZE 16u
 #define SCPEFE_CONTENT_HASH_SIZE 32u
 #define SCPEFE_DOCUMENT_ID_SIZE 16u
+#define SCPEFE_WORK_JOURNAL_KEY_SIZE 32u
 
 /* Reads the host's monotonic clock in milliseconds. */
 typedef scpefe_status (*scpefe_monotonic_time_ms_fn)(
@@ -289,6 +290,14 @@ SCPEFE_API scpefe_status scpefe_unlocked_container_view(
 SCPEFE_API scpefe_status scpefe_unlocked_container_slot_access(
     const scpefe_unlocked_container *unlocked,
     scpefe_unlocked_slot_access_v1 *access
+);
+
+/* Copies the purpose-separated key for this document's app-private work journal. */
+SCPEFE_API scpefe_status scpefe_unlocked_container_work_journal_key(
+    const scpefe_unlocked_container *unlocked,
+    uint8_t *key,
+    size_t key_capacity,
+    size_t *key_size
 );
 
 /* Releases unlocked container values and clears their storage. */

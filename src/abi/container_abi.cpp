@@ -329,6 +329,24 @@ scpefe_status scpefe_unlocked_container_slot_access(
     return SCPEFE_STATUS_OK;
 }
 
+scpefe_status scpefe_unlocked_container_work_journal_key(
+    const scpefe_unlocked_container *unlocked,
+    std::uint8_t *key,
+    std::size_t key_capacity,
+    std::size_t *key_size
+)
+{
+    if (unlocked == nullptr || key_size == nullptr) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
+    *key_size = unlocked->data.work_journal_key.size();
+    if (key == nullptr || key_capacity < *key_size) {
+        return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+    }
+    std::memcpy(key, unlocked->data.work_journal_key.data(), *key_size);
+    return SCPEFE_STATUS_OK;
+}
+
 void scpefe_unlocked_container_destroy(scpefe_unlocked_container *unlocked)
 {
     if (unlocked == nullptr) return;
@@ -336,6 +354,8 @@ void scpefe_unlocked_container_destroy(scpefe_unlocked_container *unlocked)
         unlocked->data.document_id.data(), unlocked->data.document_id.size()
     );
     sodium_memzero(unlocked->data.slot_id.data(), unlocked->data.slot_id.size());
+    sodium_memzero(unlocked->data.work_journal_key.data(),
+        unlocked->data.work_journal_key.size());
     if (!unlocked->data.encoded_snapshot_revision.empty()) {
         sodium_memzero(
             unlocked->data.encoded_snapshot_revision.data(),

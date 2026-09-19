@@ -81,6 +81,9 @@ constexpr std::uint8_t owner_permissions = 0x07;
 constexpr std::array<char, 8> snapshot_key_context{
     'S', 'C', 'P', 'S', 'N', 'A', 'P', '1',
 };
+constexpr std::array<char, 8> work_journal_key_context{
+    'S', 'C', 'P', 'J', 'R', 'N', '0', '1',
+};
 
 constexpr std::size_t salt_offset = 32;
 constexpr std::size_t wrap_nonce_offset = 52;
@@ -155,6 +158,20 @@ void derive_snapshot_key(
 {
     if (crypto_kdf_derive_from_key(
         subkey.data(), subkey.size(), 1, snapshot_key_context.data(),
+        document_key
+    ) != 0) {
+        throw ContainerFailure{ContainerError::crypto_error};
+    }
+}
+
+/* Derives the app-private work-journal key from the random document key. */
+void derive_work_journal_key(
+    std::array<std::uint8_t, key_size> &subkey,
+    const std::uint8_t *document_key
+)
+{
+    if (crypto_kdf_derive_from_key(
+        subkey.data(), subkey.size(), 2, work_journal_key_context.data(),
         document_key
     ) != 0) {
         throw ContainerFailure{ContainerError::crypto_error};
@@ -397,6 +414,7 @@ UnlockedContainerData PasswordContainer::unlock(
         UnlockedContainerData result;
         std::copy_n(snapshot_plaintext.data(), result.document_id.size(),
             result.document_id.begin());
+        derive_work_journal_key(result.work_journal_key, slot_plaintext.data());
         result.encoded_snapshot_revision.assign(
             snapshot_plaintext.begin() + document_id_size,
             snapshot_plaintext.end()

@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
-  canonicalizeDocumentText } from "./contracts.mjs";
+  canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
+  validateRecoveredWork } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -22,4 +23,26 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:enter-edit-mode")),
   saveDocument: async (content) => validateSaveResult(
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
+  updateWorkingCopy: (working) => ipcRenderer.invoke(
+    "document:update-working-copy", validateWorkingCopy(working)),
+  activity: () => ipcRenderer.invoke("document:activity"),
+  restoreRecoveredWork: async () => validateRecoveredWork(
+    await ipcRenderer.invoke("document:restore-recovery")),
+  discardRecoveredWork: async () => validateOpenedDocument(
+    await ipcRenderer.invoke("document:discard-recovery")),
+  lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
+  onLocked: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => listener(validateLockResult(value));
+    ipcRenderer.on("document:locked", handler);
+    return () => ipcRenderer.removeListener("document:locked", handler);
+  },
+  onJournalWarning: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => {
+      if (typeof value === "string") listener(value);
+    };
+    ipcRenderer.on("document:journal-warning", handler);
+    return () => ipcRenderer.removeListener("document:journal-warning", handler);
+  },
 }));

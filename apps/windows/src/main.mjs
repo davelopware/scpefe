@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, powerMonitor } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -15,6 +15,10 @@ app.whenReady().then(() => {
     native,
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
+    journalDirectory: path.join(app.getPath("userData"), "work-journals"),
+    onLocked: (result) => window?.webContents.send("document:locked", result),
+    onJournalWarning: (warning) =>
+      window?.webContents.send("document:journal-warning", warning),
   });
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
@@ -28,6 +32,7 @@ app.whenReady().then(() => {
     return service.createDocument(chosen.filePath, request);
   });
   ipcMain.handle("document:open", async (_event, password) => {
+    await service.lock("open-another");
     const chosen = await dialog.showOpenDialog(window, {
       title: "Open encrypted document",
       filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
@@ -38,6 +43,12 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("document:enter-edit-mode", () => service.enterEditMode());
   ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
+  ipcMain.handle("document:update-working-copy", (_event, working) =>
+    service.updateWorkingCopy(working));
+  ipcMain.handle("document:activity", () => service.notifyActivity());
+  ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
+  ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
+  ipcMain.handle("document:lock", () => service.lock("app-lock"));
   window = new BrowserWindow({
     width: 920,
     height: 700,
@@ -48,6 +59,9 @@ app.whenReady().then(() => {
       preload: path.join(here, "..", "dist", "preload.cjs"),
     },
   });
+  powerMonitor.on("lock-screen", () => { void service.lock("screen-lock"); });
+  window.on("blur", () => { void service.lock("background"); });
+  window.on("minimize", () => { void service.lock("background"); });
   window.loadFile(path.join(here, "..", "dist", "index.html"));
 });
 

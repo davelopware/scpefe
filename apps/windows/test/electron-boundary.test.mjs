@@ -11,6 +11,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     new URL("../dist/preload.cjs", import.meta.url), "utf8");
   assert.match(main, /sandbox:\s*true/);
   assert.match(main, /contextIsolation:\s*true/);
+  assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
+  assert.match(main, /window\.on\(["']blur["']/);
+  assert.match(main, /service\.lock\(["']app-lock["']\)/);
   assert.match(main, /dist["'],\s*["']preload\.cjs/);
   assert.doesNotMatch(main, /preload\.mjs/);
   assert.match(config, /formats:\s*\[["']cjs["']\]/);
@@ -21,8 +24,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let exposed;
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
-    ipcRenderer: { invoke: async (channel) => channel === "document:create"
-      ? { created: true, target: "C:\\Users\\Ada\\secret.scpefe" } : null },
+    ipcRenderer: { on: () => {}, removeListener: () => {},
+      invoke: async (channel) => channel === "document:create"
+        ? { created: true, target: "C:\\Users\\Ada\\secret.scpefe" } : null },
   };
   vm.runInNewContext(preload, {
     Buffer,
@@ -33,7 +37,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "createDocument", "openDocument",
-    "enterEditMode", "saveDocument",
+    "enterEditMode", "saveDocument", "updateWorkingCopy", "activity",
+    "restoreRecoveredWork", "discardRecoveredWork", "lock", "onLocked",
+    "onJournalWarning",
   ]);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",

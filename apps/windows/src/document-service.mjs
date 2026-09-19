@@ -1,13 +1,34 @@
 import path from "node:path";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
-  validateSaveResult } from "./contracts.mjs";
+  validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
+import { WorkJournalStore } from "./work-journal.mjs";
+
+const DOCUMENT_ID = /^[0-9a-f]{32}$/;
+const REVISION_ID = /^[0-9a-f]{64}$/;
 
 export class DocumentService {
-  constructor({ native, fs, profilePath }) {
+  constructor({ native, fs, profilePath, journalDirectory,
+    checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
+    inactivityMs = 120_000, now = () => Date.now(),
+    setTimer = setTimeout, clearTimer = clearTimeout,
+    onLocked = () => {}, onJournalWarning = () => {} }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
+    this.journals = new WorkJournalStore({ fs,
+      directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
+    this.checkpointIdleMs = checkpointIdleMs;
+    this.checkpointContinuousMs = checkpointContinuousMs;
+    this.inactivityMs = inactivityMs;
+    this.now = now;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.onLocked = onLocked;
+    this.onJournalWarning = onJournalWarning;
+    this.checkpointTimer = null;
+    this.inactivityTimer = null;
+    this.flushChain = Promise.resolve();
     this.active = null;
   }
 
@@ -49,19 +70,113 @@ export class DocumentService {
   async openDocument(target, password) {
     const bytes = await this.fs.readFile(target);
     const validatedPassword = validatePassword(password);
-    const opened = validateOpenedDocument(
+    const nativeOpened = this.#validateNativeOpened(
       this.native.openDocument(bytes, validatedPassword));
-    this.active = { target, password: validatedPassword, opened, editMode: false };
+    let recovery = null;
+    try {
+      const journal = await this.journals.read(
+        nativeOpened.documentId, nativeOpened.journalKey);
+      if (journal?.state === "unsaved"
+          && journal.baseRevision === nativeOpened.baseRevision) {
+        recovery = journal;
+      }
+    } catch (error) {
+      this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
+    }
+    const opened = validateOpenedDocument({ ...nativeOpened.opened,
+      ...(recovery ? { recovery: { content: recovery.text,
+        cursor: recovery.cursor, state: "unsaved",
+        updateTime: recovery.updateTime } } : {}) });
+    this.active = { target, password: validatedPassword, opened, editMode: false,
+      documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
+      journalKey: Buffer.from(nativeOpened.journalKey), recovery,
+      working: null, dirty: false, continuousDue: null, journalWarning: null };
+    nativeOpened.journalKey.fill(0);
+    this.notifyActivity();
     return opened;
   }
 
   enterEditMode() {
     if (!this.active) throw new Error("Open a document first");
+    if (this.active.recovery) {
+      throw new Error("Restore or discard recovered work before editing");
+    }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
     this.active.editMode = true;
+    this.active.working = { content: this.active.opened.content,
+      cursor: { start: 0, end: 0 } };
     return validateEditMode({ ...this.active.opened, readOnly: false });
+  }
+
+  async restoreRecoveredWork() {
+    if (!this.active?.recovery) throw new Error("No recovered work is available");
+    if (!this.active.opened.canEdit) {
+      throw new Error("The active password slot does not permit editing");
+    }
+    this.active.editMode = true;
+    this.active.working = { content: this.active.recovery.text,
+      cursor: { ...this.active.recovery.cursor } };
+    this.active.dirty = true;
+    this.notifyActivity();
+    return Object.freeze({ content: this.active.working.content, readOnly: false,
+      canEdit: true, recoveredUnsaved: true,
+      cursor: Object.freeze({ ...this.active.working.cursor }) });
+  }
+
+  async discardRecoveredWork() {
+    if (!this.active?.recovery) throw new Error("No recovered work is available");
+    await this.journals.clear(this.active.documentId);
+    this.active.recovery = null;
+    this.active.opened = validateOpenedDocument({
+      content: this.active.opened.content, readOnly: true,
+      canEdit: this.active.opened.canEdit });
+    return this.active.opened;
+  }
+
+  updateWorkingCopy(value) {
+    if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
+    const working = validateWorkingCopy(value);
+    this.active.working = working;
+    this.active.dirty = working.content !== this.active.opened.content;
+    if (this.active.dirty) this.#scheduleCheckpoint();
+    this.notifyActivity();
+    return { checkpointScheduled: this.active.dirty,
+      warning: this.active.journalWarning };
+  }
+
+  notifyActivity() {
+    if (!this.active) return { tracked: false };
+    if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
+    this.inactivityTimer = this.setTimer(() => {
+      void this.lock("inactivity");
+    }, this.inactivityMs);
+    this.inactivityTimer?.unref?.();
+    return { tracked: true };
+  }
+
+  async lock(reason = "app-lock") {
+    const active = this.active;
+    if (!active) return { locked: true, journalSaved: true, warning: null };
+    this.#cancelTimers();
+    let journalSaved = true;
+    let warning = null;
+    try {
+      await this.#flushActive(active);
+    } catch (error) {
+      journalSaved = false;
+      warning = `Latest changes could not be checkpointed: ${error.message}`;
+    } finally {
+      active.journalKey.fill(0);
+      active.working = null;
+      active.recovery = null;
+      active.password = "";
+      this.active = null;
+    }
+    const result = Object.freeze({ locked: true, journalSaved, warning, reason });
+    this.onLocked(result);
+    return result;
   }
 
   async saveDocument(content) {
@@ -83,11 +198,81 @@ export class DocumentService {
     await this.#atomicWrite(this.active.target, candidate, true);
     const published = await this.fs.readFile(this.active.target);
     if (!published.equals(candidate)) throw new Error("Published container verification failed");
-    const reopened = validateOpenedDocument(
+    const reopened = this.#validateNativeOpened(
       this.native.openDocument(published, this.active.password));
-    if (reopened.content !== canonical) throw new Error("Saved document verification failed");
-    this.active.opened = reopened;
+    if (reopened.opened.content !== canonical) {
+      reopened.journalKey.fill(0);
+      throw new Error("Saved document verification failed");
+    }
+    await this.journals.clear(this.active.documentId);
+    this.active.journalKey.fill(0);
+    this.active.opened = reopened.opened;
+    this.active.documentId = reopened.documentId;
+    this.active.baseRevision = reopened.baseRevision;
+    this.active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+    this.active.dirty = false;
+    this.active.recovery = null;
+    this.active.continuousDue = null;
+    if (this.checkpointTimer !== null) this.clearTimer(this.checkpointTimer);
+    this.checkpointTimer = null;
+    this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical });
+  }
+
+  #validateNativeOpened(value) {
+    const opened = validateOpenedDocument(value);
+    if (!DOCUMENT_ID.test(value?.documentId)
+        || !REVISION_ID.test(value?.baseRevision)
+        || !Buffer.isBuffer(value?.journalKey) || value.journalKey.length !== 32) {
+      throw new TypeError("native bridge returned incomplete recovery metadata");
+    }
+    return { opened, documentId: value.documentId,
+      baseRevision: value.baseRevision, journalKey: value.journalKey };
+  }
+
+  #scheduleCheckpoint() {
+    const active = this.active;
+    const now = this.now();
+    if (active.continuousDue === null) {
+      active.continuousDue = now + this.checkpointContinuousMs;
+    }
+    if (this.checkpointTimer !== null) this.clearTimer(this.checkpointTimer);
+    const due = Math.min(now + this.checkpointIdleMs, active.continuousDue);
+    this.checkpointTimer = this.setTimer(() => {
+      this.checkpointTimer = null;
+      void this.#flushActive(active).catch((error) => {
+        active.journalWarning = `Recovery checkpoint failed: ${error.message}`;
+        this.onJournalWarning(active.journalWarning);
+      });
+    }, Math.max(0, due - now));
+    this.checkpointTimer?.unref?.();
+  }
+
+  async #flushActive(active) {
+    if (!active?.dirty || !active.working) return;
+    const record = {
+      text: active.working.content,
+      baseRevision: active.baseRevision,
+      cursor: { ...active.working.cursor },
+      target: active.target,
+      state: "unsaved",
+      updateTime: this.now(),
+    };
+    const operation = this.flushChain.catch(() => {}).then(() =>
+      this.journals.write(active.documentId, active.journalKey, record));
+    this.flushChain = operation;
+    await operation;
+    active.continuousDue = null;
+    active.journalWarning = null;
+  }
+
+  #cancelTimers() {
+    if (this.checkpointTimer !== null) this.clearTimer(this.checkpointTimer);
+    if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
+    this.checkpointTimer = null;
+    this.inactivityTimer = null;
   }
 
   async #atomicWrite(target, bytes, replace) {

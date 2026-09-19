@@ -2,12 +2,19 @@
 
 #include <node_api.h>
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
+
+extern "C" int crypto_generichash(
+    unsigned char *, std::size_t, const unsigned char *, unsigned long long,
+    const unsigned char *, std::size_t
+);
+extern "C" void sodium_memzero(void *, std::size_t);
 
 void check(napi_env env, napi_status status)
 {
@@ -49,6 +56,26 @@ void set_boolean(napi_env env, napi_value object, const char *name, bool value)
     napi_value boolean;
     check(env, napi_get_boolean(env, value, &boolean));
     check(env, napi_set_named_property(env, object, name, boolean));
+}
+
+void set_buffer(napi_env env, napi_value object, const char *name,
+    const std::uint8_t *value, std::size_t size)
+{
+    void *copy = nullptr;
+    napi_value buffer;
+    check(env, napi_create_buffer_copy(env, size, value, &copy, &buffer));
+    check(env, napi_set_named_property(env, object, name, buffer));
+}
+
+std::string hexadecimal(const std::uint8_t *value, std::size_t size)
+{
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result(size * 2, '\0');
+    for (std::size_t index = 0; index < size; ++index) {
+        result[index * 2] = digits[value[index] >> 4];
+        result[index * 2 + 1] = digits[value[index] & 0x0f];
+    }
+    return result;
 }
 
 void throw_status(napi_env env, scpefe_status status)
@@ -180,6 +207,39 @@ napi_value open_document(napi_env env, napi_callback_info info)
             view.device_name_size);
         set_boolean(env, result, "readOnly", true);
         set_boolean(env, result, "canEdit", slot_access.can_edit != 0);
+        const std::string document_id = hexadecimal(
+            unlocked_view.document_id, unlocked_view.document_id_size);
+        set_string(env, result, "documentId", document_id.data(), document_id.size());
+        std::array<std::uint8_t, 32> revision_id{};
+        if (crypto_generichash(revision_id.data(), revision_id.size(),
+            unlocked_view.encoded_snapshot_revision,
+            unlocked_view.encoded_snapshot_revision_size, nullptr, 0) != 0) {
+            throw std::runtime_error("Unable to identify the base revision");
+        }
+        const std::string base_revision = hexadecimal(
+            revision_id.data(), revision_id.size());
+        set_string(env, result, "baseRevision", base_revision.data(),
+            base_revision.size());
+        std::array<std::uint8_t, SCPEFE_WORK_JOURNAL_KEY_SIZE> journal_key{};
+        std::size_t journal_key_size = 0;
+        status = scpefe_unlocked_container_work_journal_key(
+            unlocked, journal_key.data(), journal_key.size(), &journal_key_size);
+        if (status != SCPEFE_STATUS_OK) {
+            sodium_memzero(journal_key.data(), journal_key.size());
+            scpefe_decoded_snapshot_revision_destroy(revision);
+            revision = nullptr;
+            scpefe_unlocked_container_destroy(unlocked);
+            unlocked = nullptr;
+            throw_status(env, status);
+            return nullptr;
+        }
+        try {
+            set_buffer(env, result, "journalKey", journal_key.data(), journal_key_size);
+        } catch (...) {
+            sodium_memzero(journal_key.data(), journal_key.size());
+            throw;
+        }
+        sodium_memzero(journal_key.data(), journal_key.size());
         scpefe_decoded_snapshot_revision_destroy(revision);
         scpefe_unlocked_container_destroy(unlocked);
         return result;

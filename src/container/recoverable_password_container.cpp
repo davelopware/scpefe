@@ -49,6 +49,7 @@ constexpr std::uint64_t memory_limit = 64u * 1024u * 1024u;
 constexpr std::uint32_t aead_algorithm = 1;
 constexpr std::uint8_t full_permissions = 7;
 constexpr std::array<char, 8> snapshot_context{'S','C','P','S','N','A','P','1'};
+constexpr std::array<char, 8> work_journal_context{'S','C','P','J','R','N','0','1'};
 
 constexpr std::size_t slot_count_offset = 32;
 constexpr std::size_t snapshot_nonce_offset = 40;
@@ -105,6 +106,15 @@ void derive_snapshot_key(std::array<std::uint8_t, key_size> &key,
 {
     if (crypto_kdf_derive_from_key(key.data(), key.size(), 1,
         snapshot_context.data(), document_key) != 0) {
+        throw ContainerFailure{ContainerError::crypto_error};
+    }
+}
+
+void derive_work_journal_key(std::array<std::uint8_t, key_size> &key,
+    const std::uint8_t *document_key)
+{
+    if (crypto_kdf_derive_from_key(key.data(), key.size(), 2,
+        work_journal_context.data(), document_key) != 0) {
         throw ContainerFailure{ContainerError::crypto_error};
     }
 }
@@ -339,6 +349,7 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
             limits, ContainerError::malformed_container);
         UnlockedContainerData result;
         std::copy_n(snapshot.data(), document_id_size, result.document_id.begin());
+        derive_work_journal_key(result.work_journal_key, slot.data());
         std::copy_n(slot.data() + key_size, result.slot_id.size(),
             result.slot_id.begin());
         result.permissions = slot.back();
