@@ -29,13 +29,17 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_BUFFER_TOO_SMALL = 5,
     SCPEFE_STATUS_MALFORMED_CBOR = 6,
     SCPEFE_STATUS_LIMIT_EXCEEDED = 7,
-    SCPEFE_STATUS_UNSUPPORTED_FORMAT = 8
+    SCPEFE_STATUS_UNSUPPORTED_FORMAT = 8,
+    SCPEFE_STATUS_MALFORMED_CONTAINER = 9,
+    SCPEFE_STATUS_AUTHENTICATION_FAILED = 10,
+    SCPEFE_STATUS_CRYPTO_ERROR = 11
 } scpefe_status;
 
 #define SCPEFE_REVISION_FORMAT_VERSION 1u
 #define SCPEFE_REVISION_ID_SIZE 32u
 #define SCPEFE_SLOT_ID_SIZE 16u
 #define SCPEFE_CONTENT_HASH_SIZE 32u
+#define SCPEFE_DOCUMENT_ID_SIZE 16u
 
 /* Reads the host's monotonic clock in milliseconds. */
 typedef scpefe_status (*scpefe_monotonic_time_ms_fn)(
@@ -69,6 +73,17 @@ typedef struct scpefe_health_info_v1 {
 typedef struct scpefe_context scpefe_context;
 /* Opaque owner of one decoded snapshot revision. */
 typedef struct scpefe_decoded_snapshot_revision scpefe_decoded_snapshot_revision;
+/* Opaque owner of one authenticated, unlocked container. */
+typedef struct scpefe_unlocked_container scpefe_unlocked_container;
+
+/* Borrowed view of the semantic values authenticated during container unlock. */
+typedef struct scpefe_unlocked_container_v1 {
+    uint32_t struct_size;
+    const uint8_t *document_id;
+    size_t document_id_size;
+    const uint8_t *encoded_snapshot_revision;
+    size_t encoded_snapshot_revision_size;
+} scpefe_unlocked_container_v1;
 
 /* All byte counts are limits applied before allocating or copying data. */
 typedef struct scpefe_revision_limits_v1 {
@@ -171,6 +186,37 @@ SCPEFE_API scpefe_status scpefe_snapshot_revision_diagnostic_json(
     char *output,
     size_t output_capacity,
     size_t *output_size
+);
+
+/* Creates a self-contained container with one owner password slot and snapshot. */
+SCPEFE_API scpefe_status scpefe_password_container_create(
+    const uint8_t *password,
+    size_t password_size,
+    const uint8_t *encoded_snapshot_revision,
+    size_t encoded_snapshot_revision_size,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Authenticates an owner password and unlocks the encrypted snapshot. */
+SCPEFE_API scpefe_status scpefe_password_container_unlock(
+    const uint8_t *container,
+    size_t container_size,
+    const uint8_t *password,
+    size_t password_size,
+    scpefe_unlocked_container **unlocked
+);
+
+/* Borrows authenticated container values until the unlocked owner is destroyed. */
+SCPEFE_API scpefe_status scpefe_unlocked_container_view(
+    const scpefe_unlocked_container *unlocked,
+    scpefe_unlocked_container_v1 *view
+);
+
+/* Releases unlocked container values and clears their storage. */
+SCPEFE_API void scpefe_unlocked_container_destroy(
+    scpefe_unlocked_container *unlocked
 );
 
 #ifdef __cplusplus

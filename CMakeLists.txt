@@ -9,9 +9,13 @@ project(
 
 include(CTest)
 
+find_library(SODIUM_LIBRARY NAMES sodium libsodium.so.23 REQUIRED)
+
 add_library(scpefe SHARED
+    src/abi/container_abi.cpp
     src/abi/context_abi.cpp
     src/abi/revision_abi.cpp
+    src/container/password_container.cpp
     src/core/context.cpp
     src/core/host_services.cpp
     src/format/cbor_reader.cpp
@@ -39,6 +43,7 @@ target_include_directories(scpefe
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+target_link_libraries(scpefe PRIVATE ${SODIUM_LIBRARY})
 set_target_properties(scpefe PROPERTIES
     CXX_EXTENSIONS OFF
     CXX_VISIBILITY_PRESET hidden
@@ -74,7 +79,13 @@ if(BUILD_TESTING)
     )
     target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
 
+    add_executable(scpefe_container_test
+        tests/container_test.c
+    )
+    target_link_libraries(scpefe_container_test PRIVATE SCPEFE::scpefe)
+
     add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
+    add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
     add_test(
         NAME scpefe.revision-round-trip
         COMMAND scpefe_revision_test
