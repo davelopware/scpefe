@@ -75,12 +75,12 @@ native-only and continue to be covered by the native test suite.
 ## Windows desktop milestone
 
 `apps/windows` contains the Electron/React Windows frontend for configuring a
-local profile, publishing a new encrypted document, and reopening it read-only.
-The sandboxed renderer sees only four validated preload operations; passwords,
-container bytes, native bindings, filesystem paths, and publication remain in
-the Electron host. New desktop documents use the backward-compatible
-[recoverable v2 envelope](docs/format/password-container-v2.md), while the core
-continues to read the draft v1 vectors.
+local profile, publishing a new encrypted document, reopening it read-only, and
+explicitly entering edit mode for a manual save. The sandboxed renderer sees
+only validated preload operations; container bytes, native bindings, filesystem
+paths, and publication remain in the Electron host. New desktop documents use
+the [mutable v3 envelope](docs/format/password-container-v3.md); the core also
+reads v2 documents and the draft v1 vectors.
 
 Build the Node-API bridge alongside the native library by supplying the header
 directory from the Node/Electron SDK used for packaging:

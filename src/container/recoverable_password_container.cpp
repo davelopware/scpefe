@@ -30,7 +30,8 @@ int crypto_aead_xchacha20poly1305_ietf_decrypt(unsigned char *,
 namespace scpefe::container {
 namespace {
 
-constexpr std::array<std::uint8_t, 8> magic{'S','C','P','E','F','E',0,2};
+constexpr std::array<std::uint8_t, 8> legacy_magic{'S','C','P','E','F','E',0,2};
+constexpr std::array<std::uint8_t, 8> magic{'S','C','P','E','F','E',0,3};
 constexpr std::size_t header_size = 160;
 constexpr std::size_t document_id_size = 16;
 constexpr std::size_t key_size = 32;
@@ -40,7 +41,8 @@ constexpr std::size_t wrapped_slot_size = 65;
 constexpr std::size_t tag_size = 16;
 constexpr std::size_t salt_size = 16;
 constexpr std::size_t nonce_size = 24;
-constexpr std::uint32_t format_version = 2;
+constexpr std::uint32_t legacy_format_version = 2;
+constexpr std::uint32_t format_version = 3;
 constexpr std::uint32_t argon2id13_algorithm = 2;
 constexpr std::uint64_t operations_limit = 2;
 constexpr std::uint64_t memory_limit = 64u * 1024u * 1024u;
@@ -134,13 +136,25 @@ void clear(std::array<std::uint8_t, key_size> &a,
     if (!snapshot.empty()) sodium_memzero(snapshot.data(), snapshot.size());
 }
 
+std::array<std::uint8_t, header_size> slot_additional_data(
+    const std::uint8_t *header
+)
+{
+    std::array<std::uint8_t, header_size> result{};
+    std::copy_n(header, result.size(), result.begin());
+    std::fill(result.begin() + snapshot_nonce_offset,
+        result.begin() + owner_salt_offset, 0);
+    return result;
+}
+
 } // namespace
 
 bool RecoverablePasswordContainer::recognizes(
     const std::uint8_t *container, std::size_t size)
 {
     return size >= magic.size() && container != nullptr
-        && std::equal(magic.begin(), magic.end(), container);
+        && (std::equal(magic.begin(), magic.end(), container)
+            || std::equal(legacy_magic.begin(), legacy_magic.end(), container));
 }
 
 std::size_t RecoverablePasswordContainer::encoded_size(
@@ -195,12 +209,13 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
         std::copy(document_key.begin(), document_key.end(), slot.begin());
         std::copy(owner_slot_id.begin(), owner_slot_id.end(), slot.begin() + key_size);
         slot.back() = full_permissions;
+        const auto slot_aad = slot_additional_data(output.data());
         derive_wrapping_key(working_key, owner_password, owner_password_size,
             output.data() + owner_salt_offset);
         unsigned long long written = 0;
         if (crypto_aead_xchacha20poly1305_ietf_encrypt(
             output.data() + header_size, &written, slot.data(), slot.size(),
-            output.data(), header_size, nullptr,
+            slot_aad.data(), slot_aad.size(), nullptr,
             output.data() + owner_nonce_offset, working_key.data()) != 0
             || written != wrapped_slot_size) {
             throw ContainerFailure{ContainerError::crypto_error};
@@ -211,7 +226,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
                 output.data() + recovery_salt_offset);
             if (crypto_aead_xchacha20poly1305_ietf_encrypt(
                 output.data() + header_size + wrapped_slot_size, &written,
-                slot.data(), slot.size(), output.data(), header_size, nullptr,
+                slot.data(), slot.size(), slot_aad.data(), slot_aad.size(), nullptr,
                 output.data() + recovery_nonce_offset, working_key.data()) != 0
                 || written != wrapped_slot_size) {
                 throw ContainerFailure{ContainerError::crypto_error};
@@ -246,7 +261,8 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
 {
     if (!recognizes(container, container_size) || container_size < header_size)
         throw ContainerFailure{ContainerError::malformed_container};
-    if (read_u32(container + 8) != format_version
+    const std::uint32_t version = read_u32(container + 8);
+    if ((version != legacy_format_version && version != format_version)
         || read_u32(container + 12) != argon2id13_algorithm
         || read_u64(container + 16) != operations_limit
         || read_u64(container + 24) != memory_limit
@@ -278,7 +294,9 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
     std::array<std::uint8_t, slot_plaintext_size> slot{};
     std::vector<std::uint8_t> snapshot;
     try {
+        const auto slot_aad = slot_additional_data(container);
         bool authenticated = false;
+        std::uint32_t authenticated_index = 0;
         unsigned long long plain_size = 0;
         for (std::uint32_t index = 0; index < slot_count; ++index) {
             const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
@@ -287,9 +305,12 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
             if (crypto_aead_xchacha20poly1305_ietf_decrypt(
                 slot.data(), &plain_size, nullptr,
                 container + header_size + index * wrapped_slot_size,
-                wrapped_slot_size, container, header_size, container + nonce,
+                wrapped_slot_size,
+                version == format_version ? slot_aad.data() : container,
+                header_size, container + nonce,
                 wrapping_key.data()) == 0) {
                 authenticated = true;
+                authenticated_index = index;
                 break;
             }
         }
@@ -310,12 +331,108 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
             limits, ContainerError::malformed_container);
         UnlockedContainerData result;
         std::copy_n(snapshot.data(), document_id_size, result.document_id.begin());
+        std::copy_n(slot.data() + key_size, result.slot_id.size(),
+            result.slot_id.begin());
+        result.permissions = slot.back();
+        result.recovery_slot = authenticated_index != 0;
         result.encoded_snapshot_revision.assign(
             snapshot.begin() + document_id_size, snapshot.end());
         clear(wrapping_key, snapshot_key, slot, snapshot);
         return result;
     } catch (...) {
         clear(wrapping_key, snapshot_key, slot, snapshot);
+        throw;
+    }
+}
+
+std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
+    const std::uint8_t *container,
+    std::size_t container_size,
+    const std::uint8_t *password,
+    std::size_t password_size,
+    const std::uint8_t *encoded_snapshot_revision,
+    std::size_t encoded_snapshot_revision_size
+)
+{
+    validate_snapshot(encoded_snapshot_revision, encoded_snapshot_revision_size,
+        format::RevisionLimits::defaults(), ContainerError::invalid_argument);
+    if (!recognizes(container, container_size) || container_size < header_size
+        || read_u32(container + 8) != format_version) {
+        throw ContainerFailure{ContainerError::unsupported_format};
+    }
+    const std::uint32_t slot_count = read_u32(container + slot_count_offset);
+    if (slot_count != 1 && slot_count != 2)
+        throw ContainerFailure{ContainerError::malformed_container};
+
+    require_sodium();
+    std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
+    std::array<std::uint8_t, slot_plaintext_size> slot{};
+    std::vector<std::uint8_t> plaintext;
+    try {
+        const auto old_aad = slot_additional_data(container);
+        bool authenticated = false;
+        unsigned long long written = 0;
+        for (std::uint32_t index = 0; index < slot_count; ++index) {
+            const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
+            const std::size_t nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
+            derive_wrapping_key(wrapping_key, password, password_size, container + salt);
+            if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+                slot.data(), &written, nullptr,
+                container + header_size + index * wrapped_slot_size,
+                wrapped_slot_size, old_aad.data(), old_aad.size(),
+                container + nonce, wrapping_key.data()) == 0) {
+                authenticated = true;
+                break;
+            }
+        }
+        if (!authenticated)
+            throw ContainerFailure{ContainerError::authentication_failed};
+        if (written != slot.size() || (slot.back() & 1u) == 0)
+            throw ContainerFailure{ContainerError::invalid_argument};
+
+        const std::size_t new_size = encoded_size(
+            encoded_snapshot_revision_size, slot_count == 2);
+        std::vector<std::uint8_t> output(new_size);
+        std::copy_n(container, header_size + slot_count * wrapped_slot_size,
+            output.begin());
+        randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
+        write_u64(output.data() + encrypted_snapshot_size_offset,
+            document_id_size + encoded_snapshot_revision_size + tag_size);
+
+        const std::uint64_t old_encrypted_size = read_u64(
+            container + encrypted_snapshot_size_offset);
+        const std::size_t old_snapshot_offset =
+            header_size + slot_count * wrapped_slot_size;
+        if (old_encrypted_size < document_id_size + tag_size
+            || old_snapshot_offset + old_encrypted_size != container_size) {
+            throw ContainerFailure{ContainerError::malformed_container};
+        }
+        derive_snapshot_key(snapshot_key, slot.data());
+        plaintext.resize(old_encrypted_size - tag_size);
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+            plaintext.data(), &written, nullptr, container + old_snapshot_offset,
+            old_encrypted_size, container, header_size,
+            container + snapshot_nonce_offset, snapshot_key.data()) != 0
+            || written != plaintext.size()) {
+            throw ContainerFailure{ContainerError::authentication_failed};
+        }
+        plaintext.resize(document_id_size + encoded_snapshot_revision_size);
+        std::copy(encoded_snapshot_revision,
+            encoded_snapshot_revision + encoded_snapshot_revision_size,
+            plaintext.begin() + document_id_size);
+        const std::size_t new_snapshot_offset =
+            header_size + slot_count * wrapped_slot_size;
+        if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            output.data() + new_snapshot_offset, &written,
+            plaintext.data(), plaintext.size(), output.data(), header_size, nullptr,
+            output.data() + snapshot_nonce_offset, snapshot_key.data()) != 0
+            || written != plaintext.size() + tag_size) {
+            throw ContainerFailure{ContainerError::crypto_error};
+        }
+        clear(wrapping_key, snapshot_key, slot, plaintext);
+        return output;
+    } catch (...) {
+        clear(wrapping_key, snapshot_key, slot, plaintext);
         throw;
     }
 }
