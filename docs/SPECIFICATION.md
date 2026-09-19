@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # SCPEFE specification
 
 Status: working specification, recorded 19 September 2026. This document captures decisions made so far and distinguishes them from details that remain open.
