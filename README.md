@@ -14,3 +14,19 @@ The developing requirements and design decisions are recorded in [docs/SPECIFICA
 - Support a small set of per-file password slots for invited viewers/editors, including an optional independent recovery/master password.
 
 The selected direction is a C++20 common core with a React/TypeScript UI, Electron on Windows and Linux, and Capacitor on Android. Security-sensitive format and cryptographic details remain subject to implementation validation and independent expert review before production release.
+
+## Native developer build
+
+The supported native build uses CMake and produces the shared `libscpefe`
+common library plus the `scpefe-diagnostic` developer CLI:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
+./build/scpefe-diagnostic health
+```
+
+The health operation crosses the public, versioned C ABI. Its clock value comes
+from a deterministic in-memory host adapter registered with that CLI's explicit
+SCPEFE context.
