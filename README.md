@@ -98,3 +98,9 @@ npm run build
 On Windows, also pass `NODE_API_LIBRARY` for the matching SDK import library.
 Copy the resulting `scpefe_electron_native.node` beside `apps/windows/native`
 as part of packaging; production packaging details remain a release task.
+
+## License
+
+SCPEFE software is licensed under [GPL-3.0-or-later](LICENSE). The public
+file-format specification is CC BY 4.0, while machine-readable schemas and
+interoperability vectors carry CC0 markers.
