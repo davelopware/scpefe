@@ -17,12 +17,21 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(config, /external:\s*\[["']electron["']\]/);
   assert.doesNotMatch(preload, /(^|\n)\s*import\s/m);
   assert.match(preload, /require\(["']electron["']\)/);
+  assert.match(main, /The exported copy will not be password protected/);
+  assert.match(main, /may persist in backups or storage history/);
 
   let exposed;
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
-    ipcRenderer: { invoke: async (channel) => channel === "document:create"
-      ? { created: true, target: "C:\\Users\\Ada\\secret.scpefe" } : null },
+    ipcRenderer: { invoke: async (channel) => {
+      if (channel === "document:create") {
+        return { created: true, target: "C:\\Users\\Ada\\secret.scpefe" };
+      }
+      if (channel === "document:export-plaintext") {
+        return { exported: true, target: "C:\\Users\\Ada\\secret.txt" };
+      }
+      return null;
+    } },
   };
   vm.runInNewContext(preload, {
     Buffer,
@@ -33,7 +42,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "createDocument", "openDocument",
-    "enterEditMode", "saveDocument",
+    "enterEditMode", "saveDocument", "exportPlaintext",
   ]);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
@@ -42,4 +51,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /invalid creation result/);
+  await assert.rejects(exposed.exportPlaintext({
+    content: "current text only", lineEndings: "lf",
+  }), /invalid plaintext export result/);
 });

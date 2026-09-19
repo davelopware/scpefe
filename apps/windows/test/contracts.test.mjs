@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult,
-  validateOpenedDocument, validateProfile } from "../src/contracts.mjs";
+  validateOpenedDocument, validatePlaintextExportRequest,
+  validatePlaintextExportResult, validateProfile } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
@@ -50,4 +51,19 @@ test("creation results cannot expose host filesystem paths", () => {
   assert.throws(() => validateCreationResult({
     created: true, target: "C:\\Users\\Ada\\secret.scpefe",
   }));
+});
+
+test("plaintext export contracts expose only canonical text and line-ending choice", () => {
+  assert.deepEqual(validatePlaintextExportRequest({
+    content: " first \r\nsecond", lineEndings: "native",
+  }), { content: " first \nsecond", lineEndings: "native" });
+  assert.deepEqual(validatePlaintextExportResult({ exported: true }), {
+    exported: true,
+  });
+  assert.throws(() => validatePlaintextExportRequest({
+    content: "secret", lineEndings: "crlf", metadata: { identity: "Ada" },
+  }), /invalid/);
+  assert.throws(() => validatePlaintextExportResult({
+    exported: true, target: "/secret.txt",
+  }), /invalid/);
 });

@@ -65,3 +65,28 @@ test("view-only slots cannot enter edit mode", async (t) => {
   await service.openDocument(target, "password words");
   assert.throws(() => service.enterEditMode(), /does not permit editing/);
 });
+
+test("plaintext export writes only current text with selected line endings", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-export-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const lfExport = path.join(directory, "canonical.txt");
+  const nativeExport = path.join(directory, "native.txt");
+  await fs.writeFile(target, "encrypted container and metadata");
+  const service = new DocumentService({ fs, nativeLineEnding: "\r\n",
+    profilePath: path.join(directory, "profile.json"),
+    native: { openDocument: () => ({ content: "original", readOnly: true,
+      canEdit: false }) } });
+  await assert.rejects(service.exportPlaintext(lfExport, {
+    content: "secret", lineEndings: "lf",
+  }), /Open a document/);
+  await service.openDocument(target, "password words");
+  assert.deepEqual(await service.exportPlaintext(lfExport, {
+    content: " first \nsecond\n", lineEndings: "lf",
+  }), { exported: true });
+  assert.equal(await fs.readFile(lfExport, "utf8"), " first \nsecond\n");
+  await service.exportPlaintext(nativeExport, {
+    content: " first \nsecond", lineEndings: "native",
+  });
+  assert.equal(await fs.readFile(nativeExport, "utf8"), " first \r\nsecond");
+});

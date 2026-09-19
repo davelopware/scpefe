@@ -101,6 +101,28 @@ export function validateSaveResult(value) {
   return Object.freeze({ saved: true, content: value.content });
 }
 
+export function validatePlaintextExportRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).length !== 2
+      || !Object.hasOwn(value, "content")
+      || !Object.hasOwn(value, "lineEndings")
+      || (value.lineEndings !== "lf" && value.lineEndings !== "native")) {
+    throw new TypeError("plaintext export request is invalid");
+  }
+  return Object.freeze({
+    content: canonicalizeDocumentText(value.content),
+    lineEndings: value.lineEndings,
+  });
+}
+
+export function validatePlaintextExportResult(value) {
+  if (!value || typeof value !== "object" || value.exported !== true
+      || Object.keys(value).length !== 1) {
+    throw new TypeError("host returned an invalid plaintext export result");
+  }
+  return Object.freeze({ exported: true });
+}
+
 export function validateCreationResult(value) {
   if (!value || typeof value !== "object" || value.created !== true
       || Object.keys(value).length !== 1) {
