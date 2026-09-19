@@ -7,11 +7,16 @@
 
 namespace scpefe::format {
 
+/* Version number encoded by SnapshotRevision. */
 inline constexpr std::uint32_t snapshot_revision_format_version = 1u;
+/* Fixed byte length of a revision identifier. */
 inline constexpr std::size_t revision_id_size = 32u;
+/* Fixed byte length of a password-slot identifier. */
 inline constexpr std::size_t slot_id_size = 16u;
+/* Fixed byte length of a snapshot content hash. */
 inline constexpr std::size_t content_hash_size = 32u;
 
+/* Semantic values owned by a SnapshotRevision. */
 struct SnapshotRevisionData {
     std::vector<std::uint8_t> parent_revision_ids;
     std::uint64_t timestamp_ms{};

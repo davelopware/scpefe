@@ -2,6 +2,7 @@
 
 namespace scpefe::format {
 
+/* Internal failure categories translated to stable C ABI result codes. */
 enum class RevisionError {
     invalid_argument,
     malformed_cbor,
@@ -9,6 +10,7 @@ enum class RevisionError {
     unsupported_format,
 };
 
+/* Exception payload used to stop revision parsing or validation. */
 struct RevisionFailure {
     RevisionError error;
 };

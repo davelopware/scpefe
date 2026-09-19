@@ -19,6 +19,7 @@ extern "C" {
 
 #define SCPEFE_ABI_VERSION 1u
 
+/* Stable result codes returned by the versioned C ABI. */
 typedef enum scpefe_status {
     SCPEFE_STATUS_OK = 0,
     SCPEFE_STATUS_INVALID_ARGUMENT = 1,
@@ -36,6 +37,7 @@ typedef enum scpefe_status {
 #define SCPEFE_SLOT_ID_SIZE 16u
 #define SCPEFE_CONTENT_HASH_SIZE 32u
 
+/* Reads the host's monotonic clock in milliseconds. */
 typedef scpefe_status (*scpefe_monotonic_time_ms_fn)(
     void *instance_data,
     uint64_t *time_ms
@@ -53,6 +55,7 @@ typedef struct scpefe_host_services_v1 {
     scpefe_monotonic_time_ms_fn monotonic_time_ms;
 } scpefe_host_services_v1;
 
+/* Version and host-clock information returned by a context health check. */
 typedef struct scpefe_health_info_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -62,7 +65,9 @@ typedef struct scpefe_health_info_v1 {
     uint64_t host_monotonic_time_ms;
 } scpefe_health_info_v1;
 
+/* Opaque handle for one isolated common-core context. */
 typedef struct scpefe_context scpefe_context;
+/* Opaque owner of one decoded snapshot revision. */
 typedef struct scpefe_decoded_snapshot_revision scpefe_decoded_snapshot_revision;
 
 /* All byte counts are limits applied before allocating or copying data. */
@@ -104,25 +109,32 @@ typedef struct scpefe_snapshot_revision_v1 {
     size_t content_size;
 } scpefe_snapshot_revision_v1;
 
+/* Returns the supported C ABI version. */
 SCPEFE_API uint32_t scpefe_abi_version(void);
+/* Returns the library's semantic version string. */
 SCPEFE_API const char *scpefe_library_version(void);
 
+/* Creates an isolated context backed by the supplied host services. */
 SCPEFE_API scpefe_status scpefe_context_create(
     const scpefe_host_services_v1 *host_services,
     scpefe_context **context
 );
 
+/* Releases a context; accepting NULL follows C free-style semantics. */
 SCPEFE_API void scpefe_context_destroy(scpefe_context *context);
 
+/* Reads version and deterministic host-clock health information. */
 SCPEFE_API scpefe_status scpefe_context_health(
     scpefe_context *context,
     scpefe_health_info_v1 *health_info
 );
 
+/* Populates caller storage with the default revision allocation limits. */
 SCPEFE_API scpefe_status scpefe_revision_limits_default(
     scpefe_revision_limits_v1 *limits
 );
 
+/* Encodes one snapshot revision using deterministic CBOR. */
 SCPEFE_API scpefe_status scpefe_snapshot_revision_encode(
     const scpefe_snapshot_revision_v1 *revision,
     const scpefe_revision_limits_v1 *limits,
@@ -131,6 +143,7 @@ SCPEFE_API scpefe_status scpefe_snapshot_revision_encode(
     size_t *output_size
 );
 
+/* Decodes and validates one deterministic-CBOR snapshot revision. */
 SCPEFE_API scpefe_status scpefe_snapshot_revision_decode(
     const uint8_t *encoded,
     size_t encoded_size,
@@ -138,11 +151,13 @@ SCPEFE_API scpefe_status scpefe_snapshot_revision_decode(
     scpefe_decoded_snapshot_revision **revision
 );
 
+/* Borrows a C view whose spans remain valid until the decoded owner is destroyed. */
 SCPEFE_API scpefe_status scpefe_decoded_snapshot_revision_view(
     const scpefe_decoded_snapshot_revision *revision,
     scpefe_snapshot_revision_v1 *view
 );
 
+/* Releases an owned decoded snapshot revision. */
 SCPEFE_API void scpefe_decoded_snapshot_revision_destroy(
     scpefe_decoded_snapshot_revision *revision
 );
