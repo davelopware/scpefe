@@ -97,7 +97,7 @@ try {
         -SmokeDirectory $ResponsiveSmoke `
         -ExtraEnvironment @{
             SCPEFE_SINGLE_INSTANCE_SMOKE_READY_DELAY_MS = "1000"
-            SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS = "750"
+            SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS = "5000"
         }
     Wait-Until -Description "the startup request to survive renderer startup" -Condition {
         $Events = Read-Events $ResponsiveSmoke
@@ -111,6 +111,17 @@ try {
     $Third = Start-Preview `
         -Arguments @("--user-data-dir=$ResponsiveUserData", $ThirdTarget) `
         -SmokeDirectory $ResponsiveSmoke
+    Start-Sleep -Milliseconds 3500
+    if ($Second.HasExited -or $Third.HasExited) {
+        throw "Queued launches did not wait for their authenticated terminal outcomes."
+    }
+    if ($ResponsivePrimary.HasExited) {
+        throw "The responsive primary was killed or bypassed while a request was queued."
+    }
+    if (@((Read-Events $ResponsiveSmoke) |
+        Where-Object { $_.event -eq "handoff-timeout" }).Count -ne 0) {
+        throw "A queued acknowledgement was incorrectly treated as an unresponsive primary."
+    }
     if (-not $Second.WaitForExit(20000) -or -not $Third.WaitForExit(20000)) {
         throw "Responsive secondary launches did not receive routed acknowledgements."
     }
@@ -137,6 +148,23 @@ try {
         }
     }
     $Events = Read-Events $ResponsiveSmoke
+    $Completed = @($Events | Where-Object { $_.event -eq "completed" })
+    if ($Completed.Count -ne 3) {
+        throw "Expected three renderer-completed target requests."
+    }
+    for ($Index = 0; $Index -lt 3; $Index += 1) {
+        if ($Completed[$Index].target -ne $Expected[$Index] `
+            -or $Completed[$Index].outcome -ne "renderer-canceled") {
+            throw "Renderer completion order or outcome mismatch at ${Index}."
+        }
+    }
+    $Acknowledged = @($Events | Where-Object { $_.event -eq "handoff-acknowledged" })
+    if ($Acknowledged.Count -ne 3 `
+        -or @($Acknowledged | Where-Object {
+            $_.status -notin @("canceled", "focused") -or $_.sequence -ne 3
+        }).Count -ne 0) {
+        throw "Secondary launches did not observe authenticated terminal outcomes."
+    }
     $ReadyIndex = [array]::IndexOf(@($Events.event), "renderer-ready")
     $FirstPresentedIndex = [array]::IndexOf(@($Events.event), "presented")
     if ($ReadyIndex -lt 0 -or $FirstPresentedIndex -le $ReadyIndex) {

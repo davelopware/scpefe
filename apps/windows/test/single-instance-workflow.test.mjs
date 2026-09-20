@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { openTargetFromAdditionalData,
-  openTargetFromCommandLine, openTargetFromUrl, acknowledgementToken,
+  openTargetFromCommandLine, openTargetFromUrl, acknowledgementCredentials,
+  acknowledgementTargetHash, createAcknowledgement, validateAcknowledgement,
   OrderedOpenRequests } from "../src/single-instance.mjs";
 import { applySwitchDecision, finishDocumentSwitch,
   OpenRequestQueue } from "../src/switch-document.mjs";
@@ -19,10 +20,13 @@ test("accepts only SCPEFE shell targets from command lines and instance metadata
     absoluteTarget);
   assert.equal(openTargetFromAdditionalData({ openTarget: "relative.scpefe" }), null);
   assert.equal(openTargetFromAdditionalData({ openTarget: "/safe/document.txt" }), null);
-  assert.equal(acknowledgementToken({
-    acknowledgementToken: "123e4567-e89b-42d3-a456-426614174000",
-  }), "123e4567-e89b-42d3-a456-426614174000");
-  assert.equal(acknowledgementToken({ acknowledgementToken: "../unsafe" }), null);
+  assert.deepEqual(acknowledgementCredentials({
+    acknowledgementId: "123e4567-e89b-42d3-a456-426614174000",
+    acknowledgementSecret: "123e4567-e89b-42d3-a456-426614174001",
+  }), { id: "123e4567-e89b-42d3-a456-426614174000",
+    secret: "123e4567-e89b-42d3-a456-426614174001" });
+  assert.equal(acknowledgementCredentials({ acknowledgementId: "../unsafe",
+    acknowledgementSecret: "123e4567-e89b-42d3-a456-426614174001" }), null);
   const fileTarget = path.resolve("safe/document.scpefe");
   const linkedTarget = path.resolve("safe/linked.scpefe");
   assert.equal(openTargetFromUrl(pathToFileURL(fileTarget).href), fileTarget);
@@ -32,14 +36,41 @@ test("accepts only SCPEFE shell targets from command lines and instance metadata
   assert.equal(openTargetFromUrl("https://example.test/document.scpefe"), null);
 });
 
+test("acknowledgements authenticate launch, target, request, and protocol state", () => {
+  const credentials = { id: "123e4567-e89b-42d3-a456-426614174000",
+    secret: "123e4567-e89b-42d3-a456-426614174001" };
+  const targetHash = acknowledgementTargetHash(path.resolve("safe/document.scpefe"));
+  const value = createAcknowledgement(credentials, {
+    requestToken: "123e4567-e89b-42d3-a456-426614174002",
+    targetHash, sequence: 1, status: "queued",
+  });
+  assert.deepEqual(validateAcknowledgement(credentials, value, targetHash), {
+    id: credentials.id, requestToken: value.requestToken,
+    targetHash, sequence: 1, status: "queued",
+  });
+  assert.equal(validateAcknowledgement(credentials,
+    { ...value, status: "opened" }, targetHash), null);
+  const invalidTransition = createAcknowledgement(credentials,
+    { ...value, status: "opened" });
+  assert.equal(validateAcknowledgement(credentials, invalidTransition, targetHash), null);
+  assert.equal(validateAcknowledgement(credentials, value,
+    acknowledgementTargetHash(path.resolve("safe/other.scpefe"))), null);
+  assert.equal(validateAcknowledgement({ ...credentials,
+    secret: "123e4567-e89b-42d3-a456-426614174003" }, value, targetHash), null);
+  assert.equal(validateAcknowledgement(credentials,
+    { ...value, sequence: 4 }, targetHash), null);
+});
+
 test("stages lifecycle requests until ready and holds strict FIFO through completion", () => {
   let number = 0;
   const requests = new OrderedOpenRequests({ randomToken: () => `token-${++number}` });
   const first = requests.enqueue({ target: "/first.scpefe", source: "command-line" });
   const second = requests.enqueue({ target: "/second.scpefe",
-    acknowledgementToken: "ack-2", source: "second-instance" });
+    acknowledgement: { id: "ack-2", secret: "secret-2" },
+    source: "second-instance" });
   const third = requests.enqueue({ target: "/third.scpefe",
-    acknowledgementToken: "ack-3", source: "open-file" });
+    acknowledgement: { id: "ack-3", secret: "secret-3" }, source: "open-file" });
+  assert.equal(second.ack.id, "ack-2");
   assert.equal(requests.take(), null);
   requests.setReady();
   assert.equal(requests.take(), first);
@@ -182,6 +213,9 @@ test("main registers file and URL lifecycle events before draining staged reques
   assert.match(main, /app\.on\("open-file"/);
   assert.match(main, /app\.on\("open-url"/);
   assert.match(main, /externalRequests\.setReady\(\)/);
-  assert.match(main, /acknowledgeRequest\(request, "presented"\)/);
-  assert.match(main, /acknowledgeRequest\(pending, opened \? "opened" : "canceled"\)/);
+  assert.match(main, /acknowledgeRequest\(request, "queued", 1\)/);
+  assert.match(main, /acknowledgeRequest\(request, "presented", 2\)/);
+  assert.match(main,
+    /acknowledgeRequest\(pending, opened \? "opened" : "canceled", 3\)/);
+  assert.match(main, /validateAcknowledgement\(instanceAcknowledgement/);
 });

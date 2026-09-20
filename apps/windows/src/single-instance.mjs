@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 function scpefePath(value, workingDirectory) {
   if (typeof value !== "string" || !value || value.startsWith("-")) return null;
@@ -43,12 +44,53 @@ export function openTargetFromAdditionalData(value) {
   return path.normalize(value.openTarget);
 }
 
-/* Validates the random acknowledgement token used only for liveness signalling. */
-export function acknowledgementToken(value) {
-  const token = value?.acknowledgementToken;
-  return typeof token === "string"
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-      .test(token) ? token : null;
+/* Validates the per-launch identifier and secret used for acknowledgement authentication. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function acknowledgementCredentials(value) {
+  const id = value?.acknowledgementId;
+  const secret = value?.acknowledgementSecret;
+  return typeof id === "string" && UUID.test(id)
+    && typeof secret === "string" && UUID.test(secret)
+    ? Object.freeze({ id, secret }) : null;
+}
+
+/* Binds acknowledgements to the exact normalized target without disclosing its path. */
+export function acknowledgementTargetHash(target) {
+  return createHash("sha256").update(target ?? "", "utf8").digest("hex");
+}
+
+function acknowledgementMessage(value) {
+  return JSON.stringify({ id: value.id, requestToken: value.requestToken,
+    targetHash: value.targetHash, sequence: value.sequence, status: value.status });
+}
+
+/* Authenticates one acknowledgement transition with the launch-only secret. */
+export function createAcknowledgement(credentials, value) {
+  const payload = { id: credentials.id, requestToken: value.requestToken,
+    targetHash: value.targetHash, sequence: value.sequence, status: value.status };
+  return Object.freeze({ ...payload, mac: createHmac("sha256", credentials.secret)
+    .update(acknowledgementMessage(payload)).digest("hex") });
+}
+
+/* Rejects stale, redirected, malformed, or forged acknowledgement transitions. */
+export function validateAcknowledgement(credentials, value, targetHash) {
+  const validState = value?.sequence === 1 && value?.status === "queued"
+    || value?.sequence === 2 && value?.status === "presented"
+    || value?.sequence === 3
+      && ["focused", "opened", "canceled"].includes(value?.status);
+  if (!value || typeof value !== "object" || value.id !== credentials.id
+      || typeof value.requestToken !== "string" || !UUID.test(value.requestToken)
+      || value.targetHash !== targetHash
+      || !Number.isSafeInteger(value.sequence) || value.sequence < 1 || value.sequence > 3
+      || !validState
+      || typeof value.mac !== "string" || !/^[0-9a-f]{64}$/.test(value.mac)) return null;
+  const expected = createHmac("sha256", credentials.secret)
+    .update(acknowledgementMessage(value)).digest();
+  const observed = Buffer.from(value.mac, "hex");
+  return observed.length === expected.length && timingSafeEqual(observed, expected)
+    ? Object.freeze({ id: value.id, requestToken: value.requestToken,
+      targetHash: value.targetHash, sequence: value.sequence, status: value.status }) : null;
 }
 
 /* Holds every shell request in FIFO order until the current request completes. */
@@ -60,8 +102,9 @@ export class OrderedOpenRequests {
     this.ready = false;
   }
 
-  enqueue({ target = null, acknowledgementToken: ack = null, source }) {
-    const request = Object.freeze({ token: this.randomToken(), target, ack, source });
+  enqueue({ target = null, acknowledgement = null, source }) {
+    const request = Object.freeze({ token: this.randomToken(), target,
+      ack: acknowledgement, source });
     this.pending.push(request);
     return request;
   }

@@ -143,5 +143,9 @@ test("single-instance contracts expose no target paths or journal contents", () 
   const token = "123e4567-e89b-42d3-a456-426614174000";
   assert.deepEqual(validateExternalOpenRequest({ token,
     target: "C:\\private\\document.scpefe" }), { token });
+  assert.deepEqual(validateExternalOpenRequest({ token, smokeCompleteAfterMs: 5000 }),
+    { token, smokeCompleteAfterMs: 5000 });
+  assert.throws(() => validateExternalOpenRequest({ token,
+    smokeCompleteAfterMs: 30_001 }));
   assert.throws(() => validateExternalOpenRequest({ token: "../unsafe" }));
 });

@@ -89,7 +89,14 @@ export function validateExternalOpenRequest(value) {
         .test(value.token)) {
     throw new TypeError("host returned an invalid external open request");
   }
-  return Object.freeze({ token: value.token });
+  const smokeCompleteAfterMs = value.smokeCompleteAfterMs;
+  if (smokeCompleteAfterMs !== undefined
+      && (!Number.isSafeInteger(smokeCompleteAfterMs)
+        || smokeCompleteAfterMs < 0 || smokeCompleteAfterMs > 30_000)) {
+    throw new TypeError("host returned an invalid external open request");
+  }
+  return Object.freeze({ token: value.token,
+    ...(smokeCompleteAfterMs === undefined ? {} : { smokeCompleteAfterMs }) });
 }
 
 export function validateCreateRequest(value) {

@@ -110,7 +110,17 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   },
   onExternalOpenRequested: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
-    const handler = (_event, value) => listener(validateExternalOpenRequest(value));
+    const handler = (_event, value) => {
+      const request = validateExternalOpenRequest(value);
+      listener(request);
+      if (request.smokeCompleteAfterMs !== undefined) {
+        setTimeout(() => {
+          void ipcRenderer.invoke("document:open-external", {
+            token: request.token, password: "single-instance-smoke",
+          });
+        }, request.smokeCompleteAfterMs);
+      }
+    };
     ipcRenderer.on("document:external-open-requested", handler);
     return () => ipcRenderer.removeListener("document:external-open-requested", handler);
   },

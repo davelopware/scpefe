@@ -12,7 +12,8 @@ import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
 import { applySwitchDecision, finishDocumentSwitch,
   OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
-  openTargetFromCommandLine, openTargetFromUrl, acknowledgementToken,
+  openTargetFromCommandLine, openTargetFromUrl, acknowledgementCredentials,
+  acknowledgementTargetHash, createAcknowledgement, validateAcknowledgement,
   OrderedOpenRequests } from "./single-instance.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -26,12 +27,13 @@ let externalDrainRunning = false;
 let externalOpenInProgress = false;
 const smokeDirectory = process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_DIR || null;
 const initialOpenTarget = openTargetFromCommandLine(process.argv);
-const instanceRequestToken = randomUUID();
+const instanceAcknowledgement = Object.freeze({ id: randomUUID(), secret: randomUUID() });
 const instanceAcknowledgementPath = path.join(app.getPath("temp"),
-  `scpefe-open-${instanceRequestToken}.ack`);
+  `scpefe-open-${instanceAcknowledgement.id}.ack`);
 const hasInstanceLock = app.requestSingleInstanceLock(
   { ...(initialOpenTarget ? { openTarget: initialOpenTarget } : {}),
-    acknowledgementToken: instanceRequestToken });
+    acknowledgementId: instanceAcknowledgement.id,
+    acknowledgementSecret: instanceAcknowledgement.secret });
 
 async function sendJournalSummary() {
   if (!service || !window || window.isDestroyed()) return;
@@ -51,15 +53,18 @@ async function smokeLog(event, details = {}) {
     `${JSON.stringify({ event, pid: process.pid, ...details })}\n`);
 }
 
-function acknowledgementPath(token) {
-  return path.join(app.getPath("temp"), `scpefe-open-${token}.ack`);
+function acknowledgementPath(id) {
+  return path.join(app.getPath("temp"), `scpefe-open-${id}.ack`);
 }
 
-async function acknowledgeRequest(request, status) {
+async function acknowledgeRequest(request, status, sequence) {
   if (!request.ack) return;
-  await fs.writeFile(acknowledgementPath(request.ack), JSON.stringify({
-    acknowledgementToken: request.ack, requestToken: request.token, status,
-  }), { mode: 0o600 }).catch(() => {});
+  const acknowledgement = createAcknowledgement(request.ack, {
+    requestToken: request.token,
+    targetHash: acknowledgementTargetHash(request.target), sequence, status,
+  });
+  await fs.writeFile(acknowledgementPath(request.ack.id),
+    JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
 }
 
 async function prepareDocumentSwitch() {
@@ -132,39 +137,35 @@ async function drainExternalRequests() {
     target: request.target ? path.basename(request.target) : null,
     source: request.source });
   if (!request.target) {
-    await acknowledgeRequest(request, "focused");
+    await acknowledgeRequest(request, "focused", 3);
     externalRequests.complete(request.token);
     externalDrainRunning = false;
     return drainExternalRequests();
   }
-  window.webContents.send("document:external-open-requested", { token: request.token });
-  await acknowledgeRequest(request, "presented");
+  const smokeCompleteAfterMs = Number(
+    process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS || 400);
+  window.webContents.send("document:external-open-requested", {
+    token: request.token,
+    ...(smokeDirectory ? { smokeCompleteAfterMs } : {}),
+  });
+  await acknowledgeRequest(request, "presented", 2);
   externalDrainRunning = false;
-  if (smokeDirectory) {
-    const delay = Number(process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS || 400);
-    setTimeout(() => {
-      if (externalRequests.current(request.token)) {
-        void acknowledgeRequest(request, "smoke-completed");
-        externalRequests.complete(request.token);
-        void smokeLog("completed", { requestToken: request.token,
-          target: path.basename(request.target) }).then(drainExternalRequests);
-      }
-    }, delay)?.unref?.();
-  }
 }
 
 function routeSecondInstance(commandLine, workingDirectory, additionalData) {
-  const token = acknowledgementToken(additionalData);
+  const acknowledgement = acknowledgementCredentials(additionalData);
   if (process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_STALL === "1") {
-    void smokeLog("request-intentionally-unacknowledged", { hasToken: Boolean(token) });
+    void smokeLog("request-intentionally-unacknowledged",
+      { hasToken: Boolean(acknowledgement) });
     return;
   }
   const target = openTargetFromAdditionalData(additionalData)
     ?? openTargetFromCommandLine(commandLine, workingDirectory);
-  externalRequests.enqueue({ target, acknowledgementToken: token,
+  const request = externalRequests.enqueue({ target, acknowledgement,
     source: "second-instance" });
-  void smokeLog("queued", { target: target ? path.basename(target) : null,
-    source: "second-instance" }).then(drainExternalRequests).catch((error) => {
+  void acknowledgeRequest(request, "queued", 1).then(() => smokeLog("queued", {
+    requestToken: request.token, target: target ? path.basename(target) : null,
+    source: "second-instance" })).then(drainExternalRequests).catch((error) => {
     window?.webContents.send("document:journal-warning",
       `Could not handle the open request: ${error.message}`);
   });
@@ -174,21 +175,22 @@ if (!hasInstanceLock) {
   // The existing instance remains authoritative; never kill or bypass it.
   void (async () => {
     const deadline = Date.now() + 3000;
-    let acknowledgementStatus = null;
+    const expectedTargetHash = acknowledgementTargetHash(initialOpenTarget);
+    let acknowledgement = null;
     while (Date.now() < deadline) {
       try {
         const result = JSON.parse(await fs.readFile(instanceAcknowledgementPath, "utf8"));
-        if (result.acknowledgementToken === instanceRequestToken
-            && ["presented", "focused", "opened", "canceled", "smoke-completed"]
-              .includes(result.status)) {
-          acknowledgementStatus = result.status;
+        const valid = validateAcknowledgement(instanceAcknowledgement, result,
+          expectedTargetHash);
+        if (valid) {
+          acknowledgement = valid;
           break;
         }
       }
       catch {}
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (!acknowledgementStatus) {
+    if (!acknowledgement) {
       await smokeLog("handoff-timeout", { existingInstancePreserved: true });
       if (!smokeDirectory) {
         await app.whenReady();
@@ -199,24 +201,32 @@ if (!hasInstanceLock) {
           buttons: ["Close"], defaultId: 0, noLink: true,
         });
       }
-    } else if (acknowledgementStatus === "presented") {
+    } else if (!["focused", "opened", "canceled"].includes(acknowledgement.status)) {
       const outcomeDeadline = Date.now()
         + (smokeDirectory ? 20_000 : 300_000);
+      let lastSequence = acknowledgement.sequence;
       while (Date.now() < outcomeDeadline) {
         try {
           const result = JSON.parse(
             await fs.readFile(instanceAcknowledgementPath, "utf8"));
-          if (result.acknowledgementToken === instanceRequestToken
-              && ["opened", "canceled", "smoke-completed"].includes(result.status)) {
-            acknowledgementStatus = result.status;
+          const valid = validateAcknowledgement(instanceAcknowledgement, result,
+            expectedTargetHash);
+          if (valid?.requestToken === acknowledgement.requestToken
+              && valid.sequence >= lastSequence) {
+            acknowledgement = valid;
+            lastSequence = valid.sequence;
+          }
+          if (["focused", "opened", "canceled"].includes(acknowledgement.status)) {
             break;
           }
         } catch {}
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      await smokeLog("handoff-acknowledged", { status: acknowledgementStatus });
+      await smokeLog("handoff-acknowledged", { status: acknowledgement.status,
+        sequence: acknowledgement.sequence });
     } else {
-      await smokeLog("handoff-acknowledged", { status: acknowledgementStatus });
+      await smokeLog("handoff-acknowledged", { status: acknowledgement.status,
+        sequence: acknowledgement.sequence });
     }
     await fs.unlink(instanceAcknowledgementPath).catch(() => {});
     app.quit();
@@ -305,11 +315,19 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     const pending = externalRequests.current(request.token);
     externalOpenInProgress = true;
     try {
+      if (smokeDirectory) {
+        await acknowledgeRequest(pending, "canceled", 3);
+        externalRequests.complete(pending.token);
+        await smokeLog("completed", { requestToken: pending.token,
+          target: path.basename(pending.target), outcome: "renderer-canceled" });
+        void drainExternalRequests();
+        return null;
+      }
       const opened = await openRequests.run(async () => {
         if (!await prepareDocumentSwitch()) return null;
         return service.openDocument(pending.target, request.password);
       });
-      await acknowledgeRequest(pending, opened ? "opened" : "canceled");
+      await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
       externalRequests.complete(pending.token);
       await smokeLog("completed", { requestToken: pending.token,
         target: path.basename(pending.target), outcome: opened ? "opened" : "canceled" });
