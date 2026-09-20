@@ -26,6 +26,9 @@ jobs:
       - name: Build and smoke-test unsigned preview
         shell: powershell
         run: .\scripts\build-windows-preview.ps1
+      - name: Test packaged single-instance lifecycle
+        shell: powershell
+        run: .\scripts\test-windows-single-instance.ps1 -PackageRoot .\apps\windows\release\SCPEFE-win32-x64
       - name: Upload unsigned Windows preview
         uses: actions/upload-artifact@v4
         with:

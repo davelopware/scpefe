@@ -3,18 +3,260 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
-import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
+import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
+  DocumentService } from "./document-service.mjs";
+import { applySwitchDecision, finishDocumentSwitch,
+  OpenRequestQueue } from "./switch-document.mjs";
+import { openTargetFromAdditionalData,
+  openTargetFromCommandLine, openTargetFromUrl, acknowledgementCredentials,
+  acknowledgementTargetHash, createAcknowledgement, validateAcknowledgement,
+  OrderedOpenRequests } from "./single-instance.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const native = require(path.join(here, "..", "native", "scpefe_electron_native.node"));
 let window;
+let service;
+const openRequests = new OpenRequestQueue();
+const externalRequests = new OrderedOpenRequests({ randomToken: randomUUID });
+let externalDrainRunning = false;
+let externalOpenInProgress = false;
+const smokeDirectory = process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_DIR || null;
+const initialOpenTarget = openTargetFromCommandLine(process.argv);
+const instanceAcknowledgement = Object.freeze({ id: randomUUID(), secret: randomUUID() });
+const instanceAcknowledgementPath = path.join(app.getPath("temp"),
+  `scpefe-open-${instanceAcknowledgement.id}.ack`);
+const hasInstanceLock = app.requestSingleInstanceLock(
+  { ...(initialOpenTarget ? { openTarget: initialOpenTarget } : {}),
+    acknowledgementId: instanceAcknowledgement.id,
+    acknowledgementSecret: instanceAcknowledgement.secret });
 
-app.whenReady().then(async () => {
-  const service = new DocumentService({
+async function sendJournalSummary() {
+  if (!service || !window || window.isDestroyed()) return;
+  try {
+    window.webContents.send("journal:summary",
+      await service.unresolvedJournalSummary());
+  } catch (error) {
+    window.webContents.send("document:journal-warning",
+      `Unresolved journals could not be inspected: ${error.message}`);
+  }
+}
+
+async function smokeLog(event, details = {}) {
+  if (!smokeDirectory) return;
+  await fs.mkdir(smokeDirectory, { recursive: true });
+  await fs.appendFile(path.join(smokeDirectory, "events.jsonl"),
+    `${JSON.stringify({ event, pid: process.pid, ...details })}\n`);
+}
+
+function acknowledgementPath(id) {
+  return path.join(app.getPath("temp"), `scpefe-open-${id}.ack`);
+}
+
+async function acknowledgeRequest(request, status, sequence) {
+  if (!request.ack) return;
+  const acknowledgement = createAcknowledgement(request.ack, {
+    requestToken: request.token,
+    targetHash: acknowledgementTargetHash(request.target), sequence, status,
+  });
+  await fs.writeFile(acknowledgementPath(request.ack.id),
+    JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
+}
+
+async function prepareDocumentSwitch() {
+  if (!service.active) return true;
+  let decision = "save";
+  if (needsCloseDecision(service.active)) {
+    const conflict = service.active.pendingRecord?.state === "conflict";
+    const pending = service.active.pendingPublication;
+    const choice = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "Open another document?",
+      message: conflict ? "This document has an unresolved divergence."
+        : pending ? "This document has a save pending publication."
+          : service.active.manuallySealed
+            ? "This document has unsaved changes."
+            : "This document is only provisionally saved.",
+      detail: "Save and open preserves the current work, discard and open is destructive, and cancel keeps this document open.",
+      buttons: ["Cancel", "Save and open", "Discard and open"],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    decision = ["cancel", "save", "discard"][choice.response];
+  }
+  let outcome;
+  try {
+    outcome = await applySwitchDecision(service, decision);
+  } catch (error) {
+    if (error?.code !== "DOCUMENT_SWITCH_UNREADABLE_JOURNAL") throw error;
+    const confirmation = await dialog.showMessageBox(window, {
+      type: "warning", title: "Permanently discard unreadable recovery work?",
+      message: "The recovery journal for this authenticated document cannot be read.",
+      detail: "Only this document's encrypted journal will be deleted. This cannot be undone.",
+      buttons: ["Cancel", "Permanently discard journal and open"],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (confirmation.response !== 1) return false;
+    await service.discardUnreadableJournalForSwitch(
+      DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
+    outcome = await applySwitchDecision(service, "discard");
+  }
+  if (!outcome.proceed) return false;
+  if (outcome.pendingPublication) {
+    const disclosure = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "Save is still pending publication",
+      message: "The manual save is stored locally but has not reached its target.",
+      detail: "It will remain discoverable after switching and after restart.",
+      buttons: ["Keep current document open", "Open with save pending"],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (disclosure.response !== 1) {
+      window.webContents.send("document:switch-retained", service.active.opened);
+      await sendJournalSummary();
+      return false;
+    }
+  }
+  await finishDocumentSwitch(service);
+  await sendJournalSummary();
+  return true;
+}
+
+async function drainExternalRequests() {
+  if (externalDrainRunning || !service || !window || window.isDestroyed()) return;
+  const request = externalRequests.take();
+  if (!request) return;
+  externalDrainRunning = true;
+  window.show();
+  if (window.isMinimized()) window.restore();
+  window.focus();
+  await smokeLog("presented", { requestToken: request.token,
+    target: request.target ? path.basename(request.target) : null,
+    source: request.source });
+  if (!request.target) {
+    await acknowledgeRequest(request, "focused", 3);
+    externalRequests.complete(request.token);
+    externalDrainRunning = false;
+    return drainExternalRequests();
+  }
+  const smokeCompleteAfterMs = Number(
+    process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS || 400);
+  window.webContents.send("document:external-open-requested", {
+    token: request.token,
+    ...(smokeDirectory ? { smokeCompleteAfterMs } : {}),
+  });
+  await acknowledgeRequest(request, "presented", 2);
+  externalDrainRunning = false;
+}
+
+function routeSecondInstance(commandLine, workingDirectory, additionalData) {
+  const acknowledgement = acknowledgementCredentials(additionalData);
+  if (process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_STALL === "1") {
+    void smokeLog("request-intentionally-unacknowledged",
+      { hasToken: Boolean(acknowledgement) });
+    return;
+  }
+  const target = openTargetFromAdditionalData(additionalData)
+    ?? openTargetFromCommandLine(commandLine, workingDirectory);
+  const request = externalRequests.enqueue({ target, acknowledgement,
+    source: "second-instance" });
+  void acknowledgeRequest(request, "queued", 1).then(() => smokeLog("queued", {
+    requestToken: request.token, target: target ? path.basename(target) : null,
+    source: "second-instance" })).then(drainExternalRequests).catch((error) => {
+    window?.webContents.send("document:journal-warning",
+      `Could not handle the open request: ${error.message}`);
+  });
+}
+
+if (!hasInstanceLock) {
+  // The existing instance remains authoritative; never kill or bypass it.
+  void (async () => {
+    const deadline = Date.now() + 3000;
+    const expectedTargetHash = acknowledgementTargetHash(initialOpenTarget);
+    let acknowledgement = null;
+    while (Date.now() < deadline) {
+      try {
+        const result = JSON.parse(await fs.readFile(instanceAcknowledgementPath, "utf8"));
+        const valid = validateAcknowledgement(instanceAcknowledgement, result,
+          expectedTargetHash);
+        if (valid) {
+          acknowledgement = valid;
+          break;
+        }
+      }
+      catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!acknowledgement) {
+      await smokeLog("handoff-timeout", { existingInstancePreserved: true });
+      if (!smokeDirectory) {
+        await app.whenReady();
+        await dialog.showMessageBox({
+          type: "warning", title: "SCPEFE is already running",
+          message: "The existing SCPEFE instance did not respond.",
+          detail: "It was not killed or bypassed because it may hold unsaved encrypted work. Use Windows Task Manager to end it manually only after considering that risk, then try again.",
+          buttons: ["Close"], defaultId: 0, noLink: true,
+        });
+      }
+    } else if (!["focused", "opened", "canceled"].includes(acknowledgement.status)) {
+      const outcomeDeadline = Date.now()
+        + (smokeDirectory ? 20_000 : 300_000);
+      let lastSequence = acknowledgement.sequence;
+      while (Date.now() < outcomeDeadline) {
+        try {
+          const result = JSON.parse(
+            await fs.readFile(instanceAcknowledgementPath, "utf8"));
+          const valid = validateAcknowledgement(instanceAcknowledgement, result,
+            expectedTargetHash);
+          if (valid?.requestToken === acknowledgement.requestToken
+              && valid.sequence >= lastSequence) {
+            acknowledgement = valid;
+            lastSequence = valid.sequence;
+          }
+          if (["focused", "opened", "canceled"].includes(acknowledgement.status)) {
+            break;
+          }
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await smokeLog("handoff-acknowledged", { status: acknowledgement.status,
+        sequence: acknowledgement.sequence });
+    } else {
+      await smokeLog("handoff-acknowledged", { status: acknowledgement.status,
+        sequence: acknowledgement.sequence });
+    }
+    await fs.unlink(instanceAcknowledgementPath).catch(() => {});
+    app.quit();
+  })();
+} else app.on("second-instance",
+  (_event, commandLine, workingDirectory, additionalData) =>
+    routeSecondInstance(commandLine, workingDirectory, additionalData));
+
+if (hasInstanceLock) {
+  if (initialOpenTarget) {
+    externalRequests.enqueue({ target: initialOpenTarget, source: "command-line" });
+    void smokeLog("queued", { target: path.basename(initialOpenTarget),
+      source: "command-line" });
+  }
+  app.on("open-file", (event, filePath) => {
+    event.preventDefault();
+    const target = openTargetFromCommandLine(["SCPEFE", filePath]);
+    if (target) externalRequests.enqueue({ target, source: "open-file" });
+    void drainExternalRequests();
+  });
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    const target = openTargetFromUrl(url);
+    if (target) externalRequests.enqueue({ target, source: "open-url" });
+    void drainExternalRequests();
+  });
+}
+
+if (hasInstanceLock) app.whenReady().then(async () => {
+  service = new DocumentService({
     native,
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
@@ -25,7 +267,10 @@ app.whenReady().then(async () => {
       replacementGuarantee: "best-effort-replace",
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
-    onLocked: (result) => window?.webContents.send("document:locked", result),
+    onLocked: (result) => {
+      window?.webContents.send("document:locked", result);
+      void sendJournalSummary();
+    },
     onJournalWarning: (warning) =>
       window?.webContents.send("document:journal-warning", warning),
     onRegularSave: (result) =>
@@ -37,6 +282,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("settings:get", () => service.loadClientSettings());
   ipcMain.handle("settings:save", (_event, settings) =>
     service.saveClientSettings(settings));
+  ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   ipcMain.handle("document:create", async (_event, request) => {
     const chosen = await dialog.showSaveDialog(window, {
       title: "Create encrypted document",
@@ -47,14 +293,50 @@ app.whenReady().then(async () => {
     return service.createDocument(chosen.filePath, request);
   });
   ipcMain.handle("document:open", async (_event, password) => {
-    await service.lock("open-another");
     const chosen = await dialog.showOpenDialog(window, {
       title: "Open encrypted document",
       filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
       properties: ["openFile"],
     });
     if (chosen.canceled || chosen.filePaths.length !== 1) return null;
-    return service.openDocument(chosen.filePaths[0], password);
+    return openRequests.run(async () => {
+      if (!await prepareDocumentSwitch()) return null;
+      const opened = await service.openDocument(chosen.filePaths[0], password);
+      await sendJournalSummary();
+      return opened;
+    });
+  });
+  ipcMain.handle("document:open-external", async (_event, request) => {
+    if (!request || typeof request !== "object"
+        || typeof request.token !== "string" || typeof request.password !== "string"
+        || !externalRequests.current(request.token) || externalOpenInProgress) {
+      throw new TypeError("invalid external open request");
+    }
+    const pending = externalRequests.current(request.token);
+    externalOpenInProgress = true;
+    try {
+      if (smokeDirectory) {
+        await acknowledgeRequest(pending, "canceled", 3);
+        externalRequests.complete(pending.token);
+        await smokeLog("completed", { requestToken: pending.token,
+          target: path.basename(pending.target), outcome: "renderer-canceled" });
+        void drainExternalRequests();
+        return null;
+      }
+      const opened = await openRequests.run(async () => {
+        if (!await prepareDocumentSwitch()) return null;
+        return service.openDocument(pending.target, request.password);
+      });
+      await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
+      externalRequests.complete(pending.token);
+      await smokeLog("completed", { requestToken: pending.token,
+        target: path.basename(pending.target), outcome: opened ? "opened" : "canceled" });
+      await sendJournalSummary();
+      void drainExternalRequests();
+      return opened;
+    } finally {
+      externalOpenInProgress = false;
+    }
   });
   ipcMain.handle("document:enter-edit-mode", async () => {
     try {
@@ -181,6 +463,14 @@ app.whenReady().then(async () => {
   window.on("blur", () => { void service.lock("background"); });
   window.on("minimize", () => { void service.lock("background"); });
   window.loadFile(path.join(here, "..", "dist", "index.html"));
+  window.webContents.on("did-finish-load", () => {
+    void sendJournalSummary();
+    const delay = Number(process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_READY_DELAY_MS || 0);
+    setTimeout(() => {
+      externalRequests.setReady();
+      void smokeLog("renderer-ready").then(drainExternalRequests);
+    }, delay);
+  });
 });
 
 app.on("window-all-closed", () => app.quit());

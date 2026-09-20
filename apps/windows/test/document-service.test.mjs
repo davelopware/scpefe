@@ -7,7 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { applyCloseDecision } from "../src/close-document.mjs";
 import { compactWithBackupSelection } from "../src/compaction-flow.mjs";
-import { COMPACTION_CONFIRMATION, DocumentService } from "../src/document-service.mjs";
+import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
+  DocumentService } from "../src/document-service.mjs";
 import { confirmAndMigrate } from "../src/migration-flow.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
@@ -230,6 +231,50 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   assert.equal(calls.length, 1);
   assert.equal(calls[0].understandsIrrecoverable, true);
   assert.equal(calls[0].storedRecoverySeparately, true);
+});
+
+test("authenticated switch discard removes only the active unreadable journal", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-unreadable-journal-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const journalDirectory = path.join(directory, "journals");
+  const documentId = "91".repeat(16);
+  const otherDocumentId = "92".repeat(16);
+  const activeJournal = path.join(journalDirectory, `${documentId}.work-journal`);
+  const otherJournal = path.join(journalDirectory, `${otherDocumentId}.work-journal`);
+  await fs.mkdir(journalDirectory);
+  await fs.writeFile(target, "container");
+  await fs.writeFile(activeJournal, "malformed authenticated envelope");
+  await fs.writeFile(otherJournal, "another document's recovery data");
+  const warnings = [];
+  const service = new DocumentService({ fs, journalDirectory,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    publicationCapabilities,
+    witnessDirectory: path.join(directory, "witnesses"),
+    onJournalWarning: (warning) => warnings.push(warning),
+    native: withLease({ openDocument(bytes, password) {
+      assert.equal(bytes.toString(), "container");
+      assert.equal(password, "owner password words");
+      const baseRevision = "93".repeat(32);
+      return { content: "sealed", readOnly: true, canEdit: true,
+        documentId, baseRevision,
+        revisionGraph: [{ revisionId: baseRevision, parentRevisionIds: [] }],
+        journalKey: Buffer.alloc(32, 0x94), manuallySealed: true };
+    } }) });
+  await service.openDocument(target, "owner password words");
+  assert.equal(service.active.unreadableJournal, true);
+  assert.match(warnings.at(-1), /could not be read/);
+  await assert.rejects(service.discardUnreadableJournalForSwitch("discard"),
+    /not explicitly confirmed/);
+  assert.equal(await fs.readFile(activeJournal, "utf8"),
+    "malformed authenticated envelope");
+  assert.deepEqual(await service.discardUnreadableJournalForSwitch(
+    DISCARD_UNREADABLE_JOURNAL_CONFIRMATION),
+  { discarded: true, documentId });
+  await assert.rejects(fs.access(activeJournal), (error) => error.code === "ENOENT");
+  assert.equal(await fs.readFile(otherJournal, "utf8"),
+    "another document's recovery data");
+  assert.equal(service.active.unresolvedJournal, false);
 });
 
 test("older containers remain read-only until verified-backup migration", async (t) => {

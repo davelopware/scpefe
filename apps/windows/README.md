@@ -8,6 +8,10 @@ not a production release: the ZIP
 is unsigned, has no installer or automatic updater, and the cryptographic and
 storage behavior still requires security and release review.
 
+The Windows preview workflow also launches the packaged executable as multiple
+real processes to verify startup request staging, ordered single-instance
+routing and focus handoff, and the safe timeout for an unresponsive primary.
+
 ## Prerequisites
 
 - 64-bit Windows 10 or later.

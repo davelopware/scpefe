@@ -16,6 +16,7 @@ const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
 export const COMPACTION_CONFIRMATION = "I understand that compaction irreversibly removes older history from this container and cannot delete copies held by backups, sync tools, caches, or storage providers.";
+export const DISCARD_UNREADABLE_JOURNAL_CONFIRMATION = "Permanently discard the unreadable recovery journal for this authenticated document.";
 const UNAVAILABLE_CODES = new Set([
   "ENOENT", "ENOTDIR", "EACCES", "EIO", "ENODEV", "ESTALE", "ETIMEDOUT",
   "ECONNRESET",
@@ -110,6 +111,10 @@ export class DocumentService {
     return this.clientSettings;
   }
 
+  async unresolvedJournalSummary() {
+    return this.journals.discoverUnresolved();
+  }
+
   async createDocument(target, request) {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
@@ -188,6 +193,7 @@ export class DocumentService {
     let pendingRecord = null;
     let publicationState = "target-published";
     let unresolvedJournal = false;
+    let unreadableJournal = false;
     try {
       const journal = recoveredPublication ? null : await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
@@ -246,6 +252,7 @@ export class DocumentService {
     } catch (error) {
       if (publicationCompleted) throw error;
       unresolvedJournal = true;
+      unreadableJournal = true;
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     const targetOpened = nativeOpened.opened;
@@ -287,6 +294,7 @@ export class DocumentService {
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
       pendingPublication, pendingRecord, unresolvedJournal,
+      unreadableJournal,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
@@ -791,7 +799,11 @@ export class DocumentService {
     if (!active?.pendingPublication || !active.pendingRecord) {
       throw new Error("No pending publication is available");
     }
-    if (active.editMode) await this.exitEditMode();
+    if (active.editMode) {
+      this.#cancelRegularSave();
+      await this.#stopHeartbeat();
+      active.editMode = false;
+    }
     await this.publications.discard(
       active.documentId, active.journalKey, active.pendingRecord);
     active.pendingPublication = false;
@@ -823,6 +835,21 @@ export class DocumentService {
     if (!active.manuallySealed) return this.#discardProvisional(active);
     if (active.editMode && active.dirty) return this.discardWorkingCopy();
     return active.opened;
+  }
+
+  async discardUnreadableJournalForSwitch(confirmation) {
+    const active = this.active;
+    if (!active || !active.unreadableJournal || !active.unresolvedJournal
+        || active.pendingPublication || active.pendingRecord || active.recovery) {
+      throw new Error("No unreadable journal is available for this authenticated document");
+    }
+    if (confirmation !== DISCARD_UNREADABLE_JOURNAL_CONFIRMATION) {
+      throw new Error("Unreadable journal discard was not explicitly confirmed");
+    }
+    await this.journals.clear(active.documentId);
+    active.unreadableJournal = false;
+    active.unresolvedJournal = false;
+    return Object.freeze({ discarded: true, documentId: active.documentId });
   }
 
   updateWorkingCopy(value) {

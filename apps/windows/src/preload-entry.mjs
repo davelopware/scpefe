@@ -6,7 +6,8 @@ import { validateCreateRequest, validateCreationResult, validatePassword,
   validateMigrationResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
-  validatePublicationResult, validateRecoveredWork, validateMergeDraft } from "./contracts.mjs";
+  validatePublicationResult, validateRecoveredWork, validateMergeDraft,
+  validateUnresolvedJournalSummary, validateExternalOpenRequest } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -18,6 +19,8 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("settings:get")),
   saveClientSettings: async (settings) => validateClientSettings(
     await ipcRenderer.invoke("settings:save", validateClientSettings(settings))),
+  getUnresolvedJournalSummary: async () => validateUnresolvedJournalSummary(
+    await ipcRenderer.invoke("journal:summary")),
   createDocument: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:create", validateCreateRequest(request));
@@ -25,6 +28,13 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   },
   openDocument: async (password) => {
     const value = await ipcRenderer.invoke("document:open", validatePassword(password));
+    return value === null ? null : validateOpenedDocument(value);
+  },
+  openExternalDocument: async (request) => {
+    const value = await ipcRenderer.invoke("document:open-external", {
+      token: validateExternalOpenRequest(request).token,
+      password: validatePassword(request?.password),
+    });
     return value === null ? null : validateOpenedDocument(value);
   },
   enterEditMode: async () => validateEditMode(
@@ -97,5 +107,33 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     };
     ipcRenderer.on("document:regular-saved", handler);
     return () => ipcRenderer.removeListener("document:regular-saved", handler);
+  },
+  onExternalOpenRequested: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => {
+      const request = validateExternalOpenRequest(value);
+      listener(request);
+      if (request.smokeCompleteAfterMs !== undefined) {
+        setTimeout(() => {
+          void ipcRenderer.invoke("document:open-external", {
+            token: request.token, password: "single-instance-smoke",
+          });
+        }, request.smokeCompleteAfterMs);
+      }
+    };
+    ipcRenderer.on("document:external-open-requested", handler);
+    return () => ipcRenderer.removeListener("document:external-open-requested", handler);
+  },
+  onUnresolvedJournalSummary: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => listener(validateUnresolvedJournalSummary(value));
+    ipcRenderer.on("journal:summary", handler);
+    return () => ipcRenderer.removeListener("journal:summary", handler);
+  },
+  onSwitchRetained: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => listener(validateOpenedDocument(value));
+    ipcRenderer.on("document:switch-retained", handler);
+    return () => ipcRenderer.removeListener("document:switch-retained", handler);
   },
 }));

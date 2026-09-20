@@ -71,6 +71,34 @@ export function validateClientSettings(value = {}) {
   return Object.freeze({ regularSaveEnabled, regularSaveIntervalMs });
 }
 
+export function validateUnresolvedJournalSummary(value) {
+  if (!value || typeof value !== "object"
+      || !Number.isSafeInteger(value.total) || value.total < 0
+      || !Number.isSafeInteger(value.pendingPublications)
+      || value.pendingPublications < 0 || value.pendingPublications > value.total) {
+    throw new TypeError("host returned an invalid unresolved-journal summary");
+  }
+  return Object.freeze({ total: value.total,
+    pendingPublications: value.pendingPublications });
+}
+
+export function validateExternalOpenRequest(value) {
+  if (!value || typeof value !== "object"
+      || typeof value.token !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(value.token)) {
+    throw new TypeError("host returned an invalid external open request");
+  }
+  const smokeCompleteAfterMs = value.smokeCompleteAfterMs;
+  if (smokeCompleteAfterMs !== undefined
+      && (!Number.isSafeInteger(smokeCompleteAfterMs)
+        || smokeCompleteAfterMs < 0 || smokeCompleteAfterMs > 30_000)) {
+    throw new TypeError("host returned an invalid external open request");
+  }
+  return Object.freeze({ token: value.token,
+    ...(smokeCompleteAfterMs === undefined ? {} : { smokeCompleteAfterMs }) });
+}
+
 export function validateCreateRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("create request must be an object");
