@@ -69,6 +69,7 @@ export class DocumentService {
     this.active = null;
     this.suspendedLeases = new Map();
     this.leaseObservations = new Map();
+    this.migrationTakeoverConfirmations = new WeakMap();
   }
 
   async loadProfile() {
@@ -1290,7 +1291,7 @@ export class DocumentService {
       previousHead, head: active.baseRevision });
   }
 
-  async migrateDocument(backupTarget, { forceTakeover = false } = {}) {
+  async migrateDocument(backupTarget, { takeoverToken } = {}) {
     const active = this.active;
     if (!active?.migrationRequired) throw new Error("No older container is open");
     if (!active.slotCanEdit || active.headMismatch || active.profileMismatch
@@ -1316,12 +1317,18 @@ export class DocumentService {
         const before = this.#validateNativeOpened(
           this.native.openDocument(current, active.password));
         try {
+          if (takeoverToken !== undefined) {
+            acquisition = this.#leaseAcquisition(active, before.lease,
+              { takeoverToken, issueTakeoverToken: true,
+                observedDocumentId: before.documentId });
+          }
           if (before.containerFormatVersion !== 2
               || before.documentId !== active.documentId
               || before.baseRevision !== active.baseRevision) {
             throw new Error("The target changed before migration");
           }
-          acquisition = this.#leaseAcquisition(active, before.lease, forceTakeover);
+          acquisition ??= this.#leaseAcquisition(active, before.lease,
+            { issueTakeoverToken: true, observedDocumentId: before.documentId });
           try {
             await this.publications.publishReplica({
               target: selectedBackupTarget, candidate: current });
@@ -1476,7 +1483,7 @@ export class DocumentService {
       const latest = this.#validateNativeOpened(
         this.native.openDocument(bytes, active.password));
       const lease = latest.lease;
-      const acquisition = this.#leaseAcquisition(active, lease, forceTakeover);
+      const acquisition = this.#leaseAcquisition(active, lease, { forceTakeover });
       const nextLease = {
         active: true, sessionId: acquisition.sessionId.toString("hex"),
         heartbeatCounter: acquisition.heartbeatCounter,
@@ -1494,7 +1501,25 @@ export class DocumentService {
     this.#scheduleHeartbeat(this.leaseGeneration);
   }
 
-  #leaseAcquisition(active, lease, forceTakeover) {
+  #leaseAcquisition(active, lease, { forceTakeover = false,
+    takeoverToken, issueTakeoverToken = false,
+    observedDocumentId = active.documentId } = {}) {
+    let confirmedTakeover = false;
+    if (takeoverToken !== undefined) {
+      // Object identity is the capability; a renderer-created lookalike cannot authorize.
+      const validToken = takeoverToken !== null
+        && (typeof takeoverToken === "object" || typeof takeoverToken === "function")
+        ? this.migrationTakeoverConfirmations.get(takeoverToken) : undefined;
+      if (!validToken || validToken.documentId !== active.documentId
+          || validToken.documentId !== observedDocumentId
+          || validToken.lease !== this.#leaseFingerprint(lease)) {
+        const error = new Error("Editing lease changed after takeover confirmation");
+        error.code = "LEASE_CHANGED";
+        error.lease = lease;
+        throw error;
+      }
+      confirmedTakeover = true;
+    }
     const suspended = this.suspendedLeases.get(active.documentId);
     const sessionMatches = lease.active && suspended
       && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
@@ -1512,15 +1537,27 @@ export class DocumentService {
       const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
       this.leaseObservations.set(key, firstSeen);
       const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
-      if (!reliableExpiry && !observedStale && !forceTakeover) {
+      if (!reliableExpiry && !observedStale && !forceTakeover && !confirmedTakeover) {
         const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
         error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
         error.lease = lease;
+        if (error.code === "LEASE_CLOCK_UNCERTAIN" && issueTakeoverToken) {
+          const token = Object.freeze({});
+          this.migrationTakeoverConfirmations.set(token, {
+            documentId: active.documentId, lease: this.#leaseFingerprint(lease) });
+          error.takeoverToken = token;
+        }
         throw error;
       }
     }
     return { sessionId: sameSession ? suspended.sessionId : this.randomSessionId(),
       heartbeatCounter: sameSession ? lease.heartbeatCounter + 1 : 1 };
+  }
+
+  #leaseFingerprint(lease) {
+    return JSON.stringify([lease.active, lease.sessionId, lease.heartbeatCounter,
+      lease.holderUtcMs, lease.durationMs, lease.holderName, lease.holderEmail,
+      lease.deviceName]);
   }
 
   #scheduleHeartbeat(generation) {

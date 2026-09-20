@@ -8,6 +8,7 @@ import test from "node:test";
 import { applyCloseDecision } from "../src/close-document.mjs";
 import { compactWithBackupSelection } from "../src/compaction-flow.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "../src/document-service.mjs";
+import { confirmAndMigrate } from "../src/migration-flow.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -354,11 +355,18 @@ test("migration applies uncertain-clock observation and explicit takeover rules"
     heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
     holderName: "Remote editor", holderEmail: "remote@example.test",
     deviceName: "Future clock" };
+  let takeoverToken;
   await assert.rejects(fixture.service.migrateDocument(), (error) => {
     assert.equal(error.code, "LEASE_CLOCK_UNCERTAIN");
     assert.equal(error.lease.holderName, "Remote editor");
+    assert.equal(typeof error.takeoverToken, "object");
+    assert.equal(Object.isFrozen(error.takeoverToken), true);
+    takeoverToken = error.takeoverToken;
     return true;
   });
+  await assert.rejects(fixture.service.migrateDocument(undefined,
+    { takeoverToken: Object.freeze({}) }), (error) => error.code === "LEASE_CHANGED");
+  assert.equal(typeof takeoverToken, "object");
   assert.ok((await fs.readFile(fixture.target)).equals(fixture.legacy));
   monotonic += 599_999;
   await assert.rejects(fixture.service.migrateDocument(),
@@ -367,21 +375,56 @@ test("migration applies uncertain-clock observation and explicit takeover rules"
   assert.equal((await fixture.service.migrateDocument()).migrated, true);
 });
 
-test("migration force takeover is explicit and target races remain rejected", async (t) => {
+test("confirmed migration takeover succeeds only for the presented lease", async (t) => {
   const fixture = await migrationFixture(t, "scpefe-migration-force-");
   fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
     heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
     holderName: "Remote editor", holderEmail: "remote@example.test",
     deviceName: "Future clock" };
-  assert.equal((await fixture.service.migrateDocument(undefined,
-    { forceTakeover: true })).migrated, true);
+  const dialog = { async showMessageBox() { return { response: 1 }; } };
+  assert.equal((await confirmAndMigrate({ service: fixture.service, dialog,
+    window: {} })).migrated, true);
+});
 
+test("dialog confirmation rejects a refreshed lease before backup or migration", async (t) => {
+  const fixture = await migrationFixture(t, "scpefe-migration-confirm-race-");
+  fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
+    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
+    holderName: "Remote editor", holderEmail: "remote@example.test",
+    deviceName: "Future clock" };
+  let prompts = 0;
+  let candidateCreated = false;
+  fixture.native.migrationHook = () => { candidateCreated = true; };
+  const dialog = { async showMessageBox() {
+    prompts += 1;
+    if (prompts === 2) {
+      fixture.native.legacyLease = { ...fixture.native.legacyLease,
+        heartbeatCounter: 5, holderUtcMs: 9_000_100 };
+    }
+    return { response: 1 };
+  } };
+  await assert.rejects(confirmAndMigrate({ service: fixture.service, dialog,
+    window: {} }), (error) => error.code === "LEASE_CHANGED");
+  assert.equal(candidateCreated, false);
+  await assert.rejects(fs.access(path.join(fixture.directory,
+    "document.backup-19700101T000001Z.scpefe")), (error) => error.code === "ENOENT");
+  assert.equal(await fixture.service.journals.read(
+    fixture.service.active.documentId, fixture.service.active.journalKey), null);
+  assert.ok((await fs.readFile(fixture.target)).equals(fixture.legacy));
+});
+
+test("confirmed migration still rejects a later candidate publication race", async (t) => {
   const racing = await migrationFixture(t, "scpefe-migration-force-race-");
-  racing.native.legacyLease = { ...fixture.native.legacyLease };
+  racing.native.legacyLease = { active: true, sessionId: "79".repeat(16),
+    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
+    holderName: "Remote editor", holderEmail: "remote@example.test",
+    deviceName: "Future clock" };
+
   const competing = Buffer.from("competing-container");
   racing.native.migrationHook = () => fsSync.writeFileSync(racing.target, competing);
-  await assert.rejects(racing.service.migrateDocument(undefined,
-    { forceTakeover: true }), /Publication/);
+  const dialog = { async showMessageBox() { return { response: 1 }; } };
+  await assert.rejects(confirmAndMigrate({ service: racing.service, dialog,
+    window: {} }), /Publication/);
   assert.ok((await fs.readFile(racing.target)).equals(competing));
 });
 

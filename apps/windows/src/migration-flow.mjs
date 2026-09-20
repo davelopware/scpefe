@@ -1,8 +1,8 @@
 /* Retries migration with a user-selected backup target after backup failure. */
 export async function migrateWithBackupSelection({ service, dialog, window,
-  forceTakeover = false }) {
+  takeoverToken }) {
   try {
-    return await service.migrateDocument(undefined, { forceTakeover });
+    return await service.migrateDocument(undefined, { takeoverToken });
   } catch (error) {
     if (error?.code !== "MIGRATION_BACKUP_FAILED") throw error;
   }
@@ -13,7 +13,7 @@ export async function migrateWithBackupSelection({ service, dialog, window,
     properties: ["createDirectory"],
   });
   if (chosen.canceled || !chosen.filePath) return null;
-  return service.migrateDocument(chosen.filePath, { forceTakeover });
+  return service.migrateDocument(chosen.filePath, { takeoverToken });
 }
 
 /* Presents the older-client warning before any migration work starts. */
@@ -39,7 +39,7 @@ export async function confirmAndMigrate({ service, dialog, window }) {
     });
     if (takeover.response !== 1) return null;
     return migrateWithBackupSelection({ service, dialog, window,
-      forceTakeover: true });
+      takeoverToken: error.takeoverToken });
   }
 }
 

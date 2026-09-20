@@ -32,8 +32,8 @@ test("migration warns about older clients and retries a failed backup elsewhere"
   };
   assert.deepEqual(await confirmAndMigrate({ service, dialog, window: {} }),
     { migrated: true });
-  assert.deepEqual(calls, [[undefined, { forceTakeover: false }],
-    ["D:\\safe.scpefe", { forceTakeover: false }]]);
+  assert.deepEqual(calls, [[undefined, { takeoverToken: undefined }],
+    ["D:\\safe.scpefe", { takeoverToken: undefined }]]);
 });
 
 test("trusted migration IPC boundary delegates through confirmation", async () => {
@@ -56,12 +56,14 @@ test("only backup failures offer another destination", async () => {
 
 test("uncertain migration lease requires trusted explicit force confirmation", async () => {
   const calls = [];
+  const takeoverToken = Object.freeze({});
   const service = { async migrateDocument(target, options) {
     calls.push([target, options]);
-    if (!options.forceTakeover) {
+    if (options.takeoverToken !== takeoverToken) {
       const error = new Error("future lease");
       error.code = "LEASE_CLOCK_UNCERTAIN";
       error.lease = { holderName: "Remote editor" };
+      error.takeoverToken = takeoverToken;
       throw error;
     }
     return { migrated: true };
@@ -76,8 +78,8 @@ test("uncertain migration lease requires trusted explicit force confirmation", a
   } };
   assert.deepEqual(await confirmAndMigrate({ service, dialog, window: {} }),
     { migrated: true });
-  assert.deepEqual(calls, [[undefined, { forceTakeover: false }],
-    [undefined, { forceTakeover: true }]]);
+  assert.deepEqual(calls, [[undefined, { takeoverToken: undefined }],
+    [undefined, { takeoverToken }]]);
 });
 
 test("canceling uncertain-clock takeover keeps migration read-only", async () => {
