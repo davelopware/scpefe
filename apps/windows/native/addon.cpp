@@ -544,6 +544,41 @@ napi_value save_document(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value merge_document(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 4;
+        napi_value args[4];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 4)
+            throw std::runtime_error(
+                "mergeDocument expects current and local Buffers, password, and input");
+        const auto [current, current_size] = buffer_value(env, args[0]);
+        const auto [local, local_size] = buffer_value(env, args[1]);
+        const SecretBytes password{env, args[2]};
+        const std::string name = string_value(env, property(env, args[3], "name"));
+        const std::string email = string_value(env, property(env, args[3], "email"));
+        const std::string device = string_value(env, property(env, args[3], "deviceName"));
+        const std::string content = string_value(env, property(env, args[3], "content"));
+        double timestamp = 0;
+        check(env, napi_get_value_double(
+            env, property(env, args[3], "timestampMs"), &timestamp));
+        const scpefe_merge_save_v1 save{
+            sizeof(scpefe_merge_save_v1), current, current_size, local, local_size,
+            password.data(), password.size(), name.data(), name.size(),
+            email.data(), email.size(), device.data(), device.size(),
+            content.data(), content.size(), static_cast<std::uint64_t>(timestamp),
+        };
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_merge_save(&save, output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
 napi_value add_invitation(napi_env env, napi_callback_info info)
 {
     try {
@@ -603,6 +638,8 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"saveDocument", nullptr, save_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"mergeDocument", nullptr, merge_document, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
         {"updateLease", nullptr, update_lease, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"addInvitation", nullptr, add_invitation, nullptr, nullptr, nullptr,
@@ -610,7 +647,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 6, methods));
+    check(env, napi_define_properties(env, exports, 7, methods));
     return exports;
 }
 

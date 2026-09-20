@@ -182,6 +182,26 @@ typedef struct scpefe_manual_save_v1 {
     uint64_t timestamp_ms;
 } scpefe_manual_save_v1;
 
+/* Validated inputs used to seal a user-resolved two-parent merge revision. */
+typedef struct scpefe_merge_save_v1 {
+    uint32_t struct_size;
+    const uint8_t *current_container;
+    size_t current_container_size;
+    const uint8_t *local_container;
+    size_t local_container_size;
+    const uint8_t *password;
+    size_t password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    const char *content;
+    size_t content_size;
+    uint64_t timestamp_ms;
+} scpefe_merge_save_v1;
+
 /* Validated inputs used to publish a new owner-protected document. */
 typedef struct scpefe_new_document_v1 {
     uint32_t struct_size;
@@ -335,6 +355,14 @@ SCPEFE_API scpefe_status scpefe_new_document_create(
 /* Seals a child revision and returns a replacement self-contained container. */
 SCPEFE_API scpefe_status scpefe_manual_save(
     const scpefe_manual_save_v1 *save,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Seals a resolved merge after authenticating related current and local heads. */
+SCPEFE_API scpefe_status scpefe_merge_save(
+    const scpefe_merge_save_v1 *save,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size

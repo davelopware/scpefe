@@ -1369,3 +1369,148 @@ test("different document IDs are explained as target replacement", async (t) => 
   assert.equal(opened.headMismatch.kind, "replacement");
   assert.match(opened.headMismatch.explanation, /permanent document ID differs/);
 });
+
+function mergeContainer(content, head, graph) {
+  return Buffer.from(JSON.stringify({ content, head, graph }));
+}
+
+function mergeNative(documentId, journalKey, mergedHead) {
+  const native = {
+    openDocument(bytes) {
+      const parsed = JSON.parse(bytes.toString());
+      return { content: parsed.content, readOnly: true, canEdit: true,
+        documentId, baseRevision: parsed.head, revisionGraph: parsed.graph,
+        journalKey: Buffer.from(journalKey) };
+    },
+    mergeDocument(currentBytes, localBytes, _password, input) {
+      const current = JSON.parse(currentBytes.toString());
+      const local = JSON.parse(localBytes.toString());
+      return mergeContainer(input.content, mergedHead,
+        [...current.graph, ...local.graph.filter((candidate) =>
+          !current.graph.some((node) => node.revisionId === candidate.revisionId)),
+        { revisionId: mergedHead,
+          parentRevisionIds: [local.head, current.head] }]);
+    },
+  };
+  return withLease(native);
+}
+
+async function divergentService(directory) {
+  const target = path.join(directory, "document.scpefe");
+  const documentId = "71".repeat(16);
+  const journalKey = Buffer.alloc(32, 41);
+  const ancestor = "72".repeat(32);
+  const local = "73".repeat(32);
+  const current = "74".repeat(32);
+  const merged = "75".repeat(32);
+  const ancestorBytes = mergeContainer("base", ancestor,
+    [{ revisionId: ancestor, parentRevisionIds: [] }]);
+  const localBytes = mergeContainer("local branch", local,
+    [{ revisionId: ancestor, parentRevisionIds: [] },
+      { revisionId: local, parentRevisionIds: [ancestor] }]);
+  const currentBytes = mergeContainer("current branch", current,
+    [{ revisionId: ancestor, parentRevisionIds: [] },
+      { revisionId: current, parentRevisionIds: [ancestor] }]);
+  await fs.writeFile(target, currentBytes);
+  const options = { native: mergeNative(documentId, journalKey, merged), fs,
+    publicationCapabilities, profilePath: await writeProfile(directory, "Ada", "Desk") };
+  const service = new DocumentService(options);
+  let record = await service.publications.prepare({ documentId, journalKey, target,
+    base: ancestorBytes, candidate: localBytes, text: "local branch",
+    cursor: { start: 0, end: 0 }, baseRevision: ancestor });
+  record = await service.publications.markDiverged(documentId, journalKey, record);
+  return { service, options, target, documentId, journalKey, ancestor,
+    local, current, merged, record };
+}
+
+test("resolves an overlapping divergence only after markers are removed", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  const opened = await fixture.service.openDocument(fixture.target, "password words");
+  assert.equal(opened.publicationState, "conflict");
+  const draft = await fixture.service.beginDivergenceResolution();
+  assert.equal(draft.ancestorRevision, fixture.ancestor);
+  assert.equal(draft.localRevision, fixture.local);
+  assert.equal(draft.currentRevision, fixture.current);
+  assert.match(draft.content, /^<<<<<<< local/m);
+  await assert.rejects(fixture.service.saveDivergenceResolution(draft.content),
+    /every conflict marker/);
+  assert.deepEqual(await fixture.service.saveDivergenceResolution("resolved text"),
+    { saved: true, content: "resolved text", publicationState: "target-published" });
+  const published = fixture.options.native.openDocument(
+    await fs.readFile(fixture.target), "password words");
+  const mergeNode = published.revisionGraph.find(
+    (node) => node.revisionId === fixture.merged);
+  assert.deepEqual(mergeNode.parentRevisionIds, [fixture.local, fixture.current]);
+});
+
+test("merge drafts survive restart and authenticated journal tampering is rejected", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-restart-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  fixture.service.updateWorkingCopy({ content: "partly resolved",
+    cursor: { start: 5, end: 5 } });
+  await fixture.service.lock("restart");
+  const restarted = new DocumentService(fixture.options);
+  const opened = await restarted.openDocument(fixture.target, "password words");
+  assert.equal(opened.content, "partly resolved");
+  assert.equal(opened.publicationState, "conflict");
+
+  const journalPath = path.join(directory, "work-journals",
+    `${fixture.documentId}.work-journal`);
+  const envelope = JSON.parse(await fs.readFile(journalPath, "utf8"));
+  envelope.ciphertext = `${envelope.ciphertext.slice(0, -2)}AA`;
+  await fs.writeFile(journalPath, JSON.stringify(envelope));
+  await assert.rejects(restarted.journals.read(
+    fixture.documentId, fixture.journalKey));
+  assert.equal(JSON.parse((await fs.readFile(fixture.target)).toString()).content,
+    "current branch");
+});
+
+test("target revalidation prevents a changed head from being overwritten", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-race-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const changed = "76".repeat(32);
+  await fs.writeFile(fixture.target, mergeContainer("newer current", changed,
+    [{ revisionId: fixture.ancestor, parentRevisionIds: [] },
+      { revisionId: changed, parentRevisionIds: [fixture.ancestor] }]));
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.code === "MERGE_TARGET_CHANGED");
+  assert.equal(JSON.parse((await fs.readFile(fixture.target)).toString()).head, changed);
+});
+
+test("a target race after merge revalidation preserves the newer replica", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-publish-race-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const racedHead = "77".repeat(32);
+  const racedBytes = mergeContainer("raced current", racedHead,
+    [{ revisionId: fixture.ancestor, parentRevisionIds: [] },
+      { revisionId: racedHead, parentRevisionIds: [fixture.ancestor] }]);
+  let publicationTargetReads = 0;
+  fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+    if (property !== "readFile") return target[property];
+    return async (file, ...args) => {
+      const bytes = await target.readFile(file, ...args);
+      if (file === fixture.target && ++publicationTargetReads === 1) {
+        await target.writeFile(file, racedBytes);
+      }
+      return bytes;
+    };
+  } });
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.publicationPrepared === true);
+  assert.deepEqual(await fs.readFile(fixture.target), racedBytes);
+  const journal = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  assert.equal(journal.state, "pending-publication");
+  assert.equal(journal.text, "resolved text");
+});

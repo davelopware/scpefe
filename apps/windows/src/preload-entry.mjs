@@ -3,7 +3,7 @@ import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
-  validatePublicationResult, validateRecoveredWork } from "./contracts.mjs";
+  validatePublicationResult, validateRecoveredWork, validateMergeDraft } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
   reconnectPendingPublication: async () => validatePublicationResult(
     await ipcRenderer.invoke("document:reconnect-publication")),
+  beginDivergenceResolution: async () => validateMergeDraft(
+    await ipcRenderer.invoke("document:begin-divergence-resolution")),
+  saveDivergenceResolution: async (content) => validateSaveResult(
+    await ipcRenderer.invoke("document:save-divergence-resolution",
+      canonicalizeDocumentText(content))),
   discardPendingPublication: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:discard-publication")),
   backupDocument: async () => {
