@@ -17,6 +17,14 @@ async function readIfPresent(fs, file) {
 const REPLACEMENT_GUARANTEES = new Set([
   "atomic-replace", "best-effort-replace",
 ]);
+const UNAVAILABLE_CODES = new Set([
+  "ENOENT", "ENOTDIR", "EACCES", "EIO", "ENODEV", "ESTALE", "ETIMEDOUT",
+  "ECONNRESET",
+]);
+
+function targetUnavailable(error) {
+  return UNAVAILABLE_CODES.has(error?.code);
+}
 
 function validateCapabilities(value) {
   if (!value || typeof value !== "object"
@@ -132,9 +140,18 @@ export class PublicationService {
 
   async discard(documentId, journalKey, record) {
     if (!record?.publication) throw new Error("No pending publication is available");
-    const transaction = await readIfPresent(this.fs, record.publication.transactionFile);
+    let transaction;
+    try {
+      transaction = await readIfPresent(this.fs, record.publication.transactionFile);
+    } catch (error) {
+      if (!targetUnavailable(error)) throw error;
+    }
     if (transaction && hash(transaction) === record.publication.candidateHash) {
-      await this.fs.unlink(record.publication.transactionFile);
+      try {
+        await this.fs.unlink(record.publication.transactionFile);
+      } catch (error) {
+        if (!targetUnavailable(error)) throw error;
+      }
     }
     await this.journals.clear(documentId);
   }

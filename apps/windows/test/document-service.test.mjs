@@ -520,6 +520,65 @@ test("restart exposes a pending candidate while its target remains unavailable",
   assert.equal(targetWrites, 1);
 });
 
+test("restart can discard a pending candidate while its provider remains unavailable", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-pending-discard-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  let unavailable = false;
+  let targetWrites = 0;
+  const removableFs = Object.create(fs);
+  removableFs.readFile = async (file, ...args) => {
+    const name = path.basename(String(file));
+    if (unavailable && path.dirname(String(file)) === directory
+        && (name === path.basename(target)
+          || name.startsWith(`.${path.basename(target)}.scpefe-txn-`))) {
+      const error = new Error("provider disconnected"); error.code = "ENODEV"; throw error;
+    }
+    return fs.readFile(file, ...args);
+  };
+  removableFs.unlink = async (file) => {
+    if (unavailable && path.dirname(String(file)) === directory) {
+      const error = new Error("provider disconnected"); error.code = "EIO"; throw error;
+    }
+    return fs.unlink(file);
+  };
+  removableFs.rename = async (source, destination) => {
+    if (destination === target) targetWrites += 1;
+    return fs.rename(source, destination);
+  };
+  const native = {
+    openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+    documentId: "be".repeat(16), baseRevision: "bf".repeat(32),
+    journalKey: Buffer.alloc(32, 35) }),
+    saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+  };
+  const service = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  unavailable = true;
+  await service.saveDocument("discard while disconnected");
+  await service.lock();
+
+  const restarted = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.publicationState, "pending-publication");
+  const discarded = await restarted.discardPendingPublication();
+  assert.equal(discarded.publicationState, "target-published");
+  assert.equal(discarded.content, "base");
+  assert.equal(targetWrites, 0);
+  assert.equal(await restarted.journals.read(
+    "be".repeat(16), Buffer.alloc(32, 35)), null);
+  assert.equal(await fs.readFile(target, "utf8"), "container");
+});
+
 test("replacement and unauthenticated targets become conflicts without target writes", async (t) => {
   for (const replacement of ["other-document", "tampered-container"]) {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-target-replaced-"));
