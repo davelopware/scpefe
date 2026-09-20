@@ -51,9 +51,6 @@ std::vector<std::uint8_t> ManualSave::create(
     const auto unlocked = container::RecoverablePasswordContainer::unlock(
         container_bytes, container_size, password, password_size,
         format::RevisionLimits::defaults());
-    if (unlocked.must_be_changed || (unlocked.permissions & 1u) == 0)
-        throw container::ContainerFailure{container::ContainerError::invalid_argument};
-
     std::array<std::uint8_t, format::revision_id_size> parent_id{};
     std::array<std::uint8_t, format::content_hash_size> content_hash{};
     hash_bytes(parent_id, unlocked.encoded_snapshot_revision.data(),
@@ -62,6 +59,15 @@ std::vector<std::uint8_t> ManualSave::create(
         unlocked.encoded_snapshot_revision.data(),
         unlocked.encoded_snapshot_revision.size(),
         format::RevisionLimits::defaults());
+    const bool identity_only = (unlocked.permissions & 1u) == 0
+        && !unlocked.recovery_slot
+        && parent_revision.data().manually_sealed
+        && parent_revision.data().content == content
+        && unlocked.slot_identity_name == profile_name
+        && unlocked.slot_identity_email == profile_email;
+    if (unlocked.must_be_changed
+        || ((unlocked.permissions & 1u) == 0 && !identity_only))
+        throw container::ContainerFailure{container::ContainerError::invalid_argument};
     hash_bytes(content_hash,
         reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
 
@@ -94,7 +100,7 @@ std::vector<std::uint8_t> ManualSave::create(
         std::move(data), format::RevisionLimits::defaults()).encode();
     return container::RecoverablePasswordContainer::replace_snapshot(
         container_bytes, container_size, password, password_size,
-        encoded.data(), encoded.size());
+        encoded.data(), encoded.size(), identity_only);
 }
 
 } // namespace scpefe::document

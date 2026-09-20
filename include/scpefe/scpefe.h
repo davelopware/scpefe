@@ -137,6 +137,59 @@ typedef struct scpefe_invitation_claim_v1 {
     size_t profile_email_size;
 } scpefe_invitation_claim_v1;
 
+/* Inputs for changing one managed ordinary slot's cooperative permissions. */
+typedef struct scpefe_slot_permissions_update_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *administrator_password;
+    size_t administrator_password_size;
+    const uint8_t *slot_id;
+    size_t slot_id_size;
+    int can_edit;
+    int can_add_passwords;
+    int can_remove_passwords;
+} scpefe_slot_permissions_update_v1;
+
+/* Inputs for removing one managed ordinary password slot. */
+typedef struct scpefe_slot_remove_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *administrator_password;
+    size_t administrator_password_size;
+    const uint8_t *slot_id;
+    size_t slot_id_size;
+} scpefe_slot_remove_v1;
+
+/* Inputs for explicitly reconciling the authenticated ordinary slot identity. */
+typedef struct scpefe_slot_identity_reconcile_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *password;
+    size_t password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+} scpefe_slot_identity_reconcile_v1;
+
+/* Borrowed administrative view of one ordinary invitation slot. */
+typedef struct scpefe_managed_slot_v1 {
+    uint32_t struct_size;
+    const uint8_t *slot_id;
+    size_t slot_id_size;
+    int can_edit;
+    int can_add_passwords;
+    int can_remove_passwords;
+    int must_be_changed;
+    const char *identity_name;
+    size_t identity_name_size;
+    const char *identity_email;
+    size_t identity_email_size;
+} scpefe_managed_slot_v1;
+
 /* Borrowed authenticated details of the encrypted advisory editing lease. */
 typedef struct scpefe_editing_lease_v1 {
     uint32_t struct_size;
@@ -418,6 +471,24 @@ SCPEFE_API scpefe_status scpefe_password_container_claim_invitation(
     uint8_t *output, size_t output_capacity, size_t *output_size
 );
 
+/* Changes one managed slot's permissions without demoting permanent base slots. */
+SCPEFE_API scpefe_status scpefe_password_container_update_slot_permissions(
+    const scpefe_slot_permissions_update_v1 *update,
+    uint8_t *output, size_t output_capacity, size_t *output_size
+);
+
+/* Removes one managed slot; owner and recovery/master slots are never removable. */
+SCPEFE_API scpefe_status scpefe_password_container_remove_slot(
+    const scpefe_slot_remove_v1 *remove,
+    uint8_t *output, size_t output_capacity, size_t *output_size
+);
+
+/* Rebinds the authenticated ordinary slot identity to the supplied profile. */
+SCPEFE_API scpefe_status scpefe_password_container_reconcile_identity(
+    const scpefe_slot_identity_reconcile_v1 *reconcile,
+    uint8_t *output, size_t output_capacity, size_t *output_size
+);
+
 /* Authenticates an owner password and unlocks the encrypted snapshot. */
 SCPEFE_API scpefe_status scpefe_password_container_unlock(
     const uint8_t *container,
@@ -447,6 +518,17 @@ SCPEFE_API scpefe_status scpefe_unlocked_container_view(
 SCPEFE_API scpefe_status scpefe_unlocked_container_slot_access(
     const scpefe_unlocked_container *unlocked,
     scpefe_unlocked_slot_access_v1 *access
+);
+
+/* Returns the number of administratively visible invitation slots. */
+SCPEFE_API scpefe_status scpefe_unlocked_container_managed_slot_count(
+    const scpefe_unlocked_container *unlocked, size_t *slot_count
+);
+
+/* Borrows one administratively visible invitation slot by zero-based index. */
+SCPEFE_API scpefe_status scpefe_unlocked_container_managed_slot(
+    const scpefe_unlocked_container *unlocked, size_t index,
+    scpefe_managed_slot_v1 *slot
 );
 
 /* Borrows authenticated lease state until the unlocked owner is destroyed. */

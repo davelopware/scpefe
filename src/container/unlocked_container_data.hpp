@@ -19,6 +19,15 @@ struct EditingLeaseData {
     bool active{};
 };
 
+/* Authenticated administrative metadata for one ordinary invitation slot. */
+struct ManagedSlotData {
+    std::array<std::uint8_t, 16> slot_id{};
+    std::uint8_t permissions{};
+    bool must_be_changed{};
+    std::string identity_name;
+    std::string identity_email;
+};
+
 /* Authenticated semantic values recovered from one encrypted container. */
 struct UnlockedContainerData {
     /* Creates empty unlocked values. */
@@ -43,6 +52,7 @@ struct UnlockedContainerData {
     std::string slot_identity_name;
     std::string slot_identity_email;
     EditingLeaseData editing_lease;
+    std::vector<ManagedSlotData> managed_slots;
     std::vector<std::uint8_t> encoded_snapshot_revision;
 
 private:

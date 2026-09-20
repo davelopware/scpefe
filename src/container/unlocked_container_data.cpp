@@ -40,6 +40,7 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     slot_identity_name = std::move(other.slot_identity_name);
     slot_identity_email = std::move(other.slot_identity_email);
     editing_lease = std::move(other.editing_lease);
+    managed_slots = std::move(other.managed_slots);
     encoded_snapshot_revision = std::move(other.encoded_snapshot_revision);
     sodium_memzero(other.document_id.data(), other.document_id.size());
     sodium_memzero(other.slot_id.data(), other.slot_id.size());
@@ -73,6 +74,14 @@ void UnlockedContainerData::clear() noexcept
     clear_string(editing_lease.holder_email);
     clear_string(editing_lease.device_name);
     editing_lease.active = false;
+    for (auto &slot : managed_slots) {
+        sodium_memzero(slot.slot_id.data(), slot.slot_id.size());
+        slot.permissions = 0;
+        slot.must_be_changed = false;
+        clear_string(slot.identity_name);
+        clear_string(slot.identity_email);
+    }
+    managed_slots.clear();
     if (!encoded_snapshot_revision.empty()) {
         sodium_memzero(encoded_snapshot_revision.data(),
             encoded_snapshot_revision.size());

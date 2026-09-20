@@ -40,14 +40,15 @@ public:
         const format::RevisionLimits &limits
     );
 
-    /* Re-encrypts a version-3 head while preserving the document and password slots. */
+    /* Re-encrypts a version-3 head after an edit or validated identity-only update. */
     static std::vector<std::uint8_t> replace_snapshot(
         const std::uint8_t *container,
         std::size_t container_size,
         const std::uint8_t *password,
         std::size_t password_size,
         const std::uint8_t *encoded_snapshot_revision,
-        std::size_t encoded_snapshot_revision_size
+        std::size_t encoded_snapshot_revision_size,
+        bool allow_identity_only = false
     );
 
     /* Re-wraps the slot selected by its current password with a strong new password. */
@@ -73,6 +74,30 @@ public:
         const std::uint8_t *container, std::size_t container_size,
         const std::uint8_t *temporary_password, std::size_t temporary_password_size,
         const std::uint8_t *new_password, std::size_t new_password_size,
+        const std::string &profile_name, const std::string &profile_email
+    );
+
+    /* Changes a managed ordinary slot's cooperative permissions. */
+    static std::vector<std::uint8_t> update_slot_permissions(
+        const std::uint8_t *container, std::size_t container_size,
+        const std::uint8_t *administrator_password,
+        std::size_t administrator_password_size,
+        const std::array<std::uint8_t, 16> &slot_id,
+        std::uint8_t permissions
+    );
+
+    /* Removes a managed ordinary slot while retaining permanent base slots. */
+    static std::vector<std::uint8_t> remove_slot(
+        const std::uint8_t *container, std::size_t container_size,
+        const std::uint8_t *administrator_password,
+        std::size_t administrator_password_size,
+        const std::array<std::uint8_t, 16> &slot_id
+    );
+
+    /* Rebinds the authenticated ordinary slot to an explicitly chosen profile. */
+    static std::vector<std::uint8_t> reconcile_identity(
+        const std::uint8_t *container, std::size_t container_size,
+        const std::uint8_t *password, std::size_t password_size,
         const std::string &profile_name, const std::string &profile_email
     );
 

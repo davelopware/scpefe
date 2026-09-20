@@ -13,12 +13,18 @@ type HeadMismatch = { kind: "rollback" | "divergence" | "replacement" | "witness
 type PublicationState = "target-published" | "pending-publication" | "conflict";
 type SaveState = "unsaved" | "provisional" | PublicationState;
 type ClientSettings = { regularSaveEnabled: boolean; regularSaveIntervalMs: number };
+type ProfileMismatch = { slotName: string; slotEmail: string;
+  profileName: string; profileEmail: string; editingBlocked: true };
+type ManagedSlot = { slotId: string; identityName: string; identityEmail: string;
+  canEdit: boolean; canAddPasswords: boolean; canRemovePasswords: boolean;
+  mustBeChanged: boolean };
 type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
-  canAddPasswords?: boolean; invitationRequired?: false;
-  headMismatch?: HeadMismatch; provisional?: true };
+  canAddPasswords?: boolean; canRemovePasswords?: boolean; invitationRequired?: false;
+  headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
+  managedSlots?: ManagedSlot[]; provisional?: true };
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true };
 
 function isDocumentOpened(value: Opened | null): value is DocumentOpened {
@@ -45,6 +51,9 @@ declare global { interface Window { scpefe: {
   backupDocument(): Promise<{ backedUp: true } | null>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
   claimInvitation(password: string): Promise<DocumentOpened>;
+  reconcileIdentity(): Promise<DocumentOpened>;
+  updateSlotPermissions(request: object): Promise<DocumentOpened>;
+  removeSlot(slotId: string): Promise<{ removed: true; warning: string }>;
   exportPlaintext(request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: true } | null>;
   updateWorkingCopy(value: { content: string; cursor: Cursor }): Promise<object>;
@@ -199,6 +208,34 @@ function App() {
       });
       setMessage(`Temporary invitation passphrase (shown once): ${result.temporaryPassword}`);
       event.currentTarget.reset();
+    } catch (error) { showError(error); }
+  }
+
+  async function reconcileIdentity() {
+    try {
+      const result = await window.scpefe.reconcileIdentity();
+      setOpened(result);
+      setMessage("Password-slot identity reconciled through a sealed publication.");
+    } catch (error) { showError(error); }
+  }
+
+  async function updateManagedSlot(slot: ManagedSlot, canEdit: boolean,
+    canAddPasswords: boolean, canRemovePasswords: boolean) {
+    try {
+      const result = await window.scpefe.updateSlotPermissions({ slotId: slot.slotId,
+        canEdit, canAddPasswords, canRemovePasswords });
+      setOpened(result);
+      setMessage("Slot permissions published.");
+    } catch (error) { showError(error); }
+  }
+
+  async function removeManagedSlot(slot: ManagedSlot) {
+    try {
+      const result = await window.scpefe.removeSlot(slot.slotId);
+      setOpened((current) => isDocumentOpened(current) ? { ...current,
+        managedSlots: current.managedSlots?.filter(
+          (candidate) => candidate.slotId !== slot.slotId) } : current);
+      setMessage(result.warning);
     } catch (error) { showError(error); }
   }
 
@@ -377,6 +414,7 @@ function App() {
   }
 
   if (opened?.invitationRequired) return <main><h1>Claim invitation</h1><p>Choose a private replacement password to claim this invitation with your configured identity.</p><form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password" minLength={12} required /></label><button>Replace password and claim identity</button></form><button onClick={lock}>Cancel and lock</button><p role="status">{message}</p></main>;
+  if (opened?.profileMismatch) return <main><h1>Profile mismatch</h1><div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p><p>The document remains available read-only. Editing is blocked until you explicitly reconcile the slot identity.</p><button onClick={reconcileIdentity}>Reconcile identity and publish</button></div><textarea aria-label="Document text" value={workingText} readOnly /><button onClick={lock}>Lock now</button><p role="status">{message}</p></main>;
   if (!profile) return <main><h1>Set up this client</h1><p>Name, email, and device name are required before creating a document.</p><form onSubmit={saveProfile}><label>Name<input name="name" required /></label><label>Email<input name="email" type="email" required /></label><label>Device name<input name="deviceName" required /></label><button>Save local profile</button></form><p role="status">{message}</p></main>;
   return <main><h1>SCPEFE</h1><p>{profile.name} · {profile.email} · {profile.deviceName}</p><section><h2>Client settings</h2><form onSubmit={saveClientSettings}><label className="check"><input name="regularSaveEnabled" type="checkbox" defaultChecked={clientSettings.regularSaveEnabled} /> Enable regular provisional saves</label><label>Interval (seconds)<input name="regularSaveIntervalSeconds" type="number" min="10" max="86400" defaultValue={clientSettings.regularSaveIntervalMs / 1000} required /></label><small>Regular saves update the target but remain unsaved until you manually save.</small><button>Save client settings</button></form></section><section><h2>Create</h2><p className="warning">There is no account reset: without a valid owner or recovery password, the document is permanently irrecoverable.</p><form onSubmit={create}><label>Initial text<textarea name="content" /></label><label>Owner password<input name="ownerPassword" type="password" minLength={12} required /></label><label>Independent recovery password (strongly recommended)<input name="recoveryPassword" type="password" minLength={12} /></label><small>Store the recovery password safely offline and separately from the owner password and document.</small><label className="check"><input name="understandsIrrecoverable" type="checkbox" required /> I understand that lost passwords cannot be recovered.</label><label className="check"><input name="storedRecoverySeparately" type="checkbox" /> I will store the recovery password independently.</label><button>Create encrypted document…</button></form></section><section><h2>Open document</h2><form onSubmit={open}><label>Password<input name="password" type="password" required /></label><button>Choose document…</button></form>{opened && <><p className="mode">{opened.readOnly ? "Read-only mode" : "Edit mode"} · {saveState === "unsaved" ? "Unsaved edits" : saveState === "provisional" ? "Provisionally saved · still unsaved" : saveState === "pending-publication" ? "Manual save pending publication" : saveState === "conflict" ? "Divergence needs resolution" : "Published to target"}</p>{opened.headMismatch && <div className="warning" role="alert"><strong>{opened.headMismatch.title}</strong><p>{opened.headMismatch.explanation}</p><button onClick={acceptHeadMismatch}>Accept current authenticated head</button></div>}{opened.recovery && <div className="warning" role="alert"><p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p><button disabled={!opened.canEdit} onClick={restoreRecovery}>Restore unsaved work</button><button onClick={discardRecovery}>Discard recovered work</button></div>}{(opened.publicationState === "pending-publication" || opened.publicationState === "conflict") && <div className="warning" role="alert"><p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p><button onClick={reconnectPublication}>Retry publication</button><button onClick={discardPublication}>Discard pending save</button></div>}<div className="toolbar" aria-label="Editing tools"><button disabled={opened.readOnly || historyIndex === 0} onClick={() => moveHistory(-1)}>Undo</button><button disabled={opened.readOnly || historyIndex === history.length - 1} onClick={() => moveHistory(1)}>Redo</button></div><textarea ref={editor} aria-label="Document text" value={workingText} readOnly={opened.readOnly} onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value, { start: event.target.selectionStart, end: event.target.selectionEnd })} /><fieldset><legend>Find and replace</legend><label>Find<input ref={findInput} value={findText} onChange={(event) => setFindText(event.target.value)} /></label><label>Replace with<input value={replaceText} onChange={(event) => setReplaceText(event.target.value)} /></label><div className="toolbar"><button onClick={findNext}>Find next</button><button disabled={opened.readOnly} onClick={replaceSelection}>Replace</button><button disabled={opened.readOnly} onClick={replaceAll}>Replace all</button></div></fieldset>{opened.readOnly ? <button disabled={!opened.canEdit || opened.publicationState !== "target-published"} onClick={enterEditMode}>Enter edit mode</button> : <button onClick={save}>Save</button>}{!opened.readOnly && opened.canAddPasswords && <form onSubmit={createInvitation}><h3>Invite another person</h3><label>Temporary label<input name="temporaryLabel" required /></label><label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password" /></label><label className="check"><input name="canEdit" type="checkbox" /> May edit</label><button>Create invitation</button></form>}<button onClick={backup}>Back up…</button><button onClick={lock}>Lock now</button><fieldset><legend>Export plaintext</legend><p className="warning"><strong>Not password protected:</strong> the exported text may persist in backups or storage history.</p><label>Line endings<select value={lineEndings} onChange={(event) => setLineEndings(event.target.value as "lf" | "native")}><option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label><button onClick={exportPlaintext}>Export current text…</button></fieldset></>}</section><p role="status">{message}</p></main>;
 }

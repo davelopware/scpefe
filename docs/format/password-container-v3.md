@@ -54,7 +54,7 @@ the block and expose an inactive lease with the default duration. Lease-only
 updates re-encrypt this payload with a fresh nonce and preserve the exact
 revision bytes, so they never create history revisions.
 
-Invitation-capable writers may place an `SCPINV02` extension between the fixed
+Invitation-capable readers accept the earlier `SCPINV02` extension between the fixed
 owner/recovery wrappers and encrypted snapshot. It contains a little-endian
 32-bit invitation count followed by independently salted and nonced invitation
 records. Each record carries a 16-octet salt, 24-octet nonce, 32-bit ciphertext
@@ -68,3 +68,17 @@ and one authenticates the current encrypted snapshot. Adding, claiming, or
 rewrapping an invitation refreshes the snapshot nonce and both authenticators.
 This binds every accepted record to the current container state, so a previously
 valid temporary-password record cannot be replayed after it has been claimed.
+
+Current writers use `SCPINV03`. Each password-encrypted record is followed by a
+24-octet nonce, a 32-bit ciphertext length, and an XChaCha20-Poly1305 ciphertext
+under the purpose-separated slot-state key. That administrative plaintext repeats
+the immutable slot ID, permissions, `mustBeChanged` flag, display name, and email,
+but never contains the document key. This allows a full administrative slot to
+list, update, or remove ordinary invitation slots without knowing their passwords,
+while keeping identity and policy metadata encrypted. The keyed state authenticator
+covers both ciphertexts. A managed permission or identity update re-randomizes the
+administrative ciphertext and snapshot and refreshes both authenticators. Removing
+a record rebuilds the extension; removing its final record removes the extension.
+Permanent owner and recovery/master wrappers are outside this extension and cannot
+be demoted or removed. `SCPINV02` records remain unlockable and rewrappable but are
+not administrable because they contain no document-key-accessible directory.

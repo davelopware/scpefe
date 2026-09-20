@@ -45,3 +45,29 @@ const saved = native.saveDocument(leased, replacement, { name: "Grace Hopper",
   email: "grace@example.test", deviceName: "Grace PC", content: "claimed edit",
   timestampMs: 3 });
 assert.equal(native.openDocument(saved, replacement).content, "claimed edit");
+const managed = native.openDocument(saved, owner).managedSlots;
+assert.equal(managed.length, 1);
+assert.equal(managed[0].identityName, "Grace Hopper");
+assert.throws(() => native.updateSlotPermissions(saved, owner, {
+  slotId: managed[0].slotId, canEdit: false, canAddPasswords: true,
+  canRemovePasswords: false,
+}));
+const viewOnly = native.updateSlotPermissions(saved, owner, {
+  slotId: managed[0].slotId, canEdit: false, canAddPasswords: false,
+  canRemovePasswords: false,
+});
+assert.equal(native.openDocument(viewOnly, replacement).canEdit, false);
+const reconciled = native.reconcileIdentity(viewOnly, replacement, {
+  name: "Rear Admiral Grace Hopper", email: "hopper@example.test",
+});
+assert.equal(native.openDocument(reconciled, replacement).slotIdentityName,
+  "Rear Admiral Grace Hopper");
+const identityRevision = native.saveDocument(reconciled, replacement, {
+  name: "Rear Admiral Grace Hopper", email: "hopper@example.test",
+  deviceName: "Grace PC", content: "claimed edit", timestampMs: 4,
+});
+assert.equal(native.openDocument(identityRevision, replacement).canEdit, false);
+assert.equal(native.openDocument(identityRevision, recovery).recoverySlot, true);
+const removed = native.removeSlot(identityRevision, owner, managed[0].slotId);
+assert.throws(() => native.openDocument(removed, replacement));
+assert.equal(native.openDocument(removed, owner).canRemovePasswords, true);

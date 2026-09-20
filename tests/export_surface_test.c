@@ -58,6 +58,9 @@ int main(int argc, char **argv)
         "scpefe_password_container_change_password",
         "scpefe_password_container_add_invitation",
         "scpefe_password_container_claim_invitation",
+        "scpefe_password_container_update_slot_permissions",
+        "scpefe_password_container_remove_slot",
+        "scpefe_password_container_reconcile_identity",
         "scpefe_password_container_create",
         "scpefe_password_container_unlock",
         "scpefe_password_container_unlock_with_limits",
@@ -67,6 +70,8 @@ int main(int argc, char **argv)
         "scpefe_snapshot_revision_encode",
         "scpefe_unlocked_container_destroy",
         "scpefe_unlocked_container_slot_access",
+        "scpefe_unlocked_container_managed_slot_count",
+        "scpefe_unlocked_container_managed_slot",
         "scpefe_unlocked_container_view",
     };
     static const char *internal[] = {

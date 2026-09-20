@@ -60,7 +60,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
     "discardPendingPublication", "backupDocument", "createInvitation",
-    "claimInvitation", "exportPlaintext", "updateWorkingCopy", "activity",
+    "claimInvitation", "reconcileIdentity", "updateSlotPermissions", "removeSlot",
+    "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
     "onJournalWarning", "onRegularSave",
   ]);

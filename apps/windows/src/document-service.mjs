@@ -247,17 +247,27 @@ export class DocumentService {
     }
     const targetOpened = nativeOpened.opened;
     const { headMismatch } = await this.#observeHead(target, nativeOpened);
+    const profile = await this.loadProfile();
+    const slotIdentityPresent = targetOpened.slotIdentityName !== undefined
+      && targetOpened.slotIdentityEmail !== undefined;
+    const profileMismatch = !targetOpened.recoverySlot && profile && slotIdentityPresent
+      && (targetOpened.slotIdentityName !== profile.name
+        || targetOpened.slotIdentityEmail !== profile.email)
+      ? Object.freeze({ slotName: targetOpened.slotIdentityName,
+        slotEmail: targetOpened.slotIdentityEmail, profileName: profile.name,
+        profileEmail: profile.email, editingBlocked: true }) : null;
     const slotCanEdit = nativeOpened.opened.invitationRequired
       ? false : nativeOpened.opened.canEdit;
     const opened = nativeOpened.opened.invitationRequired
       ? nativeOpened.opened
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-        canEdit: headMismatch ? false : slotCanEdit,
+        canEdit: headMismatch || profileMismatch ? false : slotCanEdit,
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
         ...(headMismatch ? { headMismatch } : {}),
+        ...(profileMismatch ? { profileMismatch } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
@@ -266,7 +276,7 @@ export class DocumentService {
     this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
-      slotCanEdit, headMismatch,
+      slotCanEdit, headMismatch, profileMismatch,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
@@ -287,6 +297,9 @@ export class DocumentService {
     }
     if (this.active.headMismatch) {
       throw new Error("Accept or resolve the head mismatch before editing");
+    }
+    if (this.active.profileMismatch) {
+      throw new Error("Reconcile the password-slot identity before editing");
     }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
@@ -315,6 +328,7 @@ export class DocumentService {
       canRemovePasswords: request.canRemovePasswords === true };
     if (!input.temporaryLabel) throw new TypeError("temporary label is required");
     let reopened;
+    let published;
     await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
       const inspected = this.#validateNativeOpened(
@@ -329,10 +343,14 @@ export class DocumentService {
         journalKey: active.journalKey, target: active.target, base: current, candidate,
         text: active.opened.content, cursor: { start: 0, end: 0 },
         baseRevision: active.baseRevision });
+      published = await this.fs.readFile(active.target);
       reopened = this.#validateNativeOpened(this.native.openDocument(
-        await this.fs.readFile(active.target), active.password));
+        published, active.password));
     });
+    active.journalKey.fill(0);
     active.opened = reopened.opened;
+    active.baseContainer = Buffer.from(published);
+    active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     return Object.freeze({ created: true, temporaryPassword });
   }
@@ -363,6 +381,134 @@ export class DocumentService {
     active.password = replacement;
     active.opened = reopened.opened;
     active.journalKey.fill(0);
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    return active.opened;
+  }
+
+  async reconcileIdentity() {
+    const active = this.active;
+    if (!active?.profileMismatch) throw new Error("No profile mismatch is available");
+    if (!active.manuallySealed || active.recovery || active.pendingPublication
+        || active.unresolvedJournal) {
+      throw new Error("Resolve or discard document changes before reconciling identity");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    await this.#acquireLease(false);
+    active.editMode = true;
+    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    let published;
+    let reopened;
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        if (!inspected.lease.active || !active.leaseSessionId
+            || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
+            || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+          throw new Error("Editing lease is no longer held by this session");
+        }
+        const managed = inspected.opened.managedSlots?.some(
+          (slot) => slot.slotId === inspected.opened.slotId);
+        const identityCandidate = managed
+          ? this.native.reconcileIdentity(current, active.password, profile) : current;
+        const candidate = this.native.saveDocument(identityCandidate, active.password, {
+          ...profile, content: active.opened.content, timestampMs: Date.now(),
+        });
+        await this.publications.publish({ documentId: active.documentId,
+          journalKey: active.journalKey, target: active.target, base: current, candidate,
+          text: active.opened.content, cursor: { start: 0, end: 0 },
+          baseRevision: active.baseRevision, purpose: "identity-reconciliation" });
+        published = await this.fs.readFile(active.target);
+        reopened = this.#validateNativeOpened(
+          this.native.openDocument(published, active.password));
+        if (reopened.opened.slotIdentityName !== profile.name
+            || reopened.opened.slotIdentityEmail !== profile.email) {
+          throw new Error("Published identity reconciliation was not verified");
+        }
+      });
+      active.journalKey.fill(0);
+      active.opened = reopened.opened;
+      active.documentId = reopened.documentId;
+      active.baseRevision = reopened.baseRevision;
+      active.revisionGraph = reopened.revisionGraph;
+      active.observation = this.#observation(reopened);
+      active.baseContainer = Buffer.from(published);
+      active.journalKey = Buffer.from(reopened.journalKey);
+      reopened.journalKey.fill(0);
+      active.profileMismatch = null;
+      active.slotCanEdit = active.opened.canEdit;
+      active.dirty = false;
+      active.manuallySealed = true;
+      await this.witnesses.observe(active.target, active.observation);
+      await this.exitEditMode();
+      return active.opened;
+    } catch (error) {
+      active.editMode = false;
+      await this.#stopHeartbeat();
+      throw error;
+    }
+  }
+
+  async updateSlotPermissions(request) {
+    const active = this.active;
+    if (!active?.editMode || !active.opened.canAddPasswords
+        || !active.opened.canRemovePasswords) {
+      throw new Error("Enter edit mode with a full administrative slot first");
+    }
+    const slotId = String(request.slotId ?? "");
+    if (!DOCUMENT_ID.test(slotId)) throw new TypeError("slot ID is invalid");
+    const permissions = { slotId, canEdit: request.canEdit === true,
+      canAddPasswords: request.canAddPasswords === true,
+      canRemovePasswords: request.canRemovePasswords === true };
+    if ((permissions.canAddPasswords || permissions.canRemovePasswords)
+        && !permissions.canEdit) {
+      throw new TypeError("password administration implies edit permission");
+    }
+    return this.#publishSlotAdministration((current) =>
+      this.native.updateSlotPermissions(current, active.password, permissions));
+  }
+
+  async removeSlot(slotId) {
+    const active = this.active;
+    if (!active?.editMode || !active.opened.canRemovePasswords) {
+      throw new Error("Enter edit mode with a remove-password slot first");
+    }
+    const targetSlot = String(slotId ?? "");
+    if (!DOCUMENT_ID.test(targetSlot)) throw new TypeError("slot ID is invalid");
+    await this.#publishSlotAdministration((current) =>
+      this.native.removeSlot(current, active.password, targetSlot));
+    return Object.freeze({ removed: true,
+      warning: "Removal blocks this password only in the updated document; it cannot revoke plaintext, keys already obtained, or older replicas." });
+  }
+
+  async #publishSlotAdministration(createCandidate) {
+    const active = this.active;
+    let reopened;
+    let published;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.openDocument(current, active.password));
+      if (!inspected.lease.active || !active.leaseSessionId
+          || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
+          || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+        throw new Error("Editing lease is no longer held by this session");
+      }
+      const candidate = createCandidate(current);
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current, candidate,
+        text: active.opened.content, cursor: { start: 0, end: 0 },
+        baseRevision: active.baseRevision, purpose: "slot-administration" });
+      published = await this.fs.readFile(active.target);
+      reopened = this.#validateNativeOpened(this.native.openDocument(
+        published, active.password));
+    });
+    active.journalKey.fill(0);
+    active.opened = reopened.opened;
+    active.baseContainer = Buffer.from(published);
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     return active.opened;

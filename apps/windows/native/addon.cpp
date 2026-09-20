@@ -354,11 +354,66 @@ napi_value open_document(napi_env env, napi_callback_info info)
             slot_access.can_edit != 0 && !slot_access.must_be_changed);
         set_boolean(env, result, "canAddPasswords",
             slot_access.can_add_passwords != 0 && !slot_access.must_be_changed);
+        set_boolean(env, result, "canRemovePasswords",
+            slot_access.can_remove_passwords != 0 && !slot_access.must_be_changed);
         set_boolean(env, result, "mustBeChanged", slot_access.must_be_changed != 0);
-        set_string(env, result, "slotIdentityName", slot_access.identity_name,
-            slot_access.identity_name_size);
-        set_string(env, result, "slotIdentityEmail", slot_access.identity_email,
-            slot_access.identity_email_size);
+        set_boolean(env, result, "recoverySlot", slot_access.recovery_slot != 0);
+        const std::string slot_id = hexadecimal(
+            slot_access.slot_id, slot_access.slot_id_size);
+        set_string(env, result, "slotId", slot_id.data(), slot_id.size());
+        const bool revision_matches_slot = view.slot_id_size == slot_access.slot_id_size
+            && std::equal(view.slot_id, view.slot_id + view.slot_id_size,
+                slot_access.slot_id);
+        const char *identity_name = slot_access.identity_name_size != 0
+            ? slot_access.identity_name
+            : (revision_matches_slot ? view.slot_identity_name : "");
+        const std::size_t identity_name_size = slot_access.identity_name_size != 0
+            ? slot_access.identity_name_size
+            : (revision_matches_slot ? view.slot_identity_name_size : 0);
+        const char *identity_email = slot_access.identity_email_size != 0
+            ? slot_access.identity_email
+            : (revision_matches_slot ? view.slot_identity_email : "");
+        const std::size_t identity_email_size = slot_access.identity_email_size != 0
+            ? slot_access.identity_email_size
+            : (revision_matches_slot ? view.slot_identity_email_size : 0);
+        set_string(env, result, "slotIdentityName", identity_name,
+            identity_name_size);
+        set_string(env, result, "slotIdentityEmail", identity_email,
+            identity_email_size);
+        std::size_t managed_count = 0;
+        status = scpefe_unlocked_container_managed_slot_count(
+            unlocked, &managed_count);
+        if (status != SCPEFE_STATUS_OK) {
+            throw_status(env, status);
+            return nullptr;
+        }
+        napi_value managed_slots;
+        check(env, napi_create_array_with_length(env, managed_count, &managed_slots));
+        for (std::size_t index = 0; index < managed_count; ++index) {
+            scpefe_managed_slot_v1 managed{};
+            managed.struct_size = sizeof(managed);
+            status = scpefe_unlocked_container_managed_slot(
+                unlocked, index, &managed);
+            if (status != SCPEFE_STATUS_OK) {
+                throw_status(env, status);
+                return nullptr;
+            }
+            napi_value item;
+            check(env, napi_create_object(env, &item));
+            const std::string managed_id = hexadecimal(
+                managed.slot_id, managed.slot_id_size);
+            set_string(env, item, "slotId", managed_id.data(), managed_id.size());
+            set_boolean(env, item, "canEdit", managed.can_edit != 0);
+            set_boolean(env, item, "canAddPasswords", managed.can_add_passwords != 0);
+            set_boolean(env, item, "canRemovePasswords", managed.can_remove_passwords != 0);
+            set_boolean(env, item, "mustBeChanged", managed.must_be_changed != 0);
+            set_string(env, item, "identityName", managed.identity_name,
+                managed.identity_name_size);
+            set_string(env, item, "identityEmail", managed.identity_email,
+                managed.identity_email_size);
+            check(env, napi_set_element(env, managed_slots, index, item));
+        }
+        check(env, napi_set_named_property(env, result, "managedSlots", managed_slots));
         napi_value lease;
         check(env, napi_create_object(env, &lease));
         set_boolean(env, lease, "active", editing_lease.active != 0);
@@ -434,6 +489,23 @@ std::array<std::uint8_t, SCPEFE_LEASE_SESSION_ID_SIZE> parse_session_id(
     };
     for (std::size_t i = 0; i < result.size(); ++i)
         result[i] = static_cast<std::uint8_t>(digit(hex[i * 2]) * 16 + digit(hex[i * 2 + 1]));
+    return result;
+}
+
+std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> parse_slot_id(
+    const std::string &hex)
+{
+    if (hex.size() != SCPEFE_SLOT_ID_SIZE * 2)
+        throw std::runtime_error("slot ID must contain 32 hex characters");
+    std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> result{};
+    auto digit = [](char value) -> std::uint8_t {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        throw std::runtime_error("slot ID must be lowercase hexadecimal");
+    };
+    for (std::size_t i = 0; i < result.size(); ++i)
+        result[i] = static_cast<std::uint8_t>(digit(hex[i * 2]) * 16
+            + digit(hex[i * 2 + 1]));
     return result;
 }
 
@@ -686,6 +758,73 @@ napi_value claim_invitation(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value update_slot_permissions(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3; napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3) throw std::runtime_error(
+            "updateSlotPermissions expects a Buffer, administrator password, and request");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes administrator{env, args[1]};
+        const auto slot_id = parse_slot_id(string_value(
+            env, property(env, args[2], "slotId")));
+        const scpefe_slot_permissions_update_v1 request{
+            sizeof(request), container, container_size,
+            administrator.data(), administrator.size(), slot_id.data(), slot_id.size(),
+            boolean_value(env, property(env, args[2], "canEdit")),
+            boolean_value(env, property(env, args[2], "canAddPasswords")),
+            boolean_value(env, property(env, args[2], "canRemovePasswords"))};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) { return scpefe_password_container_update_slot_permissions(
+                &request, output, capacity, size); });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value remove_slot(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3; napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3) throw std::runtime_error(
+            "removeSlot expects a Buffer, administrator password, and slot ID");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes administrator{env, args[1]};
+        const auto slot_id = parse_slot_id(string_value(env, args[2]));
+        const scpefe_slot_remove_v1 request{sizeof(request), container, container_size,
+            administrator.data(), administrator.size(), slot_id.data(), slot_id.size()};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) { return scpefe_password_container_remove_slot(
+                &request, output, capacity, size); });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value reconcile_identity(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3; napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3) throw std::runtime_error(
+            "reconcileIdentity expects a Buffer, password, and profile");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes password{env, args[1]};
+        const auto name = string_value(env, property(env, args[2], "name"));
+        const auto email = string_value(env, property(env, args[2], "email"));
+        const scpefe_slot_identity_reconcile_v1 request{
+            sizeof(request), container, container_size, password.data(), password.size(),
+            name.data(), name.size(), email.data(), email.size()};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) { return scpefe_password_container_reconcile_identity(
+                &request, output, capacity, size); });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value initialize(napi_env env, napi_value exports)
 {
     napi_property_descriptor methods[] = {
@@ -707,8 +846,14 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"updateSlotPermissions", nullptr, update_slot_permissions, nullptr, nullptr,
+            nullptr, napi_default, nullptr},
+        {"removeSlot", nullptr, remove_slot, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
+        {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 9, methods));
+    check(env, napi_define_properties(env, exports, 12, methods));
     return exports;
 }
 

@@ -93,6 +93,11 @@ app.whenReady().then(async () => {
     service.createInvitation(request));
   ipcMain.handle("document:claim-invitation", (_event, password) =>
     service.claimInvitation(password));
+  ipcMain.handle("document:reconcile-identity", () => service.reconcileIdentity());
+  ipcMain.handle("document:update-slot-permissions", (_event, request) =>
+    service.updateSlotPermissions(request));
+  ipcMain.handle("document:remove-slot", (_event, slotId) =>
+    service.removeSlot(slotId));
   ipcMain.handle("document:export-plaintext", async (_event, request) => {
     const warning = await dialog.showMessageBox(window, {
       type: "warning",
