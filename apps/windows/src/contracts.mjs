@@ -34,6 +34,12 @@ function requiredText(value, field, maximum = 512) {
   return normalized;
 }
 
+function canonicalCursorOffset(value, offset) {
+  let prefix = value.slice(0, offset);
+  if (prefix.startsWith("\ufeff")) prefix = prefix.slice(1);
+  return prefix.replace(/\r\n?/g, "\n").length;
+}
+
 export function validateProfile(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("profile must be an object");
@@ -81,8 +87,27 @@ export function validateOpenedDocument(value) {
       || typeof value.content !== "string" || typeof value.canEdit !== "boolean") {
     throw new TypeError("native bridge returned an invalid document");
   }
+  let recovery;
+  if (value.recovery !== undefined) {
+    if (!value.recovery || typeof value.recovery !== "object"
+        || typeof value.recovery.content !== "string"
+        || value.recovery.state !== "unsaved"
+        || !Number.isSafeInteger(value.recovery.updateTime)
+        || !value.recovery.cursor
+        || !Number.isSafeInteger(value.recovery.cursor.start)
+        || value.recovery.cursor.start < 0
+        || !Number.isSafeInteger(value.recovery.cursor.end)
+        || value.recovery.cursor.end < value.recovery.cursor.start
+        || value.recovery.cursor.end > value.recovery.content.length) {
+      throw new TypeError("host returned invalid recovered work");
+    }
+    recovery = Object.freeze({ content: value.recovery.content, state: "unsaved",
+      updateTime: value.recovery.updateTime,
+      cursor: Object.freeze({ start: value.recovery.cursor.start,
+        end: value.recovery.cursor.end }) });
+  }
   return Object.freeze({ content: value.content, readOnly: true,
-    canEdit: value.canEdit });
+    canEdit: value.canEdit, ...(recovery ? { recovery } : {}) });
 }
 
 export function validateEditMode(value) {
@@ -91,6 +116,19 @@ export function validateEditMode(value) {
     throw new TypeError("host did not enter edit mode");
   }
   return Object.freeze({ content: value.content, readOnly: false, canEdit: true });
+}
+
+export function validateRecoveredWork(value) {
+  if (!value || typeof value !== "object" || value.readOnly !== false
+      || value.canEdit !== true || value.recoveredUnsaved !== true
+      || typeof value.content !== "string" || !value.cursor
+      || !Number.isSafeInteger(value.cursor.start)
+      || !Number.isSafeInteger(value.cursor.end)) {
+    throw new TypeError("host did not restore recovered work");
+  }
+  return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
+    recoveredUnsaved: true, cursor: Object.freeze({ start: value.cursor.start,
+      end: value.cursor.end }) });
 }
 
 export function validateSaveResult(value) {
@@ -121,6 +159,36 @@ export function validatePlaintextExportResult(value) {
     throw new TypeError("host returned an invalid plaintext export result");
   }
   return Object.freeze({ exported: true });
+}
+
+export function validateWorkingCopy(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("working copy must be an object");
+  }
+  if (typeof value.content !== "string") {
+    throw new TypeError("content must be valid UTF-8 text");
+  }
+  const start = value.cursor?.start;
+  const end = value.cursor?.end;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+      || start < 0 || end < start || end > value.content.length) {
+    throw new TypeError("cursor must be within the working copy");
+  }
+  const content = canonicalizeDocumentText(value.content);
+  return { content, cursor: {
+    start: canonicalCursorOffset(value.content, start),
+    end: canonicalCursorOffset(value.content, end),
+  } };
+}
+
+export function validateLockResult(value) {
+  if (!value || typeof value !== "object" || value.locked !== true
+      || typeof value.journalSaved !== "boolean"
+      || (value.warning !== null && typeof value.warning !== "string")) {
+    throw new TypeError("host returned an invalid lock result");
+  }
+  return Object.freeze({ locked: true, journalSaved: value.journalSaved,
+    warning: value.warning });
 }
 
 export function validateCreationResult(value) {

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult,
   validateOpenedDocument, validatePlaintextExportRequest,
-  validatePlaintextExportResult, validateProfile } from "../src/contracts.mjs";
+  validatePlaintextExportResult, validateProfile,
+  validateWorkingCopy } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
@@ -44,6 +45,12 @@ test("canonicalizes a BOM and common line endings without trimming", () => {
   assert.equal(canonicalizeDocumentText("no final newline\r"), "no final newline\n");
   assert.equal(canonicalizeDocumentText("  whitespace  "), "  whitespace  ");
   assert.throws(() => canonicalizeDocumentText("bad\ud800text"), /valid UTF-8/);
+});
+
+test("canonicalizes working-copy cursor offsets with pasted text", () => {
+  assert.deepEqual(validateWorkingCopy({ content: "\ufeffa\r\nb",
+    cursor: { start: 4, end: 5 } }),
+  { content: "a\nb", cursor: { start: 2, end: 3 } });
 });
 
 test("creation results cannot expose host filesystem paths", () => {

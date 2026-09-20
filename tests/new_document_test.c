@@ -9,7 +9,8 @@
 static int opens_with(
     const uint8_t *container,
     size_t container_size,
-    const char *password
+    const char *password,
+    uint8_t work_journal_key[SCPEFE_WORK_JOURNAL_KEY_SIZE]
 )
 {
     scpefe_unlocked_container *unlocked = NULL;
@@ -24,6 +25,15 @@ static int opens_with(
     container_view.struct_size = sizeof(container_view);
     CHECK(scpefe_unlocked_container_view(unlocked, &container_view)
         == SCPEFE_STATUS_OK);
+    if (work_journal_key != NULL) {
+        size_t key_size = 0;
+        CHECK(scpefe_unlocked_container_work_journal_key(
+            unlocked, NULL, 0, &key_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+        CHECK(key_size == SCPEFE_WORK_JOURNAL_KEY_SIZE);
+        CHECK(scpefe_unlocked_container_work_journal_key(
+            unlocked, work_journal_key, SCPEFE_WORK_JOURNAL_KEY_SIZE, &key_size)
+            == SCPEFE_STATUS_OK);
+    }
     limits.struct_size = sizeof(limits);
     CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
     CHECK(scpefe_snapshot_revision_decode(
@@ -69,6 +79,8 @@ int main(void)
     uint8_t *container = NULL;
     size_t container_size = 0;
     scpefe_unlocked_container *unlocked = NULL;
+    uint8_t owner_journal_key[SCPEFE_WORK_JOURNAL_KEY_SIZE];
+    uint8_t recovery_journal_key[SCPEFE_WORK_JOURNAL_KEY_SIZE];
 
     CHECK(scpefe_new_document_create(&document, NULL, 0, &container_size)
         == SCPEFE_STATUS_BUFFER_TOO_SMALL);
@@ -78,8 +90,10 @@ int main(void)
     CHECK(scpefe_new_document_create(
         &document, container, container_size, &container_size
     ) == SCPEFE_STATUS_OK);
-    CHECK(opens_with(container, container_size, owner) == 0);
-    CHECK(opens_with(container, container_size, recovery) == 0);
+    CHECK(opens_with(container, container_size, owner, owner_journal_key) == 0);
+    CHECK(opens_with(container, container_size, recovery, recovery_journal_key) == 0);
+    CHECK(memcmp(owner_journal_key, recovery_journal_key,
+        sizeof(owner_journal_key)) == 0);
     container[7] = 2; /* Version-2 magic with a version-3 integer is invalid. */
     unlocked = (scpefe_unlocked_container *)(uintptr_t)1;
     CHECK(scpefe_password_container_unlock(
@@ -120,7 +134,7 @@ int main(void)
     CHECK(scpefe_new_document_create(
         &invalid, container, container_size, &container_size
     ) == SCPEFE_STATUS_OK);
-    CHECK(opens_with(container, container_size, owner) == 0);
+    CHECK(opens_with(container, container_size, owner, NULL) == 0);
     free(container);
     return 0;
 }
