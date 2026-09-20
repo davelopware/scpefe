@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { createRequire } from "node:module";
 
 const native = createRequire(import.meta.url)(process.argv[2]);
@@ -45,6 +46,8 @@ const saved = native.saveDocument(leased, replacement, { name: "Grace Hopper",
   email: "grace@example.test", deviceName: "Grace PC", content: "claimed edit",
   timestampMs: 3 });
 assert.equal(native.openDocument(saved, replacement).content, "claimed edit");
+assert.equal(native.openDocument(saved, owner).slotIdentityName, "Ada");
+assert.equal(native.openDocument(saved, owner).slotIdentityEmail, "ada@example.test");
 const managed = native.openDocument(saved, owner).managedSlots;
 assert.equal(managed.length, 1);
 assert.equal(managed[0].identityName, "Grace Hopper");
@@ -71,3 +74,64 @@ assert.equal(native.openDocument(identityRevision, recovery).recoverySlot, true)
 const removed = native.removeSlot(identityRevision, owner, managed[0].slotId);
 assert.throws(() => native.openDocument(removed, replacement));
 assert.equal(native.openDocument(removed, owner).canRemovePasswords, true);
+
+function firstInvitationPasswordRecord(container) {
+  const slotCount = container.readUInt32LE(32);
+  const offset = 160 + slotCount * 65 + 12;
+  const ciphertextSize = container.readUInt32LE(offset + 40);
+  return container.subarray(offset, offset + 44 + ciphertextSize);
+}
+
+const legacyFixture = Buffer.from(fs.readFileSync(new URL(
+  "fixtures/legacy-invitation-v2.hex", import.meta.url), "utf8").trim(), "hex");
+const legacyOpened = native.openDocument(legacyFixture, owner);
+assert.equal(legacyOpened.managedSlots.length, 1);
+assert.equal(legacyOpened.managedSlots[0].slotIdKnown, false);
+assert.equal(legacyOpened.managedSlots[0].permissionsKnown, false);
+assert.equal(legacyOpened.managedSlots[0].identityKnown, false);
+assert.match(legacyOpened.managedSlots[0].identityName, /Legacy invitation 1/);
+const legacyHandle = legacyOpened.managedSlots[0].slotId;
+const legacyWrapper = firstInvitationPasswordRecord(legacyFixture);
+const legacyUpgraded = native.updateSlotPermissions(legacyFixture, owner, {
+  slotId: legacyHandle, canEdit: true, canAddPasswords: false,
+  canRemovePasswords: false,
+});
+assert.equal(legacyUpgraded.includes(Buffer.from("SCPINV03")), true);
+assert.deepEqual(firstInvitationPasswordRecord(legacyUpgraded), legacyWrapper);
+const legacyManaged = native.openDocument(legacyUpgraded, owner).managedSlots[0];
+assert.equal(legacyManaged.slotId, legacyHandle);
+assert.equal(legacyManaged.permissionsKnown, true);
+const legacyClaimed = native.claimInvitation(legacyUpgraded, temporary, {
+  newPassword: replacement, name: "Grace Hopper", email: "grace@example.test",
+});
+const legacyClaimedOpened = native.openDocument(legacyClaimed, replacement);
+assert.equal(legacyClaimedOpened.canEdit, true);
+assert.equal(legacyClaimedOpened.slotIdentityName, "Grace Hopper");
+const legacyReconciled = native.reconcileIdentity(legacyClaimed, replacement, {
+  name: "Rear Admiral Grace Hopper", email: "hopper@example.test",
+});
+assert.equal(native.openDocument(legacyReconciled, replacement).slotIdentityName,
+  "Rear Admiral Grace Hopper");
+const legacyLeased = native.updateLease(legacyReconciled, replacement, {
+  active: true, sessionId: "34".repeat(16), heartbeatCounter: 1,
+  holderUtcMs: 5, durationMs: 600_000, holderName: "Rear Admiral Grace Hopper",
+  holderEmail: "hopper@example.test", deviceName: "Grace PC",
+});
+const legacySaved = native.saveDocument(legacyLeased, replacement, {
+  name: "Rear Admiral Grace Hopper", email: "hopper@example.test",
+  deviceName: "Grace PC", content: "legacy invited edit", timestampMs: 6,
+});
+assert.equal(native.openDocument(legacySaved, owner).slotIdentityName, "Ada");
+assert.equal(native.openDocument(legacySaved, owner).slotIdentityEmail,
+  "ada@example.test");
+const legacyRemoved = native.removeSlot(legacySaved, owner, legacyHandle);
+assert.throws(() => native.openDocument(legacyRemoved, replacement));
+assert.equal(native.openDocument(legacyRemoved, owner).content,
+  "legacy invited edit");
+
+const ownerReconciled = native.reconcileIdentity(saved, owner, {
+  name: "Ada Lovelace", email: "lovelace@example.test",
+});
+assert.equal(native.openDocument(ownerReconciled, owner).slotIdentityName,
+  "Ada Lovelace");
+assert.equal(native.openDocument(ownerReconciled, recovery).recoverySlot, true);

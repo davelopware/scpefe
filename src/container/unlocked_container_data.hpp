@@ -22,8 +22,12 @@ struct EditingLeaseData {
 /* Authenticated administrative metadata for one ordinary invitation slot. */
 struct ManagedSlotData {
     std::array<std::uint8_t, 16> slot_id{};
+    std::array<std::uint8_t, 16> actual_slot_id{};
     std::uint8_t permissions{};
     bool must_be_changed{};
+    bool slot_id_known{true};
+    bool permissions_known{true};
+    bool identity_known{true};
     std::string identity_name;
     std::string identity_email;
 };
@@ -48,6 +52,7 @@ struct UnlockedContainerData {
     std::array<std::uint8_t, 32> work_journal_key{};
     std::uint8_t permissions{};
     bool recovery_slot{};
+    bool owner_slot{};
     bool must_be_changed{};
     std::string slot_identity_name;
     std::string slot_identity_email;

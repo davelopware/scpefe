@@ -348,7 +348,8 @@ export class DocumentService {
         published, active.password));
     });
     active.journalKey.fill(0);
-    active.opened = reopened.opened;
+    active.opened = validateEditMode({ ...reopened.opened,
+      readOnly: false, canEdit: active.opened.canEdit });
     active.baseContainer = Buffer.from(published);
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
@@ -410,10 +411,8 @@ export class DocumentService {
             || inspected.lease.heartbeatCounter !== active.leaseCounter) {
           throw new Error("Editing lease is no longer held by this session");
         }
-        const managed = inspected.opened.managedSlots?.some(
-          (slot) => slot.slotId === inspected.opened.slotId);
-        const identityCandidate = managed
-          ? this.native.reconcileIdentity(current, active.password, profile) : current;
+        const identityCandidate = this.native.reconcileIdentity(
+          current, active.password, profile);
         const candidate = this.native.saveDocument(identityCandidate, active.password, {
           ...profile, content: active.opened.content, timestampMs: Date.now(),
         });
@@ -507,7 +506,8 @@ export class DocumentService {
         published, active.password));
     });
     active.journalKey.fill(0);
-    active.opened = reopened.opened;
+    active.opened = validateEditMode({ ...reopened.opened,
+      readOnly: false, canEdit: active.opened.canEdit });
     active.baseContainer = Buffer.from(published);
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);

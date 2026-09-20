@@ -188,6 +188,9 @@ typedef struct scpefe_managed_slot_v1 {
     size_t identity_name_size;
     const char *identity_email;
     size_t identity_email_size;
+    int slot_id_known;
+    int permissions_known;
+    int identity_known;
 } scpefe_managed_slot_v1;
 
 /* Borrowed authenticated details of the encrypted advisory editing lease. */

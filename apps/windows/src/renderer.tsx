@@ -17,7 +17,8 @@ type ProfileMismatch = { slotName: string; slotEmail: string;
   profileName: string; profileEmail: string; editingBlocked: true };
 type ManagedSlot = { slotId: string; identityName: string; identityEmail: string;
   canEdit: boolean; canAddPasswords: boolean; canRemovePasswords: boolean;
-  mustBeChanged: boolean };
+  mustBeChanged: boolean; slotIdKnown?: boolean; permissionsKnown?: boolean;
+  identityKnown?: boolean };
 type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
@@ -29,6 +30,78 @@ type Opened = DocumentOpened | { readOnly: true; invitationRequired: true };
 
 function isDocumentOpened(value: Opened | null): value is DocumentOpened {
   return value !== null && value.invitationRequired !== true;
+}
+
+function ManagedSlotControls({ slot, canUpdate, canRemove, onUpdate, onRemove }: {
+  slot: ManagedSlot; canUpdate: boolean; canRemove: boolean;
+  onUpdate(slot: ManagedSlot, canEdit: boolean, canAddPasswords: boolean,
+    canRemovePasswords: boolean): Promise<void>;
+  onRemove(slot: ManagedSlot): Promise<void>;
+}) {
+  const [canEdit, setCanEdit] = useState(slot.canEdit);
+  const [canAddPasswords, setCanAddPasswords] = useState(slot.canAddPasswords);
+  const [canRemovePasswords, setCanRemovePasswords] = useState(slot.canRemovePasswords);
+  const [confirmRemoval, setConfirmRemoval] = useState(false);
+  const label = slot.identityKnown === false
+    ? slot.identityName : `${slot.identityName} · ${slot.identityEmail}`;
+  const updateEdit = (enabled: boolean) => {
+    setCanEdit(enabled);
+    if (!enabled) { setCanAddPasswords(false); setCanRemovePasswords(false); }
+  };
+  const updateAdministration = (kind: "add" | "remove", enabled: boolean) => {
+    if (enabled) setCanEdit(true);
+    if (kind === "add") setCanAddPasswords(enabled);
+    else setCanRemovePasswords(enabled);
+  };
+  return <li className="managed-slot"><h4>{label}</h4>
+    {slot.identityKnown === false && <p>Identity is unknown until this legacy slot authenticates and reconciles.</p>}
+    {slot.permissionsKnown === false && <p>Current permissions are unknown. Saving replaces them with the choices below.</p>}
+    {slot.mustBeChanged && <p>Invitation not yet claimed; its temporary password must be replaced.</p>}
+    <form onSubmit={(event) => { event.preventDefault(); void onUpdate(slot,
+      canEdit, canAddPasswords, canRemovePasswords); }}>
+      <fieldset disabled={!canUpdate}><legend>Permissions for {label}</legend>
+        <label className="check"><input type="checkbox" checked={canEdit}
+          onChange={(event) => updateEdit(event.target.checked)} /> May edit</label>
+        <label className="check"><input type="checkbox" checked={canAddPasswords}
+          onChange={(event) => updateAdministration("add", event.target.checked)} /> May add passwords</label>
+        <label className="check"><input type="checkbox" checked={canRemovePasswords}
+          onChange={(event) => updateAdministration("remove", event.target.checked)} /> May remove passwords</label>
+        <small>Password administration always implies edit permission.</small>
+        <button type="submit">Publish permission changes</button>
+      </fieldset>
+    </form>
+    {canRemove && !confirmRemoval && <button type="button"
+      onClick={() => setConfirmRemoval(true)}>Remove this password slot…</button>}
+    {canRemove && confirmRemoval && <div className="warning" role="alert">
+      <p>Removal blocks this password only in the updated document. It cannot revoke plaintext, keys already obtained, or older replicas.</p>
+      <div className="toolbar"><button type="button" onClick={() => { setConfirmRemoval(false);
+        void onRemove(slot); }}>Confirm slot removal</button>
+        <button type="button" onClick={() => setConfirmRemoval(false)}>Cancel</button></div>
+    </div>}
+  </li>;
+}
+
+function SlotAdministration({ opened, onUpdate, onRemove }: {
+  opened: DocumentOpened;
+  onUpdate(slot: ManagedSlot, canEdit: boolean, canAddPasswords: boolean,
+    canRemovePasswords: boolean): Promise<void>;
+  onRemove(slot: ManagedSlot): Promise<void>;
+}) {
+  const slots = opened.managedSlots ?? [];
+  const canUpdate = !opened.readOnly && opened.canAddPasswords === true
+    && opened.canRemovePasswords === true;
+  const canRemove = !opened.readOnly && opened.canRemovePasswords === true;
+  return <aside className="slot-administration" aria-labelledby="slot-administration-heading">
+    <h2 id="slot-administration-heading">Password-slot administration</h2>
+    <p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent and is never listed as an ordinary slot.</p>
+    {opened.readOnly && <p>Enter edit mode to publish permission changes or remove a slot.</p>}
+    <p className="warning">Removing a slot affects only this updated document and does not revoke older copies or information already obtained.</p>
+    {slots.length === 0 ? <p>No ordinary invitation slots exist.</p>
+      : <ul className="managed-slots">{slots.map((slot) =>
+        <ManagedSlotControls key={`${slot.slotId}-${slot.canEdit}-${slot.canAddPasswords}-${slot.canRemovePasswords}`}
+          slot={slot} canUpdate={canUpdate} canRemove={canRemove}
+          onUpdate={onUpdate} onRemove={onRemove} />)}</ul>}
+  </aside>;
 }
 
 type LockResult = { locked: true; journalSaved: boolean; warning: string | null };
@@ -412,6 +485,19 @@ function App() {
       if (result) setMessage("Unprotected plaintext exported.");
     } catch (error) { showError(error); }
   }
+
+  useEffect(() => {
+    const host = document.createElement("div");
+    host.id = "slot-administration-root";
+    const authorized = isDocumentOpened(opened)
+      && (opened.canAddPasswords === true || opened.canRemovePasswords === true);
+    if (!authorized) return;
+    document.body.append(host);
+    const root = createRoot(host);
+    root.render(<SlotAdministration opened={opened}
+      onUpdate={updateManagedSlot} onRemove={removeManagedSlot} />);
+    return () => { root.unmount(); host.remove(); };
+  }, [opened]);
 
   if (opened?.invitationRequired) return <main><h1>Claim invitation</h1><p>Choose a private replacement password to claim this invitation with your configured identity.</p><form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password" minLength={12} required /></label><button>Replace password and claim identity</button></form><button onClick={lock}>Cancel and lock</button><p role="status">{message}</p></main>;
   if (opened?.profileMismatch) return <main><h1>Profile mismatch</h1><div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p><p>The document remains available read-only. Editing is blocked until you explicitly reconcile the slot identity.</p><button onClick={reconcileIdentity}>Reconcile identity and publish</button></div><textarea aria-label="Document text" value={workingText} readOnly /><button onClick={lock}>Lock now</button><p role="status">{message}</p></main>;

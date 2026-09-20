@@ -18,7 +18,8 @@ public:
     static bool recognizes(const std::uint8_t *container, std::size_t size);
 
     /* Returns the version-3 encoded size for a snapshot and selected slot count. */
-    static std::size_t encoded_size(std::size_t snapshot_size, bool has_recovery);
+    static std::size_t encoded_size(std::size_t snapshot_size, bool has_recovery,
+        std::size_t owner_name_size = 0, std::size_t owner_email_size = 0);
 
     /* Creates a version-3 container using a caller-generated owner slot identifier. */
     static std::vector<std::uint8_t> create(

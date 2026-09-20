@@ -700,7 +700,8 @@ scpefe_status scpefe_unlocked_container_managed_slot(
         (value.permissions & 1u) != 0, (value.permissions & 2u) != 0,
         (value.permissions & 4u) != 0, value.must_be_changed,
         value.identity_name.data(), value.identity_name.size(),
-        value.identity_email.data(), value.identity_email.size()};
+        value.identity_email.data(), value.identity_email.size(),
+        value.slot_id_known, value.permissions_known, value.identity_known};
     return SCPEFE_STATUS_OK;
 }
 

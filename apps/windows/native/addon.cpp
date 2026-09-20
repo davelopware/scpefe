@@ -407,6 +407,9 @@ napi_value open_document(napi_env env, napi_callback_info info)
             set_boolean(env, item, "canAddPasswords", managed.can_add_passwords != 0);
             set_boolean(env, item, "canRemovePasswords", managed.can_remove_passwords != 0);
             set_boolean(env, item, "mustBeChanged", managed.must_be_changed != 0);
+            set_boolean(env, item, "slotIdKnown", managed.slot_id_known != 0);
+            set_boolean(env, item, "permissionsKnown", managed.permissions_known != 0);
+            set_boolean(env, item, "identityKnown", managed.identity_known != 0);
             set_string(env, item, "identityName", managed.identity_name,
                 managed.identity_name_size);
             set_string(env, item, "identityEmail", managed.identity_email,

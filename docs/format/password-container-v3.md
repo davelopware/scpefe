@@ -72,13 +72,30 @@ valid temporary-password record cannot be replayed after it has been claimed.
 Current writers use `SCPINV03`. Each password-encrypted record is followed by a
 24-octet nonce, a 32-bit ciphertext length, and an XChaCha20-Poly1305 ciphertext
 under the purpose-separated slot-state key. That administrative plaintext repeats
-the immutable slot ID, permissions, `mustBeChanged` flag, display name, and email,
-but never contains the document key. This allows a full administrative slot to
-list, update, or remove ordinary invitation slots without knowing their passwords,
-while keeping identity and policy metadata encrypted. The keyed state authenticator
-covers both ciphertexts. A managed permission or identity update re-randomizes the
+an opaque management ID, the immutable password-slot ID when known, permissions,
+`mustBeChanged` flag, display name, email, and known-value flags, but never contains
+the document key. This allows a full administrative slot to list, update, or remove
+ordinary invitation slots without knowing their passwords, while keeping identity
+and policy metadata encrypted. The keyed state authenticator covers both
+ciphertexts. A managed permission or identity update re-randomizes the
 administrative ciphertext and snapshot and refreshes both authenticators. Removing
 a record rebuilds the extension; removing its final record removes the extension.
 Permanent owner and recovery/master wrappers are outside this extension and cannot
-be demoted or removed. `SCPINV02` records remain unlockable and rewrappable but are
-not administrable because they contain no document-key-accessible directory.
+be demoted or removed.
+
+Readers enumerate `SCPINV02` records by deriving a stable opaque management ID from
+the authenticated record bytes and slot-state key. Values that were available only
+inside the unknown password wrapper are explicitly marked unknown. The first
+administrative update or identity reconciliation rebuilds the extension as
+`SCPINV03` while copying each original password salt, nonce, length, and ciphertext
+byte-for-byte. Consequently migration neither needs nor changes an invited person's
+password. Authentication by that person can later populate the immutable slot ID
+and identity without changing the management ID.
+
+Current writers also place an authenticated `SCPOWN01` owner-identity block after
+the lease and before the revision. It binds the permanent owner slot ID to its name
+and email independently of whichever slot authored the current revision. New
+documents write it at creation. An owner-authenticated operation upgrades an older
+payload when the owner-authored revision still supplies the identity, and explicit
+owner reconciliation can establish or replace it. Recovery use never treats an
+identity difference as a profile mismatch.

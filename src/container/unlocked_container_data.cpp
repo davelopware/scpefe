@@ -36,6 +36,7 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     work_journal_key = other.work_journal_key;
     permissions = other.permissions;
     recovery_slot = other.recovery_slot;
+    owner_slot = other.owner_slot;
     must_be_changed = other.must_be_changed;
     slot_identity_name = std::move(other.slot_identity_name);
     slot_identity_email = std::move(other.slot_identity_email);
@@ -47,6 +48,7 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     sodium_memzero(other.work_journal_key.data(), other.work_journal_key.size());
     other.permissions = 0;
     other.recovery_slot = false;
+    other.owner_slot = false;
     other.must_be_changed = false;
     return *this;
 }
@@ -63,6 +65,7 @@ void UnlockedContainerData::clear() noexcept
     sodium_memzero(work_journal_key.data(), work_journal_key.size());
     permissions = 0;
     recovery_slot = false;
+    owner_slot = false;
     must_be_changed = false;
     clear_string(slot_identity_name);
     clear_string(slot_identity_email);
@@ -76,8 +79,12 @@ void UnlockedContainerData::clear() noexcept
     editing_lease.active = false;
     for (auto &slot : managed_slots) {
         sodium_memzero(slot.slot_id.data(), slot.slot_id.size());
+        sodium_memzero(slot.actual_slot_id.data(), slot.actual_slot_id.size());
         slot.permissions = 0;
         slot.must_be_changed = false;
+        slot.slot_id_known = false;
+        slot.permissions_known = false;
+        slot.identity_known = false;
         clear_string(slot.identity_name);
         clear_string(slot.identity_email);
     }

@@ -166,7 +166,14 @@ test("profile mismatch stays read-only until lease-backed reconciliation", async
         managedSlots: [], documentId: "31".repeat(16),
         baseRevision: "42".repeat(32), journalKey: Buffer.alloc(32, 5) };
     },
-    saveDocument(_bytes, _password, input) {
+    reconcileIdentity(bytes, _password, input) {
+      assert.equal(bytes.toString(), "base");
+      assert.equal(input.name, "Grace");
+      assert.equal(input.email, "grace@example.test");
+      return Buffer.from("identity-reconciled");
+    },
+    saveDocument(bytes, _password, input) {
+      assert.equal(bytes.toString(), "identity-reconciled");
       assert.equal(input.name, "Grace");
       assert.equal(input.email, "grace@example.test");
       return Buffer.from("reconciled");

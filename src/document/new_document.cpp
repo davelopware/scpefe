@@ -70,7 +70,8 @@ std::size_t NewDocument::encoded_size(
     const std::array<std::uint8_t, format::content_hash_size> hash{};
     return container::RecoverablePasswordContainer::encoded_size(
         make_revision(profile_name, profile_email, device_name, content, timestamp_ms,
-            slot, hash).encode().size(), has_recovery);
+            slot, hash).encode().size(), has_recovery,
+        profile_name.size(), profile_email.size());
 }
 
 std::vector<std::uint8_t> NewDocument::create(

@@ -211,7 +211,10 @@ export function validateOpenedDocument(value) {
         || typeof slot.canEdit !== "boolean"
         || typeof slot.canAddPasswords !== "boolean"
         || typeof slot.canRemovePasswords !== "boolean"
-        || typeof slot.mustBeChanged !== "boolean") {
+        || typeof slot.mustBeChanged !== "boolean"
+        || (slot.slotIdKnown !== undefined && typeof slot.slotIdKnown !== "boolean")
+        || (slot.permissionsKnown !== undefined && typeof slot.permissionsKnown !== "boolean")
+        || (slot.identityKnown !== undefined && typeof slot.identityKnown !== "boolean")) {
       throw new TypeError("host returned invalid managed slot details");
     }
     return Object.freeze({ ...slot });
