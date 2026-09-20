@@ -110,6 +110,10 @@ export class DocumentService {
     return this.clientSettings;
   }
 
+  async unresolvedJournalSummary() {
+    return this.journals.discoverUnresolved();
+  }
+
   async createDocument(target, request) {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
@@ -791,7 +795,11 @@ export class DocumentService {
     if (!active?.pendingPublication || !active.pendingRecord) {
       throw new Error("No pending publication is available");
     }
-    if (active.editMode) await this.exitEditMode();
+    if (active.editMode) {
+      this.#cancelRegularSave();
+      await this.#stopHeartbeat();
+      active.editMode = false;
+    }
     await this.publications.discard(
       active.documentId, active.journalKey, active.pendingRecord);
     active.pendingPublication = false;

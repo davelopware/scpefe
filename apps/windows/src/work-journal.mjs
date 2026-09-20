@@ -191,6 +191,38 @@ export class WorkJournalStore {
     return null;
   }
 
+  /* Reports unresolved journal counts without decrypting or exposing document targets. */
+  async discoverUnresolved() {
+    let names;
+    try {
+      names = await this.fs.readdir(this.directory);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return Object.freeze({ total: 0, pendingPublications: 0 });
+      }
+      throw error;
+    }
+    let total = 0;
+    let pendingPublications = 0;
+    for (const name of names) {
+      if (!/^[0-9a-f]{32}\.work-journal$/.test(name)) continue;
+      total += 1;
+      try {
+        const envelope = JSON.parse(await this.fs.readFile(
+          path.join(this.directory, name), "utf8"));
+        if (envelope?.bootstrap
+            && /^[0-9a-f]{64}$/.test(envelope.bootstrap.targetHash)
+            && typeof envelope.bootstrap.base === "string"
+            && Buffer.from(envelope.bootstrap.base, "base64").length > 0) {
+          pendingPublications += 1;
+        }
+      } catch {
+        // A malformed journal remains unresolved and discoverable without exposing details.
+      }
+    }
+    return Object.freeze({ total, pendingPublications });
+  }
+
   async write(documentId, key, record) {
     requireKey(key);
     const validated = validateRecord(record);

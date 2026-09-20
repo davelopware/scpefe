@@ -14,6 +14,11 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
   assert.match(main, /service\.lock\(["']app-lock["']\)/);
+  assert.match(main, /requestSingleInstanceLock/);
+  assert.match(main, /app\.on\(["']second-instance["']/);
+  assert.match(main, /existing instance remains authoritative/);
+  assert.match(main, /Windows Task Manager/);
+  assert.doesNotMatch(main, /taskkill|process\.kill|child_process/);
   assert.match(main, /needsCloseDecision\(active\)/);
   assert.match(main, /applyCloseDecision\(service/);
   assert.match(main, /Manual save and exit/);
@@ -58,7 +63,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "getClientSettings", "saveClientSettings",
-    "createDocument", "openDocument",
+    "getUnresolvedJournalSummary", "createDocument", "openDocument",
+    "openExternalDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
     "discardPendingPublication", "backupDocument", "compactDocument", "migrateDocument",
@@ -66,7 +72,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "claimInvitation", "reconcileIdentity", "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
-    "onJournalWarning", "onRegularSave",
+    "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
+    "onUnresolvedJournalSummary",
+    "onSwitchRetained",
   ]);
   assert.equal(await exposed.compactDocument(), null);
   compactionResult = { compacted: true, backupCreated: true,

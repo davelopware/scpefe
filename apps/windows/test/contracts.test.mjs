@@ -4,7 +4,8 @@ import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult
   validateBackupResult, validateCompactionResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
-  validateWorkingCopy, validateMergeDraft } from "../src/contracts.mjs";
+  validateWorkingCopy, validateMergeDraft, validateExternalOpenRequest,
+  validateUnresolvedJournalSummary } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
@@ -131,4 +132,16 @@ test("merge drafts expose only bounded revision identities and canonical text", 
   assert.throws(() => validateMergeDraft({ content: "draft", hasConflicts: false,
     ancestorRevision: "bad", localRevision: revision,
     currentRevision: revision }), /invalid merge draft/);
+});
+
+test("single-instance contracts expose no target paths or journal contents", () => {
+  assert.deepEqual(validateUnresolvedJournalSummary({ total: 3,
+    pendingPublications: 1, ignored: "private" }),
+  { total: 3, pendingPublications: 1 });
+  assert.throws(() => validateUnresolvedJournalSummary({ total: 1,
+    pendingPublications: 2 }));
+  const token = "123e4567-e89b-42d3-a456-426614174000";
+  assert.deepEqual(validateExternalOpenRequest({ token,
+    target: "C:\\private\\document.scpefe" }), { token });
+  assert.throws(() => validateExternalOpenRequest({ token: "../unsafe" }));
 });

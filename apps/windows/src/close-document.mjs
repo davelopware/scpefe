@@ -3,7 +3,8 @@ export function needsCloseDecision(active) {
   const regularSavePending = active?.pendingRecord?.publication?.purpose
     === "regular-save";
   return Boolean(active && (active.dirty || active.recovery
-    || !active.manuallySealed || regularSavePending));
+    || !active.manuallySealed || active.pendingPublication
+    || active.unresolvedJournal || regularSavePending));
 }
 
 /* Applies one explicit close choice while preserving service lease and publication checks. */
