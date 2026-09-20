@@ -4,12 +4,14 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
+import { HeadWitnessStore } from "./head-witness.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
 
 export class DocumentService {
   constructor({ native, fs, profilePath, journalDirectory,
+    witnessDirectory,
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
     inactivityMs = 120_000, now = () => Date.now(),
@@ -21,6 +23,8 @@ export class DocumentService {
     this.nativeLineEnding = nativeLineEnding;
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
+    this.witnesses = new HeadWitnessStore({ fs,
+      directory: witnessDirectory ?? path.join(path.dirname(profilePath), "head-witnesses") });
     this.checkpointIdleMs = checkpointIdleMs;
     this.checkpointContinuousMs = checkpointContinuousMs;
     this.inactivityMs = inactivityMs;
@@ -67,6 +71,10 @@ export class DocumentService {
     await this.#atomicWrite(target, candidate, false);
     const published = await this.fs.readFile(target);
     if (!published.equals(candidate)) throw new Error("Published container verification failed");
+    const opened = this.#validateNativeOpened(
+      this.native.openDocument(published, input.ownerPassword));
+    await this.witnesses.observe(target, this.#observation(opened));
+    opened.journalKey.fill(0);
     return { created: true };
   }
 
@@ -75,6 +83,18 @@ export class DocumentService {
     const validatedPassword = validatePassword(password);
     const nativeOpened = this.#validateNativeOpened(
       this.native.openDocument(bytes, validatedPassword));
+    let headMismatch = null;
+    try {
+      const { comparison, previous } = await this.witnesses.observe(
+        target, this.#observation(nativeOpened));
+      headMismatch = this.#headMismatch(comparison.kind, previous, nativeOpened);
+    } catch (error) {
+      headMismatch = Object.freeze({ kind: "witness-error",
+        title: "Local head witness could not be authenticated",
+        explanation: `${error.message}. The document remains available read-only, but editing and saving are blocked until you explicitly accept this authenticated head.`,
+        editingBlocked: true, observedDocumentId: nativeOpened.documentId,
+        observedHead: nativeOpened.baseRevision });
+    }
     let recovery = null;
     try {
       const journal = await this.journals.read(
@@ -86,12 +106,17 @@ export class DocumentService {
     } catch (error) {
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
+    const slotCanEdit = nativeOpened.opened.canEdit;
     const opened = validateOpenedDocument({ ...nativeOpened.opened,
+      canEdit: headMismatch ? false : slotCanEdit,
+      ...(headMismatch ? { headMismatch } : {}),
       ...(recovery ? { recovery: { content: recovery.text,
         cursor: recovery.cursor, state: "unsaved",
         updateTime: recovery.updateTime } } : {}) });
     this.active = { target, password: validatedPassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
+      revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
+      slotCanEdit, headMismatch,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       working: null, dirty: false, continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
@@ -104,6 +129,9 @@ export class DocumentService {
     if (this.active.recovery) {
       throw new Error("Restore or discard recovered work before editing");
     }
+    if (this.active.headMismatch) {
+      throw new Error("Accept or resolve the head mismatch before editing");
+    }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
@@ -115,6 +143,9 @@ export class DocumentService {
 
   async restoreRecoveredWork() {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
+    if (this.active.headMismatch) {
+      throw new Error("Accept or resolve the head mismatch before editing");
+    }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
@@ -134,7 +165,20 @@ export class DocumentService {
     this.active.recovery = null;
     this.active.opened = validateOpenedDocument({
       content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.opened.canEdit });
+      canEdit: this.active.headMismatch ? false : this.active.slotCanEdit,
+      ...(this.active.headMismatch ? { headMismatch: this.active.headMismatch } : {}) });
+    return this.active.opened;
+  }
+
+  async acceptHeadMismatch() {
+    if (!this.active?.headMismatch) throw new Error("No head mismatch is available");
+    await this.witnesses.accept(this.active.target, this.active.observation);
+    this.active.headMismatch = null;
+    this.active.opened = validateOpenedDocument({
+      content: this.active.opened.content, readOnly: true,
+      canEdit: this.active.slotCanEdit,
+      ...(this.active.opened.recovery ? { recovery: this.active.opened.recovery } : {}),
+    });
     return this.active.opened;
   }
 
@@ -185,6 +229,9 @@ export class DocumentService {
   async saveDocument(content) {
     if (!this.active) throw new Error("Open a document first");
     if (!this.active.editMode) throw new Error("Enter edit mode before saving");
+    if (this.active.headMismatch) {
+      throw new Error("Accept or resolve the head mismatch before saving");
+    }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
@@ -214,6 +261,9 @@ export class DocumentService {
     this.active.opened = reopened.opened;
     this.active.documentId = reopened.documentId;
     this.active.baseRevision = reopened.baseRevision;
+    this.active.revisionGraph = reopened.revisionGraph;
+    this.active.observation = this.#observation(reopened);
+    await this.witnesses.observe(this.active.target, this.active.observation);
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
@@ -241,8 +291,40 @@ export class DocumentService {
         || !Buffer.isBuffer(value?.journalKey) || value.journalKey.length !== 32) {
       throw new TypeError("native bridge returned incomplete recovery metadata");
     }
+    const revisionGraph = value.revisionGraph ?? [{ revisionId: value.baseRevision,
+      parentRevisionIds: [] }];
+    if (!Array.isArray(revisionGraph) || revisionGraph.length === 0
+        || revisionGraph.some((node) => !node || !REVISION_ID.test(node.revisionId)
+          || !Array.isArray(node.parentRevisionIds)
+          || node.parentRevisionIds.some((parent) => !REVISION_ID.test(parent)))
+        || !revisionGraph.some((node) => node.revisionId === value.baseRevision)) {
+      throw new TypeError("native bridge returned an invalid authenticated revision graph");
+    }
     return { opened, documentId: value.documentId,
-      baseRevision: value.baseRevision, journalKey: value.journalKey };
+      baseRevision: value.baseRevision, revisionGraph,
+      journalKey: value.journalKey };
+  }
+
+  #observation(opened) {
+    return { documentId: opened.documentId, headRevision: opened.baseRevision,
+      revisionGraph: opened.revisionGraph };
+  }
+
+  #headMismatch(kind, previous, opened) {
+    const common = { editingBlocked: true,
+      witnessedDocumentId: previous?.documentId,
+      witnessedHead: previous?.headRevision,
+      observedDocumentId: opened.documentId, observedHead: opened.baseRevision };
+    if (kind === "rollback") return Object.freeze({ ...common, kind,
+      title: "This target has rolled back",
+      explanation: "The authenticated head is an ancestor of the last head seen by this client. This may be a stale replica; inspect it read-only and explicitly accept it only if the rollback is intended." });
+    if (kind === "divergence") return Object.freeze({ ...common, kind,
+      title: "This target has diverged",
+      explanation: "The authenticated head is unrelated to the last head seen by this client. Resolve the divergent histories, or explicitly accept the current branch before editing." });
+    if (kind === "replacement") return Object.freeze({ ...common, kind,
+      title: "This target contains a different document",
+      explanation: "The authenticated permanent document ID differs from the document previously observed at this target. Inspect it read-only and explicitly accept the replacement before editing." });
+    return null;
   }
 
   #scheduleCheckpoint() {

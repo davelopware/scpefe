@@ -16,6 +16,7 @@ app.whenReady().then(() => {
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
     journalDirectory: path.join(app.getPath("userData"), "work-journals"),
+    witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => window?.webContents.send("document:locked", result),
     onJournalWarning: (warning) =>
       window?.webContents.send("document:journal-warning", warning),
@@ -68,6 +69,7 @@ app.whenReady().then(() => {
   ipcMain.handle("document:activity", () => service.notifyActivity());
   ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
   ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
+  ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
   ipcMain.handle("document:lock", () => service.lock("app-lock"));
   window = new BrowserWindow({
     width: 920,

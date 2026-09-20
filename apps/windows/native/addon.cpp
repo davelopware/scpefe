@@ -67,6 +67,32 @@ void set_buffer(napi_env env, napi_value object, const char *name,
     check(env, napi_set_named_property(env, object, name, buffer));
 }
 
+std::string hexadecimal(const std::uint8_t *value, std::size_t size);
+
+void set_revision_graph(napi_env env, napi_value object,
+    const std::uint8_t *revision_id, const scpefe_snapshot_revision_v1 &revision)
+{
+    napi_value graph;
+    napi_value node;
+    napi_value parents;
+    check(env, napi_create_array_with_length(env, 1, &graph));
+    check(env, napi_create_object(env, &node));
+    const std::string id = hexadecimal(revision_id, SCPEFE_REVISION_ID_SIZE);
+    set_string(env, node, "revisionId", id.data(), id.size());
+    check(env, napi_create_array_with_length(env, revision.parent_count, &parents));
+    for (std::size_t index = 0; index < revision.parent_count; ++index) {
+        const std::string parent = hexadecimal(
+            revision.parent_revision_ids + index * SCPEFE_REVISION_ID_SIZE,
+            SCPEFE_REVISION_ID_SIZE);
+        napi_value value;
+        check(env, napi_create_string_utf8(env, parent.data(), parent.size(), &value));
+        check(env, napi_set_element(env, parents, index, value));
+    }
+    check(env, napi_set_named_property(env, node, "parentRevisionIds", parents));
+    check(env, napi_set_element(env, graph, 0, node));
+    check(env, napi_set_named_property(env, object, "revisionGraph", graph));
+}
+
 std::string hexadecimal(const std::uint8_t *value, std::size_t size)
 {
     static constexpr char digits[] = "0123456789abcdef";
@@ -220,6 +246,7 @@ napi_value open_document(napi_env env, napi_callback_info info)
             revision_id.data(), revision_id.size());
         set_string(env, result, "baseRevision", base_revision.data(),
             base_revision.size());
+        set_revision_graph(env, result, revision_id.data(), view);
         std::array<std::uint8_t, SCPEFE_WORK_JOURNAL_KEY_SIZE> journal_key{};
         std::size_t journal_key_size = 0;
         status = scpefe_unlocked_container_work_journal_key(

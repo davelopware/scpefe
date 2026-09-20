@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:restore-recovery")),
   discardRecoveredWork: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:discard-recovery")),
+  acceptHeadMismatch: async () => validateOpenedDocument(
+    await ipcRenderer.invoke("document:accept-head-mismatch")),
   lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
   onLocked: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
