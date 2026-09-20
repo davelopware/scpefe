@@ -29,6 +29,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
 
   let exposed;
   let creationResult = { created: true, target: "C:\\Users\\Ada\\secret.scpefe" };
+  let compactionResult = null;
   const invocations = [];
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
@@ -44,6 +45,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:backup") {
           return { backedUp: true, target: "C:\\Users\\Ada\\backup.scpefe" };
         }
+        if (channel === "document:compact") return compactionResult;
         return null;
       } },
   };
@@ -59,12 +61,20 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "createDocument", "openDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
-    "discardPendingPublication", "backupDocument", "createInvitation",
+    "discardPendingPublication", "backupDocument", "compactDocument", "createInvitation",
     "claimInvitation", "reconcileIdentity", "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
     "onJournalWarning", "onRegularSave",
   ]);
+  assert.equal(await exposed.compactDocument(), null);
+  compactionResult = { compacted: true, backupCreated: true,
+    previousHead: "12".repeat(32), head: "34".repeat(32) };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument())),
+    compactionResult);
+  compactionResult = { compacted: true, backupCreated: false,
+    previousHead: "12".repeat(32), head: "34".repeat(32) };
+  await assert.rejects(exposed.compactDocument(), /invalid compaction result/);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     recoveryPassword: "",

@@ -4,7 +4,8 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
-import { DocumentService } from "./document-service.mjs";
+import { registerCompactionHandler } from "./compaction-flow.mjs";
+import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -89,6 +90,8 @@ app.whenReady().then(async () => {
     if (chosen.canceled || !chosen.filePath) return null;
     return service.backupDocument(chosen.filePath);
   });
+  registerCompactionHandler({ ipcMain, service, dialog, window,
+    confirmation: COMPACTION_CONFIRMATION });
   ipcMain.handle("document:create-invitation", (_event, request) =>
     service.createInvitation(request));
   ipcMain.handle("document:claim-invitation", (_event, password) =>

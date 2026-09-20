@@ -246,12 +246,22 @@ export function validateEditMode(value) {
       || value.canEdit !== true || typeof value.content !== "string") {
     throw new TypeError("host did not enter edit mode");
   }
+  const publicationState = value.publicationState ?? "target-published";
+  if (!["target-published", "pending-publication", "conflict"]
+    .includes(publicationState)) {
+    throw new TypeError("host returned an invalid publication state");
+  }
   return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
-    publicationState: "target-published",
+    publicationState,
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
     ...(value.canRemovePasswords !== undefined
       ? { canRemovePasswords: value.canRemovePasswords } : {}),
+    ...(value.recoverySlot !== undefined ? { recoverySlot: value.recoverySlot } : {}),
+    ...(value.slotId !== undefined ? { slotId: value.slotId } : {}),
+    ...(value.slotIdentityName !== undefined
+      ? { slotIdentityName: value.slotIdentityName,
+        slotIdentityEmail: value.slotIdentityEmail } : {}),
     ...(value.managedSlots !== undefined ? { managedSlots: value.managedSlots } : {}),
     ...(value.invitationRequired !== undefined
       ? { invitationRequired: false } : {}) });
@@ -335,6 +345,18 @@ export function validateBackupResult(value) {
     throw new TypeError("host returned an invalid backup result");
   }
   return Object.freeze({ backedUp: true });
+}
+
+export function validateCompactionResult(value) {
+  if (!value || typeof value !== "object" || value.compacted !== true
+      || value.backupCreated !== true
+      || !/^[0-9a-f]{64}$/.test(value.previousHead)
+      || !/^[0-9a-f]{64}$/.test(value.head)
+      || Object.keys(value).length !== 4) {
+    throw new TypeError("host returned an invalid compaction result");
+  }
+  return Object.freeze({ compacted: true, backupCreated: true,
+    previousHead: value.previousHead, head: value.head });
 }
 
 export function validateWorkingCopy(value) {
