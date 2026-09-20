@@ -81,15 +81,18 @@ export class DocumentService {
       this.native.openDocument(bytes, validatedPassword));
     let recovery = null;
     let pendingPublication = false;
+    let unresolvedJournal = false;
     try {
       const journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
+      unresolvedJournal = journal !== null;
       if (journal?.publication) {
         pendingPublication = true;
         const resumed = await this.publications.resume(
           nativeOpened.documentId, nativeOpened.journalKey, journal);
         if (resumed.completed) {
           pendingPublication = false;
+          unresolvedJournal = false;
           const published = await this.fs.readFile(target);
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
@@ -105,6 +108,7 @@ export class DocumentService {
         recovery = journal;
       }
     } catch (error) {
+      unresolvedJournal = true;
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     const opened = validateOpenedDocument({ ...nativeOpened.opened,
@@ -115,7 +119,7 @@ export class DocumentService {
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
-      pendingPublication,
+      pendingPublication, unresolvedJournal,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
@@ -162,6 +166,7 @@ export class DocumentService {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
+    this.active.unresolvedJournal = false;
     this.active.opened = validateOpenedDocument({
       content: this.active.opened.content, readOnly: true,
       canEdit: this.active.opened.canEdit });
@@ -268,6 +273,7 @@ export class DocumentService {
     this.active.dirty = false;
     this.active.manuallySealed = true;
     this.active.pendingPublication = false;
+    this.active.unresolvedJournal = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
     this.notifyActivity();
@@ -295,7 +301,8 @@ export class DocumentService {
 
   async backupDocument(target) {
     if (!this.active) throw new Error("Open a document first");
-    if (this.active.dirty || this.active.recovery || this.active.pendingPublication) {
+    if (this.active.dirty || this.active.recovery || this.active.pendingPublication
+        || this.active.unresolvedJournal) {
       throw new Error("Save or discard changes before creating a backup");
     }
     if (!this.active.manuallySealed) {
@@ -358,6 +365,7 @@ export class DocumentService {
       this.journals.write(active.documentId, active.journalKey, record));
     this.flushChain = operation;
     await operation;
+    active.unresolvedJournal = true;
     active.continuousDue = null;
     active.journalWarning = null;
   }

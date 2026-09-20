@@ -197,11 +197,41 @@ test("backup publication never succeeds after interruption or failed verificatio
   }), /interruption/);
   await assert.rejects(fs.readFile(target), (error) => error.code === "ENOENT");
 
+  await fs.writeFile(target, "pre-existing backup");
+  const created = target.replace(/\.scpefe$/, "-1.scpefe");
   const tamperedFs = Object.create(fs);
-  tamperedFs.readFile = async (file) => file === target
-    ? Buffer.from("tampered container") : fs.readFile(file);
+  tamperedFs.readFile = async (file, ...args) => {
+    if (file === created) await fs.writeFile(file, "tampered container");
+    return fs.readFile(file, ...args);
+  };
   const tampered = new PublicationService({ fs: tamperedFs, journals, capabilities });
   await assert.rejects(tampered.publishReplica({
     target, candidate: Buffer.from("exact container"),
   }), /verification failed/);
+  assert.equal(await fs.readFile(target, "utf8"), "pre-existing backup");
+  await assert.rejects(fs.readFile(created), (error) => error.code === "ENOENT");
+});
+
+test("failed backup verification preserves a raced replacement", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const target = path.join(directory, "document.backup-20260920T010203Z.scpefe");
+  const raced = Buffer.from("raced replacement");
+  let replaced = false;
+  const racedFs = Object.create(fs);
+  racedFs.readFile = async (file, ...args) => {
+    if (file === target && !replaced) {
+      replaced = true;
+      await fs.unlink(target);
+      await fs.writeFile(target, raced);
+      return Buffer.from("tampered verification bytes");
+    }
+    return fs.readFile(file, ...args);
+  };
+  const service = new PublicationService({ fs: racedFs, journals, capabilities });
+  await assert.rejects(service.publishReplica({
+    target, candidate: Buffer.from("exact container"),
+  }), /verification failed/);
+  assert.deepEqual(await fs.readFile(target), raced);
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    name.includes("scpefe-backup-txn")), []);
 });

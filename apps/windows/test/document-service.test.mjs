@@ -117,6 +117,37 @@ test("backup requires clean, manually sealed state", async (t) => {
   await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
 });
 
+test("reopened authenticated journal states block backup", async (t) => {
+  for (const [index, state] of ["unsaved", "pending-publication", "conflict"].entries()) {
+    await t.test(state, async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+        `scpefe-backup-journal-${state}-`));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const target = path.join(directory, "notes.scpefe");
+      const backup = path.join(directory, "notes.backup.scpefe");
+      const documentId = `${70 + index}`.repeat(16);
+      const baseRevision = `${80 + index}`.repeat(32);
+      const journalKey = Buffer.alloc(32, 20 + index);
+      await fs.writeFile(target, "container");
+      const options = { fs, publicationCapabilities,
+        profilePath: path.join(directory, "profile.json"),
+        native: { openDocument: () => ({ content: "hello", readOnly: true,
+          canEdit: false, manuallySealed: true, documentId, baseRevision,
+          journalKey: Buffer.from(journalKey) }) } };
+      const writer = new DocumentService(options);
+      await writer.journals.write(documentId, journalKey, {
+        text: "durable local work", baseRevision, cursor: { start: 0, end: 0 },
+        target, state, updateTime: 42,
+      });
+
+      const reopened = new DocumentService(options);
+      await reopened.openDocument(target, "password words");
+      await assert.rejects(reopened.backupDocument(backup), /Save or discard/);
+      await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+    });
+  }
+});
+
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-journal-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

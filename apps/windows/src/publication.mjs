@@ -21,6 +21,18 @@ function collisionTarget(target, collision) {
   return `${stem}-${collision}${extension}`;
 }
 
+async function sameFile(fs, left, right) {
+  try {
+    const [leftStat, rightStat] = await Promise.all([
+      fs.stat(left), fs.stat(right),
+    ]);
+    return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 const REPLACEMENT_GUARANTEES = new Set([
   "atomic-replace", "best-effort-replace",
 ]);
@@ -98,6 +110,10 @@ export class PublicationService {
       return { completed: true };
     } catch (error) {
       if (handle) await handle.close().catch(() => {});
+      if (publishedTarget
+          && await sameFile(this.fs, publishedTarget, transactionFile).catch(() => false)) {
+        await this.fs.unlink(publishedTarget).catch(() => {});
+      }
       await this.fs.unlink(transactionFile).catch(() => {});
       throw error;
     }
