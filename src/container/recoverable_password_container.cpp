@@ -8,6 +8,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <string_view>
 
 extern "C" {
 int sodium_init(void);
@@ -50,6 +51,10 @@ constexpr std::uint32_t aead_algorithm = 1;
 constexpr std::uint8_t full_permissions = 7;
 constexpr std::array<char, 8> snapshot_context{'S','C','P','S','N','A','P','1'};
 constexpr std::array<char, 8> work_journal_context{'S','C','P','J','R','N','0','1'};
+constexpr std::array<std::uint8_t, 8> lease_magic{'S','C','P','L','E','A','S','1'};
+constexpr std::uint64_t default_lease_duration_ms = 600000;
+constexpr std::size_t lease_fixed_size = 61;
+constexpr std::size_t max_holder_field_size = 4096;
 
 constexpr std::size_t slot_count_offset = 32;
 constexpr std::size_t snapshot_nonce_offset = 40;
@@ -81,6 +86,77 @@ std::uint64_t read_u64(const std::uint8_t *in)
     std::uint64_t result = 0;
     for (std::size_t i = 0; i < 8; ++i) result |= std::uint64_t(in[i]) << (8 * i);
     return result;
+}
+
+void append_u32(std::vector<std::uint8_t> &output, std::uint32_t value)
+{
+    const auto offset = output.size();
+    output.resize(offset + 4);
+    write_u32(output.data() + offset, value);
+}
+
+void append_u64(std::vector<std::uint8_t> &output, std::uint64_t value)
+{
+    const auto offset = output.size();
+    output.resize(offset + 8);
+    write_u64(output.data() + offset, value);
+}
+
+void append_text(std::vector<std::uint8_t> &output, std::string_view value)
+{
+    if (value.size() > max_holder_field_size)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    append_u32(output, static_cast<std::uint32_t>(value.size()));
+    output.insert(output.end(), value.begin(), value.end());
+}
+
+std::vector<std::uint8_t> encode_lease(const EditingLeaseData &lease)
+{
+    if (lease.duration_ms == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    std::vector<std::uint8_t> result;
+    result.insert(result.end(), lease_magic.begin(), lease_magic.end());
+    result.push_back(lease.active ? 1 : 0);
+    result.insert(result.end(), lease.session_id.begin(), lease.session_id.end());
+    append_u64(result, lease.heartbeat_counter);
+    append_u64(result, lease.holder_utc_ms);
+    append_u64(result, lease.duration_ms);
+    append_text(result, lease.holder_name);
+    append_text(result, lease.holder_email);
+    append_text(result, lease.device_name);
+    return result;
+}
+
+std::size_t decode_lease(const std::uint8_t *input, std::size_t size,
+    EditingLeaseData &lease)
+{
+    lease.duration_ms = default_lease_duration_ms;
+    if (size < lease_magic.size()
+        || !std::equal(lease_magic.begin(), lease_magic.end(), input)) return 0;
+    if (size < lease_fixed_size || input[8] > 1)
+        throw ContainerFailure{ContainerError::malformed_container};
+    lease.active = input[8] != 0;
+    std::copy_n(input + 9, lease.session_id.size(), lease.session_id.begin());
+    lease.heartbeat_counter = read_u64(input + 25);
+    lease.holder_utc_ms = read_u64(input + 33);
+    lease.duration_ms = read_u64(input + 41);
+    if (lease.duration_ms == 0)
+        throw ContainerFailure{ContainerError::malformed_container};
+    std::size_t offset = 49;
+    auto read_text = [&](std::string &output) {
+        if (offset + 4 > size)
+            throw ContainerFailure{ContainerError::malformed_container};
+        const auto length = read_u32(input + offset);
+        offset += 4;
+        if (length > max_holder_field_size || length > size - offset)
+            throw ContainerFailure{ContainerError::malformed_container};
+        output.assign(reinterpret_cast<const char *>(input + offset), length);
+        offset += length;
+    };
+    read_text(lease.holder_name);
+    read_text(lease.holder_email);
+    read_text(lease.device_name);
+    return offset;
 }
 
 void require_sodium()
@@ -175,7 +251,11 @@ std::size_t RecoverablePasswordContainer::encoded_size(
         + document_id_size + tag_size;
     if (snapshot_size > std::numeric_limits<std::size_t>::max() - fixed)
         throw ContainerFailure{ContainerError::invalid_argument};
-    return fixed + snapshot_size;
+    const EditingLeaseData empty_lease{};
+    const auto lease_size = encode_lease(empty_lease).size();
+    if (snapshot_size > std::numeric_limits<std::size_t>::max() - fixed - lease_size)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    return fixed + lease_size + snapshot_size;
 }
 
 std::vector<std::uint8_t> RecoverablePasswordContainer::create(
@@ -204,8 +284,9 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
         write_u32(output.data() + slot_count_offset, slot_count);
         write_u32(output.data() + 36, aead_algorithm);
         randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
+        const auto lease = encode_lease(EditingLeaseData{});
         write_u64(output.data() + encrypted_snapshot_size_offset,
-            document_id_size + encoded_snapshot_revision_size + tag_size);
+            document_id_size + lease.size() + encoded_snapshot_revision_size + tag_size);
         randombytes_buf(output.data() + owner_salt_offset, salt_size);
         randombytes_buf(output.data() + owner_nonce_offset, nonce_size);
         write_u32(output.data() + 112, wrapped_slot_size);
@@ -242,11 +323,12 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
                 throw ContainerFailure{ContainerError::crypto_error};
             }
         }
-        snapshot.resize(document_id_size + encoded_snapshot_revision_size);
+        snapshot.resize(document_id_size + lease.size() + encoded_snapshot_revision_size);
         randombytes_buf(snapshot.data(), document_id_size);
+        std::copy(lease.begin(), lease.end(), snapshot.begin() + document_id_size);
         std::copy(encoded_snapshot_revision,
             encoded_snapshot_revision + encoded_snapshot_revision_size,
-            snapshot.begin() + document_id_size);
+            snapshot.begin() + document_id_size + lease.size());
         derive_snapshot_key(working_key, document_key.data());
         const std::size_t snapshot_offset = header_size + slot_count * wrapped_slot_size;
         if (crypto_aead_xchacha20poly1305_ietf_encrypt(
@@ -303,9 +385,6 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
         || snapshot_offset > container_size
         || encrypted_size != container_size - snapshot_offset)
         throw ContainerFailure{ContainerError::malformed_container};
-    const std::size_t revision_size = encrypted_size - document_id_size - tag_size;
-    if (revision_size > limits.max_input_bytes())
-        throw ContainerFailure{ContainerError::limit_exceeded};
     require_sodium();
 
     std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
@@ -345,9 +424,14 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
             throw ContainerFailure{ContainerError::authentication_failed};
         if (plain_size != snapshot.size() || plain_size < document_id_size)
             throw ContainerFailure{ContainerError::malformed_container};
-        validate_snapshot(snapshot.data() + document_id_size, revision_size,
-            limits, ContainerError::malformed_container);
         UnlockedContainerData result;
+        const auto lease_size = decode_lease(snapshot.data() + document_id_size,
+            snapshot.size() - document_id_size, result.editing_lease);
+        const std::size_t revision_size = snapshot.size() - document_id_size - lease_size;
+        if (revision_size > limits.max_input_bytes())
+            throw ContainerFailure{ContainerError::limit_exceeded};
+        validate_snapshot(snapshot.data() + document_id_size + lease_size, revision_size,
+            limits, ContainerError::malformed_container);
         std::copy_n(snapshot.data(), document_id_size, result.document_id.begin());
         derive_work_journal_key(result.work_journal_key, slot.data());
         std::copy_n(slot.data() + key_size, result.slot_id.size(),
@@ -355,7 +439,7 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
         result.permissions = slot.back();
         result.recovery_slot = authenticated_index != 0;
         result.encoded_snapshot_revision.assign(
-            snapshot.begin() + document_id_size, snapshot.end());
+            snapshot.begin() + document_id_size + lease_size, snapshot.end());
         clear(wrapping_key, snapshot_key, slot, snapshot);
         return result;
     } catch (...) {
@@ -412,14 +496,19 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
         if (written != slot.size() || (slot.back() & 1u) == 0)
             throw ContainerFailure{ContainerError::invalid_argument};
 
-        const std::size_t new_size = encoded_size(
-            encoded_snapshot_revision_size, slot_count == 2);
+        const auto current = unlock(container, container_size, password, password_size,
+            format::RevisionLimits::defaults());
+        const auto encoded_lease = encode_lease(current.editing_lease);
+        const std::size_t new_size = header_size + slot_count * wrapped_slot_size
+            + document_id_size + encoded_lease.size()
+            + encoded_snapshot_revision_size + tag_size;
         std::vector<std::uint8_t> output(new_size);
         std::copy_n(container, header_size + slot_count * wrapped_slot_size,
             output.begin());
         randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
         write_u64(output.data() + encrypted_snapshot_size_offset,
-            document_id_size + encoded_snapshot_revision_size + tag_size);
+            document_id_size + encoded_lease.size()
+                + encoded_snapshot_revision_size + tag_size);
 
         const std::uint64_t old_encrypted_size = read_u64(
             container + encrypted_snapshot_size_offset);
@@ -438,10 +527,13 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
             || written != plaintext.size()) {
             throw ContainerFailure{ContainerError::authentication_failed};
         }
-        plaintext.resize(document_id_size + encoded_snapshot_revision_size);
+        plaintext.resize(document_id_size + encoded_lease.size()
+            + encoded_snapshot_revision_size);
+        std::copy(encoded_lease.begin(), encoded_lease.end(),
+            plaintext.begin() + document_id_size);
         std::copy(encoded_snapshot_revision,
             encoded_snapshot_revision + encoded_snapshot_revision_size,
-            plaintext.begin() + document_id_size);
+            plaintext.begin() + document_id_size + encoded_lease.size());
         const std::size_t new_snapshot_offset =
             header_size + slot_count * wrapped_slot_size;
         if (crypto_aead_xchacha20poly1305_ietf_encrypt(
@@ -454,6 +546,93 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
         clear(wrapping_key, snapshot_key, slot, plaintext);
         return output;
     } catch (...) {
+        clear(wrapping_key, snapshot_key, slot, plaintext);
+        throw;
+    }
+}
+
+std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
+    const std::uint8_t *container, std::size_t container_size,
+    const std::uint8_t *password, std::size_t password_size,
+    const EditingLeaseData &lease)
+{
+    const auto encoded_lease = encode_lease(lease);
+    const auto current = unlock(container, container_size, password, password_size,
+        format::RevisionLimits::defaults());
+    if ((current.permissions & 1u) == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    const std::uint32_t slot_count = read_u32(container + slot_count_offset);
+    if (!std::equal(magic.begin(), magic.end(), container)
+        || read_u32(container + 8) != format_version
+        || (slot_count != 1 && slot_count != 2)) {
+        throw ContainerFailure{ContainerError::unsupported_format};
+    }
+
+    require_sodium();
+    std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
+    std::array<std::uint8_t, slot_plaintext_size> slot{};
+    std::vector<std::uint8_t> plaintext, replacement;
+    try {
+        const auto old_aad = slot_additional_data(container);
+        bool authenticated = false;
+        unsigned long long written = 0;
+        for (std::uint32_t index = 0; index < slot_count; ++index) {
+            const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
+            const std::size_t nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
+            derive_wrapping_key(wrapping_key, password, password_size, container + salt);
+            if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+                slot.data(), &written, nullptr,
+                container + header_size + index * wrapped_slot_size,
+                wrapped_slot_size, old_aad.data(), old_aad.size(),
+                container + nonce, wrapping_key.data()) == 0) {
+                authenticated = true;
+                break;
+            }
+        }
+        if (!authenticated)
+            throw ContainerFailure{ContainerError::authentication_failed};
+
+        const std::uint64_t old_encrypted_size = read_u64(
+            container + encrypted_snapshot_size_offset);
+        const std::size_t snapshot_offset = header_size + slot_count * wrapped_slot_size;
+        if (old_encrypted_size < document_id_size + tag_size
+            || snapshot_offset + old_encrypted_size != container_size)
+            throw ContainerFailure{ContainerError::malformed_container};
+        derive_snapshot_key(snapshot_key, slot.data());
+        plaintext.resize(old_encrypted_size - tag_size);
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+            plaintext.data(), &written, nullptr, container + snapshot_offset,
+            old_encrypted_size, container, header_size,
+            container + snapshot_nonce_offset, snapshot_key.data()) != 0
+            || written != plaintext.size()) {
+            throw ContainerFailure{ContainerError::authentication_failed};
+        }
+        EditingLeaseData old_lease;
+        const auto old_lease_size = decode_lease(plaintext.data() + document_id_size,
+            plaintext.size() - document_id_size, old_lease);
+        const auto revision_begin = plaintext.begin() + document_id_size + old_lease_size;
+        replacement.insert(replacement.end(), plaintext.begin(),
+            plaintext.begin() + document_id_size);
+        replacement.insert(replacement.end(), encoded_lease.begin(), encoded_lease.end());
+        replacement.insert(replacement.end(), revision_begin, plaintext.end());
+
+        std::vector<std::uint8_t> output(snapshot_offset + replacement.size() + tag_size);
+        std::copy_n(container, snapshot_offset, output.begin());
+        randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
+        write_u64(output.data() + encrypted_snapshot_size_offset,
+            replacement.size() + tag_size);
+        if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            output.data() + snapshot_offset, &written,
+            replacement.data(), replacement.size(), output.data(), header_size,
+            nullptr, output.data() + snapshot_nonce_offset, snapshot_key.data()) != 0
+            || written != replacement.size() + tag_size) {
+            throw ContainerFailure{ContainerError::crypto_error};
+        }
+        if (!replacement.empty()) sodium_memzero(replacement.data(), replacement.size());
+        clear(wrapping_key, snapshot_key, slot, plaintext);
+        return output;
+    } catch (...) {
+        if (!replacement.empty()) sodium_memzero(replacement.data(), replacement.size());
         clear(wrapping_key, snapshot_key, slot, plaintext);
         throw;
     }

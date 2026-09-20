@@ -5,6 +5,26 @@ import path from "node:path";
 import test from "node:test";
 import { DocumentService } from "../src/document-service.mjs";
 
+function withLease(native) {
+  let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
+    holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
+    deviceName: "" };
+  return { ...native, currentLease: () => ({ ...lease }),
+    openDocument(...args) { return { ...native.openDocument(...args), lease }; },
+    updateLease(bytes, _password, value) {
+      lease = { ...value };
+      return Buffer.from(bytes);
+    } };
+}
+
+async function writeProfile(directory, name, deviceName) {
+  const profilePath = path.join(directory, `${name}-profile.json`);
+  await fs.writeFile(profilePath, JSON.stringify({
+    name, email: `${name.toLowerCase()}@example.test`, deviceName,
+  }));
+  return profilePath;
+}
+
 test("requires a profile, publishes once, verifies, and reopens read-only", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-desktop-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -31,7 +51,7 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
       return Buffer.from(`saved:${input.content}`);
     },
   };
-  const service = new DocumentService({ native, fs,
+  const service = new DocumentService({ native: withLease(native), fs,
     profilePath: path.join(directory, "private", "profile.json") });
   const target = path.join(directory, "document.scpefe");
   const request = { ownerPassword: "owner password words", recoveryPassword: "",
@@ -45,7 +65,7 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
   assert.deepEqual(await service.openDocument(target, "owner password words"),
     { content: "hello", readOnly: true, canEdit: true });
   await assert.rejects(service.saveDocument("changed"), /Enter edit mode/);
-  assert.deepEqual(service.enterEditMode(),
+  assert.deepEqual(await service.enterEditMode(),
     { content: "hello", readOnly: false, canEdit: true });
   assert.deepEqual(await service.saveDocument("\ufeff hello \r\n"),
     { saved: true, content: " hello \n" });
@@ -59,13 +79,16 @@ test("view-only slots cannot enter edit mode", async (t) => {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   await fs.writeFile(target, "container");
+  await fs.writeFile(path.join(directory, "profile.json"), JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
   const service = new DocumentService({ fs,
     profilePath: path.join(directory, "profile.json"),
-    native: { openDocument: () => ({ content: "hello", readOnly: true,
+    native: withLease({ openDocument: () => ({ content: "hello", readOnly: true,
       canEdit: false, documentId: "11".repeat(16),
-      baseRevision: "22".repeat(32), journalKey: Buffer.alloc(32, 3) }) } });
+      baseRevision: "22".repeat(32), journalKey: Buffer.alloc(32, 3) }) }) });
   await service.openDocument(target, "password words");
-  assert.throws(() => service.enterEditMode(), /does not permit editing/);
+  await assert.rejects(service.enterEditMode(), /does not permit editing/);
 });
 
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
@@ -73,12 +96,16 @@ test("checkpoints continuously typed work and recovers it as unsaved", async (t)
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   await fs.writeFile(target, "container");
+  await fs.writeFile(path.join(directory, "profile.json"), JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
   const native = { openDocument: () => ({ content: "base", readOnly: true,
     canEdit: true, documentId: "ab".repeat(16), baseRevision: "cd".repeat(32),
     journalKey: Buffer.alloc(32, 7) }) };
   let now = 0;
   const timers = [];
-  const service = new DocumentService({ native, fs,
+  const leasedNative = withLease(native);
+  const service = new DocumentService({ native: leasedNative, fs,
     profilePath: path.join(directory, "profile.json"), now: () => now,
     setTimer: (callback, delay) => {
       const timer = { callback, delay, cleared: false };
@@ -86,7 +113,7 @@ test("checkpoints continuously typed work and recovers it as unsaved", async (t)
       return timer;
     }, clearTimer: (timer) => { timer.cleared = true; } });
   await service.openDocument(target, "password words");
-  service.enterEditMode();
+  await service.enterEditMode();
   service.updateWorkingCopy({ content: "first", cursor: { start: 5, end: 5 } });
   assert.equal(timers.at(-2).delay, 10_000);
   now = 9_000;
@@ -101,13 +128,14 @@ test("checkpoints continuously typed work and recovers it as unsaved", async (t)
     `${"ab".repeat(16)}.work-journal`);
   const encrypted = await fs.readFile(journalPath, "utf8");
   assert.doesNotMatch(encrypted, /recovered secret|document\.scpefe/);
+  await service.exitEditMode();
 
-  const restarted = new DocumentService({ native, fs,
+  const restarted = new DocumentService({ native: leasedNative, fs,
     profilePath: path.join(directory, "profile.json") });
   const opened = await restarted.openDocument(target, "password words");
   assert.deepEqual(opened.recovery, { content: "recovered secret",
     cursor: { start: 3, end: 8 }, state: "unsaved", updateTime: 29_000 });
-  assert.throws(() => restarted.enterEditMode(), /Restore or discard/);
+  await assert.rejects(restarted.enterEditMode(), /Restore or discard/);
   const restored = await restarted.restoreRecoveredWork();
   assert.equal(restored.content, "recovered secret");
   assert.equal(restored.recoveredUnsaved, true);
@@ -119,13 +147,16 @@ test("mandatory locking clears plaintext when the final journal write fails", as
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   await fs.writeFile(target, "container");
+  await fs.writeFile(path.join(directory, "profile.json"), JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
   const service = new DocumentService({ fs,
     profilePath: path.join(directory, "profile.json"),
-    native: { openDocument: () => ({ content: "base", readOnly: true,
+    native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
       canEdit: true, documentId: "44".repeat(16), baseRevision: "55".repeat(32),
-      journalKey: Buffer.alloc(32, 9) }) } });
+      journalKey: Buffer.alloc(32, 9) }) }) });
   await service.openDocument(target, "password words");
-  service.enterEditMode();
+  await service.enterEditMode();
   service.updateWorkingCopy({ content: "must disappear",
     cursor: { start: 14, end: 14 } });
   service.journals.write = async () => { throw new Error("disk full"); };
@@ -161,7 +192,7 @@ test("verified save waits for an in-flight checkpoint before clearing its journa
     },
   };
   const timers = [];
-  const service = new DocumentService({ native, fs,
+  const service = new DocumentService({ native: withLease(native), fs,
     profilePath: path.join(directory, "profile.json"),
     setTimer: (callback) => {
       const timer = { callback };
@@ -169,7 +200,7 @@ test("verified save waits for an in-flight checkpoint before clearing its journa
       return timer;
     }, clearTimer: () => {} });
   await service.openDocument(target, "password words");
-  service.enterEditMode();
+  await service.enterEditMode();
   service.updateWorkingCopy({ content: "stale unsaved work",
     cursor: { start: 18, end: 18 } });
 
@@ -221,9 +252,9 @@ test("plaintext export writes only current text with selected line endings", asy
   await fs.writeFile(target, "encrypted container and metadata");
   const service = new DocumentService({ fs, nativeLineEnding: "\r\n",
     profilePath: path.join(directory, "profile.json"),
-    native: { openDocument: () => ({ content: "original", readOnly: true,
+    native: withLease({ openDocument: () => ({ content: "original", readOnly: true,
       canEdit: false, documentId: "88".repeat(16),
-      baseRevision: "99".repeat(32), journalKey: Buffer.alloc(32, 13) }) } });
+      baseRevision: "99".repeat(32), journalKey: Buffer.alloc(32, 13) }) }) });
   await assert.rejects(service.exportPlaintext(lfExport, {
     content: "secret", lineEndings: "lf",
   }), /Open a document/);
@@ -237,4 +268,87 @@ test("plaintext export writes only current text with selected line endings", asy
   });
   assert.equal(await fs.readFile(nativeExport, "utf8"), " first \r\nsecond");
   await service.lock();
+});
+
+test("coordinates holders, heartbeats, lock suspension, resumption, and expiry", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lease-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+    canEdit: true, documentId: "aa".repeat(16), baseRevision: "bb".repeat(32),
+    journalKey: Buffer.alloc(32, 4) }) });
+  let utc = 1_000;
+  let mono = 1_000;
+  const timers = [];
+  const first = new DocumentService({ native, fs,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    utcNow: () => utc, monotonicNow: () => mono,
+    setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimer() {} });
+  await first.openDocument(target, "password words");
+  await first.enterEditMode();
+  const acquired = native.currentLease();
+  assert.equal(acquired.heartbeatCounter, 1);
+  assert.equal(timers.some((timer) => timer.delay === 120_000), true);
+
+  const second = new DocumentService({ native, fs,
+    profilePath: await writeProfile(directory, "Grace", "Laptop"),
+    utcNow: () => utc, monotonicNow: () => mono });
+  const inspected = await second.openDocument(target, "password words");
+  assert.equal(inspected.lease.holderName, "Ada");
+  await assert.rejects(second.enterEditMode(), (error) => error.code === "LEASE_ACTIVE");
+
+  utc += 120_000;
+  const heartbeat = timers.filter((timer) => timer.delay === 120_000).at(-1);
+  heartbeat.callback();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(native.currentLease().heartbeatCounter, 2);
+  await first.lock("screen-lock");
+  utc += 60_000;
+  await first.openDocument(target, "password words");
+  await first.enterEditMode();
+  assert.equal(native.currentLease().sessionId, acquired.sessionId);
+
+  await first.lock("screen-lock");
+  utc += 600_001;
+  await second.openDocument(target, "password words");
+  await second.enterEditMode();
+  assert.equal(native.currentLease().holderName, "Grace");
+  assert.notEqual(native.currentLease().sessionId, acquired.sessionId);
+});
+
+test("uncertain clocks require observation or explicit forced confirmation", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-clock-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+    canEdit: true, documentId: "cc".repeat(16), baseRevision: "dd".repeat(32),
+    journalKey: Buffer.alloc(32, 5) }) });
+  const holder = new DocumentService({ native, fs,
+    profilePath: await writeProfile(directory, "Ada", "Wrong clock"),
+    utcNow: () => 9_000_000, monotonicNow: () => 0 });
+  await holder.openDocument(target, "password words");
+  await holder.enterEditMode();
+
+  let monotonic = 10;
+  const observer = new DocumentService({ native, fs,
+    profilePath: await writeProfile(directory, "Grace", "Observer"),
+    utcNow: () => 1_000, monotonicNow: () => monotonic });
+  await observer.openDocument(target, "password words");
+  await assert.rejects(observer.enterEditMode(),
+    (error) => error.code === "LEASE_CLOCK_UNCERTAIN");
+  monotonic += 600_000;
+  await observer.enterEditMode();
+  assert.equal(native.currentLease().holderName, "Grace");
+  await assert.rejects(holder.saveDocument("must not publish"),
+    /lease is no longer held/);
+
+  const forced = new DocumentService({ native, fs,
+    profilePath: await writeProfile(directory, "Katherine", "Confirmed"),
+    utcNow: () => 500, monotonicNow: () => 20 });
+  await forced.openDocument(target, "password words");
+  await forced.enterEditMode({ forceTakeover: true });
+  assert.equal(native.currentLease().holderName, "Katherine");
 });

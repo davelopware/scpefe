@@ -88,6 +88,22 @@ export function validateOpenedDocument(value) {
     throw new TypeError("native bridge returned an invalid document");
   }
   let recovery;
+  let lease;
+  if (value.lease !== undefined) {
+    const candidate = value.lease;
+    if (!candidate || typeof candidate !== "object"
+        || typeof candidate.active !== "boolean"
+        || !/^[0-9a-f]{32}$/.test(candidate.sessionId)
+        || !Number.isSafeInteger(candidate.heartbeatCounter)
+        || !Number.isSafeInteger(candidate.holderUtcMs)
+        || !Number.isSafeInteger(candidate.durationMs) || candidate.durationMs <= 0
+        || typeof candidate.holderName !== "string"
+        || typeof candidate.holderEmail !== "string"
+        || typeof candidate.deviceName !== "string") {
+      throw new TypeError("host returned invalid editing lease details");
+    }
+    lease = Object.freeze({ ...candidate });
+  }
   if (value.recovery !== undefined) {
     if (!value.recovery || typeof value.recovery !== "object"
         || typeof value.recovery.content !== "string"
@@ -107,7 +123,8 @@ export function validateOpenedDocument(value) {
         end: value.recovery.cursor.end }) });
   }
   return Object.freeze({ content: value.content, readOnly: true,
-    canEdit: value.canEdit, ...(recovery ? { recovery } : {}) });
+    canEdit: value.canEdit, ...(lease ? { lease } : {}),
+    ...(recovery ? { recovery } : {}) });
 }
 
 export function validateEditMode(value) {

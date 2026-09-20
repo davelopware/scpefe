@@ -48,6 +48,15 @@ public:
         const std::uint8_t *encoded_snapshot_revision,
         std::size_t encoded_snapshot_revision_size
     );
+
+    /* Re-encrypts only shared lease metadata while preserving revision ciphertext semantics. */
+    static std::vector<std::uint8_t> replace_editing_lease(
+        const std::uint8_t *container,
+        std::size_t container_size,
+        const std::uint8_t *password,
+        std::size_t password_size,
+        const EditingLeaseData &lease
+    );
 };
 
 } // namespace scpefe::container

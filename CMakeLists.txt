@@ -154,10 +154,14 @@ if(BUILD_TESTING)
         add_executable(scpefe_manual_save_test tests/manual_save_test.c)
         target_link_libraries(scpefe_manual_save_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_editing_lease_test tests/editing_lease_test.c)
+        target_link_libraries(scpefe_editing_lease_test PRIVATE SCPEFE::scpefe)
+
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
         add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
         add_test(NAME scpefe.manual-save-round-trip COMMAND scpefe_manual_save_test)
+        add_test(NAME scpefe.editing-lease-round-trip COMMAND scpefe_editing_lease_test)
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"
