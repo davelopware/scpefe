@@ -25,6 +25,24 @@ async function writeProfile(directory, name, deviceName) {
   return profilePath;
 }
 
+function delayNextTargetRead(service, target) {
+  const readFile = service.fs.readFile.bind(service.fs);
+  let release;
+  const released = new Promise((resolve) => { release = resolve; });
+  let started;
+  const readStarted = new Promise((resolve) => { started = resolve; });
+  let delayed = false;
+  service.fs = { ...service.fs, async readFile(file, ...args) {
+    if (!delayed && file === target) {
+      delayed = true;
+      started();
+      await released;
+    }
+    return readFile(file, ...args);
+  } };
+  return { readStarted, release };
+}
+
 test("requires a profile, publishes once, verifies, and reopens read-only", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-desktop-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -351,4 +369,115 @@ test("uncertain clocks require observation or explicit forced confirmation", asy
   await forced.openDocument(target, "password words");
   await forced.enterEditMode({ forceTakeover: true });
   assert.equal(native.currentLease().holderName, "Katherine");
+});
+
+test("serializes a delayed heartbeat ahead of save without overwriting it", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lease-save-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const native = withLease({
+    openDocument(bytes) { return { content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+    documentId: "ee".repeat(16), baseRevision: "ff".repeat(32),
+    journalKey: Buffer.alloc(32, 6) }; },
+    saveDocument(_bytes, _password, input) { return Buffer.from(`saved:${input.content}`); },
+  });
+  const timers = [];
+  const service = new DocumentService({ native, fs, inactivityMs: 999_999,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimer() {} });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  const delayed = delayNextTargetRead(service, target);
+  timers.find((timer) => timer.delay === 120_000).callback();
+  await delayed.readStarted;
+  let saveFinished = false;
+  const saving = service.saveDocument("saved after heartbeat")
+    .then((result) => { saveFinished = true; return result; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(saveFinished, false);
+  delayed.release();
+  assert.deepEqual(await saving, { saved: true, content: "saved after heartbeat" });
+  assert.equal(await fs.readFile(target, "utf8"), "saved:saved after heartbeat");
+  assert.equal(native.currentLease().heartbeatCounter, 2);
+});
+
+test("lock and release invalidate and await an in-flight heartbeat", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lease-stop-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+    canEdit: true, documentId: "12".repeat(16), baseRevision: "34".repeat(32),
+    journalKey: Buffer.alloc(32, 7) }) });
+  const timers = [];
+  const service = new DocumentService({ native, fs, inactivityMs: 999_999,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimer() {} });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  let delayed = delayNextTargetRead(service, target);
+  timers.find((timer) => timer.delay === 120_000).callback();
+  await delayed.readStarted;
+  const locking = service.lock("screen-lock");
+  const timersBeforeLock = timers.length;
+  delayed.release();
+  await locking;
+  assert.equal(native.currentLease().heartbeatCounter, 1);
+  assert.equal(timers.length, timersBeforeLock);
+
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  const resumedCounter = native.currentLease().heartbeatCounter;
+  delayed = delayNextTargetRead(service, target);
+  timers.filter((timer) => timer.delay === 120_000).at(-1).callback();
+  await delayed.readStarted;
+  const releasing = service.exitEditMode();
+  const timersBeforeRelease = timers.length;
+  delayed.release();
+  assert.deepEqual(await releasing, { released: true });
+  assert.equal(native.currentLease().active, false);
+  assert.equal(native.currentLease().heartbeatCounter, resumedCounter);
+  assert.equal(timers.length, timersBeforeRelease);
+});
+
+test("resumes only an unchanged valid suspended lease and flags counter changes", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lease-resume-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+    canEdit: true, documentId: "56".repeat(16), baseRevision: "78".repeat(32),
+    journalKey: Buffer.alloc(32, 8) }) });
+  let utc = 10_000;
+  let sessions = 0;
+  const service = new DocumentService({ native, fs, utcNow: () => utc,
+    randomSessionId: () => Buffer.alloc(16, ++sessions),
+    profilePath: await writeProfile(directory, "Ada", "Desk") });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  const firstSession = native.currentLease().sessionId;
+  await service.lock("screen-lock");
+  utc += 60_000;
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  assert.equal(native.currentLease().sessionId, firstSession);
+
+  await service.lock("screen-lock");
+  const changed = { ...native.currentLease(), heartbeatCounter: 99 };
+  native.updateLease(Buffer.from("container"), "password words", changed);
+  await service.openDocument(target, "password words");
+  await assert.rejects(service.enterEditMode(),
+    (error) => error.code === "LEASE_CHANGED");
+
+  native.updateLease(Buffer.from("container"), "password words",
+    { ...changed, heartbeatCounter: 2 });
+  utc += 600_001;
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  assert.notEqual(native.currentLease().sessionId, firstSession);
+  assert.equal(native.currentLease().heartbeatCounter, 1);
 });

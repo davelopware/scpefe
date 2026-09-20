@@ -39,7 +39,10 @@ export class DocumentService {
     this.checkpointTimer = null;
     this.inactivityTimer = null;
     this.heartbeatTimer = null;
+    this.heartbeatOperation = null;
+    this.leaseGeneration = 0;
     this.flushChain = Promise.resolve();
+    this.publicationChain = Promise.resolve();
     this.active = null;
     this.suspendedLeases = new Map();
     this.leaseObservations = new Map();
@@ -74,9 +77,11 @@ export class DocumentService {
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new Error("Native bridge did not produce a container");
     }
-    await this.#atomicWrite(target, candidate, false);
-    const published = await this.fs.readFile(target);
-    if (!published.equals(candidate)) throw new Error("Published container verification failed");
+    await this.#queuePublication(async () => {
+      await this.#atomicWrite(target, candidate, false);
+      const published = await this.fs.readFile(target);
+      if (!published.equals(candidate)) throw new Error("Published container verification failed");
+    });
     return { created: true };
   }
 
@@ -175,7 +180,10 @@ export class DocumentService {
   async lock(reason = "app-lock") {
     const active = this.active;
     if (!active) return { locked: true, journalSaved: true, warning: null };
-    this.#cancelTimers();
+    this.#cancelCheckpoint();
+    if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
+    this.inactivityTimer = null;
+    await this.#stopHeartbeat();
     let journalSaved = true;
     let warning = null;
     try {
@@ -204,17 +212,25 @@ export class DocumentService {
   async exitEditMode() {
     const active = this.active;
     if (!active?.editMode) return { released: false };
+    await this.#stopHeartbeat();
     await this.#flushActive(active);
-    const current = await this.fs.readFile(active.target);
-    const inspected = this.#validateNativeOpened(
-      this.native.openDocument(current, active.password));
-    if (inspected.lease.active
-        && Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)) {
-      const candidate = this.native.updateLease(current, active.password,
-        { ...inspected.lease, active: false });
-      await this.#atomicWrite(active.target, candidate, true);
-    }
-    this.#cancelHeartbeat();
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.openDocument(current, active.password));
+      const sameSession = inspected.lease.active
+        && Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId);
+      if (sameSession && inspected.lease.heartbeatCounter !== active.leaseCounter) {
+        const error = new Error("Editing lease changed before it could be released");
+        error.code = "LEASE_CHANGED";
+        throw error;
+      }
+      if (sameSession) {
+        const candidate = this.native.updateLease(current, active.password,
+          { ...inspected.lease, active: false });
+        await this.#atomicWrite(active.target, candidate, true);
+      }
+    });
     active.editMode = false;
     active.working = null;
     active.leaseSessionId = null;
@@ -231,25 +247,28 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const canonical = canonicalizeDocumentText(content);
-    const current = await this.fs.readFile(this.active.target);
-    const currentLease = this.#validateNativeOpened(
-      this.native.openDocument(current, this.active.password)).lease;
-    if (!currentLease.active || !this.active.leaseSessionId
-        || !Buffer.from(currentLease.sessionId, "hex")
-          .equals(this.active.leaseSessionId)) {
-      throw new Error("Editing lease is no longer held by this session");
-    }
-    const candidate = this.native.saveDocument(current, this.active.password, {
-      ...profile, content: canonical, timestampMs: Date.now(),
+    const active = this.active;
+    const reopened = await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const currentLease = this.#validateNativeOpened(
+        this.native.openDocument(current, active.password)).lease;
+      if (!currentLease.active || !active.leaseSessionId
+          || !Buffer.from(currentLease.sessionId, "hex").equals(active.leaseSessionId)
+          || currentLease.heartbeatCounter !== active.leaseCounter) {
+        throw new Error("Editing lease is no longer held by this session");
+      }
+      const candidate = this.native.saveDocument(current, active.password, {
+        ...profile, content: canonical, timestampMs: Date.now(),
+      });
+      if (!Buffer.isBuffer(candidate) || candidate.length === 0)
+        throw new Error("Native bridge did not produce a container");
+      await this.#atomicWrite(active.target, candidate, true);
+      const published = await this.fs.readFile(active.target);
+      if (!published.equals(candidate))
+        throw new Error("Published container verification failed");
+      return this.#validateNativeOpened(
+        this.native.openDocument(published, active.password));
     });
-    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
-      throw new Error("Native bridge did not produce a container");
-    }
-    await this.#atomicWrite(this.active.target, candidate, true);
-    const published = await this.fs.readFile(this.active.target);
-    if (!published.equals(candidate)) throw new Error("Published container verification failed");
-    const reopened = this.#validateNativeOpened(
-      this.native.openDocument(published, this.active.password));
     if (reopened.opened.content !== canonical) {
       reopened.journalKey.fill(0);
       throw new Error("Saved document verification failed");
@@ -305,73 +324,110 @@ export class DocumentService {
 
   async #acquireLease(forceTakeover) {
     const active = this.active;
-    const bytes = await this.fs.readFile(active.target);
-    const latest = this.#validateNativeOpened(this.native.openDocument(bytes, active.password));
-    const lease = latest.lease;
-    const suspended = this.suspendedLeases.get(active.documentId);
-    const sameSession = lease.active && suspended
-      && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
-    if (lease.active && !sameSession) {
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    await this.#queuePublication(async () => {
+      const bytes = await this.fs.readFile(active.target);
+      const latest = this.#validateNativeOpened(
+        this.native.openDocument(bytes, active.password));
+      const lease = latest.lease;
+      const suspended = this.suspendedLeases.get(active.documentId);
+      const sessionMatches = lease.active && suspended
+        && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
       const age = this.utcNow() - lease.holderUtcMs;
-      const reliableExpiry = age >= lease.durationMs;
-      const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
-      const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
-      this.leaseObservations.set(key, firstSeen);
-      const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
-      if (!reliableExpiry && !observedStale && !forceTakeover) {
-        const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
-        error.code = age < 0
-          ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
+      if (sessionMatches && lease.heartbeatCounter !== suspended.counter) {
+        const error = new Error("Editing lease changed while this session was locked");
+        error.code = "LEASE_CHANGED";
         error.lease = lease;
         throw error;
       }
-    }
-    const profile = await this.loadProfile();
-    if (!profile) throw new Error("Configure name, email, and device name first");
-    const sessionId = sameSession ? suspended.sessionId : this.randomSessionId();
-    const nextLease = {
-      active: true, sessionId: sessionId.toString("hex"),
-      heartbeatCounter: sameSession ? lease.heartbeatCounter + 1 : 1,
-      holderUtcMs: this.utcNow(), durationMs: lease.durationMs,
-      holderName: profile.name, holderEmail: profile.email,
-      deviceName: profile.deviceName,
-    };
-    const candidate = this.native.updateLease(bytes, active.password, nextLease);
-    await this.#atomicWrite(active.target, candidate, true);
-    active.leaseSessionId = Buffer.from(sessionId);
-    active.leaseCounter = nextLease.heartbeatCounter;
-    this.#scheduleHeartbeat();
+      const sameSession = sessionMatches && age >= 0 && age < lease.durationMs;
+      if (lease.active && !sameSession) {
+        const reliableExpiry = age >= lease.durationMs;
+        const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
+        const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
+        this.leaseObservations.set(key, firstSeen);
+        const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
+        if (!reliableExpiry && !observedStale && !forceTakeover) {
+          const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
+          error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
+          error.lease = lease;
+          throw error;
+        }
+      }
+      const sessionId = sameSession ? suspended.sessionId : this.randomSessionId();
+      const nextLease = {
+        active: true, sessionId: sessionId.toString("hex"),
+        heartbeatCounter: sameSession ? lease.heartbeatCounter + 1 : 1,
+        holderUtcMs: this.utcNow(), durationMs: lease.durationMs,
+        holderName: profile.name, holderEmail: profile.email,
+        deviceName: profile.deviceName,
+      };
+      const candidate = this.native.updateLease(bytes, active.password, nextLease);
+      await this.#atomicWrite(active.target, candidate, true);
+      active.leaseSessionId = Buffer.from(sessionId);
+      active.leaseCounter = nextLease.heartbeatCounter;
+    });
+    this.leaseGeneration += 1;
+    this.#scheduleHeartbeat(this.leaseGeneration);
   }
 
-  #scheduleHeartbeat() {
+  #scheduleHeartbeat(generation) {
     this.#cancelHeartbeat();
     this.heartbeatTimer = this.setTimer(() => {
       this.heartbeatTimer = null;
-      void this.#refreshLease().catch((error) => {
+      if (generation !== this.leaseGeneration) return;
+      const operation = this.#refreshLease(generation);
+      this.heartbeatOperation = operation;
+      void operation.catch((error) => {
+        if (error?.code === "STALE_HEARTBEAT"
+            || generation !== this.leaseGeneration) return;
         this.onJournalWarning(`Editing lease refresh failed: ${error.message}`);
         void this.lock("lease-refresh-failed");
+      }).finally(() => {
+        if (this.heartbeatOperation === operation) this.heartbeatOperation = null;
       });
     }, HEARTBEAT_MS);
     this.heartbeatTimer?.unref?.();
   }
 
-  async #refreshLease() {
+  async #refreshLease(generation) {
     const active = this.active;
-    if (!active?.editMode || !active.leaseSessionId) return;
-    const bytes = await this.fs.readFile(active.target);
-    const latest = this.#validateNativeOpened(this.native.openDocument(bytes, active.password));
-    if (!latest.lease.active
-        || !Buffer.from(latest.lease.sessionId, "hex").equals(active.leaseSessionId)) {
-      active.editMode = false;
-      throw new Error("Editing lease was replaced by another client");
+    if (!active?.editMode || !active.leaseSessionId
+        || generation !== this.leaseGeneration) return;
+    await this.#queuePublication(async () => {
+      this.#requireCurrentHeartbeat(active, generation);
+      const bytes = await this.fs.readFile(active.target);
+      this.#requireCurrentHeartbeat(active, generation);
+      const latest = this.#validateNativeOpened(
+        this.native.openDocument(bytes, active.password));
+      if (!latest.lease.active
+          || !Buffer.from(latest.lease.sessionId, "hex").equals(active.leaseSessionId)
+          || latest.lease.heartbeatCounter !== active.leaseCounter) {
+        active.editMode = false;
+        throw new Error("Editing lease was replaced by another client");
+      }
+      const nextLease = { ...latest.lease,
+        heartbeatCounter: latest.lease.heartbeatCounter + 1,
+        holderUtcMs: this.utcNow() };
+      this.#requireCurrentHeartbeat(active, generation);
+      await this.#atomicWrite(active.target,
+        this.native.updateLease(bytes, active.password, nextLease), true,
+        () => active === this.active && generation === this.leaseGeneration);
+      active.leaseCounter = nextLease.heartbeatCounter;
+      this.#requireCurrentHeartbeat(active, generation);
+    });
+    if (active === this.active && active.editMode
+        && generation === this.leaseGeneration) this.#scheduleHeartbeat(generation);
+  }
+
+  #requireCurrentHeartbeat(active, generation) {
+    if (active !== this.active || !active.editMode
+        || generation !== this.leaseGeneration) {
+      const error = new Error("Heartbeat no longer belongs to the active lease");
+      error.code = "STALE_HEARTBEAT";
+      throw error;
     }
-    const nextLease = { ...latest.lease,
-      heartbeatCounter: latest.lease.heartbeatCounter + 1,
-      holderUtcMs: this.utcNow() };
-    await this.#atomicWrite(active.target,
-      this.native.updateLease(bytes, active.password, nextLease), true);
-    active.leaseCounter = nextLease.heartbeatCounter;
-    this.#scheduleHeartbeat();
   }
 
   #scheduleCheckpoint() {
@@ -410,16 +466,16 @@ export class DocumentService {
     active.journalWarning = null;
   }
 
-  #cancelTimers() {
-    this.#cancelCheckpoint();
-    this.#cancelHeartbeat();
-    if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
-    this.inactivityTimer = null;
-  }
-
   #cancelHeartbeat() {
     if (this.heartbeatTimer !== null) this.clearTimer(this.heartbeatTimer);
     this.heartbeatTimer = null;
+  }
+
+  async #stopHeartbeat() {
+    this.leaseGeneration += 1;
+    this.#cancelHeartbeat();
+    const operation = this.heartbeatOperation;
+    if (operation) await operation.catch(() => {});
   }
 
   #cancelCheckpoint() {
@@ -427,7 +483,13 @@ export class DocumentService {
     this.checkpointTimer = null;
   }
 
-  async #atomicWrite(target, bytes, replace) {
+  #queuePublication(operation) {
+    const queued = this.publicationChain.catch(() => {}).then(operation);
+    this.publicationChain = queued;
+    return queued;
+  }
+
+  async #atomicWrite(target, bytes, replace, isCurrent = () => true) {
     const transaction = `${target}.scpefe-txn-${process.pid}-${Date.now()}`;
     let handle;
     try {
@@ -436,6 +498,11 @@ export class DocumentService {
       await handle.sync();
       await handle.close();
       handle = null;
+      if (!isCurrent()) {
+        const error = new Error("Publication no longer belongs to the current state");
+        error.code = "STALE_HEARTBEAT";
+        throw error;
+      }
       if (replace) {
         await this.fs.rename(transaction, target);
       } else {
