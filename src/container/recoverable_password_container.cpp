@@ -91,6 +91,19 @@ auto clear_on_scope_exit(Buffer &buffer)
     }};
 }
 
+template<typename Builder>
+std::vector<std::uint8_t> build_sensitive_plaintext(Builder &&builder)
+{
+    std::vector<std::uint8_t> result;
+    try {
+        builder(result);
+        return result;
+    } catch (...) {
+        if (!result.empty()) sodium_memzero(result.data(), result.size());
+        throw;
+    }
+}
+
 void write_u32(std::uint8_t *out, std::uint32_t value)
 {
     for (std::size_t i = 0; i < 4; ++i) out[i] = value >> (8 * i);
@@ -141,17 +154,17 @@ std::vector<std::uint8_t> encode_lease(const EditingLeaseData &lease)
 {
     if (lease.duration_ms == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
-    std::vector<std::uint8_t> result;
-    result.insert(result.end(), lease_magic.begin(), lease_magic.end());
-    result.push_back(lease.active ? 1 : 0);
-    result.insert(result.end(), lease.session_id.begin(), lease.session_id.end());
-    append_u64(result, lease.heartbeat_counter);
-    append_u64(result, lease.holder_utc_ms);
-    append_u64(result, lease.duration_ms);
-    append_text(result, lease.holder_name);
-    append_text(result, lease.holder_email);
-    append_text(result, lease.device_name);
-    return result;
+    return build_sensitive_plaintext([&](auto &result) {
+        result.insert(result.end(), lease_magic.begin(), lease_magic.end());
+        result.push_back(lease.active ? 1 : 0);
+        result.insert(result.end(), lease.session_id.begin(), lease.session_id.end());
+        append_u64(result, lease.heartbeat_counter);
+        append_u64(result, lease.holder_utc_ms);
+        append_u64(result, lease.duration_ms);
+        append_text(result, lease.holder_name);
+        append_text(result, lease.holder_email);
+        append_text(result, lease.device_name);
+    });
 }
 
 std::size_t decode_lease(const std::uint8_t *input, std::size_t size,
@@ -190,18 +203,13 @@ std::vector<std::uint8_t> encode_owner_identity(
     const std::array<std::uint8_t, 16> &slot_id,
     std::string_view name, std::string_view email)
 {
-    std::vector<std::uint8_t> result;
-    try {
+    return build_sensitive_plaintext([&](auto &result) {
         result.insert(result.end(), owner_identity_magic.begin(),
             owner_identity_magic.end());
         result.insert(result.end(), slot_id.begin(), slot_id.end());
         append_text(result, name);
         append_text(result, email);
-        return result;
-    } catch (...) {
-        if (!result.empty()) sodium_memzero(result.data(), result.size());
-        throw;
-    }
+    });
 }
 
 std::size_t decode_owner_identity(const std::uint8_t *input, std::size_t size,
@@ -420,15 +428,15 @@ std::vector<std::uint8_t> managed_metadata_plaintext(
     std::uint8_t permissions, std::uint8_t flags, std::uint8_t known,
     std::string_view name, std::string_view email)
 {
-    std::vector<std::uint8_t> result;
-    result.insert(result.end(), management_id.begin(), management_id.end());
-    result.insert(result.end(), actual_slot_id.begin(), actual_slot_id.end());
-    result.push_back(permissions);
-    result.push_back(flags);
-    result.push_back(known);
-    append_u32_text(result, name);
-    append_u32_text(result, email);
-    return result;
+    return build_sensitive_plaintext([&](auto &result) {
+        result.insert(result.end(), management_id.begin(), management_id.end());
+        result.insert(result.end(), actual_slot_id.begin(), actual_slot_id.end());
+        result.push_back(permissions);
+        result.push_back(flags);
+        result.push_back(known);
+        append_u32_text(result, name);
+        append_u32_text(result, email);
+    });
 }
 
 void decode_managed_metadata(const std::vector<std::uint8_t> &plain,
@@ -600,14 +608,14 @@ std::vector<std::uint8_t> invitation_plaintext(
     std::uint8_t permissions, std::uint8_t flags,
     std::string_view name, std::string_view email)
 {
-    std::vector<std::uint8_t> result;
-    result.insert(result.end(), document_key, document_key + key_size);
-    result.insert(result.end(), slot_id.begin(), slot_id.end());
-    result.push_back(permissions);
-    result.push_back(flags);
-    append_u32_text(result, name);
-    append_u32_text(result, email);
-    return result;
+    return build_sensitive_plaintext([&](auto &result) {
+        result.insert(result.end(), document_key, document_key + key_size);
+        result.insert(result.end(), slot_id.begin(), slot_id.end());
+        result.push_back(permissions);
+        result.push_back(flags);
+        append_u32_text(result, name);
+        append_u32_text(result, email);
+    });
 }
 
 void decode_invitation_plaintext(const std::vector<std::uint8_t> &plain,
@@ -786,7 +794,9 @@ std::size_t RecoverablePasswordContainer::encoded_size(
     if (snapshot_size > std::numeric_limits<std::size_t>::max() - fixed)
         throw ContainerFailure{ContainerError::invalid_argument};
     const EditingLeaseData empty_lease{};
-    const auto lease_size = encode_lease(empty_lease).size();
+    auto encoded_empty_lease = encode_lease(empty_lease);
+    const auto encoded_empty_lease_clear = clear_on_scope_exit(encoded_empty_lease);
+    const auto lease_size = encoded_empty_lease.size();
     if (snapshot_size > std::numeric_limits<std::size_t>::max() - fixed - lease_size)
         throw ContainerFailure{ContainerError::invalid_argument};
     const std::size_t identity_size = owner_name_size == 0 && owner_email_size == 0
@@ -833,7 +843,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
         write_u32(output.data() + slot_count_offset, slot_count);
         write_u32(output.data() + 36, aead_algorithm);
         randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
-        const auto lease = encode_lease(EditingLeaseData{});
+        auto lease = encode_lease(EditingLeaseData{});
+        const auto lease_clear = clear_on_scope_exit(lease);
         write_u64(output.data() + encrypted_snapshot_size_offset,
             document_id_size + lease.size() + owner_identity.size()
                 + encoded_snapshot_revision_size + tag_size);
@@ -1121,7 +1132,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
             }
         }
         if (!authenticated) throw ContainerFailure{ContainerError::authentication_failed};
-        const auto encoded_lease = encode_lease(current.editing_lease);
+        auto encoded_lease = encode_lease(current.editing_lease);
+        const auto encoded_lease_clear = clear_on_scope_exit(encoded_lease);
         const std::uint64_t old_encrypted_size = read_u64(
             container + encrypted_snapshot_size_offset);
         const std::size_t old_snapshot_offset = layout.snapshot_offset;
@@ -1813,7 +1825,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
     const std::uint8_t *password, std::size_t password_size,
     const EditingLeaseData &lease)
 {
-    const auto encoded_lease = encode_lease(lease);
+    auto encoded_lease = encode_lease(lease);
+    const auto encoded_lease_clear = clear_on_scope_exit(encoded_lease);
     auto current = unlock(container, container_size, password, password_size,
         format::RevisionLimits::defaults());
     if (current.must_be_changed)
