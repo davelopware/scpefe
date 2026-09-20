@@ -1,5 +1,6 @@
 import React, { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import "./styles.css";
 
 type Profile = { name: string; email: string; deviceName: string };
@@ -91,16 +92,13 @@ function SlotAdministration({ opened, onUpdate, onRemove, onCompact }: {
   onCompact(): Promise<void>;
 }) {
   const slots = opened.managedSlots ?? [];
-  const canUpdate = !opened.readOnly && opened.canAddPasswords === true
-    && opened.canRemovePasswords === true;
+  const canUpdate = compactionAvailable(opened);
   const canRemove = !opened.readOnly && opened.canRemovePasswords === true;
   return <aside className="slot-administration" aria-labelledby="slot-administration-heading">
     <h2 id="slot-administration-heading">Password-slot administration</h2>
     <p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent and is never listed as an ordinary slot.</p>
     {opened.readOnly && <p>Enter edit mode to publish permission changes or remove a slot.</p>}
-    {canUpdate && <><h3>History compaction</h3>
-      <p className="warning">Compaction permanently removes older embedded history from this container after creating an exact verified backup. It cannot remove external copies.</p>
-      <button type="button" onClick={() => { void onCompact(); }}>Compact history…</button></>}
+    {canUpdate && <CompactionControls onCompact={onCompact} />}
     <p className="warning">Removing a slot affects only this updated document and does not revoke older copies or information already obtained.</p>
     {slots.length === 0 ? <p>No ordinary invitation slots exist.</p>
       : <ul className="managed-slots">{slots.map((slot) =>

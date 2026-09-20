@@ -1177,7 +1177,7 @@ export class DocumentService {
     return validateBackupResult({ backedUp: true });
   }
 
-  async compactDocument(confirmation) {
+  async compactDocument(confirmation, backupTarget) {
     const active = this.active;
     if (!active?.editMode || !active.opened.canAddPasswords
         || !active.opened.canRemovePasswords) {
@@ -1191,6 +1191,13 @@ export class DocumentService {
         || active.headMismatch || active.opened.publicationState !== "target-published") {
       throw new Error(
         "Compaction requires a clean, manually sealed, conflict-free document");
+    }
+    const selectedBackupTarget = backupTarget === undefined
+      ? this.suggestedBackupTarget() : backupTarget;
+    if (typeof selectedBackupTarget !== "string" || !selectedBackupTarget
+        || selectedBackupTarget.includes("\0")
+        || path.resolve(selectedBackupTarget) === path.resolve(active.target)) {
+      throw new TypeError("A distinct pre-compaction backup target is required");
     }
     let reopened;
     let published;
@@ -1210,8 +1217,16 @@ export class DocumentService {
               || inspected.lease.heartbeatCounter !== active.leaseCounter) {
             throw new Error("The target or editing lease changed before compaction");
           }
-          await this.publications.publishReplica({
-            target: this.suggestedBackupTarget(), candidate: current });
+          try {
+            await this.publications.publishReplica({
+              target: selectedBackupTarget, candidate: current });
+          } catch (cause) {
+            const error = new Error(
+              "The required pre-compaction backup could not be created and verified");
+            error.code = "COMPACTION_BACKUP_FAILED";
+            error.cause = cause;
+            throw error;
+          }
           const revalidated = await this.fs.readFile(active.target);
           if (!revalidated.equals(current)) {
             throw new Error("The target changed after the pre-compaction backup");

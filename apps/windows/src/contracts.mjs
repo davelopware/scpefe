@@ -257,6 +257,11 @@ export function validateEditMode(value) {
       ? { canAddPasswords: value.canAddPasswords } : {}),
     ...(value.canRemovePasswords !== undefined
       ? { canRemovePasswords: value.canRemovePasswords } : {}),
+    ...(value.recoverySlot !== undefined ? { recoverySlot: value.recoverySlot } : {}),
+    ...(value.slotId !== undefined ? { slotId: value.slotId } : {}),
+    ...(value.slotIdentityName !== undefined
+      ? { slotIdentityName: value.slotIdentityName,
+        slotIdentityEmail: value.slotIdentityEmail } : {}),
     ...(value.managedSlots !== undefined ? { managedSlots: value.managedSlots } : {}),
     ...(value.invitationRequired !== undefined
       ? { invitationRequired: false } : {}) });
