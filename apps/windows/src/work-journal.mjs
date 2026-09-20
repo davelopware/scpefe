@@ -82,7 +82,8 @@ function validateRecord(value) {
             || value.publication.purpose !== "regular-save"))
         || (value.publication.purpose !== undefined
           && !["invitation-claim", "regular-save", "provisional-discard",
-            "identity-reconciliation", "slot-administration", "compaction"]
+            "identity-reconciliation", "slot-administration", "compaction",
+            "format-migration"]
             .includes(value.publication.purpose))
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"

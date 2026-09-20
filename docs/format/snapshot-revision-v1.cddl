@@ -19,6 +19,8 @@ snapshot-revision-v1 = {
   ? 12: [* revision-graph-node], ; authenticated retained ancestor graph
   ? 13: false,                    ; present only for a provisional revision
   ? 14: bstr,                     ; encoded sealed base; required with field 13
+  ? 15: tstr,                     ; non-text history event type
+  ? 16: tstr,                     ; non-text history event detail
 }
 
 revision-graph-node = [

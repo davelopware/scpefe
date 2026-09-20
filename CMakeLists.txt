@@ -41,6 +41,7 @@ else()
         src/document/manual_save.cpp
         src/document/provisional_save.cpp
         src/document/merge_save.cpp
+        src/document/migration.cpp
         src/security/password_strength.cpp
         third_party/zxcvbn-c/zxcvbn.c
     )
@@ -145,6 +146,12 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-compaction-addon.integration.mjs
                 $<TARGET_FILE:scpefe_electron_native>
         )
+        add_test(
+            NAME scpefe.native-addon-migration
+            COMMAND ${NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-migration-addon.integration.mjs
+                $<TARGET_FILE:scpefe_electron_native>
+        )
     endif()
 endif()
 
@@ -230,6 +237,9 @@ if(BUILD_TESTING)
         add_executable(scpefe_editing_lease_test tests/editing_lease_test.c)
         target_link_libraries(scpefe_editing_lease_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_migration_abi_test tests/migration_abi_test.c)
+        target_link_libraries(scpefe_migration_abi_test PRIVATE SCPEFE::scpefe)
+
         add_executable(scpefe_invitation_test tests/invitation_test.c)
         target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
 
@@ -246,6 +256,7 @@ if(BUILD_TESTING)
             COMMAND scpefe_export_surface_test $<TARGET_FILE:scpefe>
         )
         add_test(NAME scpefe.editing-lease-round-trip COMMAND scpefe_editing_lease_test)
+        add_test(NAME scpefe.migration-abi-validation COMMAND scpefe_migration_abi_test)
         add_test(NAME scpefe.invitation-claim COMMAND scpefe_invitation_test)
         add_test(
             NAME scpefe.format-contract

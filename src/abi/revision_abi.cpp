@@ -63,6 +63,8 @@ SnapshotRevisionData data_from_external(
     const bool has_ancestor_graph =
         revision.struct_size >= offsetof(scpefe_snapshot_revision_v1, manually_sealed);
     const bool has_provisional_fields =
+        revision.struct_size >= offsetof(scpefe_snapshot_revision_v1, event_type);
+    const bool has_event_fields =
         revision.struct_size >= sizeof(scpefe_snapshot_revision_v1);
     if (revision.struct_size < snapshot_revision_v1_base_size
         || revision.format_version != SCPEFE_REVISION_FORMAT_VERSION
@@ -177,6 +179,16 @@ SnapshotRevisionData data_from_external(
                     + revision.provisional_base_revision_size);
         }
     }
+    if (has_event_fields) {
+        if (!scpefe::format::span_is_valid(revision.event_type,
+                revision.event_type_size)
+            || !scpefe::format::span_is_valid(revision.event_detail,
+                revision.event_detail_size)) {
+            throw RevisionFailure{RevisionError::invalid_argument};
+        }
+        data.event_type.assign(revision.event_type, revision.event_type_size);
+        data.event_detail.assign(revision.event_detail, revision.event_detail_size);
+    }
     return data;
 }
 
@@ -203,6 +215,8 @@ void populate_external_view(
         data.manually_sealed,
         data.provisional_base_revision.data(),
         data.provisional_base_revision.size(),
+        data.event_type.data(), data.event_type.size(),
+        data.event_detail.data(), data.event_detail.size(),
     };
     std::memcpy(&view, &complete,
         std::min<std::size_t>(struct_size, sizeof(complete)));

@@ -17,6 +17,8 @@ public:
     CborReader(const std::uint8_t *data, std::size_t size, const RevisionLimits &limits);
     /* Reads one unsigned integer. */
     std::uint64_t unsigned_integer();
+    /* Reads the next unsigned integer without consuming it. */
+    std::uint64_t peek_unsigned();
     /* Reads and verifies an expected unsigned integer. */
     void expect_unsigned(std::uint64_t expected);
     /* Reads one Boolean value. */

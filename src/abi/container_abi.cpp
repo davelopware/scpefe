@@ -9,6 +9,7 @@
 #include "document/manual_save.hpp"
 #include "document/provisional_save.hpp"
 #include "document/merge_save.hpp"
+#include "document/migration.hpp"
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 #include "format/revision_limits.hpp"
@@ -256,6 +257,71 @@ scpefe_status scpefe_compact_document(
         if (output == nullptr || output_capacity < encoded.size()) {
             return SCPEFE_STATUS_BUFFER_TOO_SMALL;
         }
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) {
+        return external_status(failure.error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return failure.error == scpefe::format::RevisionError::limit_exceeded
+            ? SCPEFE_STATUS_LIMIT_EXCEEDED : SCPEFE_STATUS_INVALID_ARGUMENT;
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_migrate_document(
+    const scpefe_migration_v1 *migration, std::uint8_t *output,
+    std::size_t output_capacity, std::size_t *output_size)
+{
+    if (migration == nullptr || migration->struct_size < sizeof(*migration)
+        || migration->lease.struct_size < sizeof(scpefe_editing_lease_v1)
+        || output_size == nullptr || migration->container_size == 0
+        || migration->password_size == 0
+        || !scpefe::format::span_is_valid(migration->container, migration->container_size)
+        || !scpefe::format::span_is_valid(migration->password, migration->password_size)
+        || !scpefe::format::valid_utf8(migration->profile_name,
+            migration->profile_name_size)
+        || !scpefe::format::valid_utf8(migration->profile_email,
+            migration->profile_email_size)
+        || !scpefe::format::valid_utf8(migration->device_name,
+            migration->device_name_size)
+        || migration->lease.session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
+        || !scpefe::format::span_is_valid(migration->lease.session_id,
+            migration->lease.session_id_size)
+        || migration->lease.duration_ms == 0
+        || migration->lease.holder_name_size > 4096
+        || migration->lease.holder_email_size > 4096
+        || migration->lease.device_name_size > 4096
+        || !scpefe::format::valid_utf8(migration->lease.holder_name,
+            migration->lease.holder_name_size)
+        || !scpefe::format::valid_utf8(migration->lease.holder_email,
+            migration->lease.holder_email_size)
+        || !scpefe::format::valid_utf8(migration->lease.device_name,
+            migration->lease.device_name_size)) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    try {
+        scpefe::container::EditingLeaseData lease;
+        lease.active = migration->lease.active != 0;
+        std::copy_n(migration->lease.session_id, lease.session_id.size(),
+            lease.session_id.begin());
+        lease.heartbeat_counter = migration->lease.heartbeat_counter;
+        lease.holder_utc_ms = migration->lease.holder_utc_ms;
+        lease.duration_ms = migration->lease.duration_ms;
+        lease.holder_name.assign(migration->lease.holder_name,
+            migration->lease.holder_name_size);
+        lease.holder_email.assign(migration->lease.holder_email,
+            migration->lease.holder_email_size);
+        lease.device_name.assign(migration->lease.device_name,
+            migration->lease.device_name_size);
+        const auto encoded = scpefe::document::Migration::create(
+            migration->container, migration->container_size,
+            migration->password, migration->password_size,
+            {migration->profile_name, migration->profile_name_size},
+            {migration->profile_email, migration->profile_email_size},
+            {migration->device_name, migration->device_name_size},
+            migration->timestamp_ms, lease);
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
         std::memcpy(output, encoded.data(), encoded.size());
         return SCPEFE_STATUS_OK;
     } catch (const ContainerFailure &failure) {
