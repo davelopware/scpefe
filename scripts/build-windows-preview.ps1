@@ -86,7 +86,7 @@ if (-not (Test-Path $NodeLibrary)) {
     Write-Host "Downloading Electron $ElectronVersion x64 import library..."
     Invoke-WebRequest -UseBasicParsing $NodeLibraryUrl -OutFile $NodeLibrary
 }
-$NodeInclude = Join-Path $HeadersRoot "node-v${ElectronVersion}\include\node"
+$NodeInclude = Join-Path $HeadersRoot "node_headers\include\node"
 if (-not (Test-Path (Join-Path $NodeInclude "node_api.h"))) {
     if (Test-Path $HeadersRoot) {
         Remove-Item $HeadersRoot -Recurse -Force
