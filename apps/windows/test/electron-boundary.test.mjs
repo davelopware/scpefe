@@ -22,12 +22,15 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(preload, /require\(["']electron["']\)/);
 
   let exposed;
+  let creationResult = { created: true, target: "C:\\Users\\Ada\\secret.scpefe" };
+  const invocations = [];
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
     ipcRenderer: { on: () => {}, removeListener: () => {},
-      invoke: async (channel) => {
+      invoke: async (channel, request) => {
+        invocations.push({ channel, request });
         if (channel === "document:create") {
-          return { created: true, target: "C:\\Users\\Ada\\secret.scpefe" };
+          return creationResult;
         }
         if (channel === "document:export-plaintext") {
           return { exported: true, target: "C:\\Users\\Ada\\secret.txt" };
@@ -60,5 +63,42 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /invalid creation result/);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:create",
+    request: {
+      ownerPassword: "owner password words",
+      recoveryPassword: null,
+      content: "hello",
+      understandsIrrecoverable: true,
+      storedRecoverySeparately: false,
+    },
+  });
+  creationResult = { created: true };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.createDocument({
+    ownerPassword: "owner password words",
+    recoveryPassword: "different recovery words",
+    content: "hello",
+    understandsIrrecoverable: true,
+    storedRecoverySeparately: true,
+  }))), { created: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:create",
+    request: {
+      ownerPassword: "owner password words",
+      recoveryPassword: "different recovery words",
+      content: "hello",
+      understandsIrrecoverable: true,
+      storedRecoverySeparately: true,
+    },
+  });
+  await assert.rejects(exposed.createDocument({
+    ownerPassword: "owner password words",
+    recoveryPassword: "different recovery words",
+    content: "hello",
+    understandsIrrecoverable: true,
+    storedRecoverySeparately: false,
+  }), /recovery password storage must be acknowledged/);
+  assert.equal(invocations.filter(({ channel }) =>
+    channel === "document:create").length, 2);
   await assert.rejects(exposed.backupDocument(), /invalid backup result/);
 });
