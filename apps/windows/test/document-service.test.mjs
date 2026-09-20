@@ -624,7 +624,7 @@ test("head mismatches remain inspectable but block editing until explicitly acce
       documentId: "11".repeat(16), baseRevision: x,
       revisionGraph: [{ revisionId: x, parentRevisionIds: [a] }],
       journalKey: Buffer.alloc(32, 3) } };
-  const options = { native: withLease(native), fs,
+  const options = { native: withLease(native), fs, publicationCapabilities,
     profilePath: await writeProfile(directory, "Ada", "Desk") };
   const first = new DocumentService(options);
   await first.openDocument(target, "password words");
@@ -656,7 +656,8 @@ test("different document IDs are explained as target replacement", async (t) => 
     canEdit: true, documentId, baseRevision: head,
     revisionGraph: [{ revisionId: head, parentRevisionIds: [] }],
     journalKey: Buffer.alloc(32, 5) }) };
-  const options = { native, fs, profilePath: path.join(directory, "profile.json") };
+  const options = { native, fs, publicationCapabilities,
+    profilePath: path.join(directory, "profile.json") };
   const first = new DocumentService(options);
   await first.openDocument(target, "password words");
   await first.lock();
