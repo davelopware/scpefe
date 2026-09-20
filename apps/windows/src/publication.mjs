@@ -5,6 +5,10 @@ function hash(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function recoveryBasePath(target) {
+  return path.join(path.dirname(target), `.${path.basename(target)}.scpefe-recovery-base`);
+}
+
 async function readIfPresent(fs, file) {
   try {
     return await fs.readFile(file);
@@ -53,7 +57,7 @@ export class PublicationService {
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision }) {
+    baseRevision, reopenPassword }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
@@ -68,8 +72,10 @@ export class PublicationService {
         id, target, transactionFile,
         candidateHash: hash(candidate),
         baseHash: hash(base),
+        baseFile: recoveryBasePath(target),
         candidate: candidate.toString("base64"),
         stage: "prepared",
+        ...(reopenPassword ? { reopenPassword } : {}),
       },
     };
     try {
@@ -87,7 +93,8 @@ export class PublicationService {
     const publication = record.publication;
     const candidate = Buffer.from(publication.candidate, "base64");
     if (hash(candidate) !== publication.candidateHash
-        || path.dirname(publication.transactionFile) !== path.dirname(publication.target)) {
+        || path.dirname(publication.transactionFile) !== path.dirname(publication.target)
+        || publication.baseFile !== recoveryBasePath(publication.target)) {
       return { completed: false, reason: "ambiguous",
         replacementCapabilities: this.capabilities };
     }
@@ -111,12 +118,31 @@ export class PublicationService {
       replacementCapabilities: this.capabilities };
   }
 
+  async readRecoveryBase(target) {
+    return readIfPresent(this.fs, recoveryBasePath(target));
+  }
+
   async #complete(documentId, journalKey, initialRecord) {
     let record = initialRecord;
     const publication = record.publication;
     const candidate = Buffer.from(publication.candidate, "base64");
     let handle;
     try {
+      const recoveryBase = await readIfPresent(this.fs, publication.baseFile);
+      if (recoveryBase && hash(recoveryBase) !== publication.baseHash) {
+        throw new Error("Tracked recovery base does not match its publication");
+      }
+      if (!recoveryBase) {
+        const currentBase = await readIfPresent(this.fs, publication.target);
+        if (!currentBase || hash(currentBase) !== publication.baseHash) {
+          throw new Error("Publication base is unavailable for crash recovery");
+        }
+        handle = await this.fs.open(publication.baseFile, "wx", 0o600);
+        await handle.writeFile(currentBase);
+        await handle.sync();
+        await handle.close();
+        handle = null;
+      }
       const transaction = await readIfPresent(this.fs, publication.transactionFile);
       if (!transaction) {
         handle = await this.fs.open(publication.transactionFile, "wx", 0o600);
@@ -168,5 +194,9 @@ export class PublicationService {
       await this.fs.unlink(record.publication.transactionFile);
     }
     await this.journals.clear(documentId);
+    const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
+    if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
+      await this.fs.unlink(record.publication.baseFile);
+    }
   }
 }

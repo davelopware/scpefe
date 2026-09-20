@@ -99,23 +99,55 @@ export class DocumentService {
   async openDocument(target, password) {
     const bytes = await this.fs.readFile(target);
     const validatedPassword = validatePassword(password);
-    let nativeOpened = this.#validateNativeOpened(
-      this.native.openDocument(bytes, validatedPassword));
+    let activePassword = validatedPassword;
+    let nativeOpened;
+    let recoveredPublication = false;
+    try {
+      nativeOpened = this.#validateNativeOpened(
+        this.native.openDocument(bytes, activePassword));
+    } catch (targetError) {
+      const recoveryBase = await this.publications.readRecoveryBase(target);
+      if (!recoveryBase) throw targetError;
+      let baseOpened;
+      try {
+        baseOpened = this.#validateNativeOpened(
+          this.native.openDocument(recoveryBase, validatedPassword));
+        const journal = await this.journals.read(
+          baseOpened.documentId, baseOpened.journalKey);
+        if (!journal?.publication) throw targetError;
+        const resumed = await this.publications.resume(
+          baseOpened.documentId, baseOpened.journalKey, journal);
+        if (!resumed.completed) {
+          throw new Error("Interrupted publication could not be reconciled safely");
+        }
+        activePassword = journal.publication.reopenPassword ?? validatedPassword;
+        nativeOpened = this.#validateNativeOpened(this.native.openDocument(
+          await this.fs.readFile(target), activePassword));
+        recoveredPublication = true;
+        this.onJournalWarning("Interrupted publication was completed and verified.");
+      } finally {
+        baseOpened?.journalKey.fill(0);
+      }
+    }
     let recovery = null;
     let pendingPublication = false;
+    let publicationCompleted = false;
     try {
-      const journal = await this.journals.read(
+      const journal = recoveredPublication ? null : await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       if (journal?.publication) {
         pendingPublication = true;
+        const reopenPassword = journal.publication.reopenPassword ?? activePassword;
         const resumed = await this.publications.resume(
           nativeOpened.documentId, nativeOpened.journalKey, journal);
         if (resumed.completed) {
+          publicationCompleted = true;
           pendingPublication = false;
           const published = await this.fs.readFile(target);
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
-            this.native.openDocument(published, validatedPassword));
+            this.native.openDocument(published, reopenPassword));
+          activePassword = reopenPassword;
           this.onJournalWarning("Interrupted publication was completed and verified.");
         } else if (resumed.reason === "ambiguous") {
           this.onJournalWarning(
@@ -127,6 +159,7 @@ export class DocumentService {
         recovery = journal;
       }
     } catch (error) {
+      if (publicationCompleted) throw error;
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     let headMismatch = null;
@@ -152,7 +185,7 @@ export class DocumentService {
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime } } : {}) });
-    this.active = { target, password: validatedPassword, opened, editMode: false,
+    this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
       slotCanEdit, headMismatch,
@@ -237,7 +270,8 @@ export class DocumentService {
         { newPassword: replacement, name: profile.name, email: profile.email });
       await this.publications.publish({ documentId: active.documentId,
         journalKey: active.journalKey, target: active.target, base: current, candidate,
-        text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision });
+        text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
+        reopenPassword: replacement });
       reopened = this.#validateNativeOpened(this.native.openDocument(
         await this.fs.readFile(active.target), replacement));
       if (reopened.opened.invitationRequired) {

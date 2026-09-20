@@ -42,10 +42,16 @@ function validateRecord(value) {
         || value.publication.target !== value.target
         || typeof value.publication.transactionFile !== "string"
         || !value.publication.transactionFile
+        || typeof value.publication.baseFile !== "string"
+        || !value.publication.baseFile
         || !/^[0-9a-f]{64}$/.test(value.publication.candidateHash)
         || !/^[0-9a-f]{64}$/.test(value.publication.baseHash)
         || !TRANSACTION_STAGES.has(value.publication.stage)
         || typeof candidate !== "string"
+        || (value.publication.reopenPassword !== undefined
+          && (typeof value.publication.reopenPassword !== "string"
+            || !value.publication.reopenPassword
+            || value.publication.reopenPassword.length > 4096))
         || !Buffer.from(candidate, "base64").length) {
       throw new TypeError("invalid publication transaction");
     }
@@ -53,10 +59,13 @@ function validateRecord(value) {
       id: value.publication.id,
       target: value.publication.target,
       transactionFile: value.publication.transactionFile,
+      baseFile: value.publication.baseFile,
       candidateHash: value.publication.candidateHash,
       baseHash: value.publication.baseHash,
       candidate,
       stage: value.publication.stage,
+      ...(value.publication.reopenPassword
+        ? { reopenPassword: value.publication.reopenPassword } : {}),
     };
   }
   return {

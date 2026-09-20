@@ -12,6 +12,14 @@ const original = native.createDocument({ name: "Ada", email: "ada@example.test",
 const invited = native.addInvitation(original, owner, { temporaryPassword: temporary,
   temporaryLabel: "New colleague", canEdit: true, canAddPasswords: false,
   canRemovePasswords: false });
+assert.throws(() => native.addInvitation(invited, "wrong creator password words", {
+  temporaryPassword: "another temporary invitation password", temporaryLabel: "No one",
+  canEdit: false, canAddPasswords: false, canRemovePasswords: false,
+}));
+assert.throws(() => native.claimInvitation(invited, "wrong temporary password words", {
+  newPassword: "unused replacement password words", name: "Grace Hopper",
+  email: "grace@example.test",
+}));
 assert.equal(native.openDocument(invited, owner).content, "not visible before claim");
 assert.equal(native.openDocument(invited, recovery).content, "not visible before claim");
 const firstUse = native.openDocument(invited, temporary);

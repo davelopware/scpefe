@@ -44,7 +44,7 @@ the block and expose an inactive lease with the default duration. Lease-only
 updates re-encrypt this payload with a fresh nonce and preserve the exact
 revision bytes, so they never create history revisions.
 
-Invitation-capable writers may place an `SCPINV01` extension between the fixed
+Invitation-capable writers may place an `SCPINV02` extension between the fixed
 owner/recovery wrappers and encrypted snapshot. It contains a little-endian
 32-bit invitation count followed by independently salted and nonced invitation
 records. Each record carries a 16-octet salt, 24-octet nonce, 32-bit ciphertext
@@ -52,6 +52,9 @@ length, and XChaCha20-Poly1305 ciphertext. Its plaintext contains the document
 key, immutable slot ID, permission byte, `mustBeChanged` flag, and length-prefixed
 UTF-8 display name and email. The extension supports at most seven invitations,
 keeping the ordinary owner-plus-invitation total at eight; the optional recovery
-slot remains separate. Existing fixed wrappers and snapshot ciphertext remain
-byte-for-byte unchanged when an invitation is added. Claiming rewraps only the
-matched invitation record with its replacement password and claimed identity.
+slot remains separate. A 64-octet keyed state authenticator follows the records:
+one 32-octet value authenticates the complete extension through the last record,
+and one authenticates the current encrypted snapshot. Adding, claiming, or
+rewrapping an invitation refreshes the snapshot nonce and both authenticators.
+This binds every accepted record to the current container state, so a previously
+valid temporary-password record cannot be replayed after it has been claimed.
