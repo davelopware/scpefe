@@ -16,6 +16,10 @@ app.whenReady().then(() => {
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
     journalDirectory: path.join(app.getPath("userData"), "work-journals"),
+    publicationCapabilities: {
+      sameFilesystemTransaction: true,
+      replacementGuarantee: "best-effort-replace",
+    },
     onLocked: (result) => window?.webContents.send("document:locked", result),
     onJournalWarning: (warning) =>
       window?.webContents.send("document:journal-warning", warning),

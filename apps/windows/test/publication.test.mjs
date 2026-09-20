@@ -9,6 +9,8 @@ import { WorkJournalStore } from "../src/work-journal.mjs";
 const documentId = "12".repeat(16);
 const baseRevision = "34".repeat(32);
 const key = Buffer.alloc(32, 0x5a);
+const capabilities = Object.freeze({ sameFilesystemTransaction: true,
+  replacementGuarantee: "atomic-replace" });
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-publish-"));
@@ -20,6 +22,21 @@ async function fixture(t) {
   return { directory, target, journals };
 }
 
+test("validates and surfaces host replacement capabilities", async (t) => {
+  const { journals } = await fixture(t);
+  const weaker = Object.freeze({ sameFilesystemTransaction: true,
+    replacementGuarantee: "best-effort-replace" });
+  const service = new PublicationService({ fs, journals, capabilities: weaker });
+  assert.deepEqual(service.replacementCapabilities(), weaker);
+  assert.throws(() => new PublicationService({ fs, journals }), /capabilities/);
+  assert.throws(() => new PublicationService({ fs, journals, capabilities: {
+    sameFilesystemTransaction: false, replacementGuarantee: "atomic-replace",
+  } }), /capabilities/);
+  assert.throws(() => new PublicationService({ fs, journals, capabilities: {
+    sameFilesystemTransaction: true, replacementGuarantee: "guaranteed-cloud-cas",
+  } }), /capabilities/);
+});
+
 test("tracks every publication stage and clears only after verification", async (t) => {
   const { target, journals } = await fixture(t);
   const stages = [];
@@ -28,15 +45,15 @@ test("tracks every publication stage and clears only after verification", async 
     stages.push(args[2].publication.stage);
     return write(...args);
   };
-  const service = new PublicationService({ fs, journals, now: () => 42 });
+  const service = new PublicationService({ fs, journals, capabilities, now: () => 42 });
   assert.deepEqual(service.replacementCapabilities(), {
     sameFilesystemTransaction: true,
-    replacementGuarantee: "rename-without-compare-and-swap",
+    replacementGuarantee: "atomic-replace",
   });
   const result = await service.publish({ documentId, journalKey: key, target,
     base: Buffer.from("old container"), candidate: Buffer.from("new container"),
     text: "saved text", cursor: { start: 2, end: 2 }, baseRevision });
-  assert.equal(result.replacementGuarantee, "rename-without-compare-and-swap");
+  assert.deepEqual(result.replacementCapabilities, capabilities);
   assert.deepEqual(stages,
     ["prepared", "written", "flushed", "replaced", "verified", "cleanup"]);
   assert.equal(await fs.readFile(target, "utf8"), "new container");
@@ -56,7 +73,7 @@ test("restart completes an unambiguous interrupted publication", async (t) => {
     }
     return fs.rename(...args);
   };
-  const interrupted = new PublicationService({ fs: interruptedFs, journals });
+  const interrupted = new PublicationService({ fs: interruptedFs, journals, capabilities });
   await assert.rejects(interrupted.publish({ documentId, journalKey: key, target,
     base: Buffer.from("old container"), candidate: Buffer.from("new container"),
     text: "saved text", cursor: { start: 0, end: 0 }, baseRevision }), /power loss/);
@@ -65,10 +82,9 @@ test("restart completes an unambiguous interrupted publication", async (t) => {
   assert.equal(await fs.readFile(record.publication.transactionFile, "utf8"),
     "new container");
 
-  const restarted = new PublicationService({ fs, journals });
+  const restarted = new PublicationService({ fs, journals, capabilities });
   assert.deepEqual(await restarted.resume(documentId, key, record),
-    { completed: true, recovered: true,
-      replacementGuarantee: "rename-without-compare-and-swap" });
+    { completed: true, recovered: true, replacementCapabilities: capabilities });
   assert.equal(await fs.readFile(target, "utf8"), "new container");
   assert.equal(await journals.read(documentId, key), null);
 });
@@ -81,17 +97,16 @@ test("restart preserves recovery data when the target changed", async (t) => {
     error.code = "EIO";
     throw error;
   };
-  const interrupted = new PublicationService({ fs: interruptedFs, journals });
+  const interrupted = new PublicationService({ fs: interruptedFs, journals, capabilities });
   await assert.rejects(interrupted.publish({ documentId, journalKey: key, target,
     base: Buffer.from("old container"), candidate: Buffer.from("new container"),
     text: "saved text", cursor: { start: 0, end: 0 }, baseRevision }));
   const record = await journals.read(documentId, key);
   await fs.writeFile(target, "potentially newer container");
 
-  const restarted = new PublicationService({ fs, journals });
+  const restarted = new PublicationService({ fs, journals, capabilities });
   assert.deepEqual(await restarted.resume(documentId, key, record),
-    { completed: false, reason: "ambiguous",
-      replacementGuarantee: "rename-without-compare-and-swap" });
+    { completed: false, reason: "ambiguous", replacementCapabilities: capabilities });
   assert.equal(await fs.readFile(target, "utf8"), "potentially newer container");
   assert.equal(await fs.readFile(record.publication.transactionFile, "utf8"),
     "new container");
@@ -102,16 +117,15 @@ test("restart preserves a candidate transaction when the target is missing", asy
   const { target, journals } = await fixture(t);
   const interruptedFs = Object.create(fs);
   interruptedFs.rename = async () => { throw new Error("interrupted"); };
-  const interrupted = new PublicationService({ fs: interruptedFs, journals });
+  const interrupted = new PublicationService({ fs: interruptedFs, journals, capabilities });
   await assert.rejects(interrupted.publish({ documentId, journalKey: key, target,
     base: Buffer.from("old container"), candidate: Buffer.from("new container"),
     text: "saved text", cursor: { start: 0, end: 0 }, baseRevision }));
   const record = await journals.read(documentId, key);
   await fs.unlink(target);
-  const restarted = new PublicationService({ fs, journals });
+  const restarted = new PublicationService({ fs, journals, capabilities });
   assert.deepEqual(await restarted.resume(documentId, key, record),
-    { completed: false, reason: "ambiguous",
-      replacementGuarantee: "rename-without-compare-and-swap" });
+    { completed: false, reason: "ambiguous", replacementCapabilities: capabilities });
   assert.equal(await fs.readFile(record.publication.transactionFile, "utf8"),
     "new container");
 });
@@ -120,7 +134,7 @@ test("restart never cleans up a tracked transaction with ambiguous bytes", async
   const { target, journals } = await fixture(t);
   const interruptedFs = Object.create(fs);
   interruptedFs.rename = async () => { throw new Error("interrupted"); };
-  const interrupted = new PublicationService({ fs: interruptedFs, journals });
+  const interrupted = new PublicationService({ fs: interruptedFs, journals, capabilities });
   await assert.rejects(interrupted.publish({ documentId, journalKey: key, target,
     base: Buffer.from("old container"), candidate: Buffer.from("new container"),
     text: "saved text", cursor: { start: 0, end: 0 }, baseRevision }));
@@ -128,7 +142,7 @@ test("restart never cleans up a tracked transaction with ambiguous bytes", async
   await fs.writeFile(target, "new container");
   await fs.writeFile(record.publication.transactionFile, "untracked newer bytes");
 
-  const restarted = new PublicationService({ fs, journals });
+  const restarted = new PublicationService({ fs, journals, capabilities });
   const result = await restarted.resume(documentId, key, record);
   assert.equal(result.reason, "ambiguous");
   assert.equal(await fs.readFile(record.publication.transactionFile, "utf8"),

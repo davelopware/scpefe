@@ -11,6 +11,7 @@ const REVISION_ID = /^[0-9a-f]{64}$/;
 
 export class DocumentService {
   constructor({ native, fs, profilePath, journalDirectory,
+    publicationCapabilities,
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
     inactivityMs = 120_000, now = () => Date.now(),
@@ -22,7 +23,8 @@ export class DocumentService {
     this.nativeLineEnding = nativeLineEnding;
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
-    this.publications = new PublicationService({ fs, journals: this.journals, now });
+    this.publications = new PublicationService({ fs, journals: this.journals,
+      capabilities: publicationCapabilities, now });
     this.checkpointIdleMs = checkpointIdleMs;
     this.checkpointContinuousMs = checkpointContinuousMs;
     this.inactivityMs = inactivityMs;
@@ -136,6 +138,10 @@ export class DocumentService {
     return validateEditMode({ ...this.active.opened, readOnly: false });
   }
 
+  publicationCapabilities() {
+    return this.publications.replacementCapabilities();
+  }
+
   async restoreRecoveredWork() {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
     if (!this.active.opened.canEdit) {
@@ -163,6 +169,9 @@ export class DocumentService {
 
   updateWorkingCopy(value) {
     if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
+    if (this.active.pendingPublication) {
+      throw new Error("Resolve the interrupted publication before editing");
+    }
     const working = validateWorkingCopy(value);
     this.active.working = working;
     this.active.dirty = working.content !== this.active.opened.content;
@@ -208,6 +217,9 @@ export class DocumentService {
   async saveDocument(content) {
     if (!this.active) throw new Error("Open a document first");
     if (!this.active.editMode) throw new Error("Enter edit mode before saving");
+    if (this.active.pendingPublication) {
+      throw new Error("Resolve the interrupted publication before saving");
+    }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }

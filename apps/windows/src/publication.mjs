@@ -14,19 +14,42 @@ async function readIfPresent(fs, file) {
   }
 }
 
+const REPLACEMENT_GUARANTEES = new Set([
+  "atomic-replace", "best-effort-replace",
+]);
+
+function validateCapabilities(value) {
+  if (!value || typeof value !== "object"
+      || value.sameFilesystemTransaction !== true
+      || !REPLACEMENT_GUARANTEES.has(value.replacementGuarantee)) {
+    throw new TypeError("invalid host publication capabilities");
+  }
+  return Object.freeze({ sameFilesystemTransaction: true,
+    replacementGuarantee: value.replacementGuarantee });
+}
+
+function publicationError(error) {
+  if (error && typeof error === "object") {
+    error.publicationPrepared = true;
+    return error;
+  }
+  const wrapped = new Error("Publication failed after preparation may have persisted");
+  wrapped.cause = error;
+  wrapped.publicationPrepared = true;
+  return wrapped;
+}
+
 /* Tracks and completes crash-safe candidate-container publication. */
 export class PublicationService {
-  constructor({ fs, journals, now = () => Date.now(),
-    replacementGuarantee = "rename-without-compare-and-swap" }) {
+  constructor({ fs, journals, capabilities, now = () => Date.now() }) {
     this.fs = fs;
     this.journals = journals;
     this.now = now;
-    this.replacementGuarantee = replacementGuarantee;
+    this.capabilities = validateCapabilities(capabilities);
   }
 
   replacementCapabilities() {
-    return Object.freeze({ sameFilesystemTransaction: true,
-      replacementGuarantee: this.replacementGuarantee });
+    return this.capabilities;
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
@@ -49,14 +72,13 @@ export class PublicationService {
         stage: "prepared",
       },
     };
-    await this.journals.write(documentId, journalKey, record);
     try {
+      await this.journals.write(documentId, journalKey, record);
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
-        replacementGuarantee: this.replacementGuarantee };
+        replacementCapabilities: this.capabilities };
     } catch (error) {
-      error.publicationPrepared = true;
-      throw error;
+      throw publicationError(error);
     }
   }
 
@@ -67,26 +89,26 @@ export class PublicationService {
     if (hash(candidate) !== publication.candidateHash
         || path.dirname(publication.transactionFile) !== path.dirname(publication.target)) {
       return { completed: false, reason: "ambiguous",
-        replacementGuarantee: this.replacementGuarantee };
+        replacementCapabilities: this.capabilities };
     }
     const transaction = await readIfPresent(this.fs, publication.transactionFile);
     if (transaction && hash(transaction) !== publication.candidateHash) {
       return { completed: false, reason: "ambiguous",
-        replacementGuarantee: this.replacementGuarantee };
+        replacementCapabilities: this.capabilities };
     }
     const target = await readIfPresent(this.fs, publication.target);
     if (target && hash(target) === publication.candidateHash) {
       await this.#cleanup(documentId, journalKey, record);
       return { completed: true, recovered: true,
-        replacementGuarantee: this.replacementGuarantee };
+        replacementCapabilities: this.capabilities };
     }
     if (!target || hash(target) !== publication.baseHash) {
       return { completed: false, reason: "ambiguous",
-        replacementGuarantee: this.replacementGuarantee };
+        replacementCapabilities: this.capabilities };
     }
     await this.#complete(documentId, journalKey, record);
     return { completed: true, recovered: true,
-      replacementGuarantee: this.replacementGuarantee };
+      replacementCapabilities: this.capabilities };
   }
 
   async #complete(documentId, journalKey, initialRecord) {

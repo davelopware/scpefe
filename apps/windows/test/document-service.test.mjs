@@ -5,6 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { DocumentService } from "../src/document-service.mjs";
 
+const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
+  replacementGuarantee: "atomic-replace" });
+
 test("requires a profile, publishes once, verifies, and reopens read-only", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-desktop-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -31,8 +34,9 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
       return Buffer.from(`saved:${input.content}`);
     },
   };
-  const service = new DocumentService({ native, fs,
+  const service = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: path.join(directory, "private", "profile.json") });
+  assert.deepEqual(service.publicationCapabilities(), publicationCapabilities);
   const target = path.join(directory, "document.scpefe");
   const request = { ownerPassword: "owner password words", recoveryPassword: "",
     content: "hello", understandsIrrecoverable: true,
@@ -59,7 +63,7 @@ test("view-only slots cannot enter edit mode", async (t) => {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   await fs.writeFile(target, "container");
-  const service = new DocumentService({ fs,
+  const service = new DocumentService({ fs, publicationCapabilities,
     profilePath: path.join(directory, "profile.json"),
     native: { openDocument: () => ({ content: "hello", readOnly: true,
       canEdit: false, documentId: "11".repeat(16),
@@ -78,7 +82,7 @@ test("checkpoints continuously typed work and recovers it as unsaved", async (t)
     journalKey: Buffer.alloc(32, 7) }) };
   let now = 0;
   const timers = [];
-  const service = new DocumentService({ native, fs,
+  const service = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: path.join(directory, "profile.json"), now: () => now,
     setTimer: (callback, delay) => {
       const timer = { callback, delay, cleared: false };
@@ -102,7 +106,7 @@ test("checkpoints continuously typed work and recovers it as unsaved", async (t)
   const encrypted = await fs.readFile(journalPath, "utf8");
   assert.doesNotMatch(encrypted, /recovered secret|document\.scpefe/);
 
-  const restarted = new DocumentService({ native, fs,
+  const restarted = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: path.join(directory, "profile.json") });
   const opened = await restarted.openDocument(target, "password words");
   assert.deepEqual(opened.recovery, { content: "recovered secret",
@@ -119,7 +123,7 @@ test("mandatory locking clears plaintext when the final journal write fails", as
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   await fs.writeFile(target, "container");
-  const service = new DocumentService({ fs,
+  const service = new DocumentService({ fs, publicationCapabilities,
     profilePath: path.join(directory, "profile.json"),
     native: { openDocument: () => ({ content: "base", readOnly: true,
       canEdit: true, documentId: "44".repeat(16), baseRevision: "55".repeat(32),
@@ -161,7 +165,7 @@ test("verified save waits for an in-flight checkpoint before clearing its journa
     },
   };
   const timers = [];
-  const service = new DocumentService({ native, fs,
+  const service = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: path.join(directory, "profile.json"),
     setTimer: (callback) => {
       const timer = { callback };
@@ -221,6 +225,7 @@ test("restart completes a tracked save while lock preserves its publication", as
   await fs.writeFile(profilePath, JSON.stringify({
     name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
   }));
+  let saveCalls = 0;
   const native = {
     openDocument(bytes) {
       return { content: bytes.toString().startsWith("saved:")
@@ -229,6 +234,7 @@ test("restart completes a tracked save while lock preserves its publication", as
       journalKey: Buffer.alloc(32, 19) };
     },
     saveDocument(_bytes, _password, input) {
+      saveCalls += 1;
       return Buffer.from(`saved:${input.content}`);
     },
   };
@@ -241,22 +247,80 @@ test("restart completes a tracked save while lock preserves its publication", as
     }
     return fs.rename(source, destination);
   };
-  const service = new DocumentService({ native, fs: interruptedFs, profilePath });
+  const service = new DocumentService({ native, fs: interruptedFs, profilePath,
+    publicationCapabilities });
   await service.openDocument(target, "password words");
   service.enterEditMode();
   service.updateWorkingCopy({ content: "saved after restart",
     cursor: { start: 19, end: 19 } });
   await assert.rejects(service.saveDocument("saved after restart"), /interruption/);
+  const pending = await service.journals.read("aa".repeat(16), Buffer.alloc(32, 19));
+  await assert.rejects(async () => service.updateWorkingCopy({
+    content: "must not replace candidate", cursor: { start: 3, end: 3 },
+  }), /interrupted publication/);
+  await assert.rejects(service.saveDocument("must not replace candidate"),
+    /interrupted publication/);
+  assert.equal(saveCalls, 1);
   await service.lock();
+  const afterLock = await service.journals.read("aa".repeat(16), Buffer.alloc(32, 19));
+  assert.equal(afterLock.publication.id, pending.publication.id);
+  assert.equal(afterLock.publication.candidateHash, pending.publication.candidateHash);
+  assert.equal(afterLock.publication.candidate, pending.publication.candidate);
 
   const warnings = [];
-  const restarted = new DocumentService({ native, fs, profilePath,
+  const restarted = new DocumentService({ native, fs, profilePath, publicationCapabilities,
     onJournalWarning: (warning) => warnings.push(warning) });
   const opened = await restarted.openDocument(target, "password words");
   assert.equal(opened.content, "saved after restart");
   assert.deepEqual(warnings,
     ["Interrupted publication was completed and verified."]);
   assert.equal(await fs.readFile(target, "utf8"), "saved:saved after restart");
+  await restarted.lock();
+});
+
+test("a persisted prepare with a lost acknowledgement survives lock and restart", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-prepare-ack-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  const native = {
+    openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+    documentId: "ac".repeat(16), baseRevision: "bd".repeat(32),
+    journalKey: Buffer.alloc(32, 21) }),
+    saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+  };
+  const service = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  service.updateWorkingCopy({ content: "durable candidate",
+    cursor: { start: 17, end: 17 } });
+  const write = service.journals.write.bind(service.journals);
+  let loseAcknowledgement = true;
+  service.journals.write = async (...args) => {
+    await write(...args);
+    if (loseAcknowledgement) {
+      loseAcknowledgement = false;
+      throw new Error("journal acknowledgement lost");
+    }
+  };
+  await assert.rejects(service.saveDocument("durable candidate"),
+    /acknowledgement lost/);
+  await service.lock();
+  const pending = await service.journals.read("ac".repeat(16), Buffer.alloc(32, 21));
+  assert.equal(pending.state, "pending-publication");
+  assert.equal(pending.publication.stage, "prepared");
+
+  const restarted = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.content, "durable candidate");
+  assert.equal(await restarted.journals.read("ac".repeat(16), Buffer.alloc(32, 21)), null);
   await restarted.lock();
 });
 
@@ -268,6 +332,7 @@ test("plaintext export writes only current text with selected line endings", asy
   const nativeExport = path.join(directory, "native.txt");
   await fs.writeFile(target, "encrypted container and metadata");
   const service = new DocumentService({ fs, nativeLineEnding: "\r\n",
+    publicationCapabilities,
     profilePath: path.join(directory, "profile.json"),
     native: { openDocument: () => ({ content: "original", readOnly: true,
       canEdit: false, documentId: "88".repeat(16),
