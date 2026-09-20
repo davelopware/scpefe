@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { openTargetFromAdditionalData,
   openTargetFromCommandLine, openTargetFromUrl, acknowledgementToken,
   OrderedOpenRequests } from "../src/single-instance.mjs";
@@ -9,11 +11,12 @@ import { applySwitchDecision, finishDocumentSwitch,
 
 test("accepts only SCPEFE shell targets from command lines and instance metadata", () => {
   assert.equal(openTargetFromCommandLine(
-    ["C:\\app\\SCPEFE.exe", "relative.scpefe"], "/documents"),
-  "/documents/relative.scpefe");
+    ["C:\\app\\SCPEFE.exe", "relative.scpefe"], path.resolve("/documents")),
+  path.resolve("/documents", "relative.scpefe"));
   assert.equal(openTargetFromCommandLine(["app", "--inspect", "notes.txt"]), null);
-  assert.equal(openTargetFromAdditionalData({ openTarget: "/safe/document.SCPEFE" }),
-    "/safe/document.SCPEFE");
+  const absoluteTarget = path.resolve("/safe/document.SCPEFE");
+  assert.equal(openTargetFromAdditionalData({ openTarget: absoluteTarget }),
+    absoluteTarget);
   assert.equal(openTargetFromAdditionalData({ openTarget: "relative.scpefe" }), null);
   assert.equal(openTargetFromAdditionalData({ openTarget: "/safe/document.txt" }), null);
   assert.equal(acknowledgementToken({
@@ -21,10 +24,10 @@ test("accepts only SCPEFE shell targets from command lines and instance metadata
   }), "123e4567-e89b-42d3-a456-426614174000");
   assert.equal(acknowledgementToken({ acknowledgementToken: "../unsafe" }), null);
   assert.equal(openTargetFromUrl("file:///safe/document.scpefe"),
-    "/safe/document.scpefe");
+    path.normalize(fileURLToPath("file:///safe/document.scpefe")));
   assert.equal(openTargetFromUrl(
     "scpefe://open?target=file%3A%2F%2F%2Fsafe%2Flinked.scpefe"),
-  "/safe/linked.scpefe");
+  path.normalize(fileURLToPath("file:///safe/linked.scpefe")));
   assert.equal(openTargetFromUrl("https://example.test/document.scpefe"), null);
 });
 
