@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { openTargetFromAdditionalData,
   openTargetFromCommandLine, openTargetFromUrl, acknowledgementToken,
   OrderedOpenRequests } from "../src/single-instance.mjs";
@@ -23,11 +23,12 @@ test("accepts only SCPEFE shell targets from command lines and instance metadata
     acknowledgementToken: "123e4567-e89b-42d3-a456-426614174000",
   }), "123e4567-e89b-42d3-a456-426614174000");
   assert.equal(acknowledgementToken({ acknowledgementToken: "../unsafe" }), null);
-  assert.equal(openTargetFromUrl("file:///safe/document.scpefe"),
-    path.normalize(fileURLToPath("file:///safe/document.scpefe")));
-  assert.equal(openTargetFromUrl(
-    "scpefe://open?target=file%3A%2F%2F%2Fsafe%2Flinked.scpefe"),
-  path.normalize(fileURLToPath("file:///safe/linked.scpefe")));
+  const fileTarget = path.resolve("safe/document.scpefe");
+  const linkedTarget = path.resolve("safe/linked.scpefe");
+  assert.equal(openTargetFromUrl(pathToFileURL(fileTarget).href), fileTarget);
+  const linkedUrl = new URL("scpefe://open");
+  linkedUrl.searchParams.set("target", pathToFileURL(linkedTarget).href);
+  assert.equal(openTargetFromUrl(linkedUrl.href), linkedTarget);
   assert.equal(openTargetFromUrl("https://example.test/document.scpefe"), null);
 });
 
