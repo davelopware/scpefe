@@ -204,6 +204,8 @@ export class DocumentService {
       reopened.journalKey.fill(0);
       throw new Error("Saved document verification failed");
     }
+    this.#cancelCheckpoint();
+    await this.flushChain.catch(() => {});
     await this.journals.clear(this.active.documentId);
     this.active.journalKey.fill(0);
     this.active.opened = reopened.opened;
@@ -215,8 +217,6 @@ export class DocumentService {
     this.active.dirty = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
-    if (this.checkpointTimer !== null) this.clearTimer(this.checkpointTimer);
-    this.checkpointTimer = null;
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical });
   }
@@ -269,10 +269,14 @@ export class DocumentService {
   }
 
   #cancelTimers() {
-    if (this.checkpointTimer !== null) this.clearTimer(this.checkpointTimer);
+    this.#cancelCheckpoint();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
-    this.checkpointTimer = null;
     this.inactivityTimer = null;
+  }
+
+  #cancelCheckpoint() {
+    if (this.checkpointTimer !== null) this.clearTimer(this.checkpointTimer);
+    this.checkpointTimer = null;
   }
 
   async #atomicWrite(target, bytes, replace) {

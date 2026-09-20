@@ -135,3 +135,79 @@ test("mandatory locking clears plaintext when the final journal write fails", as
   assert.match(result.warning, /disk full/);
   assert.equal(service.active, null);
 });
+
+test("verified save waits for an in-flight checkpoint before clearing its journal", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-save-race-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(path.join(directory, "profile.json"), JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  let openCount = 0;
+  let verifiedSave;
+  const saveVerified = new Promise((resolve) => { verifiedSave = resolve; });
+  const native = {
+    openDocument(bytes) {
+      openCount += 1;
+      if (openCount === 2) verifiedSave();
+      return { content: bytes.toString().startsWith("saved:")
+        ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+      documentId: "66".repeat(16), baseRevision: "77".repeat(32),
+      journalKey: Buffer.alloc(32, 11) };
+    },
+    saveDocument(_bytes, _password, input) {
+      return Buffer.from(`saved:${input.content}`);
+    },
+  };
+  const timers = [];
+  const service = new DocumentService({ native, fs,
+    profilePath: path.join(directory, "profile.json"),
+    setTimer: (callback) => {
+      const timer = { callback };
+      timers.push(timer);
+      return timer;
+    }, clearTimer: () => {} });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  service.updateWorkingCopy({ content: "stale unsaved work",
+    cursor: { start: 18, end: 18 } });
+
+  const write = service.journals.write.bind(service.journals);
+  let releaseWrite;
+  const writeReleased = new Promise((resolve) => { releaseWrite = resolve; });
+  let writeStarted;
+  const checkpointStarted = new Promise((resolve) => { writeStarted = resolve; });
+  service.journals.write = async (...args) => {
+    writeStarted();
+    await writeReleased;
+    return write(...args);
+  };
+  const clear = service.journals.clear.bind(service.journals);
+  let releaseClear;
+  const clearReleased = new Promise((resolve) => { releaseClear = resolve; });
+  let clearStarted = false;
+  let clearFinished;
+  const journalCleared = new Promise((resolve) => { clearFinished = resolve; });
+  service.journals.clear = async (...args) => {
+    clearStarted = true;
+    await clearReleased;
+    await clear(...args);
+    clearFinished();
+  };
+  timers.at(-2).callback();
+  await checkpointStarted;
+
+  const saving = service.saveDocument("saved work");
+  await saveVerified;
+  const clearRanBeforeCheckpoint = clearStarted;
+  releaseClear();
+  if (clearRanBeforeCheckpoint) await journalCleared;
+  releaseWrite();
+  await saving;
+  await service.flushChain;
+
+  const journalPath = path.join(directory, "work-journals",
+    `${"66".repeat(16)}.work-journal`);
+  await assert.rejects(fs.readFile(journalPath), (error) => error.code === "ENOENT");
+});
