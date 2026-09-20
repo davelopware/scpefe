@@ -5,6 +5,10 @@
 namespace scpefe::format {
 
 void CborWriter::unsigned_integer(std::uint64_t value) { head(0, value); }
+void CborWriter::boolean(bool value)
+{
+    output_.push_back(static_cast<std::uint8_t>(value ? 0xf5u : 0xf4u));
+}
 void CborWriter::array(std::size_t size) { head(4, size); }
 void CborWriter::map(std::size_t size) { head(5, size); }
 

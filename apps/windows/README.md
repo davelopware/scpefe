@@ -3,7 +3,8 @@
 The desktop preview is suitable for hands-on development testing. It supports
 profile setup, creation and reopening of encrypted documents, explicit edit
 mode and manual save, backup, invitations, recovery journals, authenticated
-head warnings, and plaintext export. It is not a production release: the ZIP
+head warnings, optional regular provisional saves, and plaintext export. It is
+not a production release: the ZIP
 is unsigned, has no installer or automatic updater, and the cryptographic and
 storage behavior still requires security and release review.
 

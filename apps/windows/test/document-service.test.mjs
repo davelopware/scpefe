@@ -1514,3 +1514,88 @@ test("a target race after merge revalidation preserves the newer replica", async
   assert.equal(journal.state, "pending-publication");
   assert.equal(journal.text, "resolved text");
 });
+
+test("validated client settings opt into cumulative regular provisional saves", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-regular-save-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  const settingsPath = path.join(directory, "settings.json");
+  const initial = Buffer.from(JSON.stringify({ content: "base", sealed: true,
+    parent: null }));
+  await fs.writeFile(target, initial);
+  const revisionId = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const regularInputs = [];
+  const native = withLease({
+    openDocument(bytes) {
+      const value = JSON.parse(bytes.toString());
+      const head = revisionId(bytes);
+      return { content: value.content, readOnly: true, canEdit: true,
+        manuallySealed: value.sealed, documentId: "15".repeat(16),
+        baseRevision: head, journalKey: Buffer.alloc(32, 15),
+        revisionGraph: [{ revisionId: value.parent ?? head,
+          parentRevisionIds: [] }, ...(value.parent ? [{ revisionId: head,
+            parentRevisionIds: [value.parent] }] : [])] };
+    },
+    regularSaveDocument(bytes, _password, input) {
+      const value = JSON.parse(bytes.toString());
+      const parent = value.sealed ? revisionId(bytes) : value.parent;
+      regularInputs.push({ content: input.content, parent });
+      return Buffer.from(JSON.stringify({ content: input.content,
+        sealed: false, parent, base: value.sealed ? value : value.base }));
+    },
+    saveDocument(bytes, _password, input) {
+      const value = JSON.parse(bytes.toString());
+      return Buffer.from(JSON.stringify({ content: input.content, sealed: true,
+        parent: value.sealed ? revisionId(bytes) : value.parent }));
+    },
+    discardProvisional(bytes) {
+      const value = JSON.parse(bytes.toString());
+      return Buffer.from(JSON.stringify(value.base));
+    },
+  });
+  const timers = [];
+  const service = new DocumentService({ native, fs, profilePath, settingsPath,
+    publicationCapabilities, setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false }; timers.push(timer); return timer;
+    }, clearTimer(timer) { timer.cleared = true; } });
+
+  assert.deepEqual(await service.loadClientSettings(), {
+    regularSaveEnabled: false, regularSaveIntervalMs: 120_000 });
+  await assert.rejects(service.saveClientSettings({ regularSaveEnabled: true,
+    regularSaveIntervalMs: 9999 }), /between 10 seconds and 24 hours/);
+  assert.deepEqual(await service.saveClientSettings({ regularSaveEnabled: true,
+    regularSaveIntervalMs: 15_000 }), {
+    regularSaveEnabled: true, regularSaveIntervalMs: 15_000 });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  assert.equal(timers.some((timer) => timer.delay === 15_000), true);
+
+  service.updateWorkingCopy({ content: "first", cursor: { start: 5, end: 5 } });
+  assert.deepEqual(await service.regularSaveDocument(), {
+    published: true, provisional: true, content: "first" });
+  const firstParent = regularInputs[0].parent;
+  assert.equal(service.active.manuallySealed, false);
+  assert.equal(service.active.dirty, true);
+  service.updateWorkingCopy({ content: "second", cursor: { start: 6, end: 6 } });
+  await service.regularSaveDocument();
+  assert.equal(regularInputs.length, 2);
+  assert.equal(regularInputs[1].parent, firstParent);
+  assert.equal(service.active.revisionGraph.length, 2);
+
+  await service.saveDocument("second");
+  assert.equal(service.active.manuallySealed, true);
+  assert.equal(service.active.dirty, false);
+  assert.equal((await service.journals.read(
+    service.active.documentId, service.active.journalKey)), null);
+
+  service.updateWorkingCopy({ content: "third", cursor: { start: 5, end: 5 } });
+  await service.regularSaveDocument();
+  await service.lock("crash-restart");
+  const recovered = await service.openDocument(target, "password words");
+  assert.equal(recovered.provisional, true);
+  assert.equal(recovered.recovery.content, "third");
+  const discarded = await service.discardRecoveredWork();
+  assert.equal(discarded.content, "second");
+  assert.equal(discarded.provisional, undefined);
+});

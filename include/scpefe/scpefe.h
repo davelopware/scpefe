@@ -182,6 +182,9 @@ typedef struct scpefe_manual_save_v1 {
     uint64_t timestamp_ms;
 } scpefe_manual_save_v1;
 
+/* Validated inputs used to create or amend one provisional snapshot revision. */
+typedef scpefe_manual_save_v1 scpefe_regular_save_v1;
+
 /* Validated inputs used to seal a user-resolved two-parent merge revision. */
 typedef struct scpefe_merge_save_v1 {
     uint32_t struct_size;
@@ -267,6 +270,9 @@ typedef struct scpefe_snapshot_revision_v1 {
     size_t content_size;
     const scpefe_revision_graph_node_v1 *ancestor_graph;
     size_t ancestor_count;
+    int manually_sealed;
+    const uint8_t *provisional_base_revision;
+    size_t provisional_base_revision_size;
 } scpefe_snapshot_revision_v1;
 
 /* Returns the supported C ABI version. */
@@ -355,6 +361,25 @@ SCPEFE_API scpefe_status scpefe_new_document_create(
 /* Seals a child revision and returns a replacement self-contained container. */
 SCPEFE_API scpefe_status scpefe_manual_save(
     const scpefe_manual_save_v1 *save,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Creates or amends one provisional revision without asserting a manual save. */
+SCPEFE_API scpefe_status scpefe_regular_save(
+    const scpefe_regular_save_v1 *save,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Restores the sealed base retained by a provisional revision. */
+SCPEFE_API scpefe_status scpefe_provisional_save_discard(
+    const uint8_t *container,
+    size_t container_size,
+    const uint8_t *password,
+    size_t password_size,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size

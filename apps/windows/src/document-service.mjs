@@ -4,10 +4,10 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   validateBackupResult, validatePublicationResult, validateSaveResult,
-  validateWorkingCopy } from "./contracts.mjs";
+  validateWorkingCopy, validateClientSettings } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
-import { HeadWitnessStore } from "./head-witness.mjs";
+import { HeadWitnessStore, compareHeadWitness } from "./head-witness.mjs";
 import { createMergeDraft, hasConflictMarkers } from "./divergence-merge.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
@@ -24,17 +24,18 @@ function targetUnavailable(error) {
 }
 
 export class DocumentService {
-  constructor({ native, fs, profilePath, journalDirectory,
+  constructor({ native, fs, profilePath, settingsPath, journalDirectory,
     publicationCapabilities, witnessDirectory,
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
     inactivityMs = 120_000, now = () => Date.now(),
     utcNow = now, monotonicNow = now, randomSessionId = () => randomBytes(16),
     setTimer = setTimeout, clearTimer = clearTimeout,
-    onLocked = () => {}, onJournalWarning = () => {} }) {
+    onLocked = () => {}, onJournalWarning = () => {}, onRegularSave = () => {} }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
+    this.settingsPath = settingsPath ?? path.join(path.dirname(profilePath), "settings.json");
     this.nativeLineEnding = nativeLineEnding;
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
@@ -53,10 +54,13 @@ export class DocumentService {
     this.clearTimer = clearTimer;
     this.onLocked = onLocked;
     this.onJournalWarning = onJournalWarning;
+    this.onRegularSave = onRegularSave;
     this.checkpointTimer = null;
     this.inactivityTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatOperation = null;
+    this.regularSaveTimer = null;
+    this.clientSettings = validateClientSettings();
     this.leaseGeneration = 0;
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
@@ -80,6 +84,27 @@ export class DocumentService {
     await this.#atomicWrite(this.profilePath,
       Buffer.from(`${JSON.stringify(validated)}\n`, "utf8"), true);
     return validated;
+  }
+
+  async loadClientSettings() {
+    try {
+      this.clientSettings = validateClientSettings(JSON.parse(
+        await this.fs.readFile(this.settingsPath, "utf8")));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      this.clientSettings = validateClientSettings();
+    }
+    this.#scheduleRegularSave();
+    return this.clientSettings;
+  }
+
+  async saveClientSettings(settings) {
+    this.clientSettings = validateClientSettings(settings);
+    await this.fs.mkdir(path.dirname(this.settingsPath), { recursive: true });
+    await this.#atomicWrite(this.settingsPath,
+      Buffer.from(`${JSON.stringify(this.clientSettings)}\n`, "utf8"), true);
+    this.#scheduleRegularSave();
+    return this.clientSettings;
   }
 
   async createDocument(target, request) {
@@ -201,6 +226,17 @@ export class DocumentService {
           && journal.baseRevision === nativeOpened.baseRevision) {
         recovery = journal;
       }
+      if (!nativeOpened.opened.invitationRequired && !nativeOpened.manuallySealed
+          && !recovery) {
+        recovery = { text: nativeOpened.opened.content,
+          baseRevision: nativeOpened.baseRevision,
+          cursor: { start: 0, end: 0 }, target, state: "unsaved",
+          updateTime: Number.isSafeInteger(nativeOpened.revisionTimestampMs)
+            ? nativeOpened.revisionTimestampMs : this.now(),
+          authorName: nativeOpened.profileName ?? "",
+          deviceName: nativeOpened.deviceName ?? "" };
+        unresolvedJournal = true;
+      }
       if (!journal && !recoveredPublication) {
         await this.publications.cleanupOrphanedRecoveryBase(target);
       }
@@ -210,18 +246,7 @@ export class DocumentService {
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     const targetOpened = nativeOpened.opened;
-    let headMismatch = null;
-    try {
-      const { comparison, previous } = await this.witnesses.observe(
-        target, this.#observation(nativeOpened));
-      headMismatch = this.#headMismatch(comparison.kind, previous, nativeOpened);
-    } catch (error) {
-      headMismatch = Object.freeze({ kind: "witness-error",
-        title: "Local head witness could not be authenticated",
-        explanation: `${error.message}. The document remains available read-only, but editing and saving are blocked until you explicitly accept this authenticated head.`,
-        editingBlocked: true, observedDocumentId: nativeOpened.documentId,
-        observedHead: nativeOpened.baseRevision });
-    }
+    const { headMismatch } = await this.#observeHead(target, nativeOpened);
     const slotCanEdit = nativeOpened.opened.invitationRequired
       ? false : nativeOpened.opened.canEdit;
     const opened = nativeOpened.opened.invitationRequired
@@ -235,7 +260,9 @@ export class DocumentService {
         ...(headMismatch ? { headMismatch } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
-          updateTime: recovery.updateTime } } : {}) });
+          updateTime: recovery.updateTime,
+          ...(recovery.authorName ? { authorName: recovery.authorName } : {}),
+          ...(recovery.deviceName ? { deviceName: recovery.deviceName } : {}) } } : {}) });
     this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
@@ -268,6 +295,8 @@ export class DocumentService {
     this.active.editMode = true;
     this.active.working = { content: this.active.opened.content,
       cursor: { start: 0, end: 0 } };
+    this.active.dirty = !this.active.manuallySealed;
+    this.#scheduleRegularSave();
     return validateEditMode({ ...this.active.opened, readOnly: false });
   }
 
@@ -367,6 +396,9 @@ export class DocumentService {
 
   async discardRecoveredWork() {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
+    if (!this.active.manuallySealed) {
+      return this.#discardProvisional(this.active);
+    }
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
     this.active.unresolvedJournal = false;
@@ -377,6 +409,21 @@ export class DocumentService {
       ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
       ...(this.active.headMismatch ? { headMismatch: this.active.headMismatch } : {}) });
     return this.active.opened;
+  }
+
+  async discardWorkingCopy() {
+    const active = this.active;
+    if (!active?.editMode || !active.dirty) {
+      throw new Error("No unsaved working copy is available");
+    }
+    if (!active.manuallySealed) return this.#discardProvisional(active);
+    this.#cancelCheckpoint();
+    await this.journals.clear(active.documentId);
+    active.dirty = false;
+    active.unresolvedJournal = false;
+    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    await this.exitEditMode();
+    return active.opened;
   }
 
   async acceptHeadMismatch() {
@@ -610,7 +657,8 @@ export class DocumentService {
     }
     const working = validateWorkingCopy(value);
     this.active.working = working;
-    this.active.dirty = working.content !== this.active.opened.content;
+    this.active.dirty = !this.active.manuallySealed
+      || working.content !== this.active.opened.content;
     if (this.active.dirty) this.#scheduleCheckpoint();
     this.notifyActivity();
     return { checkpointScheduled: this.active.dirty,
@@ -631,6 +679,7 @@ export class DocumentService {
     const active = this.active;
     if (!active) return { locked: true, journalSaved: true, warning: null };
     this.#cancelCheckpoint();
+    this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
     this.inactivityTimer = null;
     await this.#stopHeartbeat();
@@ -662,6 +711,7 @@ export class DocumentService {
   async exitEditMode() {
     const active = this.active;
     if (!active?.editMode) return { released: false };
+    this.#cancelRegularSave();
     await this.#stopHeartbeat();
     await this.#flushActive(active);
     await this.#queuePublication(async () => {
@@ -686,6 +736,85 @@ export class DocumentService {
     active.leaseSessionId = null;
     this.suspendedLeases.delete(active.documentId);
     return { released: true };
+  }
+
+  async regularSaveDocument() {
+    const active = this.active;
+    if (!this.clientSettings.regularSaveEnabled || !active?.editMode
+        || !active.dirty || !active.working || active.pendingPublication
+        || active.headMismatch) {
+      return Object.freeze({ published: false });
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const canonical = canonicalizeDocumentText(active.working.content);
+    await this.#flushActive(active);
+    let published;
+    let reopened;
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        try {
+          if (inspected.documentId !== active.documentId
+              || inspected.baseRevision !== active.baseRevision
+              || !inspected.lease.active || !active.leaseSessionId
+              || !Buffer.from(inspected.lease.sessionId, "hex")
+                .equals(active.leaseSessionId)
+              || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+            const error = new Error(
+              "The target changed before the regular save could be published");
+            error.code = "REGULAR_SAVE_DIVERGED";
+            throw error;
+          }
+          const candidate = this.native.regularSaveDocument(current, active.password, {
+            ...profile, content: canonical, timestampMs: Date.now(),
+          });
+          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+            throw new Error("Native bridge did not produce a provisional container");
+          }
+          await this.#atomicWrite(active.target, candidate, true,
+            () => active === this.active && active.editMode, current);
+          published = await this.fs.readFile(active.target);
+          reopened = this.#validateNativeOpened(
+            this.native.openDocument(published, active.password));
+          if (reopened.opened.content !== canonical || reopened.manuallySealed) {
+            throw new Error("Regular save verification failed");
+          }
+        } finally {
+          inspected.journalKey.fill(0);
+        }
+      });
+    } catch (error) {
+      if (targetUnavailable(error)) {
+        this.onJournalWarning(
+          "The target is unavailable; regular save was skipped and work remains unsaved locally.");
+        return Object.freeze({ published: false });
+      }
+      throw error;
+    }
+    active.journalKey.fill(0);
+    active.opened = reopened.opened;
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.baseContainer = Buffer.from(published);
+    active.targetContent = canonical;
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    active.manuallySealed = false;
+    active.dirty = true;
+    active.unresolvedJournal = true;
+    await this.journals.write(active.documentId, active.journalKey, {
+      text: canonical, baseRevision: active.baseRevision,
+      cursor: { ...active.working.cursor }, target: active.target,
+      state: "unsaved", updateTime: this.now(),
+    });
+    const result = Object.freeze({ published: true, provisional: true,
+      content: canonical });
+    this.onRegularSave(result);
+    return result;
   }
 
   async saveDocument(content) {
@@ -833,12 +962,12 @@ export class DocumentService {
 
   async backupDocument(target) {
     if (!this.active) throw new Error("Open a document first");
+    if (!this.active.manuallySealed) {
+      throw new Error("Manually save the document before creating a backup");
+    }
     if (this.active.dirty || this.active.recovery || this.active.pendingPublication
         || this.active.unresolvedJournal) {
       throw new Error("Save or discard changes before creating a backup");
-    }
-    if (!this.active.manuallySealed) {
-      throw new Error("Manually save the document before creating a backup");
     }
     const activeTarget = this.active.target;
     const candidate = await this.fs.readFile(activeTarget);
@@ -881,7 +1010,9 @@ export class DocumentService {
     }
     return { opened, documentId: value.documentId,
       baseRevision: value.baseRevision, revisionGraph, journalKey: value.journalKey,
-      lease: Object.freeze({ ...rawLease }), manuallySealed: value.manuallySealed ?? true };
+      lease: Object.freeze({ ...rawLease }), manuallySealed: value.manuallySealed ?? true,
+      revisionTimestampMs: value.revisionTimestampMs,
+      profileName: value.profileName, deviceName: value.deviceName };
   }
 
   async #acquireLease(forceTakeover) {
@@ -1182,11 +1313,57 @@ export class DocumentService {
     active.recovery = null;
   }
 
+  async #discardProvisional(active) {
+    if (active.headMismatch) {
+      throw new Error("Resolve the head mismatch before discarding provisional work");
+    }
+    if (!active.editMode) {
+      await this.#acquireLease(false);
+      active.editMode = true;
+    }
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        try {
+          if (inspected.baseRevision !== active.baseRevision
+              || !inspected.lease.active || !active.leaseSessionId
+              || !Buffer.from(inspected.lease.sessionId, "hex")
+                .equals(active.leaseSessionId)
+              || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+            throw new Error(
+              "The target changed before provisional work could be discarded");
+          }
+          const candidate = this.native.discardProvisional(current, active.password);
+          await this.#atomicWrite(active.target, candidate, true, () => true, current);
+        } finally {
+          inspected.journalKey.fill(0);
+        }
+      });
+      await this.journals.clear(active.documentId);
+      await this.#adoptPublishedCandidate(active);
+      await this.exitEditMode();
+      return active.opened;
+    } catch (error) {
+      active.editMode = false;
+      await this.#stopHeartbeat();
+      throw error;
+    }
+  }
+
   async #observeHead(target, opened) {
     let headMismatch = null;
     try {
-      const { comparison, previous } = await this.witnesses.observe(
-        target, this.#observation(opened));
+      const observation = this.#observation(opened);
+      let result;
+      if (opened.manuallySealed) {
+        result = await this.witnesses.observe(target, observation);
+      } else {
+        const previous = await this.witnesses.read(target);
+        result = { comparison: compareHeadWitness(previous, observation), previous };
+      }
+      const { comparison, previous } = result;
       headMismatch = this.#headMismatch(comparison.kind, previous, opened);
     } catch (error) {
       headMismatch = Object.freeze({ kind: "witness-error",
@@ -1262,13 +1439,34 @@ export class DocumentService {
     this.checkpointTimer = null;
   }
 
+  #scheduleRegularSave() {
+    this.#cancelRegularSave();
+    const active = this.active;
+    if (!this.clientSettings.regularSaveEnabled || !active?.editMode) return;
+    this.regularSaveTimer = this.setTimer(() => {
+      this.regularSaveTimer = null;
+      void this.regularSaveDocument().catch((error) => {
+        this.onJournalWarning(`Regular save failed: ${error.message}`);
+      }).finally(() => {
+        if (active === this.active && active.editMode) this.#scheduleRegularSave();
+      });
+    }, this.clientSettings.regularSaveIntervalMs);
+    this.regularSaveTimer?.unref?.();
+  }
+
+  #cancelRegularSave() {
+    if (this.regularSaveTimer !== null) this.clearTimer(this.regularSaveTimer);
+    this.regularSaveTimer = null;
+  }
+
   #queuePublication(operation) {
     const queued = this.publicationChain.catch(() => {}).then(operation);
     this.publicationChain = queued;
     return queued;
   }
 
-  async #atomicWrite(target, bytes, replace, isCurrent = () => true) {
+  async #atomicWrite(target, bytes, replace, isCurrent = () => true,
+    expectedTarget = null) {
     const transaction = `${target}.scpefe-txn-${process.pid}-${Date.now()}`;
     let handle;
     try {
@@ -1281,6 +1479,14 @@ export class DocumentService {
         const error = new Error("Publication no longer belongs to the current state");
         error.code = "STALE_HEARTBEAT";
         throw error;
+      }
+      if (expectedTarget !== null) {
+        const observed = await this.fs.readFile(target);
+        if (!observed.equals(expectedTarget)) {
+          const error = new Error("Publication target changed before replacement");
+          error.code = "TARGET_CHANGED";
+          throw error;
+        }
       }
       if (replace) {
         await this.fs.rename(transaction, target);

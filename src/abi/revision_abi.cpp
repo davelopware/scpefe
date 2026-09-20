@@ -61,6 +61,8 @@ SnapshotRevisionData data_from_external(
 )
 {
     const bool has_ancestor_graph =
+        revision.struct_size >= offsetof(scpefe_snapshot_revision_v1, manually_sealed);
+    const bool has_provisional_fields =
         revision.struct_size >= sizeof(scpefe_snapshot_revision_v1);
     if (revision.struct_size < snapshot_revision_v1_base_size
         || revision.format_version != SCPEFE_REVISION_FORMAT_VERSION
@@ -162,6 +164,19 @@ SnapshotRevisionData data_from_external(
         }
         data.ancestor_graph.push_back(std::move(node));
     }
+    if (has_provisional_fields) {
+        data.manually_sealed = revision.manually_sealed != 0
+            || revision.provisional_base_revision_size == 0;
+        if (revision.provisional_base_revision_size != 0) {
+            if (!scpefe::format::span_is_valid(revision.provisional_base_revision,
+                    revision.provisional_base_revision_size)) {
+                throw RevisionFailure{RevisionError::invalid_argument};
+            }
+            data.provisional_base_revision.assign(revision.provisional_base_revision,
+                revision.provisional_base_revision
+                    + revision.provisional_base_revision_size);
+        }
+    }
     return data;
 }
 
@@ -185,6 +200,9 @@ void populate_external_view(
         data.content_hash.data(), data.content_hash.size(),
         data.content.data(), data.content.size(),
         ancestor_views.data(), ancestor_views.size(),
+        data.manually_sealed,
+        data.provisional_base_revision.data(),
+        data.provisional_base_revision.size(),
     };
     std::memcpy(&view, &complete,
         std::min<std::size_t>(struct_size, sizeof(complete)));

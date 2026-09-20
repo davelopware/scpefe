@@ -1,4 +1,7 @@
 const MAX_TEXT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
+const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
+const MAX_REGULAR_SAVE_INTERVAL_MS = 86_400_000;
 
 function hasUnpairedSurrogate(value) {
   for (let index = 0; index < value.length; index += 1) {
@@ -50,6 +53,22 @@ export function validateProfile(value) {
     throw new TypeError("email must be a valid address");
   }
   return { name, email, deviceName: requiredText(value.deviceName, "device name") };
+}
+
+export function validateClientSettings(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("client settings must be an object");
+  }
+  const regularSaveEnabled = value.regularSaveEnabled ?? false;
+  const regularSaveIntervalMs = value.regularSaveIntervalMs
+    ?? DEFAULT_REGULAR_SAVE_INTERVAL_MS;
+  if (typeof regularSaveEnabled !== "boolean"
+      || !Number.isSafeInteger(regularSaveIntervalMs)
+      || regularSaveIntervalMs < MIN_REGULAR_SAVE_INTERVAL_MS
+      || regularSaveIntervalMs > MAX_REGULAR_SAVE_INTERVAL_MS) {
+    throw new TypeError("regular save interval must be between 10 seconds and 24 hours");
+  }
+  return Object.freeze({ regularSaveEnabled, regularSaveIntervalMs });
 }
 
 export function validateCreateRequest(value) {
@@ -153,6 +172,10 @@ export function validateOpenedDocument(value) {
     }
     recovery = Object.freeze({ content: value.recovery.content, state: "unsaved",
       updateTime: value.recovery.updateTime,
+      ...(typeof value.recovery.authorName === "string" && value.recovery.authorName
+        ? { authorName: value.recovery.authorName } : {}),
+      ...(typeof value.recovery.deviceName === "string" && value.recovery.deviceName
+        ? { deviceName: value.recovery.deviceName } : {}),
       cursor: Object.freeze({ start: value.recovery.cursor.start,
         end: value.recovery.cursor.end }) });
   }
@@ -160,8 +183,16 @@ export function validateOpenedDocument(value) {
   if (!["target-published", "pending-publication", "conflict"].includes(publicationState)) {
     throw new TypeError("host returned an invalid publication state");
   }
+  if (value.manuallySealed !== undefined && typeof value.manuallySealed !== "boolean") {
+    throw new TypeError("host returned invalid revision state");
+  }
+  if (value.provisional !== undefined && typeof value.provisional !== "boolean") {
+    throw new TypeError("host returned invalid provisional state");
+  }
+  const provisional = value.provisional === true || value.manuallySealed === false;
   return Object.freeze({ content: value.content, readOnly: true,
     canEdit: value.canEdit, publicationState,
+    ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
     ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),

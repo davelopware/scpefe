@@ -97,6 +97,19 @@ void SnapshotRevision::validate_data(
         throw RevisionFailure{RevisionError::invalid_argument};
     }
     validate_ancestor_graph(data.ancestor_graph, limits);
+    if (data.manually_sealed != data.provisional_base_revision.empty()) {
+        throw RevisionFailure{RevisionError::invalid_argument};
+    }
+    if (!data.provisional_base_revision.empty()) {
+        if (data.provisional_base_revision.size() > limits.max_input_bytes()) {
+            throw RevisionFailure{RevisionError::limit_exceeded};
+        }
+        const auto base = SnapshotRevision::decode(data.provisional_base_revision.data(),
+            data.provisional_base_revision.size(), limits);
+        if (!base.data().manually_sealed) {
+            throw RevisionFailure{RevisionError::invalid_argument};
+        }
+    }
 }
 
 SnapshotRevision::SnapshotRevision(SnapshotRevisionData data)
@@ -116,7 +129,8 @@ SnapshotRevision SnapshotRevision::create(
 std::vector<std::uint8_t> SnapshotRevision::encode() const
 {
     CborWriter writer;
-    writer.map(data_.ancestor_graph.empty() ? 11 : 12);
+    writer.map(11 + (data_.ancestor_graph.empty() ? 0 : 1)
+        + (data_.manually_sealed ? 0 : 2));
     writer.unsigned_integer(1); writer.unsigned_integer(snapshot_revision_format_version);
     const std::size_t parent_count = data_.parent_revision_ids.size() / revision_id_size;
     writer.unsigned_integer(2); writer.array(parent_count);
@@ -149,6 +163,12 @@ std::vector<std::uint8_t> SnapshotRevision::encode() const
             }
         }
     }
+    if (!data_.manually_sealed) {
+        writer.unsigned_integer(13); writer.boolean(false);
+        writer.unsigned_integer(14);
+        writer.bytes(data_.provisional_base_revision.data(),
+            data_.provisional_base_revision.size());
+    }
     return writer.take_output();
 }
 
@@ -160,7 +180,7 @@ SnapshotRevision SnapshotRevision::decode(
 {
     CborReader reader(encoded, encoded_size, limits);
     const std::size_t field_count = reader.map(1);
-    if (field_count != 11 && field_count != 12)
+    if (field_count < 11 || field_count > 14)
         throw RevisionFailure{RevisionError::malformed_cbor};
     reader.expect_unsigned(1);
     if (reader.unsigned_integer() != snapshot_revision_format_version) {
@@ -202,40 +222,73 @@ SnapshotRevision SnapshotRevision::decode(
         )) {
         throw RevisionFailure{RevisionError::malformed_cbor};
     }
-    if (field_count == 12) {
-        reader.expect_unsigned(12);
-        const std::size_t node_count = reader.array(2);
-        if (node_count > limits.max_collection_entries())
-            throw RevisionFailure{RevisionError::limit_exceeded};
-        revision.data_.ancestor_graph.reserve(node_count);
-        for (std::size_t index = 0; index < node_count; ++index) {
-            if (reader.array(3) != 2)
-                throw RevisionFailure{RevisionError::malformed_cbor};
-            RevisionGraphNodeData node;
-            const auto id = reader.bytes(revision_id_size);
-            std::copy(id.begin(), id.end(), node.revision_id.begin());
-            const std::size_t count = reader.array(4);
-            if (count > limits.max_parent_count()
-                || count > std::numeric_limits<std::size_t>::max() / revision_id_size) {
+    std::size_t remaining_fields = field_count - 11;
+    if (remaining_fields != 0) {
+        const auto next_key = reader.unsigned_integer();
+        if (next_key == 12) {
+            const std::size_t node_count = reader.array(2);
+            if (node_count > limits.max_collection_entries())
                 throw RevisionFailure{RevisionError::limit_exceeded};
+            revision.data_.ancestor_graph.reserve(node_count);
+            for (std::size_t index = 0; index < node_count; ++index) {
+                if (reader.array(3) != 2)
+                    throw RevisionFailure{RevisionError::malformed_cbor};
+                RevisionGraphNodeData node;
+                const auto id = reader.bytes(revision_id_size);
+                std::copy(id.begin(), id.end(), node.revision_id.begin());
+                const std::size_t count = reader.array(4);
+                if (count > limits.max_parent_count()
+                    || count > std::numeric_limits<std::size_t>::max()
+                        / revision_id_size) {
+                    throw RevisionFailure{RevisionError::limit_exceeded};
+                }
+                node.parent_revision_ids.reserve(count * revision_id_size);
+                for (std::size_t parent = 0; parent < count; ++parent) {
+                    const auto id_value = reader.bytes(revision_id_size);
+                    node.parent_revision_ids.insert(node.parent_revision_ids.end(),
+                        id_value.begin(), id_value.end());
+                }
+                revision.data_.ancestor_graph.push_back(std::move(node));
             }
-            node.parent_revision_ids.reserve(count * revision_id_size);
-            for (std::size_t parent = 0; parent < count; ++parent) {
-                const auto id_value = reader.bytes(revision_id_size);
-                node.parent_revision_ids.insert(node.parent_revision_ids.end(),
-                    id_value.begin(), id_value.end());
+            try {
+                validate_ancestor_graph(revision.data_.ancestor_graph, limits);
+            } catch (const RevisionFailure &failure) {
+                if (failure.error == RevisionError::invalid_argument)
+                    throw RevisionFailure{RevisionError::malformed_cbor};
+                throw;
             }
-            revision.data_.ancestor_graph.push_back(std::move(node));
-        }
-        try {
-            validate_ancestor_graph(revision.data_.ancestor_graph, limits);
-        } catch (const RevisionFailure &failure) {
-            if (failure.error == RevisionError::invalid_argument)
+            --remaining_fields;
+        } else if (next_key == 13) {
+            revision.data_.manually_sealed = reader.boolean();
+            if (revision.data_.manually_sealed)
                 throw RevisionFailure{RevisionError::malformed_cbor};
-            throw;
+            --remaining_fields;
+        } else {
+            throw RevisionFailure{RevisionError::malformed_cbor};
         }
     }
-    if (!reader.finished()) throw RevisionFailure{RevisionError::malformed_cbor};
+    if (remaining_fields != 0 && revision.data_.manually_sealed) {
+        reader.expect_unsigned(13);
+        revision.data_.manually_sealed = reader.boolean();
+        if (revision.data_.manually_sealed)
+            throw RevisionFailure{RevisionError::malformed_cbor};
+        --remaining_fields;
+    }
+    if (remaining_fields != 0) {
+        reader.expect_unsigned(14);
+        revision.data_.provisional_base_revision = reader.bytes(
+            0, limits.max_input_bytes());
+        --remaining_fields;
+    }
+    if (remaining_fields != 0 || !reader.finished())
+        throw RevisionFailure{RevisionError::malformed_cbor};
+    try {
+        validate_data(revision.data_, limits);
+    } catch (const RevisionFailure &failure) {
+        if (failure.error == RevisionError::invalid_argument)
+            throw RevisionFailure{RevisionError::malformed_cbor};
+        throw;
+    }
     return revision;
 }
 
@@ -274,6 +327,7 @@ std::string SnapshotRevision::diagnostic_json(bool include_content) const
         json.raw("]}");
     }
     json.raw("]");
+    if (!data_.manually_sealed) json.raw(",\"manually_sealed\":false");
     json.raw(",\"snapshot\":{\"codec\":\"none\",\"uncompressed_length\":"
         + std::to_string(data_.content.size()));
     if (include_content) {

@@ -3,6 +3,7 @@ import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
+  validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
@@ -11,6 +12,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value === null ? null : validateProfile(value);
   },
   saveProfile: (profile) => ipcRenderer.invoke("profile:save", validateProfile(profile)),
+  getClientSettings: async () => validateClientSettings(
+    await ipcRenderer.invoke("settings:get")),
+  saveClientSettings: async (settings) => validateClientSettings(
+    await ipcRenderer.invoke("settings:save", validateClientSettings(settings))),
   createDocument: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:create", validateCreateRequest(request));
@@ -68,5 +73,14 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     };
     ipcRenderer.on("document:journal-warning", handler);
     return () => ipcRenderer.removeListener("document:journal-warning", handler);
+  },
+  onRegularSave: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => {
+      if (value?.published === true && value?.provisional === true
+          && typeof value.content === "string") listener(Object.freeze({ ...value }));
+    };
+    ipcRenderer.on("document:regular-saved", handler);
+    return () => ipcRenderer.removeListener("document:regular-saved", handler);
   },
 }));
