@@ -192,21 +192,9 @@ double brute_force_bits(const std::uint8_t *password, std::size_t size)
     bool non_ascii = false;
     std::array<std::size_t, 256> frequencies{};
     std::size_t unique = 0;
-    std::size_t runs = size == 0 ? 0 : 1;
-    std::size_t current_run = size == 0 ? 0 : 1;
-    std::size_t longest_run = current_run;
     for (std::size_t index = 0; index < size; ++index) {
         const std::uint8_t value = password[index];
         if (frequencies[value]++ == 0) ++unique;
-        if (index != 0) {
-            if (value == password[index - 1]) {
-                ++current_run;
-                longest_run = std::max(longest_run, current_run);
-            } else {
-                ++runs;
-                current_run = 1;
-            }
-        }
         lower = lower || (value >= 'a' && value <= 'z');
         upper = upper || (value >= 'A' && value <= 'Z');
         digit = digit || (value >= '0' && value <= '9');
@@ -218,7 +206,6 @@ double brute_force_bits(const std::uint8_t *password, std::size_t size)
         non_ascii = non_ascii || value >= 0x80;
     }
     if (unique < 2) return 0.0;
-    if (longest_run >= 4 && runs <= unique * 2) return 0.0;
     const std::size_t observed_alphabet = (lower ? 26u : 0u)
         + (upper ? 26u : 0u) + (digit ? 10u : 0u) + (space ? 1u : 0u)
         + (symbol ? 32u : 0u) + (non_ascii ? 128u : 0u);
@@ -231,9 +218,95 @@ double brute_force_bits(const std::uint8_t *password, std::size_t size)
             static_cast<double>(size) / static_cast<double>(frequency));
     }
     const double unseen_symbol_allowance = 1.5 * static_cast<double>(unique);
-    return std::min(
+    const double unstructured_bits = std::min(
         size * std::log2(static_cast<double>(estimated_alphabet)),
         sampled_bits + unseen_symbol_allowance);
+
+    std::array<std::size_t, 256> run_symbol_frequencies{};
+    std::array<std::size_t, 16> run_length_frequencies{};
+    std::size_t run_count = 0;
+    std::size_t run_symbol_unique = 0;
+    std::size_t longest_collapsed_sequence = 1;
+    std::size_t collapsed_linear = 1;
+    int previous_collapsed_delta = 0;
+    constexpr std::array keyboard_rows{
+        std::string_view{"1234567890"},
+        std::string_view{"qwertyuiop"},
+        std::string_view{"asdfghjkl"},
+        std::string_view{"zxcvbnm"},
+    };
+    std::array<std::size_t, keyboard_rows.size()> keyboard_runs{};
+    std::array<int, keyboard_rows.size()> previous_keyboard_steps{};
+    std::uint8_t previous_run_symbol = 0;
+    auto record_run = [&](std::uint8_t symbol, std::size_t length) {
+        if (run_symbol_frequencies[symbol]++ == 0) ++run_symbol_unique;
+        ++run_length_frequencies[std::min<std::size_t>(
+            length, run_length_frequencies.size() - 1)];
+        if (run_count != 0) {
+            const int delta = static_cast<int>(folded(symbol))
+                - static_cast<int>(folded(previous_run_symbol));
+            if ((delta == 1 || delta == -1)
+                && delta == previous_collapsed_delta) {
+                ++collapsed_linear;
+            } else {
+                collapsed_linear = (delta == 1 || delta == -1) ? 2 : 1;
+            }
+            previous_collapsed_delta = delta;
+            longest_collapsed_sequence = std::max(
+                longest_collapsed_sequence, collapsed_linear);
+            for (std::size_t row = 0; row < keyboard_rows.size(); ++row) {
+                const int step = keyboard_position(symbol, keyboard_rows[row])
+                    - keyboard_position(previous_run_symbol, keyboard_rows[row]);
+                if ((step == 1 || step == -1)
+                    && step == previous_keyboard_steps[row]) {
+                    ++keyboard_runs[row];
+                } else {
+                    keyboard_runs[row] = (step == 1 || step == -1) ? 2 : 1;
+                }
+                previous_keyboard_steps[row] = step;
+                longest_collapsed_sequence = std::max(
+                    longest_collapsed_sequence, keyboard_runs[row]);
+            }
+        } else {
+            keyboard_runs.fill(1);
+        }
+        previous_run_symbol = symbol;
+        ++run_count;
+    };
+
+    std::size_t run_start = 0;
+    for (std::size_t index = 1; index <= size; ++index) {
+        if (index != size && password[index] == password[run_start]) continue;
+        record_run(password[run_start], index - run_start);
+        run_start = index;
+    }
+    if (run_count == size) return unstructured_bits;
+
+    const std::size_t run_alphabet = std::min(
+        observed_alphabet, std::max<std::size_t>(2, run_symbol_unique * 2));
+    const double symbol_unit_bits = std::log2(static_cast<double>(run_alphabet));
+    double grouped_symbol_bits = run_count * symbol_unit_bits;
+    if (longest_collapsed_sequence >= 2) {
+        grouped_symbol_bits -= longest_collapsed_sequence * symbol_unit_bits;
+        grouped_symbol_bits += symbol_unit_bits
+            + std::log2(static_cast<double>(longest_collapsed_sequence)) + 1.0;
+    }
+    double sampled_run_symbol_bits = 0.0;
+    for (const std::size_t frequency : run_symbol_frequencies) {
+        if (frequency == 0) continue;
+        sampled_run_symbol_bits += frequency * std::log2(
+            static_cast<double>(run_count) / static_cast<double>(frequency));
+    }
+    grouped_symbol_bits = std::min(grouped_symbol_bits,
+        sampled_run_symbol_bits + 1.5 * static_cast<double>(run_symbol_unique));
+
+    double run_length_bits = std::log2(static_cast<double>(size) + 1.0);
+    for (const std::size_t frequency : run_length_frequencies) {
+        if (frequency == 0) continue;
+        run_length_bits += frequency * std::log2(
+            static_cast<double>(run_count) / static_cast<double>(frequency));
+    }
+    return std::min(unstructured_bits, grouped_symbol_bits + run_length_bits);
 }
 
 } // namespace
