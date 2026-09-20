@@ -140,8 +140,24 @@ export function validateOpenedDocument(value) {
       cursor: Object.freeze({ start: value.recovery.cursor.start,
         end: value.recovery.cursor.end }) });
   }
+  if (value.mustBeChanged !== undefined && typeof value.mustBeChanged !== "boolean") {
+    throw new TypeError("native bridge returned invalid invitation state");
+  }
+  if (value.canAddPasswords !== undefined
+      && typeof value.canAddPasswords !== "boolean") {
+    throw new TypeError("native bridge returned invalid slot permissions");
+  }
+  const invitationRequired = value.mustBeChanged === true;
+  if (invitationRequired && (value.content !== "" || value.canEdit)) {
+    throw new TypeError("invitation content was exposed before claim");
+  }
   return Object.freeze({ content: value.content, readOnly: true,
-    canEdit: value.canEdit, ...(lease ? { lease } : {}),
+    canEdit: value.canEdit,
+    ...(value.canAddPasswords !== undefined
+      ? { canAddPasswords: value.canAddPasswords } : {}),
+    ...(value.mustBeChanged !== undefined ? { invitationRequired,
+      temporaryLabel: invitationRequired ? String(value.slotIdentityName ?? "") : "" } : {}),
+    ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
@@ -151,7 +167,11 @@ export function validateEditMode(value) {
       || value.canEdit !== true || typeof value.content !== "string") {
     throw new TypeError("host did not enter edit mode");
   }
-  return Object.freeze({ content: value.content, readOnly: false, canEdit: true });
+  return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
+    ...(value.canAddPasswords !== undefined
+      ? { canAddPasswords: value.canAddPasswords } : {}),
+    ...(value.invitationRequired !== undefined
+      ? { invitationRequired: false } : {}) });
 }
 
 export function validateRecoveredWork(value) {

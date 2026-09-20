@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:enter-edit-mode")),
   saveDocument: async (content) => validateSaveResult(
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
+  createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
+  claimInvitation: async (password) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

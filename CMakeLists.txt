@@ -102,6 +102,12 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-head-witness-addon.integration.mjs
                 $<TARGET_FILE:scpefe_electron_native>
         )
+        add_test(
+            NAME scpefe.native-addon-invitation
+            COMMAND ${NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-invitation-addon.integration.mjs
+                $<TARGET_FILE:scpefe_electron_native>
+        )
     endif()
 endif()
 
@@ -179,6 +185,9 @@ if(BUILD_TESTING)
         add_executable(scpefe_editing_lease_test tests/editing_lease_test.c)
         target_link_libraries(scpefe_editing_lease_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_invitation_test tests/invitation_test.c)
+        target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
+
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
         add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
@@ -189,6 +198,7 @@ if(BUILD_TESTING)
             COMMAND scpefe_export_surface_test $<TARGET_FILE:scpefe>
         )
         add_test(NAME scpefe.editing-lease-round-trip COMMAND scpefe_editing_lease_test)
+        add_test(NAME scpefe.invitation-claim COMMAND scpefe_invitation_test)
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"

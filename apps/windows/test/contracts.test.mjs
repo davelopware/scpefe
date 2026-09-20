@@ -39,6 +39,17 @@ test("accepts only validated read-only native results", () => {
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: false }));
 });
 
+test("permits only the invitation claim surface before password replacement", () => {
+  assert.deepEqual(validateOpenedDocument({ content: "", readOnly: true,
+    canEdit: false, canAddPasswords: false, mustBeChanged: true,
+    slotIdentityName: "New colleague" }), {
+    content: "", readOnly: true, canEdit: false, canAddPasswords: false,
+    invitationRequired: true, temporaryLabel: "New colleague",
+  });
+  assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: true,
+    canEdit: false, mustBeChanged: true }), /exposed before claim/);
+});
+
 test("canonicalizes a BOM and common line endings without trimming", () => {
   assert.equal(canonicalizeDocumentText("\ufeff first \r\nsecond\r\n"),
     " first \nsecond\n");

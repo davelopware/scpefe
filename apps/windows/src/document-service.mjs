@@ -122,7 +122,7 @@ export class DocumentService {
             "Interrupted publication needs confirmation; recovery data was preserved.");
         }
       }
-      if (journal?.state === "unsaved"
+      if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved"
           && journal.baseRevision === nativeOpened.baseRevision) {
         recovery = journal;
       }
@@ -180,6 +180,73 @@ export class DocumentService {
     this.active.working = { content: this.active.opened.content,
       cursor: { start: 0, end: 0 } };
     return validateEditMode({ ...this.active.opened, readOnly: false });
+  }
+
+  async createInvitation(request) {
+    const active = this.active;
+    if (!active?.editMode || !active.opened.canAddPasswords) {
+      throw new Error("Enter edit mode with an add-password slot first");
+    }
+    const temporaryPassword = request.temporaryPassword
+      ? validatePassword(request.temporaryPassword)
+      : randomBytes(24).toString("base64url");
+    const input = { temporaryPassword,
+      temporaryLabel: String(request.temporaryLabel ?? "").trim(),
+      canEdit: request.canEdit === true,
+      canAddPasswords: request.canAddPasswords === true,
+      canRemovePasswords: request.canRemovePasswords === true };
+    if (!input.temporaryLabel) throw new TypeError("temporary label is required");
+    let reopened;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.openDocument(current, active.password));
+      if (!inspected.lease.active || !active.leaseSessionId
+          || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
+          || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+        throw new Error("Editing lease is no longer held by this session");
+      }
+      const candidate = this.native.addInvitation(current, active.password, input);
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current, candidate,
+        text: active.opened.content, cursor: { start: 0, end: 0 },
+        baseRevision: active.baseRevision });
+      reopened = this.#validateNativeOpened(this.native.openDocument(
+        await this.fs.readFile(active.target), active.password));
+    });
+    active.opened = reopened.opened;
+    reopened.journalKey.fill(0);
+    return Object.freeze({ created: true, temporaryPassword });
+  }
+
+  async claimInvitation(newPassword) {
+    const active = this.active;
+    if (!active?.opened.invitationRequired) {
+      throw new Error("The active password slot is not awaiting a claim");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const replacement = validatePassword(newPassword);
+    let reopened;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const candidate = this.native.claimInvitation(current, active.password,
+        { newPassword: replacement, name: profile.name, email: profile.email });
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current, candidate,
+        text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision });
+      reopened = this.#validateNativeOpened(this.native.openDocument(
+        await this.fs.readFile(active.target), replacement));
+      if (reopened.opened.invitationRequired) {
+        throw new Error("Published invitation claim was not verified");
+      }
+    });
+    active.password = replacement;
+    active.opened = reopened.opened;
+    active.journalKey.fill(0);
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    return active.opened;
   }
 
   publicationCapabilities() {

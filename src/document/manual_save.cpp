@@ -51,7 +51,7 @@ std::vector<std::uint8_t> ManualSave::create(
     const auto unlocked = container::RecoverablePasswordContainer::unlock(
         container_bytes, container_size, password, password_size,
         format::RevisionLimits::defaults());
-    if ((unlocked.permissions & 1u) == 0)
+    if (unlocked.must_be_changed || (unlocked.permissions & 1u) == 0)
         throw container::ContainerFailure{container::ContainerError::invalid_argument};
 
     std::array<std::uint8_t, format::revision_id_size> parent_id{};
@@ -75,8 +75,10 @@ std::vector<std::uint8_t> ManualSave::create(
     data.timestamp_ms = timestamp_ms;
     data.slot_id.assign(unlocked.slot_id.begin(), unlocked.slot_id.end());
     if (!unlocked.recovery_slot) {
-        data.slot_identity_name.assign(profile_name);
-        data.slot_identity_email.assign(profile_email);
+        data.slot_identity_name = unlocked.slot_identity_name.empty()
+            ? std::string(profile_name) : unlocked.slot_identity_name;
+        data.slot_identity_email = unlocked.slot_identity_email.empty()
+            ? std::string(profile_email) : unlocked.slot_identity_email;
     }
     data.client_profile_name.assign(profile_name);
     data.client_profile_email.assign(profile_email);

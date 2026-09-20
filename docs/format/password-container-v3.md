@@ -43,3 +43,15 @@ email, and device name. Readers also accept early version-3 payloads without
 the block and expose an inactive lease with the default duration. Lease-only
 updates re-encrypt this payload with a fresh nonce and preserve the exact
 revision bytes, so they never create history revisions.
+
+Invitation-capable writers may place an `SCPINV01` extension between the fixed
+owner/recovery wrappers and encrypted snapshot. It contains a little-endian
+32-bit invitation count followed by independently salted and nonced invitation
+records. Each record carries a 16-octet salt, 24-octet nonce, 32-bit ciphertext
+length, and XChaCha20-Poly1305 ciphertext. Its plaintext contains the document
+key, immutable slot ID, permission byte, `mustBeChanged` flag, and length-prefixed
+UTF-8 display name and email. The extension supports at most seven invitations,
+keeping the ordinary owner-plus-invitation total at eight; the optional recovery
+slot remains separate. Existing fixed wrappers and snapshot ciphertext remain
+byte-for-byte unchanged when an invitation is added. Claiming rewraps only the
+matched invitation record with its replacement password and claimed identity.

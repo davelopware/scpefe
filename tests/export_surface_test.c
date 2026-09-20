@@ -53,6 +53,8 @@ int main(int argc, char **argv)
         "scpefe_manual_save",
         "scpefe_new_document_create",
         "scpefe_password_container_change_password",
+        "scpefe_password_container_add_invitation",
+        "scpefe_password_container_claim_invitation",
         "scpefe_password_container_create",
         "scpefe_password_container_unlock",
         "scpefe_password_container_unlock_with_limits",

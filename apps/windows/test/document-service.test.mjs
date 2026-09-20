@@ -114,6 +114,44 @@ test("view-only slots cannot enter edit mode", async (t) => {
   await assert.rejects(service.enterEditMode(), /does not permit editing/);
 });
 
+test("generates a one-time invitation secret and publishes it under the held lease", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-invite-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  await fs.writeFile(target, "base");
+  const sessionId = "12".repeat(16);
+  let received;
+  const opened = () => ({ content: "secret", readOnly: true, canEdit: true,
+    canAddPasswords: true, mustBeChanged: false, slotIdentityName: "",
+    slotIdentityEmail: "", documentId: "11".repeat(16),
+    baseRevision: "22".repeat(32), revisionGraph: [{ revisionId: "22".repeat(32),
+      parentRevisionIds: [] }], journalKey: Buffer.alloc(32, 3),
+    lease: { active: true, sessionId, heartbeatCounter: 4, holderUtcMs: 1,
+      durationMs: 600_000, holderName: "Ada", holderEmail: "ada@example.test",
+      deviceName: "Desk PC" } });
+  const native = { openDocument: opened,
+    addInvitation(_bytes, password, request) {
+      assert.equal(password, "owner password words"); received = request;
+      return Buffer.from("candidate");
+    } };
+  const service = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+  service.active = { target, password: "owner password words", opened: opened(),
+    editMode: true, documentId: "11".repeat(16), baseRevision: "22".repeat(32),
+    journalKey: Buffer.alloc(32, 3), leaseSessionId: Buffer.from(sessionId, "hex"),
+    leaseCounter: 4 };
+  const result = await service.createInvitation({ temporaryLabel: "New colleague",
+    canEdit: true });
+  assert.equal(result.created, true);
+  assert.equal(result.temporaryPassword.length, 32);
+  assert.equal(received.temporaryPassword, result.temporaryPassword);
+  assert.equal(received.temporaryLabel, "New colleague");
+  assert.doesNotMatch(JSON.stringify(service.active),
+    new RegExp(result.temporaryPassword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal((await fs.readFile(target)).toString(), "candidate");
+});
+
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-journal-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

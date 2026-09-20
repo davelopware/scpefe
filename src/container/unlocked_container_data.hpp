@@ -26,6 +26,9 @@ struct UnlockedContainerData {
     std::array<std::uint8_t, 32> work_journal_key{};
     std::uint8_t permissions{};
     bool recovery_slot{};
+    bool must_be_changed{};
+    std::string slot_identity_name;
+    std::string slot_identity_email;
     EditingLeaseData editing_lease;
     std::vector<std::uint8_t> encoded_snapshot_revision;
 };

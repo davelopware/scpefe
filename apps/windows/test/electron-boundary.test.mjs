@@ -44,7 +44,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "createDocument", "openDocument",
-    "enterEditMode", "saveDocument", "exportPlaintext", "updateWorkingCopy", "activity",
+    "enterEditMode", "saveDocument", "createInvitation", "claimInvitation",
+    "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
     "onJournalWarning",
   ]);
