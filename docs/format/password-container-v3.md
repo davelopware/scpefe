@@ -26,3 +26,11 @@ revision with the existing document key. The new revision has one parent: the
 keeps all password slots usable, avoids nonce reuse, and authenticates every
 immutable header field. Version-2 containers remain readable but cannot be
 rewritten because their slot wrappers authenticate the mutable fields.
+
+A password change replaces only the 65-octet wrapper belonging to the slot
+authenticated by the current password. The slot's existing independent salt
+and nonce remain in the unchanged header; only the password-derived wrapping
+key and resulting wrapper change. The document key, slot
+identifier, permissions, header, other wrappers, and encrypted snapshot bytes
+remain unchanged. Before replacement, the new password is assessed locally and
+tried against every other slot so one password cannot address two slots.

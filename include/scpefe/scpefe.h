@@ -32,7 +32,9 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_UNSUPPORTED_FORMAT = 8,
     SCPEFE_STATUS_MALFORMED_CONTAINER = 9,
     SCPEFE_STATUS_AUTHENTICATION_FAILED = 10,
-    SCPEFE_STATUS_CRYPTO_ERROR = 11
+    SCPEFE_STATUS_CRYPTO_ERROR = 11,
+    SCPEFE_STATUS_WEAK_PASSWORD = 12,
+    SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE = 13
 } scpefe_status;
 
 #define SCPEFE_REVISION_FORMAT_VERSION 1u
@@ -256,6 +258,19 @@ SCPEFE_API scpefe_status scpefe_new_document_create(
 /* Seals a child revision and returns a replacement self-contained container. */
 SCPEFE_API scpefe_status scpefe_manual_save(
     const scpefe_manual_save_v1 *save,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Re-wraps the authenticated slot without replacing encrypted document content. */
+SCPEFE_API scpefe_status scpefe_password_container_change_password(
+    const uint8_t *container,
+    size_t container_size,
+    const uint8_t *current_password,
+    size_t current_password_size,
+    const uint8_t *new_password,
+    size_t new_password_size,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size

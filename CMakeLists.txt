@@ -37,6 +37,8 @@ else()
         src/core/host_services.cpp
         src/document/new_document.cpp
         src/document/manual_save.cpp
+        src/security/password_strength.cpp
+        third_party/zxcvbn-c/zxcvbn.c
     )
 endif()
 add_library(SCPEFE::scpefe ALIAS scpefe)
@@ -56,12 +58,17 @@ target_include_directories(scpefe
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/zxcvbn-c
 )
 if(NOT EMSCRIPTEN)
     target_link_libraries(scpefe PRIVATE ${SODIUM_LIBRARY})
+    if(NOT MSVC)
+        target_link_libraries(scpefe PRIVATE m)
+    endif()
 endif()
 set_target_properties(scpefe PROPERTIES
     CXX_EXTENSIONS OFF
+    C_VISIBILITY_PRESET hidden
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES
     VERSION ${PROJECT_VERSION}
@@ -154,10 +161,21 @@ if(BUILD_TESTING)
         add_executable(scpefe_manual_save_test tests/manual_save_test.c)
         target_link_libraries(scpefe_manual_save_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_password_change_test tests/password_change_test.c)
+        target_link_libraries(scpefe_password_change_test PRIVATE SCPEFE::scpefe)
+
+        add_executable(scpefe_export_surface_test tests/export_surface_test.c)
+        target_link_libraries(scpefe_export_surface_test PRIVATE ${CMAKE_DL_LIBS})
+
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
         add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
         add_test(NAME scpefe.manual-save-round-trip COMMAND scpefe_manual_save_test)
+        add_test(NAME scpefe.password-change COMMAND scpefe_password_change_test)
+        add_test(
+            NAME scpefe.export-surface
+            COMMAND scpefe_export_surface_test $<TARGET_FILE:scpefe>
+        )
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"
