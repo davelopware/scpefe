@@ -68,6 +68,7 @@ export class PublicationService {
         id, target, transactionFile,
         candidateHash: hash(candidate),
         baseHash: hash(base),
+        base: base.toString("base64"),
         candidate: candidate.toString("base64"),
         stage: "prepared",
       },

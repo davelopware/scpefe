@@ -462,6 +462,121 @@ test("tampered publication bytes never overwrite the target and can be discarded
     "tampered transaction");
 });
 
+test("restart exposes a pending candidate while its target remains unavailable", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-pending-bootstrap-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  let unavailable = false;
+  let targetWrites = 0;
+  const removableFs = Object.create(fs);
+  removableFs.readFile = async (file, ...args) => {
+    if (unavailable && file === target) {
+      const error = new Error("disconnected"); error.code = "ENODEV"; throw error;
+    }
+    return fs.readFile(file, ...args);
+  };
+  removableFs.rename = async (source, destination) => {
+    if (destination === target) targetWrites += 1;
+    return fs.rename(source, destination);
+  };
+  const native = {
+    openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+    documentId: "bc".repeat(16), baseRevision: "bd".repeat(32),
+    journalKey: Buffer.alloc(32, 31) }),
+    saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+  };
+  const service = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  unavailable = true;
+  await service.saveDocument("survives disconnected restart");
+  await service.lock();
+
+  const restarted = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.publicationState, "pending-publication");
+  assert.equal(opened.content, "survives disconnected restart");
+  assert.equal(targetWrites, 0);
+  const pending = await restarted.journals.read(
+    "bc".repeat(16), Buffer.alloc(32, 31));
+  assert.equal(Buffer.from(pending.publication.candidate, "base64").toString(),
+    "saved:survives disconnected restart");
+
+  assert.deepEqual(await restarted.reconnectPendingPublication(), {
+    publicationState: "pending-publication", content: "survives disconnected restart",
+  });
+  assert.equal(targetWrites, 0);
+  unavailable = false;
+  assert.equal((await restarted.reconnectPendingPublication()).publicationState,
+    "target-published");
+  assert.equal(targetWrites, 1);
+});
+
+test("replacement and unauthenticated targets become conflicts without target writes", async (t) => {
+  for (const replacement of ["other-document", "tampered-container"]) {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-target-replaced-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const profilePath = path.join(directory, "profile.json");
+    await fs.writeFile(target, "container");
+    await fs.writeFile(profilePath, JSON.stringify({
+      name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+    }));
+    let unavailable = false;
+    let targetWrites = 0;
+    const guardedFs = Object.create(fs);
+    guardedFs.readFile = async (file, ...args) => {
+      if (unavailable && file === target) {
+        const error = new Error("disconnected"); error.code = "ENOENT"; throw error;
+      }
+      return fs.readFile(file, ...args);
+    };
+    guardedFs.rename = async (source, destination) => {
+      if (destination === target) targetWrites += 1;
+      return fs.rename(source, destination);
+    };
+    const native = {
+      openDocument(bytes) {
+        const value = bytes.toString();
+        if (value === "tampered-container") throw new Error("authentication failed");
+        return { content: value.startsWith("saved:") ? value.slice(6) : "base",
+          readOnly: true, canEdit: true,
+          documentId: (value === "other-document" ? "de" : "cd").repeat(16),
+          baseRevision: "ce".repeat(32), journalKey: Buffer.alloc(32, 33) };
+      },
+      saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+    };
+    const service = new DocumentService({ native, fs: guardedFs, profilePath,
+      publicationCapabilities });
+    await service.openDocument(target, "password words");
+    service.enterEditMode();
+    unavailable = true;
+    await service.saveDocument("exact local candidate");
+    unavailable = false;
+    await fs.writeFile(target, replacement);
+    targetWrites = 0;
+
+    assert.deepEqual(await service.reconnectPendingPublication(), {
+      publicationState: "conflict", content: "exact local candidate",
+    });
+    assert.equal(targetWrites, 0);
+    assert.equal(await fs.readFile(target, "utf8"), replacement);
+    const conflict = await service.journals.read(
+      "cd".repeat(16), Buffer.alloc(32, 33));
+    assert.equal(conflict.state, "conflict");
+    assert.equal(Buffer.from(conflict.publication.candidate, "base64").toString(),
+      "saved:exact local candidate");
+  }
+});
+
 test("plaintext export writes only current text with selected line endings", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-export-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

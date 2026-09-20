@@ -83,8 +83,12 @@ export class DocumentService {
   }
 
   async openDocument(target, password) {
-    let bytes = await this.fs.readFile(target);
     const validatedPassword = validatePassword(password);
+    const bootstrap = await this.journals.findPublication(target);
+    if (bootstrap) {
+      return this.#openPendingDocument(target, validatedPassword, bootstrap);
+    }
+    let bytes = await this.fs.readFile(target);
     let nativeOpened = this.#validateNativeOpened(
       this.native.openDocument(bytes, validatedPassword));
     let recovery = null;
@@ -209,11 +213,16 @@ export class DocumentService {
       }
       throw error;
     }
-    const targetOpened = this.#validateNativeOpened(
-      this.native.openDocument(target, active.password));
+    let targetOpened;
+    try {
+      targetOpened = this.#validateNativeOpened(
+        this.native.openDocument(target, active.password));
+    } catch {
+      return this.#markActiveConflict(active);
+    }
     try {
       if (targetOpened.documentId !== active.documentId) {
-        throw new Error("The reconnected target is a different document");
+        return await this.#markActiveConflict(active);
       }
     } finally {
       targetOpened.journalKey.fill(0);
@@ -453,6 +462,99 @@ export class DocumentService {
     }
   }
 
+  async #openPendingDocument(target, password, bootstrap) {
+    let baseOpened = this.#validateNativeOpened(
+      this.native.openDocument(bootstrap.base, password));
+    if (baseOpened.documentId !== bootstrap.documentId) {
+      baseOpened.journalKey.fill(0);
+      throw new Error("Pending publication bootstrap does not match its document");
+    }
+    let record = await this.journals.read(
+      baseOpened.documentId, baseOpened.journalKey);
+    if (!record?.publication || record.target !== target) {
+      baseOpened.journalKey.fill(0);
+      throw new Error("Pending publication journal does not match its target");
+    }
+    this.#validateCandidate(record, password, baseOpened.documentId);
+
+    let targetBytes = null;
+    let targetOpened = null;
+    let invalidTarget = false;
+    let unavailable = false;
+    try {
+      targetBytes = await this.fs.readFile(target);
+      targetOpened = this.#validateNativeOpened(
+        this.native.openDocument(targetBytes, password));
+      if (targetOpened.documentId !== baseOpened.documentId) invalidTarget = true;
+    } catch (error) {
+      if (targetUnavailable(error)) unavailable = true;
+      else invalidTarget = true;
+    }
+
+    let publicationState = record.state === "conflict" ? "conflict" : "pending-publication";
+    if (invalidTarget || (targetOpened && targetOpened.documentId !== baseOpened.documentId)) {
+      if (record.state !== "conflict") {
+        record = await this.publications.markDiverged(
+          baseOpened.documentId, baseOpened.journalKey, record);
+      }
+      publicationState = "conflict";
+      this.onJournalWarning(
+        "The target was replaced or failed authentication; the pending candidate was preserved as a conflict.");
+    } else if (!unavailable && record.state !== "conflict") {
+      let resumed;
+      try {
+        resumed = await this.publications.resume(
+          baseOpened.documentId, baseOpened.journalKey, record);
+      } catch (error) {
+        if (targetUnavailable(error)) unavailable = true;
+        else throw error;
+      }
+      if (resumed?.completed) {
+        const published = await this.fs.readFile(target);
+        const reopened = this.#validateNativeOpened(
+          this.native.openDocument(published, password));
+        baseOpened.journalKey.fill(0);
+        targetOpened?.journalKey.fill(0);
+        const opened = validateOpenedDocument({ ...reopened.opened,
+          publicationState: "target-published" });
+        this.active = { target, password, opened, editMode: false,
+          documentId: reopened.documentId, baseRevision: reopened.baseRevision,
+          journalKey: Buffer.from(reopened.journalKey), recovery: null,
+          baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
+          working: null, dirty: false, pendingPublication: false, pendingRecord: null,
+          continuousDue: null, journalWarning: null };
+        reopened.journalKey.fill(0);
+        this.onJournalWarning("Interrupted publication was completed and verified.");
+        this.notifyActivity();
+        return opened;
+      }
+      if (resumed?.reason === "changed") {
+        record = await this.publications.markDiverged(
+          baseOpened.documentId, baseOpened.journalKey, record);
+        publicationState = "conflict";
+      }
+    }
+    if (unavailable) {
+      this.onJournalWarning(
+        "The target is unavailable; the manual save remains pending locally.");
+    }
+
+    const currentOpened = targetOpened && !invalidTarget ? targetOpened : baseOpened;
+    const opened = validateOpenedDocument({ ...baseOpened.opened,
+      content: record.text, publicationState });
+    this.active = { target, password, opened, editMode: false,
+      documentId: baseOpened.documentId, baseRevision: currentOpened.baseRevision,
+      journalKey: Buffer.from(baseOpened.journalKey), recovery: null,
+      baseContainer: Buffer.from(targetBytes && !invalidTarget ? targetBytes : bootstrap.base),
+      targetContent: currentOpened.opened.content,
+      working: null, dirty: false, pendingPublication: true, pendingRecord: record,
+      continuousDue: null, journalWarning: null };
+    baseOpened.journalKey.fill(0);
+    targetOpened?.journalKey.fill(0);
+    this.notifyActivity();
+    return opened;
+  }
+
   async #adoptPublishedCandidate(active) {
     const published = await this.fs.readFile(active.target);
     const reopened = this.#validateNativeOpened(
@@ -471,6 +573,17 @@ export class DocumentService {
     active.pendingPublication = false;
     active.pendingRecord = null;
     active.recovery = null;
+  }
+
+  async #markActiveConflict(active) {
+    if (active.pendingRecord.state !== "conflict") {
+      active.pendingRecord = await this.publications.markDiverged(
+        active.documentId, active.journalKey, active.pendingRecord);
+    }
+    active.opened = validateOpenedDocument({ ...active.opened,
+      publicationState: "conflict" });
+    return validatePublicationResult({ publicationState: "conflict",
+      content: active.pendingRecord.text });
   }
 
   #scheduleCheckpoint() {
