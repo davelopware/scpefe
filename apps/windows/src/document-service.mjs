@@ -751,6 +751,7 @@ export class DocumentService {
     await this.#flushActive(active);
     let published;
     let reopened;
+    let candidate;
     try {
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
@@ -768,14 +769,17 @@ export class DocumentService {
             error.code = "REGULAR_SAVE_DIVERGED";
             throw error;
           }
-          const candidate = this.native.regularSaveDocument(current, active.password, {
+          candidate = this.native.regularSaveDocument(current, active.password, {
             ...profile, content: canonical, timestampMs: Date.now(),
           });
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a provisional container");
           }
-          await this.#atomicWrite(active.target, candidate, true,
-            () => active === this.active && active.editMode, current);
+          await this.publications.publish({ documentId: active.documentId,
+            journalKey: active.journalKey, target: active.target,
+            base: current, candidate, text: canonical,
+            cursor: { ...active.working.cursor }, baseRevision: active.baseRevision,
+            purpose: "regular-save", state: "unsaved" });
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
             this.native.openDocument(published, active.password));
@@ -787,6 +791,30 @@ export class DocumentService {
         }
       });
     } catch (error) {
+      if (error?.code === "REGULAR_SAVE_DIVERGED") {
+        return this.#preserveRegularSaveConflict(active, profile, canonical);
+      }
+      if (error.publicationPrepared) {
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        if (active.pendingRecord?.publication) {
+          let target = null;
+          try { target = await this.fs.readFile(active.target); } catch {}
+          const expectedBase = Buffer.from(active.pendingRecord.publication.base, "base64");
+          const expectedCandidate = Buffer.from(
+            active.pendingRecord.publication.candidate, "base64");
+          if (target && !target.equals(expectedBase) && !target.equals(expectedCandidate)) {
+            active.pendingRecord = await this.publications.markDiverged(
+              active.documentId, active.journalKey, active.pendingRecord);
+          }
+          active.pendingPublication = true;
+          active.unresolvedJournal = true;
+          active.opened = validateOpenedDocument({ ...active.opened,
+            content: canonical,
+            publicationState: active.pendingRecord.state === "conflict"
+              ? "conflict" : "pending-publication" });
+        }
+      }
       if (targetUnavailable(error)) {
         this.onJournalWarning(
           "The target is unavailable; regular save was skipped and work remains unsaved locally.");
@@ -1229,19 +1257,29 @@ export class DocumentService {
         const { headMismatch, slotCanEdit } = await this.#observeHead(target, reopened);
         baseOpened.journalKey.fill(0);
         targetOpened?.journalKey.fill(0);
+        const regularSave = record.publication.purpose === "regular-save"
+          && !reopened.manuallySealed;
+        const recovery = regularSave ? { content: reopened.opened.content,
+          cursor: { start: 0, end: 0 }, state: "unsaved",
+          updateTime: Number.isSafeInteger(reopened.revisionTimestampMs)
+            ? reopened.revisionTimestampMs : this.now(),
+          ...(reopened.profileName ? { authorName: reopened.profileName } : {}),
+          ...(reopened.deviceName ? { deviceName: reopened.deviceName } : {}) } : null;
         const opened = validateOpenedDocument({ ...reopened.opened,
           canEdit: headMismatch ? false : slotCanEdit,
           publicationState: "target-published",
           ...(reopened.lease.active ? { lease: reopened.lease } : {}),
+          ...(recovery ? { recovery } : {}),
           ...(headMismatch ? { headMismatch } : {}) });
         this.active = { target, password: reopenPassword, opened, editMode: false,
           documentId: reopened.documentId, baseRevision: reopened.baseRevision,
           revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
           slotCanEdit, headMismatch,
-          journalKey: Buffer.from(reopened.journalKey), recovery: null,
+          journalKey: Buffer.from(reopened.journalKey), recovery,
           baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
           working: null, dirty: false, manuallySealed: reopened.manuallySealed,
-          pendingPublication: false, pendingRecord: null, unresolvedJournal: false,
+          pendingPublication: false, pendingRecord: null,
+          unresolvedJournal: recovery !== null,
           continuousDue: null, journalWarning: null };
         reopened.journalKey.fill(0);
         this.onJournalWarning("Interrupted publication was completed and verified.");
@@ -1336,7 +1374,20 @@ export class DocumentService {
               "The target changed before provisional work could be discarded");
           }
           const candidate = this.native.discardProvisional(current, active.password);
-          await this.#atomicWrite(active.target, candidate, true, () => true, current);
+          const candidateOpened = this.#validateNativeOpened(
+            this.native.openDocument(candidate, active.password));
+          try {
+            if (!candidateOpened.manuallySealed) {
+              throw new Error("Discard did not restore a manually sealed revision");
+            }
+            await this.publications.publish({ documentId: active.documentId,
+              journalKey: active.journalKey, target: active.target,
+              base: current, candidate, text: candidateOpened.opened.content,
+              cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
+              purpose: "provisional-discard" });
+          } finally {
+            candidateOpened.journalKey.fill(0);
+          }
         } finally {
           inspected.journalKey.fill(0);
         }
@@ -1346,10 +1397,57 @@ export class DocumentService {
       await this.exitEditMode();
       return active.opened;
     } catch (error) {
+      if (error.publicationPrepared) {
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        if (active.pendingRecord?.publication) {
+          let target = null;
+          try { target = await this.fs.readFile(active.target); } catch {}
+          const expectedBase = Buffer.from(active.pendingRecord.publication.base, "base64");
+          const expectedCandidate = Buffer.from(
+            active.pendingRecord.publication.candidate, "base64");
+          if (target && !target.equals(expectedBase) && !target.equals(expectedCandidate)) {
+            active.pendingRecord = await this.publications.markDiverged(
+              active.documentId, active.journalKey, active.pendingRecord);
+          }
+          active.pendingPublication = true;
+          active.unresolvedJournal = true;
+          active.opened = validateOpenedDocument({ ...active.opened,
+            content: active.pendingRecord.text,
+            publicationState: active.pendingRecord.state === "conflict"
+              ? "conflict" : "pending-publication" });
+        }
+      }
       active.editMode = false;
       await this.#stopHeartbeat();
       throw error;
     }
+  }
+
+  async #preserveRegularSaveConflict(active, profile, canonical) {
+    const candidate = this.native.regularSaveDocument(
+      active.baseContainer, active.password, {
+        ...profile, content: canonical, timestampMs: Date.now(),
+      });
+    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      throw new Error("Native bridge did not produce a provisional container");
+    }
+    let record = await this.publications.prepare({
+      documentId: active.documentId, journalKey: active.journalKey,
+      target: active.target, base: active.baseContainer, candidate,
+      text: canonical, cursor: { ...active.working.cursor },
+      baseRevision: active.baseRevision, purpose: "regular-save", state: "unsaved",
+    });
+    record = await this.publications.markDiverged(
+      active.documentId, active.journalKey, record);
+    active.pendingPublication = true;
+    active.pendingRecord = record;
+    active.unresolvedJournal = true;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      content: canonical, publicationState: "conflict" });
+    this.onJournalWarning(
+      "The target changed before regular save; unsaved work was preserved for divergence resolution.");
+    return Object.freeze({ published: false, conflict: true, content: canonical });
   }
 
   async #observeHead(target, opened) {

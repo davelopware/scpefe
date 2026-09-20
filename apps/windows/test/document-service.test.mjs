@@ -1599,3 +1599,189 @@ test("validated client settings opt into cumulative regular provisional saves", 
   assert.equal(discarded.content, "second");
   assert.equal(discarded.provisional, undefined);
 });
+
+async function regularPublicationFixture(directory) {
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  const settingsPath = path.join(directory, "settings.json");
+  const initial = Buffer.from(JSON.stringify({ content: "base", sealed: true,
+    parent: null }));
+  await fs.writeFile(target, initial);
+  const revisionId = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const native = withLease({
+    openDocument(bytes) {
+      const value = JSON.parse(bytes.toString());
+      const head = revisionId(bytes);
+      return { content: value.content, readOnly: true, canEdit: true,
+        manuallySealed: value.sealed, documentId: "25".repeat(16),
+        baseRevision: head, journalKey: Buffer.alloc(32, 25),
+        revisionGraph: [{ revisionId: value.parent ?? head,
+          parentRevisionIds: [] }, ...(value.parent ? [{ revisionId: head,
+            parentRevisionIds: [value.parent] }] : [])] };
+    },
+    regularSaveDocument(bytes, _password, input) {
+      const value = JSON.parse(bytes.toString());
+      const parent = value.sealed ? revisionId(bytes) : value.parent;
+      return Buffer.from(JSON.stringify({ content: input.content,
+        sealed: false, parent, base: value.sealed ? value : value.base }));
+    },
+    saveDocument(bytes, _password, input) {
+      const value = JSON.parse(bytes.toString());
+      return Buffer.from(JSON.stringify({ content: input.content, sealed: true,
+        parent: value.sealed ? revisionId(bytes) : value.parent }));
+    },
+    discardProvisional(bytes) {
+      return Buffer.from(JSON.stringify(JSON.parse(bytes.toString()).base));
+    },
+  });
+  const options = { native, fs, profilePath, settingsPath,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    publicationCapabilities };
+  const service = new DocumentService(options);
+  await service.saveClientSettings({ regularSaveEnabled: true,
+    regularSaveIntervalMs: 120_000 });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  service.updateWorkingCopy({ content: "local unsaved",
+    cursor: { start: 13, end: 13 } });
+  return { service, options, target, initial, revisionId };
+}
+
+test("regular-save divergence remains restart-safe and accessible", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-regular-diverged-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await regularPublicationFixture(directory);
+  const initialHead = fixture.revisionId(fixture.initial);
+  const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+    parent: initialHead }));
+  await fs.writeFile(fixture.target, remote);
+
+  assert.deepEqual(await fixture.service.regularSaveDocument(), {
+    published: false, conflict: true, content: "local unsaved" });
+  const record = await fixture.service.journals.read(
+    fixture.service.active.documentId, fixture.service.active.journalKey);
+  assert.equal(record.state, "conflict");
+  assert.equal(record.publication.purpose, "regular-save");
+
+  const restarted = new DocumentService(fixture.options);
+  const opened = await restarted.openDocument(fixture.target, "password words");
+  assert.equal(opened.publicationState, "conflict");
+  assert.equal(opened.content, "local unsaved");
+  assert.equal(restarted.active.pendingRecord.state, "conflict");
+});
+
+for (const fault of ["before-replace", "race", "post-replace"]) {
+  test(`regular-save ${fault} recovers as logically unsaved`, async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      `scpefe-regular-${fault}-`));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    if (fault === "before-replace") {
+      fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+        if (property !== "rename") return target[property];
+        return async () => { throw new Error("injected crash before replace"); };
+      } });
+    } else if (fault === "race") {
+      let targetReads = 0;
+      const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+        parent: fixture.revisionId(fixture.initial) }));
+      fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+        if (property !== "readFile") return target[property];
+        return async (file, ...args) => {
+          const bytes = await target.readFile(file, ...args);
+          if (file === fixture.target && ++targetReads === 1) {
+            await target.writeFile(file, remote);
+          }
+          return bytes;
+        };
+      } });
+    } else {
+      let failClear = true;
+      fixture.service.publications.journals = new Proxy(fixture.service.journals,
+        { get(target, property) {
+          if (property !== "clear") {
+            const value = target[property];
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return async (...args) => {
+            if (failClear) { failClear = false; throw new Error("injected post-replace crash"); }
+            return target.clear(...args);
+          };
+        } });
+    }
+    await assert.rejects(fixture.service.regularSaveDocument(),
+      (error) => error.publicationPrepared === true);
+
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target, "password words");
+    if (fault === "race") {
+      assert.equal(opened.publicationState, "conflict");
+      assert.equal(opened.content, "local unsaved");
+    } else {
+      assert.equal(opened.provisional, true);
+      assert.equal(opened.recovery.content, "local unsaved");
+      assert.equal(restarted.active.manuallySealed, false);
+    }
+  });
+}
+
+for (const fault of ["before-replace", "race", "post-replace"]) {
+  test(`provisional discard ${fault} recovers safely`, async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      `scpefe-discard-${fault}-`));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    await fixture.service.regularSaveDocument();
+    if (fault === "before-replace") {
+      fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+        if (property !== "rename") return target[property];
+        return async () => { throw new Error("discard crash before replace"); };
+      } });
+    } else if (fault === "race") {
+      let targetReads = 0;
+      const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+        parent: fixture.revisionId(fixture.initial) }));
+      fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+        if (property !== "readFile") return target[property];
+        return async (file, ...args) => {
+          const bytes = await target.readFile(file, ...args);
+          if (file === fixture.target && ++targetReads === 1) {
+            await target.writeFile(file, remote);
+          }
+          return bytes;
+        };
+      } });
+    } else {
+      let failClear = true;
+      fixture.service.publications.journals = new Proxy(fixture.service.journals,
+        { get(target, property) {
+          if (property !== "clear") {
+            const value = target[property];
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return async (...args) => {
+            if (failClear) { failClear = false; throw new Error("discard cleanup crash"); }
+            return target.clear(...args);
+          };
+        } });
+    }
+    await assert.rejects(fixture.service.discardWorkingCopy(),
+      (error) => error.publicationPrepared === true);
+    const tracked = await fixture.service.journals.read(
+      fixture.service.active.documentId, fixture.service.active.journalKey);
+    assert.equal(tracked.publication.purpose, "provisional-discard");
+
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target, "password words");
+    if (fault === "race") {
+      assert.equal(opened.publicationState, "conflict");
+      assert.equal(opened.content, "base");
+      assert.equal(restarted.active.pendingPublication, true);
+    } else {
+      assert.equal(opened.content, "base");
+      assert.equal(opened.provisional, undefined);
+      assert.equal(restarted.active.pendingPublication, false);
+    }
+  });
+}

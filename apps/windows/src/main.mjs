@@ -132,14 +132,20 @@ app.whenReady().then(async () => {
   let closingAfterRelease = false;
   let closeOperation = null;
   window.on("close", (event) => {
-    if (closingAfterRelease || !service.active?.editMode) return;
+    if (closingAfterRelease) return;
+    const active = service.active;
+    const regularSavePending = active?.pendingRecord?.publication?.purpose
+      === "regular-save";
+    const needsUnsavedDecision = active && (active.dirty || active.recovery
+      || !active.manuallySealed || regularSavePending);
+    if (!active || (!active.editMode && !needsUnsavedDecision)) return;
     event.preventDefault();
     if (closeOperation) return;
     closeOperation = (async () => {
-      if (service.active?.dirty) {
+      if (needsUnsavedDecision) {
         const choice = await dialog.showMessageBox(window, {
           type: "warning", title: "Unsaved changes",
-          message: service.active.manuallySealed
+          message: service.active.manuallySealed && !regularSavePending
             ? "This document has unsaved changes."
             : "This document is only provisionally saved.",
           detail: "Manual save seals the changes. Discard restores the last manually saved content.",
@@ -148,9 +154,24 @@ app.whenReady().then(async () => {
         });
         if (choice.response === 0) return;
         if (choice.response === 1) {
+          if (service.active.pendingPublication) {
+            const resumed = await service.reconnectPendingPublication();
+            if (resumed.publicationState !== "target-published") {
+              throw new Error(
+                "Resolve the saved divergence in the app before exiting");
+            }
+          }
+          if (service.active.recovery) await service.restoreRecoveredWork();
+          else if (!service.active.editMode) await service.enterEditMode();
           await service.saveDocument(service.active.working.content);
         } else {
-          await service.discardWorkingCopy();
+          if (service.active.pendingPublication) {
+            await service.discardPendingPublication();
+          } else if (service.active.recovery) {
+            await service.discardRecoveredWork();
+          } else {
+            await service.discardWorkingCopy();
+          }
         }
       }
       if (service.active?.editMode) {

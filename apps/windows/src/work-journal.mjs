@@ -56,7 +56,7 @@ function validateRecord(value) {
     const candidate = value.publication?.candidate;
     const base = value.publication?.base;
     if (!value.publication || typeof value.publication !== "object"
-        || (value.state !== "pending-publication" && value.state !== "conflict")
+        || !["unsaved", "pending-publication", "conflict"].includes(value.state)
         || typeof value.publication.id !== "string"
         || !/^[0-9a-f]{32}$/.test(value.publication.id)
         || value.publication.target !== value.target
@@ -72,7 +72,8 @@ function validateRecord(value) {
         || typeof base !== "string" || !Buffer.from(base, "base64").length
         || hash(Buffer.from(base, "base64")) !== value.publication.baseHash
         || (value.publication.purpose !== undefined
-          && value.publication.purpose !== "invitation-claim")
+          && !["invitation-claim", "regular-save", "provisional-discard"]
+            .includes(value.publication.purpose))
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"
             || !value.publication.reopenPassword
@@ -80,7 +81,9 @@ function validateRecord(value) {
         || (value.publication.purpose === "invitation-claim"
           && (value.publication.reopenPassword === undefined || value.text !== ""))
         || (value.publication.reopenPassword !== undefined
-          && value.publication.purpose !== "invitation-claim")) {
+          && value.publication.purpose !== "invitation-claim")
+        || (value.state === "unsaved"
+          && value.publication.purpose !== "regular-save")) {
       throw new TypeError("invalid publication transaction");
     }
     publication = {
