@@ -75,7 +75,9 @@ export function validateCreateRequest(value) {
     throw new TypeError("recovery password storage must be acknowledged");
   }
   return { ownerPassword, recoveryPassword,
-    content: canonicalizeDocumentText(value.content) };
+    content: canonicalizeDocumentText(value.content),
+    understandsIrrecoverable: true,
+    storedRecoverySeparately: recoveryPassword !== null };
 }
 
 export function validatePassword(value) {

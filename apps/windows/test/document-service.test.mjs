@@ -86,6 +86,8 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
     deviceName: "Desk PC" });
   assert.deepEqual(await service.createDocument(target, request), { created: true });
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].understandsIrrecoverable, true);
+  assert.equal(calls[0].storedRecoverySeparately, false);
   assert.deepEqual(await service.openDocument(target, "owner password words"),
     { content: "hello", readOnly: true, canEdit: true,
       publicationState: "target-published" });
@@ -98,6 +100,36 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
   assert.equal((await fs.readFile(target)).toString(), "saved: hello \n");
   await assert.rejects(service.createDocument(target, request),
     (error) => error.code === "EEXIST");
+});
+
+test("validates creation acknowledgements at the service boundary", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-create-acks-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  const calls = [];
+  const service = new DocumentService({ fs, publicationCapabilities, profilePath,
+    native: { createDocument(input) {
+      calls.push(input);
+      return Buffer.from("container");
+    }, openDocument: () => ({ content: "hello", readOnly: true, canEdit: true,
+      documentId: "11".repeat(16), baseRevision: "22".repeat(32),
+      journalKey: Buffer.alloc(32, 3) }) } });
+  const request = { ownerPassword: "owner password words",
+    recoveryPassword: "different recovery words", content: "hello",
+    understandsIrrecoverable: true, storedRecoverySeparately: true };
+
+  await assert.rejects(service.createDocument(path.join(directory, "missing.scpefe"),
+    { ...request, understandsIrrecoverable: false }),
+  /irrecoverability must be acknowledged/);
+  await assert.rejects(service.createDocument(path.join(directory, "unsafe.scpefe"),
+    { ...request, storedRecoverySeparately: false }),
+  /recovery password storage must be acknowledged/);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await service.createDocument(path.join(directory, "safe.scpefe"),
+    request), { created: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].understandsIrrecoverable, true);
+  assert.equal(calls[0].storedRecoverySeparately, true);
 });
 
 test("view-only slots cannot enter edit mode", async (t) => {

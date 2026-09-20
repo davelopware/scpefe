@@ -25,6 +25,8 @@ test("requires irrecoverability and independent recovery acknowledgements", () =
     ownerPassword: request.ownerPassword,
     recoveryPassword: request.recoveryPassword,
     content: "hello",
+    understandsIrrecoverable: true,
+    storedRecoverySeparately: true,
   });
   assert.throws(() => validateCreateRequest({ ...request,
     understandsIrrecoverable: false }));
@@ -32,6 +34,14 @@ test("requires irrecoverability and independent recovery acknowledgements", () =
     recoveryPassword: request.ownerPassword }));
   assert.throws(() => validateCreateRequest({ ...request,
     storedRecoverySeparately: false }));
+  assert.deepEqual(validateCreateRequest({ ...request,
+    recoveryPassword: "", storedRecoverySeparately: false }), {
+    ownerPassword: request.ownerPassword,
+    recoveryPassword: null,
+    content: "hello",
+    understandsIrrecoverable: true,
+    storedRecoverySeparately: false,
+  });
 });
 
 test("accepts only validated read-only native results", () => {
