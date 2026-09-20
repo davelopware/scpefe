@@ -83,7 +83,12 @@ if(SCPEFE_BUILD_NODE_ADDON)
     add_library(scpefe_electron_native MODULE apps/windows/native/addon.cpp)
     target_compile_features(scpefe_electron_native PRIVATE cxx_std_20)
     target_include_directories(scpefe_electron_native PRIVATE ${NODE_API_INCLUDE_DIR})
-    target_link_libraries(scpefe_electron_native PRIVATE SCPEFE::scpefe)
+    # The bridge scrubs temporary secrets and computes journal authentication
+    # tags directly with libsodium, so Windows must link its import library too.
+    target_link_libraries(scpefe_electron_native PRIVATE
+        SCPEFE::scpefe
+        ${SODIUM_LIBRARY}
+    )
     if(WIN32)
         if(NOT NODE_API_LIBRARY)
             message(FATAL_ERROR "NODE_API_LIBRARY is required on Windows")

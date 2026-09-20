@@ -1,0 +1,32 @@
+name: Windows preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/windows-preview-build
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/windows/package-lock.json
+      - name: Build and smoke-test unsigned preview
+        shell: powershell
+        run: .\scripts\build-windows-preview.ps1
+      - name: Upload unsigned Windows preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCPEFE-win32-x64-unsigned
+          path: apps/windows/release/SCPEFE-win32-x64.zip
+          if-no-files-found: error
+          retention-days: 14
