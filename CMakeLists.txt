@@ -38,6 +38,7 @@ else()
         src/document/new_document.cpp
         src/document/manual_save.cpp
         src/security/password_strength.cpp
+        third_party/zxcvbn-c/zxcvbn.c
     )
 endif()
 add_library(SCPEFE::scpefe ALIAS scpefe)
@@ -57,9 +58,13 @@ target_include_directories(scpefe
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/zxcvbn-c
 )
 if(NOT EMSCRIPTEN)
     target_link_libraries(scpefe PRIVATE ${SODIUM_LIBRARY})
+    if(NOT MSVC)
+        target_link_libraries(scpefe PRIVATE m)
+    endif()
 endif()
 set_target_properties(scpefe PROPERTIES
     CXX_EXTENSIONS OFF
