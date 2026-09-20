@@ -41,6 +41,22 @@ test("accepts only validated read-only native results", () => {
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: false }));
 });
 
+test("permits only the invitation claim surface before password replacement", () => {
+  const opened = validateOpenedDocument({ content: "", readOnly: true,
+    canEdit: false, canAddPasswords: false, mustBeChanged: true,
+    slotIdentityName: "New colleague", slotIdentityEmail: "invite@example.test",
+    profileName: "Document author", profileEmail: "author@example.test",
+    deviceName: "Author device", lease: { active: true,
+      holderName: "Lease holder", holderEmail: "holder@example.test",
+      deviceName: "Lease device", sessionId: "ab".repeat(16),
+      heartbeatCounter: 4, holderUtcMs: 1, durationMs: 600000 },
+  });
+  assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
+  assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
+  assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: true,
+    canEdit: false, mustBeChanged: true }), /exposed before claim/);
+});
+
 test("canonicalizes a BOM and common line endings without trimming", () => {
   assert.equal(canonicalizeDocumentText("\ufeff first \r\nsecond\r\n"),
     " first \nsecond\n");

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace scpefe::container {
@@ -57,6 +58,22 @@ public:
         std::size_t current_password_size,
         const std::uint8_t *new_password,
         std::size_t new_password_size
+    );
+
+    /* Adds one constrained ordinary invitation slot to a current container. */
+    static std::vector<std::uint8_t> add_invitation(
+        const std::uint8_t *container, std::size_t container_size,
+        const std::uint8_t *creator_password, std::size_t creator_password_size,
+        const std::uint8_t *temporary_password, std::size_t temporary_password_size,
+        std::uint8_t permissions, const std::string &temporary_label
+    );
+
+    /* Replaces an invitation password and binds its slot to a local profile. */
+    static std::vector<std::uint8_t> claim_invitation(
+        const std::uint8_t *container, std::size_t container_size,
+        const std::uint8_t *temporary_password, std::size_t temporary_password_size,
+        const std::uint8_t *new_password, std::size_t new_password_size,
+        const std::string &profile_name, const std::string &profile_email
     );
 
     /* Re-encrypts only shared lease metadata while preserving revision ciphertext semantics. */

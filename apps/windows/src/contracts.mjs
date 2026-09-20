@@ -87,6 +87,20 @@ export function validateOpenedDocument(value) {
       || typeof value.content !== "string" || typeof value.canEdit !== "boolean") {
     throw new TypeError("native bridge returned an invalid document");
   }
+  if (value.mustBeChanged !== undefined && typeof value.mustBeChanged !== "boolean") {
+    throw new TypeError("native bridge returned invalid invitation state");
+  }
+  if (value.canAddPasswords !== undefined
+      && typeof value.canAddPasswords !== "boolean") {
+    throw new TypeError("native bridge returned invalid slot permissions");
+  }
+  const invitationRequired = value.mustBeChanged === true;
+  if (invitationRequired) {
+    if (value.content !== "" || value.canEdit || value.canAddPasswords) {
+      throw new TypeError("invitation content was exposed before claim");
+    }
+    return Object.freeze({ readOnly: true, invitationRequired: true });
+  }
   let recovery;
   let lease;
   if (value.lease !== undefined) {
@@ -145,7 +159,11 @@ export function validateOpenedDocument(value) {
     throw new TypeError("host returned an invalid publication state");
   }
   return Object.freeze({ content: value.content, readOnly: true,
-    canEdit: value.canEdit, publicationState, ...(lease ? { lease } : {}),
+    canEdit: value.canEdit, publicationState,
+    ...(value.canAddPasswords !== undefined
+      ? { canAddPasswords: value.canAddPasswords } : {}),
+    ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),
+    ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
@@ -156,7 +174,11 @@ export function validateEditMode(value) {
     throw new TypeError("host did not enter edit mode");
   }
   return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
-    publicationState: "target-published" });
+    publicationState: "target-published",
+    ...(value.canAddPasswords !== undefined
+      ? { canAddPasswords: value.canAddPasswords } : {}),
+    ...(value.invitationRequired !== undefined
+      ? { invitationRequired: false } : {}) });
 }
 
 export function validateRecoveredWork(value) {

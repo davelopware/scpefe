@@ -97,7 +97,45 @@ typedef struct scpefe_unlocked_slot_access_v1 {
     size_t slot_id_size;
     int can_edit;
     int recovery_slot;
+    int can_add_passwords;
+    int can_remove_passwords;
+    int must_be_changed;
+    const char *identity_name;
+    size_t identity_name_size;
+    const char *identity_email;
+    size_t identity_email_size;
 } scpefe_unlocked_slot_access_v1;
+
+/* Inputs for adding one constrained temporary-password invitation slot. */
+typedef struct scpefe_invitation_create_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *creator_password;
+    size_t creator_password_size;
+    const uint8_t *temporary_password;
+    size_t temporary_password_size;
+    int can_edit;
+    int can_add_passwords;
+    int can_remove_passwords;
+    const char *temporary_label;
+    size_t temporary_label_size;
+} scpefe_invitation_create_v1;
+
+/* Inputs for replacing and binding an invitation credential on first use. */
+typedef struct scpefe_invitation_claim_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *temporary_password;
+    size_t temporary_password_size;
+    const uint8_t *new_password;
+    size_t new_password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+} scpefe_invitation_claim_v1;
 
 /* Borrowed authenticated details of the encrypted advisory editing lease. */
 typedef struct scpefe_editing_lease_v1 {
@@ -313,6 +351,18 @@ SCPEFE_API scpefe_status scpefe_password_container_change_password(
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size
+);
+
+/* Adds an invitation slot while enforcing creator permissions and slot limits. */
+SCPEFE_API scpefe_status scpefe_password_container_add_invitation(
+    const scpefe_invitation_create_v1 *invitation,
+    uint8_t *output, size_t output_capacity, size_t *output_size
+);
+
+/* Claims an invitation by replacing its password and encrypted display identity. */
+SCPEFE_API scpefe_status scpefe_password_container_claim_invitation(
+    const scpefe_invitation_claim_v1 *claim,
+    uint8_t *output, size_t output_capacity, size_t *output_size
 );
 
 /* Authenticates an owner password and unlocks the encrypted snapshot. */

@@ -77,6 +77,10 @@ app.whenReady().then(() => {
     if (chosen.canceled || !chosen.filePath) return null;
     return service.backupDocument(chosen.filePath);
   });
+  ipcMain.handle("document:create-invitation", (_event, request) =>
+    service.createInvitation(request));
+  ipcMain.handle("document:claim-invitation", (_event, password) =>
+    service.claimInvitation(password));
   ipcMain.handle("document:export-plaintext", async (_event, request) => {
     const warning = await dialog.showMessageBox(window, {
       type: "warning",

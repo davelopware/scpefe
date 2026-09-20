@@ -47,24 +47,33 @@ function validateRecord(value) {
         || value.publication.target !== value.target
         || typeof value.publication.transactionFile !== "string"
         || !value.publication.transactionFile
+        || typeof value.publication.baseFile !== "string"
+        || !value.publication.baseFile
         || !/^[0-9a-f]{64}$/.test(value.publication.candidateHash)
         || !/^[0-9a-f]{64}$/.test(value.publication.baseHash)
         || !TRANSACTION_STAGES.has(value.publication.stage)
         || typeof candidate !== "string"
         || !Buffer.from(candidate, "base64").length
         || typeof base !== "string" || !Buffer.from(base, "base64").length
-        || hash(Buffer.from(base, "base64")) !== value.publication.baseHash) {
+        || hash(Buffer.from(base, "base64")) !== value.publication.baseHash
+        || (value.publication.reopenPassword !== undefined
+          && (typeof value.publication.reopenPassword !== "string"
+            || !value.publication.reopenPassword
+            || value.publication.reopenPassword.length > 4096))) {
       throw new TypeError("invalid publication transaction");
     }
     publication = {
       id: value.publication.id,
       target: value.publication.target,
       transactionFile: value.publication.transactionFile,
+      baseFile: value.publication.baseFile,
       candidateHash: value.publication.candidateHash,
       baseHash: value.publication.baseHash,
       base,
       candidate,
       stage: value.publication.stage,
+      ...(value.publication.reopenPassword
+        ? { reopenPassword: value.publication.reopenPassword } : {}),
     };
   }
   return {

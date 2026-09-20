@@ -32,6 +32,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:backup");
     return value === null ? null : validateBackupResult(value);
   },
+  createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
+  claimInvitation: async (password) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

@@ -108,30 +108,72 @@ export class DocumentService {
   async openDocument(target, password) {
     const validatedPassword = validatePassword(password);
     const bootstrap = await this.journals.findPublication(target);
+    let bytes;
+    let nativeOpened;
     if (bootstrap) {
-      return this.#openPendingDocument(target, validatedPassword, bootstrap);
+      try {
+        return await this.#openPendingDocument(target, validatedPassword, bootstrap);
+      } catch (bootstrapError) {
+        try {
+          bytes = await this.fs.readFile(target);
+          nativeOpened = this.#validateNativeOpened(
+            this.native.openDocument(bytes, validatedPassword));
+        } catch {
+          throw bootstrapError;
+        }
+      }
     }
-    let bytes = await this.fs.readFile(target);
-    let nativeOpened = this.#validateNativeOpened(
-      this.native.openDocument(bytes, validatedPassword));
+    bytes ??= await this.fs.readFile(target);
+    let activePassword = validatedPassword;
+    let recoveredPublication = false;
+    try {
+      nativeOpened ??= this.#validateNativeOpened(
+        this.native.openDocument(bytes, activePassword));
+    } catch (targetError) {
+      const recoveryBase = await this.publications.readRecoveryBase(target);
+      if (!recoveryBase) throw targetError;
+      let baseOpened;
+      try {
+        baseOpened = this.#validateNativeOpened(
+          this.native.openDocument(recoveryBase, validatedPassword));
+        const journal = await this.journals.read(
+          baseOpened.documentId, baseOpened.journalKey);
+        if (!journal?.publication) throw targetError;
+        const resumed = await this.publications.resume(
+          baseOpened.documentId, baseOpened.journalKey, journal);
+        if (!resumed.completed) {
+          throw new Error("Interrupted publication could not be reconciled safely");
+        }
+        activePassword = journal.publication.reopenPassword ?? validatedPassword;
+        nativeOpened = this.#validateNativeOpened(this.native.openDocument(
+          await this.fs.readFile(target), activePassword));
+        recoveredPublication = true;
+        this.onJournalWarning("Interrupted publication was completed and verified.");
+      } finally {
+        baseOpened?.journalKey.fill(0);
+      }
+    }
     let recovery = null;
     let pendingPublication = false;
+    let publicationCompleted = false;
     let pendingRecord = null;
     let publicationState = "target-published";
     let unresolvedJournal = false;
     try {
-      const journal = await this.journals.read(
+      const journal = recoveredPublication ? null : await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       unresolvedJournal = journal !== null;
       if (journal?.publication) {
         pendingPublication = true;
         pendingRecord = journal;
         publicationState = journal.state === "conflict" ? "conflict" : "pending-publication";
-        this.#validateCandidate(journal, validatedPassword, nativeOpened.documentId);
+        const reopenPassword = journal.publication.reopenPassword ?? activePassword;
+        this.#validateCandidate(journal, reopenPassword, nativeOpened.documentId);
         const resumed = journal.state === "conflict" ? { completed: false, reason: "changed" }
           : await this.publications.resume(
             nativeOpened.documentId, nativeOpened.journalKey, journal);
         if (resumed.completed) {
+          publicationCompleted = true;
           pendingPublication = false;
           pendingRecord = null;
           publicationState = "target-published";
@@ -140,7 +182,8 @@ export class DocumentService {
           bytes = published;
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
-            this.native.openDocument(published, validatedPassword));
+            this.native.openDocument(published, reopenPassword));
+          activePassword = reopenPassword;
           this.onJournalWarning("Interrupted publication was completed and verified.");
         } else if (resumed.reason === "changed") {
           pendingRecord = await this.publications.markDiverged(
@@ -153,11 +196,15 @@ export class DocumentService {
             "Interrupted publication needs confirmation; recovery data was preserved.");
         }
       }
-      if (journal?.state === "unsaved"
+      if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved"
           && journal.baseRevision === nativeOpened.baseRevision) {
         recovery = journal;
       }
+      if (!journal && !recoveredPublication) {
+        await this.publications.cleanupOrphanedRecoveryBase(target);
+      }
     } catch (error) {
+      if (publicationCompleted) throw error;
       unresolvedJournal = true;
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
@@ -174,16 +221,19 @@ export class DocumentService {
         editingBlocked: true, observedDocumentId: nativeOpened.documentId,
         observedHead: nativeOpened.baseRevision });
     }
-    const slotCanEdit = nativeOpened.opened.canEdit;
-    const opened = validateOpenedDocument({ ...nativeOpened.opened,
-      lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-      canEdit: headMismatch ? false : slotCanEdit,
-      ...(pendingRecord ? { content: pendingRecord.text } : {}), publicationState,
-      ...(headMismatch ? { headMismatch } : {}),
-      ...(recovery ? { recovery: { content: recovery.text,
-        cursor: recovery.cursor, state: "unsaved",
-        updateTime: recovery.updateTime } } : {}) });
-    this.active = { target, password: validatedPassword, opened, editMode: false,
+    const slotCanEdit = nativeOpened.opened.invitationRequired
+      ? false : nativeOpened.opened.canEdit;
+    const opened = nativeOpened.opened.invitationRequired
+      ? nativeOpened.opened
+      : validateOpenedDocument({ ...nativeOpened.opened,
+        lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
+        canEdit: headMismatch ? false : slotCanEdit,
+        ...(pendingRecord ? { content: pendingRecord.text } : {}), publicationState,
+        ...(headMismatch ? { headMismatch } : {}),
+        ...(recovery ? { recovery: { content: recovery.text,
+          cursor: recovery.cursor, state: "unsaved",
+          updateTime: recovery.updateTime } } : {}) });
+    this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
       slotCanEdit, headMismatch,
@@ -216,6 +266,74 @@ export class DocumentService {
     this.active.working = { content: this.active.opened.content,
       cursor: { start: 0, end: 0 } };
     return validateEditMode({ ...this.active.opened, readOnly: false });
+  }
+
+  async createInvitation(request) {
+    const active = this.active;
+    if (!active?.editMode || !active.opened.canAddPasswords) {
+      throw new Error("Enter edit mode with an add-password slot first");
+    }
+    const temporaryPassword = request.temporaryPassword
+      ? validatePassword(request.temporaryPassword)
+      : randomBytes(24).toString("base64url");
+    const input = { temporaryPassword,
+      temporaryLabel: String(request.temporaryLabel ?? "").trim(),
+      canEdit: request.canEdit === true,
+      canAddPasswords: request.canAddPasswords === true,
+      canRemovePasswords: request.canRemovePasswords === true };
+    if (!input.temporaryLabel) throw new TypeError("temporary label is required");
+    let reopened;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.openDocument(current, active.password));
+      if (!inspected.lease.active || !active.leaseSessionId
+          || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
+          || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+        throw new Error("Editing lease is no longer held by this session");
+      }
+      const candidate = this.native.addInvitation(current, active.password, input);
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current, candidate,
+        text: active.opened.content, cursor: { start: 0, end: 0 },
+        baseRevision: active.baseRevision });
+      reopened = this.#validateNativeOpened(this.native.openDocument(
+        await this.fs.readFile(active.target), active.password));
+    });
+    active.opened = reopened.opened;
+    reopened.journalKey.fill(0);
+    return Object.freeze({ created: true, temporaryPassword });
+  }
+
+  async claimInvitation(newPassword) {
+    const active = this.active;
+    if (!active?.opened.invitationRequired) {
+      throw new Error("The active password slot is not awaiting a claim");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const replacement = validatePassword(newPassword);
+    let reopened;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const candidate = this.native.claimInvitation(current, active.password,
+        { newPassword: replacement, name: profile.name, email: profile.email });
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current, candidate,
+        text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
+        reopenPassword: replacement });
+      reopened = this.#validateNativeOpened(this.native.openDocument(
+        await this.fs.readFile(active.target), replacement));
+      if (reopened.opened.invitationRequired) {
+        throw new Error("Published invitation claim was not verified");
+      }
+    });
+    active.password = replacement;
+    active.opened = reopened.opened;
+    active.journalKey.fill(0);
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    return active.opened;
   }
 
   publicationCapabilities() {
@@ -779,7 +897,8 @@ export class DocumentService {
       baseOpened.journalKey.fill(0);
       throw new Error("Pending publication journal does not match its target");
     }
-    this.#validateCandidate(record, password, baseOpened.documentId);
+    const reopenPassword = record.publication.reopenPassword ?? password;
+    this.#validateCandidate(record, reopenPassword, baseOpened.documentId);
 
     let targetBytes = null;
     let targetOpened = null;
@@ -787,8 +906,14 @@ export class DocumentService {
     let unavailable = false;
     try {
       targetBytes = await this.fs.readFile(target);
-      targetOpened = this.#validateNativeOpened(
-        this.native.openDocument(targetBytes, password));
+      try {
+        targetOpened = this.#validateNativeOpened(
+          this.native.openDocument(targetBytes, password));
+      } catch (passwordError) {
+        if (reopenPassword === password) throw passwordError;
+        targetOpened = this.#validateNativeOpened(
+          this.native.openDocument(targetBytes, reopenPassword));
+      }
       if (targetOpened.documentId !== baseOpened.documentId) invalidTarget = true;
     } catch (error) {
       if (targetUnavailable(error)) unavailable = true;
@@ -816,7 +941,7 @@ export class DocumentService {
       if (resumed?.completed) {
         const published = await this.fs.readFile(target);
         const reopened = this.#validateNativeOpened(
-          this.native.openDocument(published, password));
+          this.native.openDocument(published, reopenPassword));
         const { headMismatch, slotCanEdit } = await this.#observeHead(target, reopened);
         baseOpened.journalKey.fill(0);
         targetOpened?.journalKey.fill(0);
@@ -825,7 +950,7 @@ export class DocumentService {
           publicationState: "target-published",
           ...(reopened.lease.active ? { lease: reopened.lease } : {}),
           ...(headMismatch ? { headMismatch } : {}) });
-        this.active = { target, password, opened, editMode: false,
+        this.active = { target, password: reopenPassword, opened, editMode: false,
           documentId: reopened.documentId, baseRevision: reopened.baseRevision,
           revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
           slotCanEdit, headMismatch,

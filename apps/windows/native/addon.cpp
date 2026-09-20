@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -42,6 +43,53 @@ std::string string_value(napi_env env, napi_value value)
         env, value, result.data(), result.size() + 1, &size));
     return result;
 }
+
+class SecretBytes {
+public:
+    SecretBytes() = default;
+
+    SecretBytes(napi_env env, napi_value value)
+    {
+        assign(env, value);
+    }
+
+    ~SecretBytes()
+    {
+        clear();
+    }
+
+    SecretBytes(const SecretBytes &) = delete;
+    SecretBytes &operator=(const SecretBytes &) = delete;
+
+    void assign(napi_env env, napi_value value)
+    {
+        clear();
+        size_t size = 0;
+        check(env, napi_get_value_string_utf8(env, value, nullptr, 0, &size));
+        bytes_.resize(size + 1);
+        size_t written = 0;
+        try {
+            check(env, napi_get_value_string_utf8(env, value,
+                reinterpret_cast<char *>(bytes_.data()), bytes_.size(), &written));
+            bytes_.resize(written);
+        } catch (...) {
+            clear();
+            throw;
+        }
+    }
+
+    const std::uint8_t *data() const { return bytes_.data(); }
+    std::size_t size() const { return bytes_.size(); }
+
+private:
+    void clear()
+    {
+        if (!bytes_.empty()) sodium_memzero(bytes_.data(), bytes_.size());
+        bytes_.clear();
+    }
+
+    std::vector<std::uint8_t> bytes_;
+};
 
 void set_string(napi_env env, napi_value object, const char *name,
     const char *value, std::size_t size)
@@ -146,6 +194,34 @@ void throw_status(napi_env env, scpefe_status status)
     napi_throw_error(env, "SCPEFE_NATIVE", message.c_str());
 }
 
+std::pair<const std::uint8_t *, std::size_t> buffer_value(
+    napi_env env, napi_value value)
+{
+    bool is_buffer = false;
+    check(env, napi_is_buffer(env, value, &is_buffer));
+    if (!is_buffer) throw std::runtime_error("expected a Buffer");
+    void *bytes = nullptr;
+    std::size_t size = 0;
+    check(env, napi_get_buffer_info(env, value, &bytes, &size));
+    return {static_cast<const std::uint8_t *>(bytes), size};
+}
+
+template<class Operation>
+napi_value output_buffer(napi_env env, Operation operation)
+{
+    std::size_t size = 0;
+    auto status = operation(nullptr, 0, &size);
+    if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) {
+        throw_status(env, status); return nullptr;
+    }
+    void *bytes = nullptr;
+    napi_value result;
+    check(env, napi_create_buffer(env, size, &bytes, &result));
+    status = operation(static_cast<std::uint8_t *>(bytes), size, &size);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    return result;
+}
+
 napi_value create_document(napi_env env, napi_callback_info info)
 {
     try {
@@ -157,13 +233,13 @@ napi_value create_document(napi_env env, napi_callback_info info)
         const std::string email = string_value(env, property(env, args[0], "email"));
         const std::string device = string_value(env, property(env, args[0], "deviceName"));
         const std::string content = string_value(env, property(env, args[0], "content"));
-        const std::string owner = string_value(env, property(env, args[0], "ownerPassword"));
+        const SecretBytes owner{env, property(env, args[0], "ownerPassword")};
         napi_value recovery_value = property(env, args[0], "recoveryPassword");
         napi_valuetype recovery_type;
         check(env, napi_typeof(env, recovery_value, &recovery_type));
         const bool has_recovery = recovery_type == napi_string;
-        const std::string recovery = has_recovery
-            ? string_value(env, recovery_value) : std::string{};
+        SecretBytes recovery;
+        if (has_recovery) recovery.assign(env, recovery_value);
         double timestamp = 0;
         check(env, napi_get_value_double(
             env, property(env, args[0], "timestampMs"), &timestamp));
@@ -172,9 +248,8 @@ napi_value create_document(napi_env env, napi_callback_info info)
             name.data(), name.size(), email.data(), email.size(),
             device.data(), device.size(), content.data(), content.size(),
             static_cast<std::uint64_t>(timestamp),
-            reinterpret_cast<const std::uint8_t *>(owner.data()), owner.size(),
-            has_recovery
-                ? reinterpret_cast<const std::uint8_t *>(recovery.data()) : nullptr,
+            owner.data(), owner.size(),
+            has_recovery ? recovery.data() : nullptr,
             has_recovery ? recovery.size() : 0,
         };
         std::size_t size = 0;
@@ -217,10 +292,10 @@ napi_value open_document(napi_env env, napi_callback_info info)
         void *bytes = nullptr;
         size_t size = 0;
         check(env, napi_get_buffer_info(env, args[0], &bytes, &size));
-        const std::string password = string_value(env, args[1]);
+        const SecretBytes password{env, args[1]};
         scpefe_status status = scpefe_password_container_unlock(
             static_cast<const std::uint8_t *>(bytes), size,
-            reinterpret_cast<const std::uint8_t *>(password.data()), password.size(),
+            password.data(), password.size(),
             &unlocked);
         if (status != SCPEFE_STATUS_OK) {
             scpefe_decoded_snapshot_revision_destroy(revision);
@@ -263,7 +338,10 @@ napi_value open_document(napi_env env, napi_callback_info info)
         }
         napi_value result;
         check(env, napi_create_object(env, &result));
-        set_string(env, result, "content", view.content, view.content_size);
+        if (slot_access.must_be_changed)
+            set_string(env, result, "content", "", 0);
+        else
+            set_string(env, result, "content", view.content, view.content_size);
         set_string(env, result, "profileName", view.client_profile_name,
             view.client_profile_name_size);
         set_string(env, result, "profileEmail", view.client_profile_email,
@@ -271,7 +349,15 @@ napi_value open_document(napi_env env, napi_callback_info info)
         set_string(env, result, "deviceName", view.device_name,
             view.device_name_size);
         set_boolean(env, result, "readOnly", true);
-        set_boolean(env, result, "canEdit", slot_access.can_edit != 0);
+        set_boolean(env, result, "canEdit",
+            slot_access.can_edit != 0 && !slot_access.must_be_changed);
+        set_boolean(env, result, "canAddPasswords",
+            slot_access.can_add_passwords != 0 && !slot_access.must_be_changed);
+        set_boolean(env, result, "mustBeChanged", slot_access.must_be_changed != 0);
+        set_string(env, result, "slotIdentityName", slot_access.identity_name,
+            slot_access.identity_name_size);
+        set_string(env, result, "slotIdentityEmail", slot_access.identity_email,
+            slot_access.identity_email_size);
         napi_value lease;
         check(env, napi_create_object(env, &lease));
         set_boolean(env, lease, "active", editing_lease.active != 0);
@@ -362,7 +448,7 @@ napi_value update_lease(napi_env env, napi_callback_info info)
         void *container = nullptr;
         size_t container_size = 0;
         check(env, napi_get_buffer_info(env, args[0], &container, &container_size));
-        const std::string password = string_value(env, args[1]);
+        const SecretBytes password{env, args[1]};
         const bool active = boolean_value(env, property(env, args[2], "active"));
         const auto session = parse_session_id(string_value(
             env, property(env, args[2], "sessionId")));
@@ -380,7 +466,7 @@ napi_value update_lease(napi_env env, napi_callback_info info)
         const scpefe_editing_lease_update_v1 update{
             sizeof(scpefe_editing_lease_update_v1),
             static_cast<const std::uint8_t *>(container), container_size,
-            reinterpret_cast<const std::uint8_t *>(password.data()), password.size(),
+            password.data(), password.size(),
             lease,
         };
         std::size_t size = 0;
@@ -420,7 +506,7 @@ napi_value save_document(napi_env env, napi_callback_info info)
         void *container = nullptr;
         size_t container_size = 0;
         check(env, napi_get_buffer_info(env, args[0], &container, &container_size));
-        const std::string password = string_value(env, args[1]);
+        const SecretBytes password{env, args[1]};
         const std::string name = string_value(env, property(env, args[2], "name"));
         const std::string email = string_value(env, property(env, args[2], "email"));
         const std::string device = string_value(env, property(env, args[2], "deviceName"));
@@ -431,7 +517,7 @@ napi_value save_document(napi_env env, napi_callback_info info)
         const scpefe_manual_save_v1 save{
             sizeof(scpefe_manual_save_v1),
             static_cast<const std::uint8_t *>(container), container_size,
-            reinterpret_cast<const std::uint8_t *>(password.data()), password.size(),
+            password.data(), password.size(),
             name.data(), name.size(), email.data(), email.size(),
             device.data(), device.size(), content.data(), content.size(),
             static_cast<std::uint64_t>(timestamp),
@@ -458,6 +544,56 @@ napi_value save_document(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value add_invitation(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3; napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3) throw std::runtime_error(
+            "addInvitation expects a Buffer, creator password, and request");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes creator{env, args[1]};
+        const SecretBytes temporary{env, property(env, args[2], "temporaryPassword")};
+        const auto label = string_value(env, property(env, args[2], "temporaryLabel"));
+        const scpefe_invitation_create_v1 request{
+            sizeof(request), container, container_size,
+            creator.data(), creator.size(), temporary.data(), temporary.size(),
+            boolean_value(env, property(env, args[2], "canEdit")),
+            boolean_value(env, property(env, args[2], "canAddPasswords")),
+            boolean_value(env, property(env, args[2], "canRemovePasswords")),
+            label.data(), label.size()};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) { return scpefe_password_container_add_invitation(
+                &request, output, capacity, size); });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value claim_invitation(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3; napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3) throw std::runtime_error(
+            "claimInvitation expects a Buffer, temporary password, and request");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes temporary{env, args[1]};
+        const SecretBytes replacement{env, property(env, args[2], "newPassword")};
+        const auto name = string_value(env, property(env, args[2], "name"));
+        const auto email = string_value(env, property(env, args[2], "email"));
+        const scpefe_invitation_claim_v1 request{
+            sizeof(request), container, container_size,
+            temporary.data(), temporary.size(), replacement.data(), replacement.size(),
+            name.data(), name.size(), email.data(), email.size()};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) { return scpefe_password_container_claim_invitation(
+                &request, output, capacity, size); });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value initialize(napi_env env, napi_value exports)
 {
     napi_property_descriptor methods[] = {
@@ -469,8 +605,12 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"updateLease", nullptr, update_lease, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"addInvitation", nullptr, add_invitation, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
+        {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 4, methods));
+    check(env, napi_define_properties(env, exports, 6, methods));
     return exports;
 }
 
