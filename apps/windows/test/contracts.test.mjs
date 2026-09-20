@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult,
+  validateBackupResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
   validateWorkingCopy } from "../src/contracts.mjs";
@@ -58,6 +59,13 @@ test("creation results cannot expose host filesystem paths", () => {
   assert.throws(() => validateCreationResult({
     created: true, target: "C:\\Users\\Ada\\secret.scpefe",
   }));
+});
+
+test("backup results expose success without a host filesystem path", () => {
+  assert.deepEqual(validateBackupResult({ backedUp: true }), { backedUp: true });
+  assert.throws(() => validateBackupResult({
+    backedUp: true, target: "C:\\Users\\Ada\\secret.scpefe",
+  }), /invalid backup result/);
 });
 
 test("plaintext export contracts expose only canonical text and line-ending choice", () => {

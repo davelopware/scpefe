@@ -14,6 +14,13 @@ async function readIfPresent(fs, file) {
   }
 }
 
+function collisionTarget(target, collision) {
+  if (collision === 0) return target;
+  const extension = path.extname(target);
+  const stem = extension ? target.slice(0, -extension.length) : target;
+  return `${stem}-${collision}${extension}`;
+}
+
 const REPLACEMENT_GUARANTEES = new Set([
   "atomic-replace", "best-effort-replace",
 ]);
@@ -50,6 +57,50 @@ export class PublicationService {
 
   replacementCapabilities() {
     return this.capabilities;
+  }
+
+  async publishReplica({ target, candidate }) {
+    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      throw new TypeError("backup candidate must contain container bytes");
+    }
+    const id = randomBytes(16).toString("hex");
+    const transactionFile = path.join(path.dirname(target),
+      `.${path.basename(target)}.scpefe-backup-txn-${id}`);
+    let handle;
+    let publishedTarget;
+    try {
+      handle = await this.fs.open(transactionFile, "wx", 0o600);
+      await handle.writeFile(candidate);
+      await handle.sync();
+      await handle.close();
+      handle = null;
+
+      for (let collision = 0; ; collision += 1) {
+        const proposed = collisionTarget(target, collision);
+        try {
+          await this.fs.link(transactionFile, proposed);
+          publishedTarget = proposed;
+          break;
+        } catch (error) {
+          if (error?.code !== "EEXIST") throw error;
+        }
+      }
+
+      handle = await this.fs.open(publishedTarget, "r+");
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      const published = await this.fs.readFile(publishedTarget);
+      if (!published.equals(candidate)) {
+        throw new Error("Backup replica verification failed");
+      }
+      await this.fs.unlink(transactionFile);
+      return { completed: true };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      await this.fs.unlink(transactionFile).catch(() => {});
+      throw error;
+    }
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,

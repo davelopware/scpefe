@@ -161,6 +161,14 @@ export function validatePlaintextExportResult(value) {
   return Object.freeze({ exported: true });
 }
 
+export function validateBackupResult(value) {
+  if (!value || typeof value !== "object" || value.backedUp !== true
+      || Object.keys(value).length !== 1) {
+    throw new TypeError("host returned an invalid backup result");
+  }
+  return Object.freeze({ backedUp: true });
+}
+
 export function validateWorkingCopy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("working copy must be an object");

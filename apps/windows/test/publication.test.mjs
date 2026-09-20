@@ -149,3 +149,59 @@ test("restart never cleans up a tracked transaction with ambiguous bytes", async
     "untracked newer bytes");
   assert.ok((await journals.read(documentId, key)).publication);
 });
+
+test("backup publication is create-only, flushed, and byte-identical", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const target = path.join(directory, "document.backup-20260920T010203Z.scpefe");
+  await fs.writeFile(target, "existing backup");
+  await fs.writeFile(target.replace(/\.scpefe$/, "-1.scpefe"), "another backup");
+  const calls = [];
+  const observedFs = Object.create(fs);
+  observedFs.link = async (...args) => {
+    calls.push(["publish", args[1]]);
+    return fs.link(...args);
+  };
+  observedFs.open = async (...args) => {
+    const handle = await fs.open(...args);
+    const sync = handle.sync.bind(handle);
+    handle.sync = async () => { calls.push(["flush", args[0]]); return sync(); };
+    return handle;
+  };
+  observedFs.readFile = async (...args) => {
+    calls.push(["verify", args[0]]);
+    return fs.readFile(...args);
+  };
+  const candidate = Buffer.from([0, 255, 17, 31, 128, 64]);
+  const service = new PublicationService({ fs: observedFs, journals, capabilities });
+  assert.deepEqual(await service.publishReplica({ target, candidate }),
+    { completed: true });
+  const created = target.replace(/\.scpefe$/, "-2.scpefe");
+  assert.deepEqual(await fs.readFile(created), candidate);
+  assert.equal(await fs.readFile(target, "utf8"), "existing backup");
+  assert.equal(await fs.readFile(target.replace(/\.scpefe$/, "-1.scpefe"), "utf8"),
+    "another backup");
+  assert.ok(calls.findIndex(([kind, name]) => kind === "publish" && name === created)
+    < calls.findIndex(([kind, name]) => kind === "flush" && name === created));
+  assert.ok(calls.findIndex(([kind, name]) => kind === "flush" && name === created)
+    < calls.findIndex(([kind, name]) => kind === "verify" && name === created));
+});
+
+test("backup publication never succeeds after interruption or failed verification", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const target = path.join(directory, "document.backup-20260920T010203Z.scpefe");
+  const interruptedFs = Object.create(fs);
+  interruptedFs.link = async () => { throw new Error("simulated interruption"); };
+  const interrupted = new PublicationService({ fs: interruptedFs, journals, capabilities });
+  await assert.rejects(interrupted.publishReplica({
+    target, candidate: Buffer.from("exact container"),
+  }), /interruption/);
+  await assert.rejects(fs.readFile(target), (error) => error.code === "ENOENT");
+
+  const tamperedFs = Object.create(fs);
+  tamperedFs.readFile = async (file) => file === target
+    ? Buffer.from("tampered container") : fs.readFile(file);
+  const tampered = new PublicationService({ fs: tamperedFs, journals, capabilities });
+  await assert.rejects(tampered.publishReplica({
+    target, candidate: Buffer.from("exact container"),
+  }), /verification failed/);
+});

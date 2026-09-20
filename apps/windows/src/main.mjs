@@ -47,6 +47,16 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("document:enter-edit-mode", () => service.enterEditMode());
   ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
+  ipcMain.handle("document:backup", async () => {
+    const chosen = await dialog.showSaveDialog(window, {
+      title: "Create verified backup replica",
+      defaultPath: service.suggestedBackupTarget(),
+      filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
+      properties: ["createDirectory"],
+    });
+    if (chosen.canceled || !chosen.filePath) return null;
+    return service.backupDocument(chosen.filePath);
+  });
   ipcMain.handle("document:export-plaintext", async (_event, request) => {
     const warning = await dialog.showMessageBox(window, {
       type: "warning",

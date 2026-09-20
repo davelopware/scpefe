@@ -2,7 +2,7 @@ import path from "node:path";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
-  validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
+  validateBackupResult, validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 
@@ -114,7 +114,8 @@ export class DocumentService {
     this.active = { target, password: validatedPassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
-      working: null, dirty: false, pendingPublication,
+      working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
+      pendingPublication,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
@@ -265,6 +266,7 @@ export class DocumentService {
     reopened.journalKey.fill(0);
     this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
     this.active.dirty = false;
+    this.active.manuallySealed = true;
     this.active.pendingPublication = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
@@ -282,6 +284,32 @@ export class DocumentService {
     return validatePlaintextExportResult({ exported: true });
   }
 
+  suggestedBackupTarget() {
+    if (!this.active) throw new Error("Open a document first");
+    const parsed = path.parse(this.active.target);
+    const stem = parsed.ext.toLowerCase() === ".scpefe" ? parsed.name : parsed.base;
+    const timestamp = new Date(this.now()).toISOString()
+      .replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    return path.join(parsed.dir, `${stem}.backup-${timestamp}.scpefe`);
+  }
+
+  async backupDocument(target) {
+    if (!this.active) throw new Error("Open a document first");
+    if (this.active.dirty || this.active.recovery || this.active.pendingPublication) {
+      throw new Error("Save or discard changes before creating a backup");
+    }
+    if (!this.active.manuallySealed) {
+      throw new Error("Manually save the document before creating a backup");
+    }
+    const activeTarget = this.active.target;
+    const candidate = await this.fs.readFile(activeTarget);
+    await this.publications.publishReplica({ target, candidate });
+    if (this.active.target !== activeTarget) {
+      throw new Error("Backup changed the active target");
+    }
+    return validateBackupResult({ backedUp: true });
+  }
+
   #validateNativeOpened(value) {
     const opened = validateOpenedDocument(value);
     if (!DOCUMENT_ID.test(value?.documentId)
@@ -289,8 +317,13 @@ export class DocumentService {
         || !Buffer.isBuffer(value?.journalKey) || value.journalKey.length !== 32) {
       throw new TypeError("native bridge returned incomplete recovery metadata");
     }
+    if (value.manuallySealed !== undefined
+        && typeof value.manuallySealed !== "boolean") {
+      throw new TypeError("native bridge returned invalid revision state");
+    }
     return { opened, documentId: value.documentId,
-      baseRevision: value.baseRevision, journalKey: value.journalKey };
+      baseRevision: value.baseRevision, journalKey: value.journalKey,
+      manuallySealed: value.manuallySealed ?? true };
   }
 
   #scheduleCheckpoint() {
