@@ -6,6 +6,9 @@ const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const STATES = new Set(["unsaved", "pending-publication", "conflict"]);
+const TRANSACTION_STAGES = new Set([
+  "prepared", "written", "flushed", "replaced", "verified", "cleanup",
+]);
 
 function journalName(documentId) {
   if (!DOCUMENT_ID.test(documentId)) throw new TypeError("invalid document identifier");
@@ -29,6 +32,33 @@ function validateRecord(value) {
       || value.cursor.end > value.text.length) {
     throw new TypeError("invalid work-journal record");
   }
+  let publication;
+  if (value.publication !== undefined) {
+    const candidate = value.publication?.candidate;
+    if (!value.publication || typeof value.publication !== "object"
+        || value.state !== "pending-publication"
+        || typeof value.publication.id !== "string"
+        || !/^[0-9a-f]{32}$/.test(value.publication.id)
+        || value.publication.target !== value.target
+        || typeof value.publication.transactionFile !== "string"
+        || !value.publication.transactionFile
+        || !/^[0-9a-f]{64}$/.test(value.publication.candidateHash)
+        || !/^[0-9a-f]{64}$/.test(value.publication.baseHash)
+        || !TRANSACTION_STAGES.has(value.publication.stage)
+        || typeof candidate !== "string"
+        || !Buffer.from(candidate, "base64").length) {
+      throw new TypeError("invalid publication transaction");
+    }
+    publication = {
+      id: value.publication.id,
+      target: value.publication.target,
+      transactionFile: value.publication.transactionFile,
+      candidateHash: value.publication.candidateHash,
+      baseHash: value.publication.baseHash,
+      candidate,
+      stage: value.publication.stage,
+    };
+  }
   return {
     text: value.text,
     baseRevision: value.baseRevision,
@@ -36,6 +66,7 @@ function validateRecord(value) {
     target: value.target,
     state: value.state,
     updateTime: value.updateTime,
+    ...(publication ? { publication } : {}),
   };
 }
 
