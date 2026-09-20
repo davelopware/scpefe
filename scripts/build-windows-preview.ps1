@@ -31,6 +31,29 @@ function Require-Command {
     }
 }
 
+function Invoke-PackagedTest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$Script,
+        [Parameter(Mandatory = $true)][string]$Addon
+    )
+
+    Write-Host "> $Executable $Script $Addon"
+    $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $StartInfo.FileName = $Executable
+    $StartInfo.Arguments = '"{0}" "{1}"' -f $Script, $Addon
+    $StartInfo.UseShellExecute = $false
+    $Process = [System.Diagnostics.Process]::Start($StartInfo)
+    try {
+        $Process.WaitForExit()
+        if ($Process.ExitCode -ne 0) {
+            throw "Packaged test failed with exit code $($Process.ExitCode): $Script"
+        }
+    } finally {
+        $Process.Dispose()
+    }
+}
+
 if ($env:OS -ne "Windows_NT") {
     throw "This script builds a native Windows preview and must run on Windows."
 }
@@ -165,17 +188,67 @@ Copy-Item (Join-Path $WindowsRoot "src"), (Join-Path $WindowsRoot "dist"), $Nati
 
 $PreviousRunAsNode = $env:ELECTRON_RUN_AS_NODE
 $env:ELECTRON_RUN_AS_NODE = "1"
+$AdjacentNode = Join-Path $PackageRoot "node.exe"
+$HostProbeSignal = Join-Path $BuildRoot "native-addon-host.release"
 try {
-    Invoke-Checked (Join-Path $PackageRoot "SCPEFE.exe") @(
-        (Join-Path $WindowsRoot "test\native-head-witness-addon.integration.mjs"),
+    # A normal Node executable beside the renamed Electron host reproduces the
+    # dangerous Windows loader choice that Electron's delay-load hook prevents.
+    Copy-Item (Get-Command "node").Source $AdjacentNode -Force
+    if (Test-Path $HostProbeSignal) { Remove-Item $HostProbeSignal -Force }
+
+    $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $StartInfo.FileName = Join-Path $PackageRoot "SCPEFE.exe"
+    $StartInfo.WorkingDirectory = $PackageRoot
+    $StartInfo.Arguments = '"{0}" "{1}" "{2}"' -f `
+        (Join-Path $WindowsRoot "test\native-addon-host.integration.mjs"), `
+        (Join-Path $AppRoot "native\scpefe_electron_native.node"), `
+        $HostProbeSignal
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.RedirectStandardOutput = $true
+    $StartInfo.RedirectStandardError = $true
+    $HostProbe = [System.Diagnostics.Process]::Start($StartInfo)
+    try {
+        $Ready = $HostProbe.StandardOutput.ReadLine()
+        if ($Ready -ne "SCPEFE_NATIVE_HOST_READY") {
+            $HostProbe.WaitForExit()
+            $ProbeError = $HostProbe.StandardError.ReadToEnd()
+            throw "Packaged native addon host probe failed before readiness " +
+                "(exit $($HostProbe.ExitCode)): $ProbeError"
+        }
+        $HostProbe.Refresh()
+        $SeparateNode = @($HostProbe.Modules | Where-Object {
+            $_.ModuleName -ieq "node.exe"
+        })
+        if ($SeparateNode.Count -ne 0) {
+            throw "Packaged native addon loaded a separate node.exe instead of " +
+                "binding Node-API to SCPEFE.exe."
+        }
+        New-Item -ItemType File -Force $HostProbeSignal | Out-Null
+        if (-not $HostProbe.WaitForExit(10000)) {
+            throw "Packaged native addon host probe did not exit after release."
+        }
+        $ProbeError = $HostProbe.StandardError.ReadToEnd()
+        if ($HostProbe.ExitCode -ne 0) {
+            throw "Packaged native addon host probe exited with " +
+                "$($HostProbe.ExitCode): $ProbeError"
+        }
+    } finally {
+        if (-not $HostProbe.HasExited) { $HostProbe.Kill() }
+        $HostProbe.Dispose()
+    }
+
+    Invoke-PackagedTest `
+        (Join-Path $PackageRoot "SCPEFE.exe") `
+        (Join-Path $WindowsRoot "test\native-head-witness-addon.integration.mjs") `
         (Join-Path $AppRoot "native\scpefe_electron_native.node")
-    )
-    Invoke-Checked (Join-Path $PackageRoot "SCPEFE.exe") @(
-        (Join-Path $WindowsRoot "test\native-invitation-addon.integration.mjs"),
+    Invoke-PackagedTest `
+        (Join-Path $PackageRoot "SCPEFE.exe") `
+        (Join-Path $WindowsRoot "test\native-invitation-addon.integration.mjs") `
         (Join-Path $AppRoot "native\scpefe_electron_native.node")
-    )
 } finally {
     $env:ELECTRON_RUN_AS_NODE = $PreviousRunAsNode
+    if (Test-Path $AdjacentNode) { Remove-Item $AdjacentNode -Force }
+    if (Test-Path $HostProbeSignal) { Remove-Item $HostProbeSignal -Force }
 }
 
 Compress-Archive -Path $PackageRoot -DestinationPath $Archive -CompressionLevel Optimal

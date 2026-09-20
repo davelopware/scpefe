@@ -93,7 +93,17 @@ if(SCPEFE_BUILD_NODE_ADDON)
         if(NOT NODE_API_LIBRARY)
             message(FATAL_ERROR "NODE_API_LIBRARY is required on Windows")
         endif()
-        target_link_libraries(scpefe_electron_native PRIVATE ${NODE_API_LIBRARY})
+        # Electron exports Node-API from its executable, which applications are
+        # free to rename. Delay-load node.exe so the hook can bind those imports
+        # to the actual host image instead of loading an unrelated system Node.
+        target_sources(scpefe_electron_native PRIVATE
+            apps/windows/native/win_delay_load_hook.cpp
+        )
+        target_link_libraries(scpefe_electron_native PRIVATE
+            ${NODE_API_LIBRARY}
+            delayimp
+        )
+        target_link_options(scpefe_electron_native PRIVATE "/DELAYLOAD:node.exe")
     endif()
     set_target_properties(scpefe_electron_native PROPERTIES
         PREFIX ""
