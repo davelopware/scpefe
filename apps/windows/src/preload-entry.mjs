@@ -3,7 +3,7 @@ import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
-  validateRecoveredWork } from "./contracts.mjs";
+  validatePublicationResult, validateRecoveredWork } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:enter-edit-mode")),
   saveDocument: async (content) => validateSaveResult(
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
+  reconnectPendingPublication: async () => validatePublicationResult(
+    await ipcRenderer.invoke("document:reconnect-publication")),
+  discardPendingPublication: async () => validateOpenedDocument(
+    await ipcRenderer.invoke("document:discard-publication")),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

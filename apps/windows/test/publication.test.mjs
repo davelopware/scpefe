@@ -106,7 +106,7 @@ test("restart preserves recovery data when the target changed", async (t) => {
 
   const restarted = new PublicationService({ fs, journals, capabilities });
   assert.deepEqual(await restarted.resume(documentId, key, record),
-    { completed: false, reason: "ambiguous", replacementCapabilities: capabilities });
+    { completed: false, reason: "changed", replacementCapabilities: capabilities });
   assert.equal(await fs.readFile(target, "utf8"), "potentially newer container");
   assert.equal(await fs.readFile(record.publication.transactionFile, "utf8"),
     "new container");
@@ -125,7 +125,7 @@ test("restart preserves a candidate transaction when the target is missing", asy
   await fs.unlink(target);
   const restarted = new PublicationService({ fs, journals, capabilities });
   assert.deepEqual(await restarted.resume(documentId, key, record),
-    { completed: false, reason: "ambiguous", replacementCapabilities: capabilities });
+    { completed: false, reason: "unavailable", replacementCapabilities: capabilities });
   assert.equal(await fs.readFile(record.publication.transactionFile, "utf8"),
     "new container");
 });

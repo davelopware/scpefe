@@ -17,6 +17,14 @@ async function readIfPresent(fs, file) {
 const REPLACEMENT_GUARANTEES = new Set([
   "atomic-replace", "best-effort-replace",
 ]);
+const UNAVAILABLE_CODES = new Set([
+  "ENOENT", "ENOTDIR", "EACCES", "EIO", "ENODEV", "ESTALE", "ETIMEDOUT",
+  "ECONNRESET",
+]);
+
+function targetUnavailable(error) {
+  return UNAVAILABLE_CODES.has(error?.code);
+}
 
 function validateCapabilities(value) {
   if (!value || typeof value !== "object"
@@ -52,12 +60,12 @@ export class PublicationService {
     return this.capabilities;
   }
 
-  async publish({ documentId, journalKey, target, base, candidate, text, cursor,
+  async prepare({ documentId, journalKey, target, base, candidate, text, cursor,
     baseRevision }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
-    let record = {
+    const record = {
       text,
       baseRevision,
       cursor: { ...cursor },
@@ -68,12 +76,21 @@ export class PublicationService {
         id, target, transactionFile,
         candidateHash: hash(candidate),
         baseHash: hash(base),
+        base: base.toString("base64"),
         candidate: candidate.toString("base64"),
         stage: "prepared",
       },
     };
+    await this.journals.write(documentId, journalKey, record);
+    return record;
+  }
+
+  async publish({ documentId, journalKey, target, base, candidate, text, cursor,
+    baseRevision }) {
+    let record;
     try {
-      await this.journals.write(documentId, journalKey, record);
+      record = await this.prepare({ documentId, journalKey, target, base,
+        candidate, text, cursor, baseRevision });
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };
@@ -102,13 +119,41 @@ export class PublicationService {
       return { completed: true, recovered: true,
         replacementCapabilities: this.capabilities };
     }
-    if (!target || hash(target) !== publication.baseHash) {
-      return { completed: false, reason: "ambiguous",
+    if (!target) {
+      return { completed: false, reason: "unavailable",
+        replacementCapabilities: this.capabilities };
+    }
+    if (hash(target) !== publication.baseHash) {
+      return { completed: false, reason: "changed",
         replacementCapabilities: this.capabilities };
     }
     await this.#complete(documentId, journalKey, record);
     return { completed: true, recovered: true,
       replacementCapabilities: this.capabilities };
+  }
+
+  async markDiverged(documentId, journalKey, record) {
+    const diverged = { ...record, state: "conflict", updateTime: this.now() };
+    await this.journals.write(documentId, journalKey, diverged);
+    return diverged;
+  }
+
+  async discard(documentId, journalKey, record) {
+    if (!record?.publication) throw new Error("No pending publication is available");
+    let transaction;
+    try {
+      transaction = await readIfPresent(this.fs, record.publication.transactionFile);
+    } catch (error) {
+      if (!targetUnavailable(error)) throw error;
+    }
+    if (transaction && hash(transaction) === record.publication.candidateHash) {
+      try {
+        await this.fs.unlink(record.publication.transactionFile);
+      } catch (error) {
+        if (!targetUnavailable(error)) throw error;
+      }
+    }
+    await this.journals.clear(documentId);
   }
 
   async #complete(documentId, journalKey, initialRecord) {

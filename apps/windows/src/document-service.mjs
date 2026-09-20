@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
-  validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
+  validatePublicationResult, validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 import { HeadWitnessStore } from "./head-witness.mjs";
@@ -12,6 +12,14 @@ const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
+const UNAVAILABLE_CODES = new Set([
+  "ENOENT", "ENOTDIR", "EACCES", "EIO", "ENODEV", "ESTALE", "ETIMEDOUT",
+  "ECONNRESET",
+]);
+
+function targetUnavailable(error) {
+  return UNAVAILABLE_CODES.has(error?.code);
+}
 
 export class DocumentService {
   constructor({ native, fs, profilePath, journalDirectory,
@@ -97,26 +105,45 @@ export class DocumentService {
   }
 
   async openDocument(target, password) {
-    const bytes = await this.fs.readFile(target);
     const validatedPassword = validatePassword(password);
+    const bootstrap = await this.journals.findPublication(target);
+    if (bootstrap) {
+      return this.#openPendingDocument(target, validatedPassword, bootstrap);
+    }
+    let bytes = await this.fs.readFile(target);
     let nativeOpened = this.#validateNativeOpened(
       this.native.openDocument(bytes, validatedPassword));
     let recovery = null;
     let pendingPublication = false;
+    let pendingRecord = null;
+    let publicationState = "target-published";
     try {
       const journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       if (journal?.publication) {
         pendingPublication = true;
-        const resumed = await this.publications.resume(
-          nativeOpened.documentId, nativeOpened.journalKey, journal);
+        pendingRecord = journal;
+        publicationState = journal.state === "conflict" ? "conflict" : "pending-publication";
+        this.#validateCandidate(journal, validatedPassword, nativeOpened.documentId);
+        const resumed = journal.state === "conflict" ? { completed: false, reason: "changed" }
+          : await this.publications.resume(
+            nativeOpened.documentId, nativeOpened.journalKey, journal);
         if (resumed.completed) {
           pendingPublication = false;
+          pendingRecord = null;
+          publicationState = "target-published";
           const published = await this.fs.readFile(target);
+          bytes = published;
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
             this.native.openDocument(published, validatedPassword));
           this.onJournalWarning("Interrupted publication was completed and verified.");
+        } else if (resumed.reason === "changed") {
+          pendingRecord = await this.publications.markDiverged(
+            nativeOpened.documentId, nativeOpened.journalKey, journal);
+          publicationState = "conflict";
+          this.onJournalWarning(
+            "The target changed while publication was pending; divergence must be resolved.");
         } else if (resumed.reason === "ambiguous") {
           this.onJournalWarning(
             "Interrupted publication needs confirmation; recovery data was preserved.");
@@ -129,6 +156,7 @@ export class DocumentService {
     } catch (error) {
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
+    const targetOpened = nativeOpened.opened;
     let headMismatch = null;
     try {
       const { comparison, previous } = await this.witnesses.observe(
@@ -145,6 +173,7 @@ export class DocumentService {
     const opened = validateOpenedDocument({ ...nativeOpened.opened,
       lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
       canEdit: headMismatch ? false : slotCanEdit,
+      ...(pendingRecord ? { content: pendingRecord.text } : {}), publicationState,
       ...(headMismatch ? { headMismatch } : {}),
       ...(recovery ? { recovery: { content: recovery.text,
         cursor: recovery.cursor, state: "unsaved",
@@ -154,7 +183,9 @@ export class DocumentService {
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
       slotCanEdit, headMismatch,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
-      working: null, dirty: false, pendingPublication,
+      baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
+      working: null, dirty: false,
+      pendingPublication, pendingRecord,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
@@ -215,6 +246,7 @@ export class DocumentService {
     this.active.opened = validateOpenedDocument({
       content: this.active.opened.content, readOnly: true,
       canEdit: this.active.headMismatch ? false : this.active.slotCanEdit,
+      publicationState: this.active.opened.publicationState,
       ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
       ...(this.active.headMismatch ? { headMismatch: this.active.headMismatch } : {}) });
     return this.active.opened;
@@ -227,10 +259,79 @@ export class DocumentService {
     this.active.opened = validateOpenedDocument({
       content: this.active.opened.content, readOnly: true,
       canEdit: this.active.slotCanEdit,
+      publicationState: this.active.opened.publicationState,
       ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
       ...(this.active.opened.recovery ? { recovery: this.active.opened.recovery } : {}),
     });
     return this.active.opened;
+  }
+
+  async reconnectPendingPublication() {
+    const active = this.active;
+    if (!active?.pendingPublication || !active.pendingRecord) {
+      throw new Error("No pending publication is available");
+    }
+    let target;
+    try {
+      target = await this.fs.readFile(active.target);
+    } catch (error) {
+      if (targetUnavailable(error)) {
+        return validatePublicationResult({ publicationState: "pending-publication",
+          content: active.pendingRecord.text });
+      }
+      throw error;
+    }
+    let targetOpened;
+    try {
+      targetOpened = this.#validateNativeOpened(
+        this.native.openDocument(target, active.password));
+    } catch {
+      return this.#markActiveConflict(active);
+    }
+    try {
+      if (targetOpened.documentId !== active.documentId) {
+        return await this.#markActiveConflict(active);
+      }
+    } finally {
+      targetOpened.journalKey.fill(0);
+    }
+    this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
+    const resumed = await this.publications.resume(
+      active.documentId, active.journalKey, active.pendingRecord);
+    if (resumed.completed) {
+      await this.#adoptPublishedCandidate(active);
+      return validatePublicationResult({ publicationState: "target-published",
+        content: active.opened.content });
+    }
+    if (resumed.reason === "changed") {
+      active.pendingRecord = await this.publications.markDiverged(
+        active.documentId, active.journalKey, active.pendingRecord);
+      active.opened = validateOpenedDocument({ ...active.opened,
+        publicationState: "conflict" });
+      return validatePublicationResult({ publicationState: "conflict",
+        content: active.pendingRecord.text });
+    }
+    return validatePublicationResult({ publicationState: "pending-publication",
+      content: active.pendingRecord.text });
+  }
+
+  async discardPendingPublication() {
+    const active = this.active;
+    if (!active?.pendingPublication || !active.pendingRecord) {
+      throw new Error("No pending publication is available");
+    }
+    await this.publications.discard(
+      active.documentId, active.journalKey, active.pendingRecord);
+    active.pendingPublication = false;
+    active.pendingRecord = null;
+    active.working = null;
+    active.dirty = false;
+    active.opened = validateOpenedDocument({ content: active.targetContent,
+      readOnly: true, canEdit: active.headMismatch ? false : active.slotCanEdit,
+      publicationState: "target-published",
+      ...(active.opened.lease ? { lease: active.opened.lease } : {}),
+      ...(active.headMismatch ? { headMismatch: active.headMismatch } : {}) });
+    return active.opened;
   }
 
   updateWorkingCopy(value) {
@@ -337,9 +438,38 @@ export class DocumentService {
     await this.flushChain.catch(() => {});
     const active = this.active;
     let reopened;
+    let published;
     try {
       reopened = await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
+        let current;
+        try {
+          current = await this.fs.readFile(active.target);
+        } catch (error) {
+          if (!targetUnavailable(error)) throw error;
+          const candidate = this.native.saveDocument(
+            active.baseContainer, active.password, {
+              ...profile, content: canonical, timestampMs: Date.now(),
+            });
+          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+            throw new Error("Native bridge did not produce a container");
+          }
+          active.pendingRecord = await this.publications.prepare({
+            documentId: active.documentId,
+            journalKey: active.journalKey,
+            target: active.target,
+            base: active.baseContainer,
+            candidate,
+            text: canonical,
+            cursor: { start: 0, end: 0 },
+            baseRevision: active.baseRevision,
+          });
+          active.pendingPublication = true;
+          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+          active.dirty = false;
+          active.opened = validateOpenedDocument({ ...active.opened,
+            content: canonical, publicationState: "pending-publication" });
+          return null;
+        }
         const currentLease = this.#validateNativeOpened(
           this.native.openDocument(current, active.password)).lease;
         if (!currentLease.active || !active.leaseSessionId
@@ -363,13 +493,25 @@ export class DocumentService {
           cursor: { start: 0, end: 0 },
           baseRevision: active.baseRevision,
         });
-        const published = await this.fs.readFile(active.target);
+        published = await this.fs.readFile(active.target);
         return this.#validateNativeOpened(
           this.native.openDocument(published, active.password));
       });
     } catch (error) {
-      if (error.publicationPrepared) active.pendingPublication = true;
+      if (error.publicationPrepared) {
+        active.pendingPublication = true;
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        active.opened = validateOpenedDocument({ ...active.opened,
+          content: canonical, publicationState: "pending-publication" });
+        active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        active.dirty = false;
+      }
       throw error;
+    }
+    if (!reopened) {
+      return validateSaveResult({ saved: true, content: canonical,
+        publicationState: "pending-publication" });
     }
     if (reopened.opened.content !== canonical) {
       reopened.journalKey.fill(0);
@@ -382,15 +524,19 @@ export class DocumentService {
     this.active.revisionGraph = reopened.revisionGraph;
     this.active.observation = this.#observation(reopened);
     await this.witnesses.observe(this.active.target, this.active.observation);
+    this.active.baseContainer = Buffer.from(published);
+    this.active.targetContent = canonical;
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
     this.active.dirty = false;
     this.active.pendingPublication = false;
+    this.active.pendingRecord = null;
     this.active.recovery = null;
     this.active.continuousDue = null;
     this.notifyActivity();
-    return validateSaveResult({ saved: true, content: canonical });
+    return validateSaveResult({ saved: true, content: canonical,
+      publicationState: "target-published" });
   }
 
   async exportPlaintext(target, request) {
@@ -477,6 +623,7 @@ export class DocumentService {
       };
       const candidate = this.native.updateLease(bytes, active.password, nextLease);
       await this.#atomicWrite(active.target, candidate, true);
+      active.baseContainer = Buffer.from(candidate);
       active.leaseSessionId = Buffer.from(sessionId);
       active.leaseCounter = nextLease.heartbeatCounter;
     });
@@ -523,9 +670,10 @@ export class DocumentService {
         heartbeatCounter: latest.lease.heartbeatCounter + 1,
         holderUtcMs: this.utcNow() };
       this.#requireCurrentHeartbeat(active, generation);
-      await this.#atomicWrite(active.target,
-        this.native.updateLease(bytes, active.password, nextLease), true,
+      const candidate = this.native.updateLease(bytes, active.password, nextLease);
+      await this.#atomicWrite(active.target, candidate, true,
         () => active === this.active && generation === this.leaseGeneration);
+      active.baseContainer = Buffer.from(candidate);
       active.leaseCounter = nextLease.heartbeatCounter;
       this.#requireCurrentHeartbeat(active, generation);
     });
@@ -562,6 +710,179 @@ export class DocumentService {
       title: "This target contains a different document",
       explanation: "The authenticated permanent document ID differs from the document previously observed at this target. Inspect it read-only and explicitly accept the replacement before editing." });
     return null;
+  }
+
+  #validateCandidate(record, password, documentId) {
+    const candidate = Buffer.from(record.publication.candidate, "base64");
+    const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
+    try {
+      if (opened.documentId !== documentId || opened.opened.content !== record.text) {
+        throw new Error("Pending publication candidate does not match its document");
+      }
+    } finally {
+      opened.journalKey.fill(0);
+    }
+  }
+
+  async #openPendingDocument(target, password, bootstrap) {
+    let baseOpened = this.#validateNativeOpened(
+      this.native.openDocument(bootstrap.base, password));
+    if (baseOpened.documentId !== bootstrap.documentId) {
+      baseOpened.journalKey.fill(0);
+      throw new Error("Pending publication bootstrap does not match its document");
+    }
+    let record = await this.journals.read(
+      baseOpened.documentId, baseOpened.journalKey);
+    if (!record?.publication || record.target !== target) {
+      baseOpened.journalKey.fill(0);
+      throw new Error("Pending publication journal does not match its target");
+    }
+    this.#validateCandidate(record, password, baseOpened.documentId);
+
+    let targetBytes = null;
+    let targetOpened = null;
+    let invalidTarget = false;
+    let unavailable = false;
+    try {
+      targetBytes = await this.fs.readFile(target);
+      targetOpened = this.#validateNativeOpened(
+        this.native.openDocument(targetBytes, password));
+      if (targetOpened.documentId !== baseOpened.documentId) invalidTarget = true;
+    } catch (error) {
+      if (targetUnavailable(error)) unavailable = true;
+      else invalidTarget = true;
+    }
+
+    let publicationState = record.state === "conflict" ? "conflict" : "pending-publication";
+    if (invalidTarget || (targetOpened && targetOpened.documentId !== baseOpened.documentId)) {
+      if (record.state !== "conflict") {
+        record = await this.publications.markDiverged(
+          baseOpened.documentId, baseOpened.journalKey, record);
+      }
+      publicationState = "conflict";
+      this.onJournalWarning(
+        "The target was replaced or failed authentication; the pending candidate was preserved as a conflict.");
+    } else if (!unavailable && record.state !== "conflict") {
+      let resumed;
+      try {
+        resumed = await this.publications.resume(
+          baseOpened.documentId, baseOpened.journalKey, record);
+      } catch (error) {
+        if (targetUnavailable(error)) unavailable = true;
+        else throw error;
+      }
+      if (resumed?.completed) {
+        const published = await this.fs.readFile(target);
+        const reopened = this.#validateNativeOpened(
+          this.native.openDocument(published, password));
+        const { headMismatch, slotCanEdit } = await this.#observeHead(target, reopened);
+        baseOpened.journalKey.fill(0);
+        targetOpened?.journalKey.fill(0);
+        const opened = validateOpenedDocument({ ...reopened.opened,
+          canEdit: headMismatch ? false : slotCanEdit,
+          publicationState: "target-published",
+          ...(reopened.lease.active ? { lease: reopened.lease } : {}),
+          ...(headMismatch ? { headMismatch } : {}) });
+        this.active = { target, password, opened, editMode: false,
+          documentId: reopened.documentId, baseRevision: reopened.baseRevision,
+          revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
+          slotCanEdit, headMismatch,
+          journalKey: Buffer.from(reopened.journalKey), recovery: null,
+          baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
+          working: null, dirty: false, pendingPublication: false, pendingRecord: null,
+          continuousDue: null, journalWarning: null };
+        reopened.journalKey.fill(0);
+        this.onJournalWarning("Interrupted publication was completed and verified.");
+        this.notifyActivity();
+        return opened;
+      }
+      if (resumed?.reason === "changed") {
+        record = await this.publications.markDiverged(
+          baseOpened.documentId, baseOpened.journalKey, record);
+        publicationState = "conflict";
+      }
+    }
+    if (unavailable) {
+      this.onJournalWarning(
+        "The target is unavailable; the manual save remains pending locally.");
+    }
+
+    const currentOpened = targetOpened && !invalidTarget ? targetOpened : baseOpened;
+    const { headMismatch, slotCanEdit } = await this.#observeHead(target, currentOpened);
+    const opened = validateOpenedDocument({ ...baseOpened.opened,
+      content: record.text, canEdit: headMismatch ? false : slotCanEdit,
+      publicationState,
+      ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
+      ...(headMismatch ? { headMismatch } : {}) });
+    this.active = { target, password, opened, editMode: false,
+      documentId: baseOpened.documentId, baseRevision: currentOpened.baseRevision,
+      revisionGraph: currentOpened.revisionGraph,
+      observation: this.#observation(currentOpened), slotCanEdit, headMismatch,
+      journalKey: Buffer.from(baseOpened.journalKey), recovery: null,
+      baseContainer: Buffer.from(targetBytes && !invalidTarget ? targetBytes : bootstrap.base),
+      targetContent: currentOpened.opened.content,
+      working: null, dirty: false, pendingPublication: true, pendingRecord: record,
+      continuousDue: null, journalWarning: null };
+    baseOpened.journalKey.fill(0);
+    targetOpened?.journalKey.fill(0);
+    this.notifyActivity();
+    return opened;
+  }
+
+  async #adoptPublishedCandidate(active) {
+    const published = await this.fs.readFile(active.target);
+    const reopened = this.#validateNativeOpened(
+      this.native.openDocument(published, active.password));
+    const { headMismatch, slotCanEdit } = await this.#observeHead(
+      active.target, reopened);
+    active.journalKey.fill(0);
+    active.opened = validateOpenedDocument({ ...reopened.opened,
+      canEdit: headMismatch ? false : slotCanEdit,
+      publicationState: "target-published",
+      ...(reopened.lease.active ? { lease: reopened.lease } : {}),
+      ...(headMismatch ? { headMismatch } : {}) });
+    active.documentId = reopened.documentId;
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.slotCanEdit = slotCanEdit;
+    active.headMismatch = headMismatch;
+    active.baseContainer = Buffer.from(published);
+    active.targetContent = reopened.opened.content;
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    active.dirty = false;
+    active.pendingPublication = false;
+    active.pendingRecord = null;
+    active.recovery = null;
+  }
+
+  async #observeHead(target, opened) {
+    let headMismatch = null;
+    try {
+      const { comparison, previous } = await this.witnesses.observe(
+        target, this.#observation(opened));
+      headMismatch = this.#headMismatch(comparison.kind, previous, opened);
+    } catch (error) {
+      headMismatch = Object.freeze({ kind: "witness-error",
+        title: "Local head witness could not be authenticated",
+        explanation: `${error.message}. The document remains available read-only, but editing and saving are blocked until you explicitly accept this authenticated head.`,
+        editingBlocked: true, observedDocumentId: opened.documentId,
+        observedHead: opened.baseRevision });
+    }
+    return { headMismatch, slotCanEdit: opened.opened.canEdit };
+  }
+
+  async #markActiveConflict(active) {
+    if (active.pendingRecord.state !== "conflict") {
+      active.pendingRecord = await this.publications.markDiverged(
+        active.documentId, active.journalKey, active.pendingRecord);
+    }
+    active.opened = validateOpenedDocument({ ...active.opened,
+      publicationState: "conflict" });
+    return validatePublicationResult({ publicationState: "conflict",
+      content: active.pendingRecord.text });
   }
 
   #scheduleCheckpoint() {
