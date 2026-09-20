@@ -35,7 +35,8 @@ test("requires irrecoverability and independent recovery acknowledgements", () =
 
 test("accepts only validated read-only native results", () => {
   assert.deepEqual(validateOpenedDocument({ content: "secret", readOnly: true,
-    canEdit: true }), { content: "secret", readOnly: true, canEdit: true });
+    canEdit: true }), { content: "secret", readOnly: true, canEdit: true,
+    publicationState: "target-published" });
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: false }));
 });
 

@@ -47,12 +47,14 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
   assert.deepEqual(await service.createDocument(target, request), { created: true });
   assert.equal(calls.length, 1);
   assert.deepEqual(await service.openDocument(target, "owner password words"),
-    { content: "hello", readOnly: true, canEdit: true });
+    { content: "hello", readOnly: true, canEdit: true,
+      publicationState: "target-published" });
   await assert.rejects(service.saveDocument("changed"), /Enter edit mode/);
   assert.deepEqual(service.enterEditMode(),
-    { content: "hello", readOnly: false, canEdit: true });
+    { content: "hello", readOnly: false, canEdit: true,
+      publicationState: "target-published" });
   assert.deepEqual(await service.saveDocument("\ufeff hello \r\n"),
-    { saved: true, content: " hello \n" });
+    { saved: true, content: " hello \n", publicationState: "target-published" });
   assert.equal((await fs.readFile(target)).toString(), "saved: hello \n");
   await assert.rejects(service.createDocument(target, request),
     (error) => error.code === "EEXIST");
@@ -322,6 +324,142 @@ test("a persisted prepare with a lost acknowledgement survives lock and restart"
   assert.equal(opened.content, "durable candidate");
   assert.equal(await restarted.journals.read("ac".repeat(16), Buffer.alloc(32, 21)), null);
   await restarted.lock();
+});
+
+test("an unavailable target leaves an exact candidate pending and reconnect publishes it", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-offline-save-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  let unavailable = false;
+  const removableFs = Object.create(fs);
+  removableFs.readFile = async (file, ...args) => {
+    if (unavailable && file === target) {
+      const error = new Error("target disconnected");
+      error.code = "ENOENT";
+      throw error;
+    }
+    return fs.readFile(file, ...args);
+  };
+  const native = {
+    openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+    documentId: "da".repeat(16), baseRevision: "db".repeat(32),
+    journalKey: Buffer.alloc(32, 25) }),
+    saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+  };
+  const service = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  unavailable = true;
+  assert.deepEqual(await service.saveDocument("locally saved"), {
+    saved: true, content: "locally saved", publicationState: "pending-publication",
+  });
+  const pending = await service.journals.read("da".repeat(16), Buffer.alloc(32, 25));
+  assert.equal(Buffer.from(pending.publication.candidate, "base64").toString(),
+    "saved:locally saved");
+  assert.equal(await fs.readFile(target, "utf8"), "container");
+  unavailable = false;
+  assert.deepEqual(await service.reconnectPendingPublication(), {
+    publicationState: "target-published", content: "locally saved",
+  });
+  assert.equal(await fs.readFile(target, "utf8"), "saved:locally saved");
+});
+
+test("pending publication survives restart and a changed target enters divergence", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-offline-restart-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  let unavailable = false;
+  const removableFs = Object.create(fs);
+  removableFs.readFile = async (file, ...args) => {
+    if (unavailable && file === target) {
+      const error = new Error("target disconnected"); error.code = "EIO"; throw error;
+    }
+    return fs.readFile(file, ...args);
+  };
+  const native = {
+    openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : bytes.toString() === "changed" ? "remote" : "base",
+    readOnly: true, canEdit: true, documentId: "ea".repeat(16),
+    baseRevision: "eb".repeat(32), journalKey: Buffer.alloc(32, 27) }),
+    saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+  };
+  const service = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  unavailable = true;
+  await service.saveDocument("saved candidate");
+  await service.lock();
+  unavailable = false;
+  await fs.writeFile(target, "changed");
+
+  const restarted = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.content, "saved candidate");
+  assert.equal(opened.publicationState, "conflict");
+  assert.equal(await fs.readFile(target, "utf8"), "changed");
+  const conflict = await restarted.journals.read(
+    "ea".repeat(16), Buffer.alloc(32, 27));
+  assert.equal(conflict.state, "conflict");
+  assert.equal(Buffer.from(conflict.publication.candidate, "base64").toString(),
+    "saved:saved candidate");
+});
+
+test("tampered publication bytes never overwrite the target and can be discarded", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-offline-tamper-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  let unavailable = false;
+  const removableFs = Object.create(fs);
+  removableFs.readFile = async (file, ...args) => {
+    if (unavailable && file === target) {
+      const error = new Error("missing"); error.code = "ENOENT"; throw error;
+    }
+    return fs.readFile(file, ...args);
+  };
+  const native = {
+    openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+    documentId: "fa".repeat(16), baseRevision: "fb".repeat(32),
+    journalKey: Buffer.alloc(32, 29) }),
+    saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
+  };
+  const service = new DocumentService({ native, fs: removableFs, profilePath,
+    publicationCapabilities });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  unavailable = true;
+  await service.saveDocument("exact candidate");
+  const pending = await service.journals.read("fa".repeat(16), Buffer.alloc(32, 29));
+  await fs.writeFile(pending.publication.transactionFile, "tampered transaction");
+  unavailable = false;
+  assert.deepEqual(await service.reconnectPendingPublication(), {
+    publicationState: "pending-publication", content: "exact candidate",
+  });
+  assert.equal(await fs.readFile(target, "utf8"), "container");
+  const discarded = await service.discardPendingPublication();
+  assert.equal(discarded.publicationState, "target-published");
+  assert.equal(discarded.content, "base");
+  assert.equal(await fs.readFile(pending.publication.transactionFile, "utf8"),
+    "tampered transaction");
 });
 
 test("plaintext export writes only current text with selected line endings", async (t) => {

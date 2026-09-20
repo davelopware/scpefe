@@ -36,7 +36,7 @@ function validateRecord(value) {
   if (value.publication !== undefined) {
     const candidate = value.publication?.candidate;
     if (!value.publication || typeof value.publication !== "object"
-        || value.state !== "pending-publication"
+        || (value.state !== "pending-publication" && value.state !== "conflict")
         || typeof value.publication.id !== "string"
         || !/^[0-9a-f]{32}$/.test(value.publication.id)
         || value.publication.target !== value.target

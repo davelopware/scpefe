@@ -106,8 +106,12 @@ export function validateOpenedDocument(value) {
       cursor: Object.freeze({ start: value.recovery.cursor.start,
         end: value.recovery.cursor.end }) });
   }
+  const publicationState = value.publicationState ?? "target-published";
+  if (!["target-published", "pending-publication", "conflict"].includes(publicationState)) {
+    throw new TypeError("host returned an invalid publication state");
+  }
   return Object.freeze({ content: value.content, readOnly: true,
-    canEdit: value.canEdit, ...(recovery ? { recovery } : {}) });
+    canEdit: value.canEdit, publicationState, ...(recovery ? { recovery } : {}) });
 }
 
 export function validateEditMode(value) {
@@ -115,7 +119,8 @@ export function validateEditMode(value) {
       || value.canEdit !== true || typeof value.content !== "string") {
     throw new TypeError("host did not enter edit mode");
   }
-  return Object.freeze({ content: value.content, readOnly: false, canEdit: true });
+  return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
+    publicationState: "target-published" });
 }
 
 export function validateRecoveredWork(value) {
@@ -133,10 +138,23 @@ export function validateRecoveredWork(value) {
 
 export function validateSaveResult(value) {
   if (!value || typeof value !== "object" || value.saved !== true
-      || typeof value.content !== "string" || Object.keys(value).length !== 2) {
+      || typeof value.content !== "string"
+      || !["target-published", "pending-publication", "conflict"].includes(value.publicationState)
+      || Object.keys(value).length !== 3) {
     throw new TypeError("host returned an invalid save result");
   }
-  return Object.freeze({ saved: true, content: value.content });
+  return Object.freeze({ saved: true, content: value.content,
+    publicationState: value.publicationState });
+}
+
+export function validatePublicationResult(value) {
+  if (!value || typeof value !== "object"
+      || !["target-published", "pending-publication", "conflict"].includes(value.publicationState)
+      || typeof value.content !== "string" || Object.keys(value).length !== 2) {
+    throw new TypeError("host returned an invalid publication result");
+  }
+  return Object.freeze({ publicationState: value.publicationState,
+    content: value.content });
 }
 
 export function validatePlaintextExportRequest(value) {

@@ -2,12 +2,20 @@ import path from "node:path";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
-  validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
+  validatePublicationResult, validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
+const UNAVAILABLE_CODES = new Set([
+  "ENOENT", "ENOTDIR", "EACCES", "EIO", "ENODEV", "ESTALE", "ETIMEDOUT",
+  "ECONNRESET",
+]);
+
+function targetUnavailable(error) {
+  return UNAVAILABLE_CODES.has(error?.code);
+}
 
 export class DocumentService {
   constructor({ native, fs, profilePath, journalDirectory,
@@ -75,26 +83,41 @@ export class DocumentService {
   }
 
   async openDocument(target, password) {
-    const bytes = await this.fs.readFile(target);
+    let bytes = await this.fs.readFile(target);
     const validatedPassword = validatePassword(password);
     let nativeOpened = this.#validateNativeOpened(
       this.native.openDocument(bytes, validatedPassword));
     let recovery = null;
     let pendingPublication = false;
+    let pendingRecord = null;
+    let publicationState = "target-published";
     try {
       const journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       if (journal?.publication) {
         pendingPublication = true;
-        const resumed = await this.publications.resume(
-          nativeOpened.documentId, nativeOpened.journalKey, journal);
+        pendingRecord = journal;
+        publicationState = journal.state === "conflict" ? "conflict" : "pending-publication";
+        this.#validateCandidate(journal, validatedPassword, nativeOpened.documentId);
+        const resumed = journal.state === "conflict" ? { completed: false, reason: "changed" }
+          : await this.publications.resume(
+            nativeOpened.documentId, nativeOpened.journalKey, journal);
         if (resumed.completed) {
           pendingPublication = false;
+          pendingRecord = null;
+          publicationState = "target-published";
           const published = await this.fs.readFile(target);
+          bytes = published;
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
             this.native.openDocument(published, validatedPassword));
           this.onJournalWarning("Interrupted publication was completed and verified.");
+        } else if (resumed.reason === "changed") {
+          pendingRecord = await this.publications.markDiverged(
+            nativeOpened.documentId, nativeOpened.journalKey, journal);
+          publicationState = "conflict";
+          this.onJournalWarning(
+            "The target changed while publication was pending; divergence must be resolved.");
         } else if (resumed.reason === "ambiguous") {
           this.onJournalWarning(
             "Interrupted publication needs confirmation; recovery data was preserved.");
@@ -107,14 +130,18 @@ export class DocumentService {
     } catch (error) {
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
+    const targetOpened = nativeOpened.opened;
     const opened = validateOpenedDocument({ ...nativeOpened.opened,
+      ...(pendingRecord ? { content: pendingRecord.text } : {}), publicationState,
       ...(recovery ? { recovery: { content: recovery.text,
         cursor: recovery.cursor, state: "unsaved",
         updateTime: recovery.updateTime } } : {}) });
     this.active = { target, password: validatedPassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
-      working: null, dirty: false, pendingPublication,
+      baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
+      working: null, dirty: false,
+      pendingPublication, pendingRecord,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
@@ -165,6 +192,67 @@ export class DocumentService {
       content: this.active.opened.content, readOnly: true,
       canEdit: this.active.opened.canEdit });
     return this.active.opened;
+  }
+
+  async reconnectPendingPublication() {
+    const active = this.active;
+    if (!active?.pendingPublication || !active.pendingRecord) {
+      throw new Error("No pending publication is available");
+    }
+    let target;
+    try {
+      target = await this.fs.readFile(active.target);
+    } catch (error) {
+      if (targetUnavailable(error)) {
+        return validatePublicationResult({ publicationState: "pending-publication",
+          content: active.pendingRecord.text });
+      }
+      throw error;
+    }
+    const targetOpened = this.#validateNativeOpened(
+      this.native.openDocument(target, active.password));
+    try {
+      if (targetOpened.documentId !== active.documentId) {
+        throw new Error("The reconnected target is a different document");
+      }
+    } finally {
+      targetOpened.journalKey.fill(0);
+    }
+    this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
+    const resumed = await this.publications.resume(
+      active.documentId, active.journalKey, active.pendingRecord);
+    if (resumed.completed) {
+      await this.#adoptPublishedCandidate(active);
+      return validatePublicationResult({ publicationState: "target-published",
+        content: active.opened.content });
+    }
+    if (resumed.reason === "changed") {
+      active.pendingRecord = await this.publications.markDiverged(
+        active.documentId, active.journalKey, active.pendingRecord);
+      active.opened = validateOpenedDocument({ ...active.opened,
+        publicationState: "conflict" });
+      return validatePublicationResult({ publicationState: "conflict",
+        content: active.pendingRecord.text });
+    }
+    return validatePublicationResult({ publicationState: "pending-publication",
+      content: active.pendingRecord.text });
+  }
+
+  async discardPendingPublication() {
+    const active = this.active;
+    if (!active?.pendingPublication || !active.pendingRecord) {
+      throw new Error("No pending publication is available");
+    }
+    await this.publications.discard(
+      active.documentId, active.journalKey, active.pendingRecord);
+    active.pendingPublication = false;
+    active.pendingRecord = null;
+    active.working = null;
+    active.dirty = false;
+    active.opened = validateOpenedDocument({ content: active.targetContent,
+      readOnly: true, canEdit: active.opened.canEdit,
+      publicationState: "target-published" });
+    return active.opened;
   }
 
   updateWorkingCopy(value) {
@@ -228,26 +316,83 @@ export class DocumentService {
     const canonical = canonicalizeDocumentText(content);
     this.#cancelCheckpoint();
     await this.flushChain.catch(() => {});
-    const current = await this.fs.readFile(this.active.target);
-    const candidate = this.native.saveDocument(current, this.active.password, {
+    const base = this.active.baseContainer;
+    const baseRevision = this.active.baseRevision;
+    const candidate = this.native.saveDocument(base, this.active.password, {
       ...profile, content: canonical, timestampMs: Date.now(),
     });
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new Error("Native bridge did not produce a container");
+    }
+    let current;
+    try {
+      current = await this.fs.readFile(this.active.target);
+    } catch (error) {
+      if (!targetUnavailable(error)) throw error;
+      this.active.pendingRecord = await this.publications.prepare({
+        documentId: this.active.documentId,
+        journalKey: this.active.journalKey,
+        target: this.active.target,
+        base,
+        candidate,
+        text: canonical,
+        cursor: { start: 0, end: 0 },
+        baseRevision,
+      });
+      this.active.pendingPublication = true;
+      this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+      this.active.dirty = false;
+      this.active.opened = validateOpenedDocument({ ...this.active.opened,
+        publicationState: "pending-publication" });
+      return validateSaveResult({ saved: true, content: canonical,
+        publicationState: "pending-publication" });
+    }
+    if (!current.equals(base)) {
+      const observed = this.#validateNativeOpened(
+        this.native.openDocument(current, this.active.password));
+      observed.journalKey.fill(0);
+      if (observed.documentId !== this.active.documentId) {
+        throw new Error("The publication target is a different document");
+      }
+      this.active.baseContainer = Buffer.from(current);
+      this.active.baseRevision = observed.baseRevision;
+      this.active.targetContent = observed.opened.content;
+      this.active.pendingRecord = await this.publications.prepare({
+        documentId: this.active.documentId, journalKey: this.active.journalKey,
+        target: this.active.target, base, candidate, text: canonical,
+        cursor: { start: 0, end: 0 }, baseRevision,
+      });
+      this.active.pendingRecord = await this.publications.markDiverged(
+        this.active.documentId, this.active.journalKey, this.active.pendingRecord);
+      this.active.pendingPublication = true;
+      this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+      this.active.dirty = false;
+      this.active.opened = validateOpenedDocument({ ...this.active.opened,
+        content: canonical, publicationState: "conflict" });
+      return validateSaveResult({ saved: true, content: canonical,
+        publicationState: "conflict" });
     }
     try {
       await this.publications.publish({
         documentId: this.active.documentId,
         journalKey: this.active.journalKey,
         target: this.active.target,
-        base: current,
+        base,
         candidate,
         text: canonical,
         cursor: { start: 0, end: 0 },
-        baseRevision: this.active.baseRevision,
+        baseRevision,
       });
     } catch (error) {
-      if (error.publicationPrepared) this.active.pendingPublication = true;
+      if (error.publicationPrepared) {
+        this.active.pendingPublication = true;
+        this.active.pendingRecord = await this.journals.read(
+          this.active.documentId, this.active.journalKey);
+        this.active.opened = validateOpenedDocument({ ...this.active.opened,
+          content: canonical, publicationState: "pending-publication" });
+        this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        this.active.dirty = false;
+      }
       throw error;
     }
     const published = await this.fs.readFile(this.active.target);
@@ -261,6 +406,8 @@ export class DocumentService {
     this.active.opened = reopened.opened;
     this.active.documentId = reopened.documentId;
     this.active.baseRevision = reopened.baseRevision;
+    this.active.baseContainer = Buffer.from(published);
+    this.active.targetContent = canonical;
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
@@ -269,7 +416,8 @@ export class DocumentService {
     this.active.recovery = null;
     this.active.continuousDue = null;
     this.notifyActivity();
-    return validateSaveResult({ saved: true, content: canonical });
+    return validateSaveResult({ saved: true, content: canonical,
+      publicationState: "target-published" });
   }
 
   async exportPlaintext(target, request) {
@@ -291,6 +439,38 @@ export class DocumentService {
     }
     return { opened, documentId: value.documentId,
       baseRevision: value.baseRevision, journalKey: value.journalKey };
+  }
+
+  #validateCandidate(record, password, documentId) {
+    const candidate = Buffer.from(record.publication.candidate, "base64");
+    const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
+    try {
+      if (opened.documentId !== documentId || opened.opened.content !== record.text) {
+        throw new Error("Pending publication candidate does not match its document");
+      }
+    } finally {
+      opened.journalKey.fill(0);
+    }
+  }
+
+  async #adoptPublishedCandidate(active) {
+    const published = await this.fs.readFile(active.target);
+    const reopened = this.#validateNativeOpened(
+      this.native.openDocument(published, active.password));
+    active.journalKey.fill(0);
+    active.opened = validateOpenedDocument({ ...reopened.opened,
+      publicationState: "target-published" });
+    active.documentId = reopened.documentId;
+    active.baseRevision = reopened.baseRevision;
+    active.baseContainer = Buffer.from(published);
+    active.targetContent = reopened.opened.content;
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    active.dirty = false;
+    active.pendingPublication = false;
+    active.pendingRecord = null;
+    active.recovery = null;
   }
 
   #scheduleCheckpoint() {

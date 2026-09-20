@@ -47,6 +47,10 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("document:enter-edit-mode", () => service.enterEditMode());
   ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
+  ipcMain.handle("document:reconnect-publication", () =>
+    service.reconnectPendingPublication());
+  ipcMain.handle("document:discard-publication", () =>
+    service.discardPendingPublication());
   ipcMain.handle("document:export-plaintext", async (_event, request) => {
     const warning = await dialog.showMessageBox(window, {
       type: "warning",
