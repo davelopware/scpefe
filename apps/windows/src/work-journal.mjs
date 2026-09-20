@@ -37,6 +37,21 @@ function validateRecord(value) {
     throw new TypeError("invalid work-journal record");
   }
   let publication;
+  let merge;
+  if (value.merge !== undefined) {
+    if (value.state !== "conflict" || !value.merge
+        || typeof value.merge !== "object"
+        || typeof value.merge.localContent !== "string"
+        || !/^[0-9a-f]{64}$/.test(value.merge.ancestorRevision)
+        || !/^[0-9a-f]{64}$/.test(value.merge.localRevision)
+        || !/^[0-9a-f]{64}$/.test(value.merge.currentRevision)) {
+      throw new TypeError("invalid merge-resolution state");
+    }
+    merge = { localContent: value.merge.localContent,
+      ancestorRevision: value.merge.ancestorRevision,
+      localRevision: value.merge.localRevision,
+      currentRevision: value.merge.currentRevision };
+  }
   if (value.publication !== undefined) {
     const candidate = value.publication?.candidate;
     const base = value.publication?.base;
@@ -92,6 +107,7 @@ function validateRecord(value) {
     state: value.state,
     updateTime: value.updateTime,
     ...(publication ? { publication } : {}),
+    ...(merge ? { merge } : {}),
   };
 }
 

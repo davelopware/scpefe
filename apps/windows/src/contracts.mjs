@@ -217,6 +217,22 @@ export function validatePublicationResult(value) {
     content: value.content });
 }
 
+export function validateMergeDraft(value) {
+  if (!value || typeof value !== "object" || typeof value.content !== "string"
+      || typeof value.hasConflicts !== "boolean"
+      || !/^[0-9a-f]{64}$/.test(value.ancestorRevision)
+      || !/^[0-9a-f]{64}$/.test(value.localRevision)
+      || !/^[0-9a-f]{64}$/.test(value.currentRevision)
+      || Object.keys(value).length !== 5) {
+    throw new TypeError("host returned an invalid merge draft");
+  }
+  return Object.freeze({ content: canonicalizeDocumentText(value.content),
+    hasConflicts: value.hasConflicts,
+    ancestorRevision: value.ancestorRevision,
+    localRevision: value.localRevision,
+    currentRevision: value.currentRevision });
+}
+
 export function validatePlaintextExportRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
       || Object.keys(value).length !== 2

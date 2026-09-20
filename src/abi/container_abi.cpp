@@ -6,6 +6,7 @@
 #include "container/unlocked_container_data.hpp"
 #include "document/new_document.hpp"
 #include "document/manual_save.hpp"
+#include "document/merge_save.hpp"
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 #include "format/revision_limits.hpp"
@@ -244,6 +245,57 @@ scpefe_status scpefe_manual_save(
     try {
         const auto encoded = scpefe::document::ManualSave::create(
             save->container, save->container_size,
+            save->password, save->password_size,
+            {save->profile_name, save->profile_name_size},
+            {save->profile_email, save->profile_email_size},
+            {save->device_name, save->device_name_size},
+            {save->content, save->content_size}, save->timestamp_ms);
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) {
+        return external_status(failure.error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return failure.error == scpefe::format::RevisionError::limit_exceeded
+            ? SCPEFE_STATUS_LIMIT_EXCEEDED : SCPEFE_STATUS_INVALID_ARGUMENT;
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_merge_save(
+    const scpefe_merge_save_v1 *save,
+    std::uint8_t *output,
+    std::size_t output_capacity,
+    std::size_t *output_size
+)
+{
+    if (save == nullptr || save->struct_size < sizeof(scpefe_merge_save_v1)
+        || output_size == nullptr
+        || !scpefe::format::span_is_valid(
+            save->current_container, save->current_container_size)
+        || save->current_container_size == 0
+        || !scpefe::format::span_is_valid(
+            save->local_container, save->local_container_size)
+        || save->local_container_size == 0
+        || !scpefe::format::span_is_valid(save->password, save->password_size)
+        || save->password_size == 0
+        || !scpefe::format::valid_utf8(save->profile_name, save->profile_name_size)
+        || save->profile_name_size == 0
+        || !scpefe::format::valid_utf8(save->profile_email, save->profile_email_size)
+        || save->profile_email_size == 0
+        || !scpefe::format::valid_utf8(save->device_name, save->device_name_size)
+        || save->device_name_size == 0
+        || !scpefe::format::valid_canonical_document_text(
+            save->content, save->content_size)) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        const auto encoded = scpefe::document::MergeSave::create(
+            save->current_container, save->current_container_size,
+            save->local_container, save->local_container_size,
             save->password, save->password_size,
             {save->profile_name, save->profile_name_size},
             {save->profile_email, save->profile_email_size},

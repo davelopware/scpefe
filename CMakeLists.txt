@@ -38,6 +38,7 @@ else()
         src/core/host_services.cpp
         src/document/new_document.cpp
         src/document/manual_save.cpp
+        src/document/merge_save.cpp
         src/security/password_strength.cpp
         third_party/zxcvbn-c/zxcvbn.c
     )
@@ -124,6 +125,12 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-invitation-addon.integration.mjs
                 $<TARGET_FILE:scpefe_electron_native>
         )
+        add_test(
+            NAME scpefe.native-addon-merge
+            COMMAND ${NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-merge-addon.integration.mjs
+                $<TARGET_FILE:scpefe_electron_native>
+        )
     endif()
 endif()
 
@@ -192,6 +199,9 @@ if(BUILD_TESTING)
         add_executable(scpefe_manual_save_test tests/manual_save_test.c)
         target_link_libraries(scpefe_manual_save_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_merge_save_test tests/merge_save_test.c)
+        target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe)
+
         add_executable(scpefe_password_change_test tests/password_change_test.c)
         target_link_libraries(scpefe_password_change_test PRIVATE SCPEFE::scpefe)
 
@@ -208,6 +218,7 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
         add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
         add_test(NAME scpefe.manual-save-round-trip COMMAND scpefe_manual_save_test)
+        add_test(NAME scpefe.merge-save-round-trip COMMAND scpefe_merge_save_test)
         add_test(NAME scpefe.password-change COMMAND scpefe_password_change_test)
         add_test(
             NAME scpefe.export-surface

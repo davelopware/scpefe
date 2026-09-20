@@ -8,6 +8,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 import { HeadWitnessStore } from "./head-witness.mjs";
+import { createMergeDraft, hasConflictMarkers } from "./divergence-merge.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
@@ -441,11 +442,152 @@ export class DocumentService {
       content: active.pendingRecord.text });
   }
 
+  async beginDivergenceResolution() {
+    const active = this.active;
+    if (!active?.pendingPublication || active.pendingRecord?.state !== "conflict") {
+      throw new Error("No divergent pending publication is available");
+    }
+    if (!active.slotCanEdit) {
+      throw new Error("The active password slot does not permit editing");
+    }
+    this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
+    await this.#acquireLease(false);
+    active.editMode = true;
+    try {
+      const currentBytes = await this.fs.readFile(active.target);
+      const current = this.#validateNativeOpened(
+        this.native.openDocument(currentBytes, active.password));
+      const localBytes = Buffer.from(active.pendingRecord.publication.candidate, "base64");
+      const local = this.#validateNativeOpened(
+        this.native.openDocument(localBytes, active.password));
+      const ancestorBytes = Buffer.from(active.pendingRecord.publication.base, "base64");
+      const ancestor = this.#validateNativeOpened(
+        this.native.openDocument(ancestorBytes, active.password));
+      try {
+        if (!current.journalKey.equals(local.journalKey)
+            || !current.journalKey.equals(ancestor.journalKey)) {
+          throw new Error("Divergent replicas do not share authenticated key material");
+        }
+        const calculated = createMergeDraft({ ancestor, local, current });
+        const savedMerge = active.pendingRecord.merge;
+        if (savedMerge && (savedMerge.ancestorRevision !== calculated.ancestorRevision
+            || savedMerge.localRevision !== calculated.localRevision
+            || savedMerge.currentRevision !== calculated.currentRevision)) {
+          const error = new Error(
+            "The target changed while the merge resolution was stored");
+          error.code = "MERGE_TARGET_CHANGED";
+          throw error;
+        }
+        const draft = savedMerge ? Object.freeze({ ...calculated,
+          content: active.pendingRecord.text,
+          hasConflicts: hasConflictMarkers(active.pendingRecord.text) }) : calculated;
+        const cursor = savedMerge ? { ...active.pendingRecord.cursor }
+          : { start: 0, end: 0 };
+        const localContent = active.pendingRecord.merge?.localContent
+          ?? active.pendingRecord.text;
+        active.pendingRecord = { ...active.pendingRecord,
+          text: draft.content, cursor,
+          updateTime: this.now(),
+          merge: { localContent, ancestorRevision: draft.ancestorRevision,
+            localRevision: draft.localRevision,
+            currentRevision: draft.currentRevision } };
+        await this.journals.write(
+          active.documentId, active.journalKey, active.pendingRecord);
+        active.baseContainer = Buffer.from(currentBytes);
+        active.baseRevision = current.baseRevision;
+        active.revisionGraph = current.revisionGraph;
+        active.observation = this.#observation(current);
+        active.targetContent = current.opened.content;
+        active.working = { content: draft.content, cursor };
+        active.dirty = true;
+        active.opened = validateOpenedDocument({ ...active.opened,
+          content: draft.content, canEdit: true, publicationState: "conflict" });
+        this.notifyActivity();
+        return draft;
+      } finally {
+        current.journalKey.fill(0);
+        local.journalKey.fill(0);
+        ancestor.journalKey.fill(0);
+      }
+    } catch (error) {
+      active.editMode = false;
+      await this.#stopHeartbeat();
+      throw error;
+    }
+  }
+
+  async saveDivergenceResolution(content) {
+    const active = this.active;
+    if (!active?.editMode || !active.pendingPublication
+        || active.pendingRecord?.state !== "conflict"
+        || !active.pendingRecord.merge) {
+      throw new Error("Begin divergence resolution before saving");
+    }
+    const canonical = canonicalizeDocumentText(content);
+    if (hasConflictMarkers(canonical)) {
+      throw new Error("Resolve every conflict marker before saving the merge");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    this.#cancelCheckpoint();
+    await this.flushChain.catch(() => {});
+    try {
+      await this.#queuePublication(async () => {
+        const currentBytes = await this.fs.readFile(active.target);
+        const current = this.#validateNativeOpened(
+          this.native.openDocument(currentBytes, active.password));
+        try {
+          const merge = active.pendingRecord.merge;
+          if (current.documentId !== active.documentId
+              || current.baseRevision !== merge.currentRevision
+              || !current.lease.active || !active.leaseSessionId
+              || !Buffer.from(current.lease.sessionId, "hex")
+                .equals(active.leaseSessionId)
+              || current.lease.heartbeatCounter !== active.leaseCounter) {
+            const error = new Error(
+              "The target changed while the merge was being resolved");
+            error.code = "MERGE_TARGET_CHANGED";
+            throw error;
+          }
+          const localBytes = Buffer.from(
+            active.pendingRecord.publication.candidate, "base64");
+          const candidate = this.native.mergeDocument(
+            currentBytes, localBytes, active.password,
+            { ...profile, content: canonical, timestampMs: Date.now() });
+          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+            throw new Error("Native bridge did not produce a merge container");
+          }
+          await this.publications.publish({ documentId: active.documentId,
+            journalKey: active.journalKey, target: active.target,
+            base: currentBytes, candidate, text: canonical,
+            cursor: { start: 0, end: 0 }, baseRevision: current.baseRevision });
+        } finally {
+          current.journalKey.fill(0);
+        }
+      });
+    } catch (error) {
+      if (error.publicationPrepared) {
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        active.opened = validateOpenedDocument({ ...active.opened,
+          content: canonical, publicationState: "pending-publication" });
+        active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        active.dirty = false;
+      }
+      throw error;
+    }
+    await this.#adoptPublishedCandidate(active);
+    this.notifyActivity();
+    return validateSaveResult({ saved: true, content: canonical,
+      publicationState: "target-published" });
+  }
+
   async discardPendingPublication() {
     const active = this.active;
     if (!active?.pendingPublication || !active.pendingRecord) {
       throw new Error("No pending publication is available");
     }
+    if (active.editMode) await this.exitEditMode();
     await this.publications.discard(
       active.documentId, active.journalKey, active.pendingRecord);
     active.pendingPublication = false;
@@ -463,7 +605,7 @@ export class DocumentService {
 
   updateWorkingCopy(value) {
     if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
-    if (this.active.pendingPublication) {
+    if (this.active.pendingPublication && !this.active.pendingRecord?.merge) {
       throw new Error("Resolve the interrupted publication before editing");
     }
     const working = validateWorkingCopy(value);
@@ -886,7 +1028,8 @@ export class DocumentService {
       if (opened.documentId !== documentId
           || (invitationClaim && (record.publication.reopenPassword !== password
             || record.text !== "" || opened.opened.invitationRequired))
-          || (!invitationClaim && opened.opened.content !== record.text)) {
+          || (!invitationClaim
+            && opened.opened.content !== (record.merge?.localContent ?? record.text))) {
         throw new Error("Pending publication candidate does not match its document");
       }
     } finally {
@@ -1085,15 +1228,14 @@ export class DocumentService {
   }
 
   async #flushActive(active) {
-    if (!active?.dirty || !active.working || active.pendingPublication) return;
-    const record = {
-      text: active.working.content,
-      baseRevision: active.baseRevision,
-      cursor: { ...active.working.cursor },
-      target: active.target,
-      state: "unsaved",
-      updateTime: this.now(),
-    };
+    if (!active?.dirty || !active.working
+        || (active.pendingPublication && !active.pendingRecord?.merge)) return;
+    const record = active.pendingRecord?.merge
+      ? { ...active.pendingRecord, text: active.working.content,
+        cursor: { ...active.working.cursor }, updateTime: this.now() }
+      : { text: active.working.content, baseRevision: active.baseRevision,
+        cursor: { ...active.working.cursor }, target: active.target,
+        state: "unsaved", updateTime: this.now() };
     const operation = this.flushChain.catch(() => {}).then(() =>
       this.journals.write(active.documentId, active.journalKey, record));
     this.flushChain = operation;

@@ -51,6 +51,7 @@ int main(int argc, char **argv)
         "scpefe_decoded_snapshot_revision_view",
         "scpefe_library_version",
         "scpefe_manual_save",
+        "scpefe_merge_save",
         "scpefe_new_document_create",
         "scpefe_password_container_change_password",
         "scpefe_password_container_add_invitation",

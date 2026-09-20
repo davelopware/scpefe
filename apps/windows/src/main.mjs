@@ -65,6 +65,10 @@ app.whenReady().then(() => {
   ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
   ipcMain.handle("document:reconnect-publication", () =>
     service.reconnectPendingPublication());
+  ipcMain.handle("document:begin-divergence-resolution", () =>
+    service.beginDivergenceResolution());
+  ipcMain.handle("document:save-divergence-resolution", (_event, content) =>
+    service.saveDivergenceResolution(content));
   ipcMain.handle("document:discard-publication", () =>
     service.discardPendingPublication());
   ipcMain.handle("document:backup", async () => {

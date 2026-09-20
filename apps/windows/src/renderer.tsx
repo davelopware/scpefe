@@ -11,6 +11,8 @@ type HeadMismatch = { kind: "rollback" | "divergence" | "replacement" | "witness
   title: string; explanation: string; editingBlocked: true };
 type PublicationState = "target-published" | "pending-publication" | "conflict";
 type SaveState = "unsaved" | PublicationState;
+type MergeDraft = { content: string; hasConflicts: boolean;
+  ancestorRevision: string; localRevision: string; currentRevision: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   canAddPasswords?: boolean; invitationRequired?: false;
@@ -31,6 +33,9 @@ declare global { interface Window { scpefe: {
   saveDocument(content: string): Promise<{ saved: true; content: string;
     publicationState: PublicationState }>;
   reconnectPendingPublication(): Promise<{ content: string;
+    publicationState: PublicationState }>;
+  beginDivergenceResolution(): Promise<MergeDraft>;
+  saveDivergenceResolution(content: string): Promise<{ saved: true; content: string;
     publicationState: PublicationState }>;
   discardPendingPublication(): Promise<DocumentOpened>;
   backupDocument(): Promise<{ backedUp: true } | null>;
@@ -196,7 +201,7 @@ function App() {
 
   function edit(content: string, cursor?: Cursor) {
     setWorkingText(content);
-    setSaveState("unsaved");
+    setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
     setHistory((current) => [...current.slice(0, historyIndex + 1), content]);
     setHistoryIndex((current) => current + 1);
     const nextCursor = cursor ?? { start: content.length, end: content.length };
@@ -205,7 +210,9 @@ function App() {
 
   async function save() {
     try {
-      const result = await window.scpefe.saveDocument(workingText);
+      const result = saveState === "conflict"
+        ? await window.scpefe.saveDivergenceResolution(workingText)
+        : await window.scpefe.saveDocument(workingText);
       setWorkingText(result.content);
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: result.content,
@@ -220,8 +227,27 @@ function App() {
     } catch (error) { showError(error); }
   }
 
+  async function beginDivergenceResolution() {
+    try {
+      const draft = await window.scpefe.beginDivergenceResolution();
+      setWorkingText(draft.content);
+      setHistory([draft.content]);
+      setHistoryIndex(0);
+      setOpened((current) => isDocumentOpened(current) ? { ...current,
+        content: draft.content, readOnly: false, canEdit: true } : current);
+      setSaveState("conflict");
+      setMessage(draft.hasConflicts
+        ? "Resolve every local/current marker, then save the merge."
+        : "The three-way merge is clean. Review it, then save the merge.");
+    } catch (error) { showError(error); }
+  }
+
   async function reconnectPublication() {
     try {
+      if (isDocumentOpened(opened) && opened.publicationState === "conflict") {
+        await beginDivergenceResolution();
+        return;
+      }
       const result = await window.scpefe.reconnectPendingPublication();
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: result.content, readOnly: true,

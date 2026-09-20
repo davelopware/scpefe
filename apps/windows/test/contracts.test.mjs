@@ -4,7 +4,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult
   validateBackupResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
-  validateWorkingCopy } from "../src/contracts.mjs";
+  validateWorkingCopy, validateMergeDraft } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
@@ -108,4 +108,16 @@ test("plaintext export contracts expose only canonical text and line-ending choi
   assert.throws(() => validatePlaintextExportResult({
     exported: true, target: "/secret.txt",
   }), /invalid/);
+});
+
+test("merge drafts expose only bounded revision identities and canonical text", () => {
+  const revision = "ab".repeat(32);
+  assert.deepEqual(validateMergeDraft({ content: "local\r\n", hasConflicts: true,
+    ancestorRevision: revision, localRevision: revision,
+    currentRevision: revision }), { content: "local\n", hasConflicts: true,
+    ancestorRevision: revision, localRevision: revision,
+    currentRevision: revision });
+  assert.throws(() => validateMergeDraft({ content: "draft", hasConflicts: false,
+    ancestorRevision: "bad", localRevision: revision,
+    currentRevision: revision }), /invalid merge draft/);
 });
