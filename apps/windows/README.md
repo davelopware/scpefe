@@ -10,7 +10,7 @@ storage behavior still requires security and release review.
 ## Prerequisites
 
 - 64-bit Windows 10 or later.
-- Visual Studio 2022 Build Tools (or Visual Studio 2022) with **Desktop
+- Visual Studio 2022 Build Tools or later (or the matching Visual Studio) with **Desktop
   development with C++** and the Windows SDK.
 - CMake 3.20 or later on `PATH`.
 - Node.js 22.12 or later with npm on `PATH`.
