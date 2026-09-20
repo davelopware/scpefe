@@ -6,10 +6,60 @@
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 
+#include <algorithm>
 #include <limits>
+#include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace scpefe::format {
+namespace {
+
+std::string revision_key(const std::uint8_t *value)
+{
+    return std::string(reinterpret_cast<const char *>(value), revision_id_size);
+}
+
+void validate_ancestor_graph(
+    const std::vector<RevisionGraphNodeData> &graph,
+    const RevisionLimits &limits
+)
+{
+    if (graph.size() > limits.max_collection_entries()
+        || (!graph.empty() && limits.max_nesting_depth() < 4)) {
+        throw RevisionFailure{RevisionError::limit_exceeded};
+    }
+    std::unordered_map<std::string, std::size_t> nodes;
+    for (std::size_t index = 0; index < graph.size(); ++index) {
+        const auto &node = graph[index];
+        if (node.parent_revision_ids.size() % revision_id_size != 0) {
+            throw RevisionFailure{RevisionError::invalid_argument};
+        }
+        const std::size_t count = node.parent_revision_ids.size() / revision_id_size;
+        if (count > limits.max_parent_count()
+            || count > limits.max_collection_entries()) {
+            throw RevisionFailure{RevisionError::limit_exceeded};
+        }
+        if (!nodes.emplace(revision_key(node.revision_id.data()), index).second) {
+            throw RevisionFailure{RevisionError::invalid_argument};
+        }
+    }
+    std::vector<std::uint8_t> state(graph.size());
+    const auto visit = [&](const auto &self, std::size_t index) -> void {
+        if (state[index] == 1) throw RevisionFailure{RevisionError::invalid_argument};
+        if (state[index] == 2) return;
+        state[index] = 1;
+        const auto &parents = graph[index].parent_revision_ids;
+        for (std::size_t offset = 0; offset < parents.size(); offset += revision_id_size) {
+            const auto found = nodes.find(revision_key(parents.data() + offset));
+            if (found != nodes.end()) self(self, found->second);
+        }
+        state[index] = 2;
+    };
+    for (std::size_t index = 0; index < graph.size(); ++index) visit(visit, index);
+}
+
+} // namespace
 
 void SnapshotRevision::validate_data(
     const SnapshotRevisionData &data,
@@ -46,6 +96,7 @@ void SnapshotRevision::validate_data(
         || !valid_canonical_document_text(data.content.data(), data.content.size())) {
         throw RevisionFailure{RevisionError::invalid_argument};
     }
+    validate_ancestor_graph(data.ancestor_graph, limits);
 }
 
 SnapshotRevision::SnapshotRevision(SnapshotRevisionData data)
@@ -65,7 +116,7 @@ SnapshotRevision SnapshotRevision::create(
 std::vector<std::uint8_t> SnapshotRevision::encode() const
 {
     CborWriter writer;
-    writer.map(11);
+    writer.map(data_.ancestor_graph.empty() ? 11 : 12);
     writer.unsigned_integer(1); writer.unsigned_integer(snapshot_revision_format_version);
     const std::size_t parent_count = data_.parent_revision_ids.size() / revision_id_size;
     writer.unsigned_integer(2); writer.array(parent_count);
@@ -85,6 +136,19 @@ std::vector<std::uint8_t> SnapshotRevision::encode() const
     writer.unsigned_integer(1); writer.unsigned_integer(0);
     writer.unsigned_integer(2); writer.unsigned_integer(data_.content.size());
     writer.unsigned_integer(3); writer.text(data_.content.data(), data_.content.size());
+    if (!data_.ancestor_graph.empty()) {
+        writer.unsigned_integer(12); writer.array(data_.ancestor_graph.size());
+        for (const auto &node : data_.ancestor_graph) {
+            writer.array(2);
+            writer.bytes(node.revision_id.data(), node.revision_id.size());
+            const std::size_t count = node.parent_revision_ids.size() / revision_id_size;
+            writer.array(count);
+            for (std::size_t index = 0; index < count; ++index) {
+                writer.bytes(node.parent_revision_ids.data() + index * revision_id_size,
+                    revision_id_size);
+            }
+        }
+    }
     return writer.take_output();
 }
 
@@ -95,7 +159,9 @@ SnapshotRevision SnapshotRevision::decode(
 )
 {
     CborReader reader(encoded, encoded_size, limits);
-    if (reader.map(1) != 11) throw RevisionFailure{RevisionError::malformed_cbor};
+    const std::size_t field_count = reader.map(1);
+    if (field_count != 11 && field_count != 12)
+        throw RevisionFailure{RevisionError::malformed_cbor};
     reader.expect_unsigned(1);
     if (reader.unsigned_integer() != snapshot_revision_format_version) {
         throw RevisionFailure{RevisionError::unsupported_format};
@@ -133,10 +199,43 @@ SnapshotRevision SnapshotRevision::decode(
     if (uncompressed_size != revision.data_.content.size()
         || !valid_canonical_document_text(
             revision.data_.content.data(), revision.data_.content.size()
-        )
-        || !reader.finished()) {
+        )) {
         throw RevisionFailure{RevisionError::malformed_cbor};
     }
+    if (field_count == 12) {
+        reader.expect_unsigned(12);
+        const std::size_t node_count = reader.array(2);
+        if (node_count > limits.max_collection_entries())
+            throw RevisionFailure{RevisionError::limit_exceeded};
+        revision.data_.ancestor_graph.reserve(node_count);
+        for (std::size_t index = 0; index < node_count; ++index) {
+            if (reader.array(3) != 2)
+                throw RevisionFailure{RevisionError::malformed_cbor};
+            RevisionGraphNodeData node;
+            const auto id = reader.bytes(revision_id_size);
+            std::copy(id.begin(), id.end(), node.revision_id.begin());
+            const std::size_t count = reader.array(4);
+            if (count > limits.max_parent_count()
+                || count > std::numeric_limits<std::size_t>::max() / revision_id_size) {
+                throw RevisionFailure{RevisionError::limit_exceeded};
+            }
+            node.parent_revision_ids.reserve(count * revision_id_size);
+            for (std::size_t parent = 0; parent < count; ++parent) {
+                const auto id_value = reader.bytes(revision_id_size);
+                node.parent_revision_ids.insert(node.parent_revision_ids.end(),
+                    id_value.begin(), id_value.end());
+            }
+            revision.data_.ancestor_graph.push_back(std::move(node));
+        }
+        try {
+            validate_ancestor_graph(revision.data_.ancestor_graph, limits);
+        } catch (const RevisionFailure &failure) {
+            if (failure.error == RevisionError::invalid_argument)
+                throw RevisionFailure{RevisionError::malformed_cbor};
+            throw;
+        }
+    }
+    if (!reader.finished()) throw RevisionFailure{RevisionError::malformed_cbor};
     return revision;
 }
 
@@ -159,6 +258,22 @@ std::string SnapshotRevision::diagnostic_json(bool include_content) const
     json.raw(",\"client_profile_email\":"); json.string(data_.client_profile_email.data(), data_.client_profile_email.size());
     json.raw(",\"device_name\":"); json.string(data_.device_name.data(), data_.device_name.size());
     json.raw(",\"content_hash\":"); json.hex(data_.content_hash.data(), data_.content_hash.size());
+    json.raw(",\"ancestor_graph\":[");
+    for (std::size_t node_index = 0; node_index < data_.ancestor_graph.size(); ++node_index) {
+        if (node_index != 0) json.character(',');
+        const auto &node = data_.ancestor_graph[node_index];
+        json.raw("{\"revision_id\":");
+        json.hex(node.revision_id.data(), node.revision_id.size());
+        json.raw(",\"parent_revision_ids\":[");
+        const std::size_t count = node.parent_revision_ids.size() / revision_id_size;
+        for (std::size_t index = 0; index < count; ++index) {
+            if (index != 0) json.character(',');
+            json.hex(node.parent_revision_ids.data() + index * revision_id_size,
+                revision_id_size);
+        }
+        json.raw("]}");
+    }
+    json.raw("]");
     json.raw(",\"snapshot\":{\"codec\":\"none\",\"uncompressed_length\":"
         + std::to_string(data_.content.size()));
     if (include_content) {

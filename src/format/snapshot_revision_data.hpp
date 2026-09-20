@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -16,6 +17,12 @@ inline constexpr std::size_t slot_id_size = 16u;
 /* Fixed byte length of a snapshot content hash. */
 inline constexpr std::size_t content_hash_size = 32u;
 
+/* One authenticated ancestor node retained for revision-graph traversal. */
+struct RevisionGraphNodeData {
+    std::array<std::uint8_t, revision_id_size> revision_id{};
+    std::vector<std::uint8_t> parent_revision_ids;
+};
+
 /* Semantic values owned by a SnapshotRevision. */
 struct SnapshotRevisionData {
     std::vector<std::uint8_t> parent_revision_ids;
@@ -28,6 +35,7 @@ struct SnapshotRevisionData {
     std::string device_name;
     std::vector<std::uint8_t> content_hash;
     std::string content;
+    std::vector<RevisionGraphNodeData> ancestor_graph;
 };
 
 } // namespace scpefe::format

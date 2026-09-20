@@ -16,7 +16,13 @@ snapshot-revision-v1 = {
   9: tstr,                      ; device name
   10: content-hash,
   11: snapshot-v1,
+  ? 12: [* revision-graph-node], ; authenticated retained ancestor graph
 }
+
+revision-graph-node = [
+  revision-id,                    ; ancestor revision ID
+  [* revision-id],               ; its direct parent revision IDs
+]
 
 snapshot-v1 = {
   1: 0,                         ; codec: none

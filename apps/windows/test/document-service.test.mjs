@@ -605,3 +605,63 @@ test("resumes only an unchanged valid suspended lease and flags counter changes"
   assert.notEqual(native.currentLease().sessionId, firstSession);
   assert.equal(native.currentLease().heartbeatCounter, 1);
 });
+
+test("head mismatches remain inspectable but block editing until explicitly accepted", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-head-mismatch-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "first");
+  const a = "aa".repeat(32);
+  const b = "bb".repeat(32);
+  const x = "cc".repeat(32);
+  let version = "first";
+  const native = { openDocument: () => version === "first"
+    ? { content: "original", readOnly: true, canEdit: true,
+      documentId: "11".repeat(16), baseRevision: b,
+      revisionGraph: [{ revisionId: a, parentRevisionIds: [] },
+        { revisionId: b, parentRevisionIds: [a] }], journalKey: Buffer.alloc(32, 3) }
+    : { content: "other branch", readOnly: true, canEdit: true,
+      documentId: "11".repeat(16), baseRevision: x,
+      revisionGraph: [{ revisionId: x, parentRevisionIds: [a] }],
+      journalKey: Buffer.alloc(32, 3) } };
+  const options = { native: withLease(native), fs,
+    profilePath: await writeProfile(directory, "Ada", "Desk") };
+  const first = new DocumentService(options);
+  await first.openDocument(target, "password words");
+  await first.lock();
+  version = "other";
+  const restarted = new DocumentService(options);
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.content, "other branch");
+  assert.equal(opened.readOnly, true);
+  assert.equal(opened.canEdit, false);
+  assert.equal(opened.headMismatch.kind, "divergence");
+  assert.match(opened.headMismatch.explanation, /unrelated/);
+  await assert.rejects(restarted.enterEditMode(), /head mismatch/);
+  const accepted = await restarted.acceptHeadMismatch();
+  assert.equal(accepted.canEdit, true);
+  assert.equal(accepted.headMismatch, undefined);
+  assert.equal((await restarted.enterEditMode()).readOnly, false);
+  await restarted.lock();
+});
+
+test("different document IDs are explained as target replacement", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-replacement-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  let documentId = "11".repeat(16);
+  const head = "aa".repeat(32);
+  const native = { openDocument: () => ({ content: "inspectable", readOnly: true,
+    canEdit: true, documentId, baseRevision: head,
+    revisionGraph: [{ revisionId: head, parentRevisionIds: [] }],
+    journalKey: Buffer.alloc(32, 5) }) };
+  const options = { native, fs, profilePath: path.join(directory, "profile.json") };
+  const first = new DocumentService(options);
+  await first.openDocument(target, "password words");
+  await first.lock();
+  documentId = "22".repeat(16);
+  const opened = await new DocumentService(options).openDocument(target, "password words");
+  assert.equal(opened.headMismatch.kind, "replacement");
+  assert.match(opened.headMismatch.explanation, /permanent document ID differs/);
+});

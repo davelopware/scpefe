@@ -104,6 +104,24 @@ export function validateOpenedDocument(value) {
     }
     lease = Object.freeze({ ...candidate });
   }
+  let headMismatch;
+  if (value.headMismatch !== undefined) {
+    const mismatch = value.headMismatch;
+    if (!mismatch || typeof mismatch !== "object"
+        || !["rollback", "divergence", "replacement", "witness-error"].includes(mismatch.kind)
+        || typeof mismatch.title !== "string" || !mismatch.title
+        || typeof mismatch.explanation !== "string" || !mismatch.explanation
+        || mismatch.editingBlocked !== true
+        || !/^[0-9a-f]{32}$/.test(mismatch.observedDocumentId)
+        || !/^[0-9a-f]{64}$/.test(mismatch.observedHead)
+        || (mismatch.witnessedDocumentId !== undefined
+          && !/^[0-9a-f]{32}$/.test(mismatch.witnessedDocumentId))
+        || (mismatch.witnessedHead !== undefined
+          && !/^[0-9a-f]{64}$/.test(mismatch.witnessedHead))) {
+      throw new TypeError("host returned an invalid head mismatch");
+    }
+    headMismatch = Object.freeze({ ...mismatch });
+  }
   if (value.recovery !== undefined) {
     if (!value.recovery || typeof value.recovery !== "object"
         || typeof value.recovery.content !== "string"
@@ -124,7 +142,8 @@ export function validateOpenedDocument(value) {
   }
   return Object.freeze({ content: value.content, readOnly: true,
     canEdit: value.canEdit, ...(lease ? { lease } : {}),
-    ...(recovery ? { recovery } : {}) });
+    ...(recovery ? { recovery } : {}),
+    ...(headMismatch ? { headMismatch } : {}) });
 }
 
 export function validateEditMode(value) {

@@ -7,6 +7,7 @@
 #include "format/snapshot_revision_data.hpp"
 
 #include <array>
+#include <utility>
 
 extern "C" {
 int sodium_init(void);
@@ -57,11 +58,20 @@ std::vector<std::uint8_t> ManualSave::create(
     std::array<std::uint8_t, format::content_hash_size> content_hash{};
     hash_bytes(parent_id, unlocked.encoded_snapshot_revision.data(),
         unlocked.encoded_snapshot_revision.size());
+    const auto parent_revision = format::SnapshotRevision::decode(
+        unlocked.encoded_snapshot_revision.data(),
+        unlocked.encoded_snapshot_revision.size(),
+        format::RevisionLimits::defaults());
     hash_bytes(content_hash,
         reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
 
     format::SnapshotRevisionData data;
     data.parent_revision_ids.assign(parent_id.begin(), parent_id.end());
+    data.ancestor_graph = parent_revision.data().ancestor_graph;
+    format::RevisionGraphNodeData parent_node;
+    parent_node.revision_id = parent_id;
+    parent_node.parent_revision_ids = parent_revision.data().parent_revision_ids;
+    data.ancestor_graph.push_back(std::move(parent_node));
     data.timestamp_ms = timestamp_ms;
     data.slot_id.assign(unlocked.slot_id.begin(), unlocked.slot_id.end());
     if (!unlocked.recovery_slot) {

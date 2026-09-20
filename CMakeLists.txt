@@ -94,6 +94,15 @@ if(SCPEFE_BUILD_NODE_ADDON)
         SUFFIX ".node"
         CXX_EXTENSIONS OFF
     )
+    if(BUILD_TESTING)
+        find_program(NODE_EXECUTABLE node REQUIRED)
+        add_test(
+            NAME scpefe.native-addon-head-witness
+            COMMAND ${NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-head-witness-addon.integration.mjs
+                $<TARGET_FILE:scpefe_electron_native>
+        )
+    endif()
 endif()
 
 if(MSVC)

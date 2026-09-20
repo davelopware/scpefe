@@ -173,8 +173,16 @@ typedef struct scpefe_revision_limits_v1 {
     size_t max_parent_count;
 } scpefe_revision_limits_v1;
 
+/* Borrowed view of one authenticated ancestor and its direct parent IDs. */
+typedef struct scpefe_revision_graph_node_v1 {
+    const uint8_t *revision_id;
+    const uint8_t *parent_revision_ids;
+    size_t parent_count;
+} scpefe_revision_graph_node_v1;
+
 /*
  * parent_revision_ids points to parent_count consecutive 32-byte revision IDs.
+ * ancestor_graph points to ancestor_count authenticated historical nodes.
  * String fields are UTF-8 byte spans and need not be NUL terminated.
  */
 typedef struct scpefe_snapshot_revision_v1 {
@@ -199,6 +207,8 @@ typedef struct scpefe_snapshot_revision_v1 {
     size_t content_hash_size;
     const char *content;
     size_t content_size;
+    const scpefe_revision_graph_node_v1 *ancestor_graph;
+    size_t ancestor_count;
 } scpefe_snapshot_revision_v1;
 
 /* Returns the supported C ABI version. */
