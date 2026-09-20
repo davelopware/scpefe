@@ -202,6 +202,103 @@ test("restart finishes an interrupted invitation claim with its replacement cred
       ["Interrupted publication was completed and verified."]);
   });
 
+test("claim cleanup is restart-safe at every removal boundary", async (t) => {
+  for (const fault of ["before-transaction", "after-transaction",
+    "before-journal", "after-journal", "before-sidecar", "after-sidecar"]) {
+    await t.test(fault, async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-cleanup-"));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const target = path.join(directory, "document.scpefe");
+      const profilePath = await writeProfile(directory, "Grace", "Private PC");
+      await fs.writeFile(target, "invited");
+      const temporary = "temporary invitation password";
+      const replacement = "private replacement password";
+      const documentId = "51".repeat(16);
+      const journalKey = Buffer.alloc(32, 9);
+      const common = { readOnly: true, documentId,
+        baseRevision: "62".repeat(32) };
+      const native = {
+        openDocument(bytes, password) {
+          if (bytes.toString() === "invited" && password === temporary) {
+            return { ...common, journalKey: Buffer.from(journalKey), content: "",
+              canEdit: false, canAddPasswords: false, mustBeChanged: true };
+          }
+          if (bytes.toString() === "claimed" && password === replacement) {
+            return { ...common, journalKey: Buffer.from(journalKey), content: "secret",
+              canEdit: true, canAddPasswords: false, mustBeChanged: false };
+          }
+          throw new Error("authentication failed");
+        },
+        claimInvitation: () => Buffer.from("claimed"),
+      };
+      const first = new DocumentService({ native, fs, profilePath,
+        publicationCapabilities });
+      await first.openDocument(target, temporary);
+      const write = first.journals.write.bind(first.journals);
+      first.journals.write = async (...args) => {
+        await write(...args);
+        if (args[2]?.publication?.stage === "replaced") {
+          throw new Error("simulated process loss after target replacement");
+        }
+      };
+      await assert.rejects(first.claimInvitation(replacement), /process loss/);
+      const record = await first.journals.read(documentId, journalKey);
+      if (fault.endsWith("transaction")) {
+        await fs.writeFile(record.publication.transactionFile, "claimed");
+      }
+
+      let injected = false;
+      const faultFs = Object.create(fs);
+      faultFs.unlink = async (file) => {
+        const transactionFault = fault.endsWith("transaction")
+          && file === record.publication.transactionFile;
+        const sidecarFault = fault.endsWith("sidecar")
+          && file === record.publication.baseFile;
+        if (!injected && (transactionFault || sidecarFault)) {
+          injected = true;
+          if (fault.startsWith("after")) await fs.unlink(file);
+          throw new Error(`simulated ${fault} cleanup fault`);
+        }
+        return fs.unlink(file);
+      };
+      const interrupted = new DocumentService({ native, fs: faultFs, profilePath,
+        publicationCapabilities });
+      if (fault.endsWith("journal")) {
+        const clear = interrupted.journals.clear.bind(interrupted.journals);
+        interrupted.journals.clear = async (...args) => {
+          if (!injected) {
+            injected = true;
+            if (fault.startsWith("after")) await clear(...args);
+            throw new Error(`simulated ${fault} cleanup fault`);
+          }
+          return clear(...args);
+        };
+      }
+      const interruptedOpen = await interrupted.openDocument(target, replacement);
+      assert.equal(interruptedOpen.content, "secret");
+      assert.equal(injected, true);
+
+      const clean = new DocumentService({ native, fs, profilePath,
+        publicationCapabilities });
+      const opened = await clean.openDocument(target, replacement);
+      assert.equal(opened.content, "secret");
+      assert.throws(() => native.openDocument(Buffer.from("claimed"), temporary),
+        /authentication failed/);
+      assert.equal(await clean.journals.read(documentId, journalKey), null);
+      await assert.rejects(fs.readFile(record.publication.baseFile),
+        (error) => error.code === "ENOENT");
+      await assert.rejects(fs.readFile(record.publication.transactionFile),
+        (error) => error.code === "ENOENT");
+
+      await clean.publications.publish({ documentId, journalKey, target,
+        base: Buffer.from("claimed"), candidate: Buffer.from("future"),
+        text: "", cursor: { start: 0, end: 0 },
+        baseRevision: common.baseRevision });
+      assert.equal(await fs.readFile(target, "utf8"), "future");
+    });
+  }
+});
+
 test("generates a one-time invitation secret and publishes it under the held lease", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-invite-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

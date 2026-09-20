@@ -122,15 +122,25 @@ export class PublicationService {
     return readIfPresent(this.fs, recoveryBasePath(target));
   }
 
+  async cleanupOrphanedRecoveryBase(target) {
+    const recoveryBase = await readIfPresent(this.fs, recoveryBasePath(target));
+    if (recoveryBase) await this.fs.unlink(recoveryBasePath(target));
+  }
+
   async #complete(documentId, journalKey, initialRecord) {
     let record = initialRecord;
     const publication = record.publication;
     const candidate = Buffer.from(publication.candidate, "base64");
     let handle;
     try {
-      const recoveryBase = await readIfPresent(this.fs, publication.baseFile);
+      let recoveryBase = await readIfPresent(this.fs, publication.baseFile);
       if (recoveryBase && hash(recoveryBase) !== publication.baseHash) {
-        throw new Error("Tracked recovery base does not match its publication");
+        const currentBase = await readIfPresent(this.fs, publication.target);
+        if (!currentBase || hash(currentBase) !== publication.baseHash) {
+          throw new Error("Tracked recovery base does not match its publication");
+        }
+        await this.fs.unlink(publication.baseFile);
+        recoveryBase = null;
       }
       if (!recoveryBase) {
         const currentBase = await readIfPresent(this.fs, publication.target);

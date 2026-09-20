@@ -189,6 +189,21 @@ int main(void)
             (const uint8_t *)owner, sizeof(owner) - 1, &unlocked)
             == SCPEFE_STATUS_AUTHENTICATION_FAILED);
         CHECK(unlocked == NULL);
+        memcpy(replayed, claimed, claimed_size);
+        replayed[prefix_size + current_record_size] ^= 1;
+        extra_size = 0;
+        CHECK(scpefe_password_container_change_password(
+            replayed, claimed_size,
+            (const uint8_t *)owner, sizeof(owner) - 1,
+            (const uint8_t *)"violet-correct-horse-battery-planet-92831",
+            strlen("violet-correct-horse-battery-planet-92831"),
+            NULL, 0, &extra_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(scpefe_password_container_change_password(
+            replayed, claimed_size,
+            (const uint8_t *)recovery, sizeof(recovery) - 1,
+            (const uint8_t *)"harbour-orchid-cobalt-window-forest-63842",
+            strlen("harbour-orchid-cobalt-window-forest-63842"),
+            NULL, 0, &extra_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
         free(replayed);
     }
     CHECK(claim(claimed, claimed_size, replacement,

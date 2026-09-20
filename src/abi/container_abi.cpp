@@ -16,8 +16,6 @@
 #include <utility>
 #include <vector>
 
-extern "C" void sodium_memzero(void *buffer, std::size_t size);
-
 using scpefe::container::ContainerError;
 using scpefe::container::ContainerFailure;
 using scpefe::container::PasswordContainer;
@@ -78,7 +76,7 @@ bool read_limits(
 
 struct scpefe_unlocked_container {
     /* Takes ownership of authenticated unlocked values. */
-    explicit scpefe_unlocked_container(UnlockedContainerData value)
+    explicit scpefe_unlocked_container(UnlockedContainerData &&value) noexcept
         : data(std::move(value)) {}
     UnlockedContainerData data;
 };
@@ -542,18 +540,5 @@ scpefe_status scpefe_unlocked_container_work_journal_key(
 
 void scpefe_unlocked_container_destroy(scpefe_unlocked_container *unlocked)
 {
-    if (unlocked == nullptr) return;
-    sodium_memzero(
-        unlocked->data.document_id.data(), unlocked->data.document_id.size()
-    );
-    sodium_memzero(unlocked->data.slot_id.data(), unlocked->data.slot_id.size());
-    sodium_memzero(unlocked->data.work_journal_key.data(),
-        unlocked->data.work_journal_key.size());
-    if (!unlocked->data.encoded_snapshot_revision.empty()) {
-        sodium_memzero(
-            unlocked->data.encoded_snapshot_revision.data(),
-            unlocked->data.encoded_snapshot_revision.size()
-        );
-    }
     delete unlocked;
 }

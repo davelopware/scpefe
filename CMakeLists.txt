@@ -33,6 +33,7 @@ else()
         src/abi/context_abi.cpp
         src/container/password_container.cpp
         src/container/recoverable_password_container.cpp
+        src/container/unlocked_container_data.cpp
         src/core/context.cpp
         src/core/host_services.cpp
         src/document/new_document.cpp

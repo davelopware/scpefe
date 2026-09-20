@@ -21,6 +21,19 @@ struct EditingLeaseData {
 
 /* Authenticated semantic values recovered from one encrypted container. */
 struct UnlockedContainerData {
+    /* Creates empty unlocked values. */
+    UnlockedContainerData() = default;
+    /* Transfers unlocked values and wipes fixed secrets in the source. */
+    UnlockedContainerData(UnlockedContainerData &&other) noexcept;
+    /* Replaces unlocked values and wipes fixed secrets in the source. */
+    UnlockedContainerData &operator=(UnlockedContainerData &&other) noexcept;
+    /* Wipes all owned authenticated plaintext before releasing storage. */
+    ~UnlockedContainerData();
+    /* Prevents duplicating authenticated plaintext through construction. */
+    UnlockedContainerData(const UnlockedContainerData &) = delete;
+    /* Prevents duplicating authenticated plaintext through assignment. */
+    UnlockedContainerData &operator=(const UnlockedContainerData &) = delete;
+
     std::array<std::uint8_t, 16> document_id{};
     std::array<std::uint8_t, 16> slot_id{};
     std::array<std::uint8_t, 32> work_journal_key{};
@@ -31,6 +44,10 @@ struct UnlockedContainerData {
     std::string slot_identity_email;
     EditingLeaseData editing_lease;
     std::vector<std::uint8_t> encoded_snapshot_revision;
+
+private:
+    /* Wipes all currently owned authenticated plaintext in place. */
+    void clear() noexcept;
 };
 
 } // namespace scpefe::container

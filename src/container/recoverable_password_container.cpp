@@ -253,34 +253,6 @@ void clear(std::array<std::uint8_t, key_size> &a,
     if (!snapshot.empty()) sodium_memzero(snapshot.data(), snapshot.size());
 }
 
-void clear_string(std::string &value)
-{
-    if (!value.empty()) sodium_memzero(value.data(), value.size());
-}
-
-void clear_unlocked(UnlockedContainerData &value)
-{
-    sodium_memzero(value.document_id.data(), value.document_id.size());
-    sodium_memzero(value.slot_id.data(), value.slot_id.size());
-    sodium_memzero(value.work_journal_key.data(), value.work_journal_key.size());
-    clear_string(value.slot_identity_name);
-    clear_string(value.slot_identity_email);
-    sodium_memzero(value.editing_lease.session_id.data(),
-        value.editing_lease.session_id.size());
-    clear_string(value.editing_lease.holder_name);
-    clear_string(value.editing_lease.holder_email);
-    clear_string(value.editing_lease.device_name);
-    if (!value.encoded_snapshot_revision.empty())
-        sodium_memzero(value.encoded_snapshot_revision.data(),
-            value.encoded_snapshot_revision.size());
-}
-
-auto clear_unlocked_on_scope_exit(UnlockedContainerData &value)
-{
-    return std::unique_ptr<UnlockedContainerData, void (*)(UnlockedContainerData *)>{
-        &value, [](UnlockedContainerData *unlocked) { clear_unlocked(*unlocked); }};
-}
-
 std::array<std::uint8_t, header_size> slot_additional_data(
     const std::uint8_t *header
 )
@@ -753,7 +725,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
     const std::uint32_t slot_count = layout.base_slot_count;
     auto current = unlock(container, container_size, password, password_size,
         format::RevisionLimits::defaults());
-    const auto current_clear = clear_unlocked_on_scope_exit(current);
     if (current.must_be_changed || (current.permissions & 1u) == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
 
@@ -882,7 +853,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
     try {
         auto probe = unlock(container, container_size, new_password, new_password_size,
             format::RevisionLimits::defaults());
-        const auto probe_clear = clear_unlocked_on_scope_exit(probe);
         throw ContainerFailure{ContainerError::password_already_in_use};
     } catch (const ContainerFailure &failure) {
         if (failure.error != ContainerError::authentication_failed) throw;
@@ -955,6 +925,11 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
                 return output;
             }
         }
+        if (authenticated) {
+            if (plain_size != slot.size() || slot.back() != full_permissions)
+                throw ContainerFailure{ContainerError::malformed_container};
+            require_valid_slot_state(container, container_size, layout, slot.data());
+        }
         for (const auto &record : layout.invitations) {
             std::vector<std::uint8_t> invited;
             const auto invited_clear = clear_on_scope_exit(invited);
@@ -967,8 +942,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
         }
         if (!authenticated)
             throw ContainerFailure{ContainerError::authentication_failed};
-        if (plain_size != slot.size() || slot.back() != full_permissions)
-            throw ContainerFailure{ContainerError::malformed_container};
 
         derive_snapshot_key(snapshot_key, slot.data());
         snapshot.resize(static_cast<std::size_t>(encrypted_size) - tag_size);
@@ -1043,14 +1016,12 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
         throw ContainerFailure{ContainerError::invalid_argument};
     auto creator = unlock(container, container_size, creator_password,
         creator_password_size, format::RevisionLimits::defaults());
-    const auto creator_clear = clear_unlocked_on_scope_exit(creator);
     if (creator.must_be_changed || (creator.permissions & 2u) == 0
         || (permissions & ~creator.permissions) != 0)
         throw ContainerFailure{ContainerError::invalid_argument};
     try {
         auto probe = unlock(container, container_size, temporary_password,
             temporary_password_size, format::RevisionLimits::defaults());
-        const auto probe_clear = clear_unlocked_on_scope_exit(probe);
         throw ContainerFailure{ContainerError::password_already_in_use};
     } catch (const ContainerFailure &failure) {
         if (failure.error != ContainerError::authentication_failed) throw;
@@ -1141,7 +1112,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     try {
         auto probe = unlock(container, container_size, new_password, new_password_size,
             format::RevisionLimits::defaults());
-        const auto probe_clear = clear_unlocked_on_scope_exit(probe);
         throw ContainerFailure{ContainerError::password_already_in_use};
     } catch (const ContainerFailure &failure) {
         if (failure.error != ContainerError::authentication_failed) throw;
@@ -1198,7 +1168,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
     const auto encoded_lease = encode_lease(lease);
     auto current = unlock(container, container_size, password, password_size,
         format::RevisionLimits::defaults());
-    const auto current_clear = clear_unlocked_on_scope_exit(current);
     if (current.must_be_changed || (current.permissions & 1u) == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
     const std::uint32_t slot_count = read_u32(container + slot_count_offset);

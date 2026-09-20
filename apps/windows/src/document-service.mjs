@@ -158,6 +158,9 @@ export class DocumentService {
           && journal.baseRevision === nativeOpened.baseRevision) {
         recovery = journal;
       }
+      if (!journal && !recoveredPublication) {
+        await this.publications.cleanupOrphanedRecoveryBase(target);
+      }
     } catch (error) {
       if (publicationCompleted) throw error;
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
