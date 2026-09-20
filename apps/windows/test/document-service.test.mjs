@@ -133,8 +133,9 @@ async function migrationFixture(t, prefix = "scpefe-migration-fixture-", fsImpl 
       containerFormatVersion: current ? 3 : 2,
       historyEventType: current ? "format-migration" : "",
       historyEventDetail: current ? "container-version-2-to-3" : "",
-      lease: current ? activeLease : inactive };
+      lease: current ? activeLease : native.legacyLease };
   }, migrateDocument() { native.migrationHook?.(); return candidate; } };
+  native.legacyLease = inactive;
   const options = { native, fs: fsImpl, profilePath, publicationCapabilities,
     journalDirectory: path.join(directory, "journals"),
     witnessDirectory: path.join(directory, "witnesses"), now: () => 1000,
@@ -343,6 +344,45 @@ test("restart completes an interrupted tracked migration publication", async (t)
   const opened = await restarted.openDocument(fixture.target, "owner password words");
   assert.equal(opened.migrationRequired, undefined);
   assert.ok((await fs.readFile(fixture.target)).equals(fixture.candidate));
+});
+
+test("migration applies uncertain-clock observation and explicit takeover rules", async (t) => {
+  const fixture = await migrationFixture(t, "scpefe-migration-clock-");
+  let monotonic = 10;
+  fixture.service.monotonicNow = () => monotonic;
+  fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
+    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
+    holderName: "Remote editor", holderEmail: "remote@example.test",
+    deviceName: "Future clock" };
+  await assert.rejects(fixture.service.migrateDocument(), (error) => {
+    assert.equal(error.code, "LEASE_CLOCK_UNCERTAIN");
+    assert.equal(error.lease.holderName, "Remote editor");
+    return true;
+  });
+  assert.ok((await fs.readFile(fixture.target)).equals(fixture.legacy));
+  monotonic += 599_999;
+  await assert.rejects(fixture.service.migrateDocument(),
+    (error) => error.code === "LEASE_CLOCK_UNCERTAIN");
+  monotonic += 1;
+  assert.equal((await fixture.service.migrateDocument()).migrated, true);
+});
+
+test("migration force takeover is explicit and target races remain rejected", async (t) => {
+  const fixture = await migrationFixture(t, "scpefe-migration-force-");
+  fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
+    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
+    holderName: "Remote editor", holderEmail: "remote@example.test",
+    deviceName: "Future clock" };
+  assert.equal((await fixture.service.migrateDocument(undefined,
+    { forceTakeover: true })).migrated, true);
+
+  const racing = await migrationFixture(t, "scpefe-migration-force-race-");
+  racing.native.legacyLease = { ...fixture.native.legacyLease };
+  const competing = Buffer.from("competing-container");
+  racing.native.migrationHook = () => fsSync.writeFileSync(racing.target, competing);
+  await assert.rejects(racing.service.migrateDocument(undefined,
+    { forceTakeover: true }), /Publication/);
+  assert.ok((await fs.readFile(racing.target)).equals(competing));
 });
 
 test("view-only slots cannot enter edit mode", async (t) => {

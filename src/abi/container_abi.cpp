@@ -288,7 +288,16 @@ scpefe_status scpefe_migrate_document(
         || migration->lease.session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
         || !scpefe::format::span_is_valid(migration->lease.session_id,
             migration->lease.session_id_size)
-        || migration->lease.duration_ms == 0) return SCPEFE_STATUS_INVALID_ARGUMENT;
+        || migration->lease.duration_ms == 0
+        || migration->lease.holder_name_size > 4096
+        || migration->lease.holder_email_size > 4096
+        || migration->lease.device_name_size > 4096
+        || !scpefe::format::valid_utf8(migration->lease.holder_name,
+            migration->lease.holder_name_size)
+        || !scpefe::format::valid_utf8(migration->lease.holder_email,
+            migration->lease.holder_email_size)
+        || !scpefe::format::valid_utf8(migration->lease.device_name,
+            migration->lease.device_name_size)) return SCPEFE_STATUS_INVALID_ARGUMENT;
     try {
         scpefe::container::EditingLeaseData lease;
         lease.active = migration->lease.active != 0;

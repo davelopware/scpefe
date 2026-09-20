@@ -639,6 +639,30 @@ napi_value migrate_document(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value change_password(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3)
+            throw std::runtime_error(
+                "changePassword expects a Buffer, current password, and new password");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes current{env, args[1]};
+        const SecretBytes replacement{env, args[2]};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_password_container_change_password(
+                container, container_size, current.data(), current.size(),
+                replacement.data(), replacement.size(), output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
 napi_value save_document(napi_env env, napi_callback_info info)
 {
     try {
@@ -920,6 +944,8 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"migrateDocument", nullptr, migrate_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"changePassword", nullptr, change_password, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
         {"addInvitation", nullptr, add_invitation, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
@@ -931,7 +957,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 14, methods));
+    check(env, napi_define_properties(env, exports, 15, methods));
     return exports;
 }
 

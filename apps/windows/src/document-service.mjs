@@ -1290,7 +1290,7 @@ export class DocumentService {
       previousHead, head: active.baseRevision });
   }
 
-  async migrateDocument(backupTarget) {
+  async migrateDocument(backupTarget, { forceTakeover = false } = {}) {
     const active = this.active;
     if (!active?.migrationRequired) throw new Error("No older container is open");
     if (!active.slotCanEdit || active.headMismatch || active.profileMismatch
@@ -1307,7 +1307,7 @@ export class DocumentService {
         || path.resolve(selectedBackupTarget) === path.resolve(active.target)) {
       throw new TypeError("A distinct pre-migration backup target is required");
     }
-    const sessionId = this.randomSessionId();
+    let acquisition;
     let published;
     let reopened;
     try {
@@ -1321,10 +1321,7 @@ export class DocumentService {
               || before.baseRevision !== active.baseRevision) {
             throw new Error("The target changed before migration");
           }
-          const age = this.utcNow() - before.lease.holderUtcMs;
-          if (before.lease.active && !(age >= before.lease.durationMs)) {
-            throw new Error(`Editing lease held by ${before.lease.holderName || "another editor"}`);
-          }
+          acquisition = this.#leaseAcquisition(active, before.lease, forceTakeover);
           try {
             await this.publications.publishReplica({
               target: selectedBackupTarget, candidate: current });
@@ -1338,8 +1335,9 @@ export class DocumentService {
           if (!(await this.fs.readFile(active.target)).equals(current)) {
             throw new Error("The target changed after the pre-migration backup");
           }
-          const nextLease = { active: true, sessionId: sessionId.toString("hex"),
-            heartbeatCounter: 1, holderUtcMs: this.utcNow(),
+          const nextLease = { active: true,
+            sessionId: acquisition.sessionId.toString("hex"),
+            heartbeatCounter: acquisition.heartbeatCounter, holderUtcMs: this.utcNow(),
             durationMs: before.lease.durationMs, holderName: profile.name,
             holderEmail: profile.email, deviceName: profile.deviceName };
           const candidate = this.native.migrateDocument(current, active.password, {
@@ -1389,8 +1387,8 @@ export class DocumentService {
     active.editMode = true;
     active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
     active.dirty = false;
-    active.leaseSessionId = Buffer.from(sessionId);
-    active.leaseCounter = 1;
+    active.leaseSessionId = Buffer.from(acquisition.sessionId);
+    active.leaseCounter = acquisition.heartbeatCounter;
     this.leaseGeneration += 1;
     this.#scheduleHeartbeat(this.leaseGeneration);
     await this.witnesses.observe(active.target, active.observation);
@@ -1478,34 +1476,10 @@ export class DocumentService {
       const latest = this.#validateNativeOpened(
         this.native.openDocument(bytes, active.password));
       const lease = latest.lease;
-      const suspended = this.suspendedLeases.get(active.documentId);
-      const sessionMatches = lease.active && suspended
-        && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
-      const age = this.utcNow() - lease.holderUtcMs;
-      if (sessionMatches && lease.heartbeatCounter !== suspended.counter) {
-        const error = new Error("Editing lease changed while this session was locked");
-        error.code = "LEASE_CHANGED";
-        error.lease = lease;
-        throw error;
-      }
-      const sameSession = sessionMatches && age >= 0 && age < lease.durationMs;
-      if (lease.active && !sameSession) {
-        const reliableExpiry = age >= lease.durationMs;
-        const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
-        const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
-        this.leaseObservations.set(key, firstSeen);
-        const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
-        if (!reliableExpiry && !observedStale && !forceTakeover) {
-          const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
-          error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
-          error.lease = lease;
-          throw error;
-        }
-      }
-      const sessionId = sameSession ? suspended.sessionId : this.randomSessionId();
+      const acquisition = this.#leaseAcquisition(active, lease, forceTakeover);
       const nextLease = {
-        active: true, sessionId: sessionId.toString("hex"),
-        heartbeatCounter: sameSession ? lease.heartbeatCounter + 1 : 1,
+        active: true, sessionId: acquisition.sessionId.toString("hex"),
+        heartbeatCounter: acquisition.heartbeatCounter,
         holderUtcMs: this.utcNow(), durationMs: lease.durationMs,
         holderName: profile.name, holderEmail: profile.email,
         deviceName: profile.deviceName,
@@ -1513,11 +1487,40 @@ export class DocumentService {
       const candidate = this.native.updateLease(bytes, active.password, nextLease);
       await this.#atomicWrite(active.target, candidate, true);
       active.baseContainer = Buffer.from(candidate);
-      active.leaseSessionId = Buffer.from(sessionId);
+      active.leaseSessionId = Buffer.from(acquisition.sessionId);
       active.leaseCounter = nextLease.heartbeatCounter;
     });
     this.leaseGeneration += 1;
     this.#scheduleHeartbeat(this.leaseGeneration);
+  }
+
+  #leaseAcquisition(active, lease, forceTakeover) {
+    const suspended = this.suspendedLeases.get(active.documentId);
+    const sessionMatches = lease.active && suspended
+      && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
+    const age = this.utcNow() - lease.holderUtcMs;
+    if (sessionMatches && lease.heartbeatCounter !== suspended.counter) {
+      const error = new Error("Editing lease changed while this session was locked");
+      error.code = "LEASE_CHANGED";
+      error.lease = lease;
+      throw error;
+    }
+    const sameSession = sessionMatches && age >= 0 && age < lease.durationMs;
+    if (lease.active && !sameSession) {
+      const reliableExpiry = age >= lease.durationMs;
+      const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
+      const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
+      this.leaseObservations.set(key, firstSeen);
+      const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
+      if (!reliableExpiry && !observedStale && !forceTakeover) {
+        const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
+        error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
+        error.lease = lease;
+        throw error;
+      }
+    }
+    return { sessionId: sameSession ? suspended.sessionId : this.randomSessionId(),
+      heartbeatCounter: sameSession ? lease.heartbeatCounter + 1 : 1 };
   }
 
   #scheduleHeartbeat(generation) {
