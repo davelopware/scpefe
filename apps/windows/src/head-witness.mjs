@@ -4,18 +4,26 @@ import path from "node:path";
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
 const KEY_BYTES = 32;
+const MAX_GRAPH_NODES = 1025;
+const MAX_PARENTS = 8;
 
 function targetKey(target) {
   return createHash("sha256").update(target, "utf8").digest("hex");
 }
 
 function validateGraph(value) {
-  if (!Array.isArray(value)) throw new TypeError("invalid authenticated revision graph");
+  if (!Array.isArray(value) || value.length > MAX_GRAPH_NODES) {
+    throw new TypeError("invalid authenticated revision graph");
+  }
   const graph = new Map();
   for (const node of value) {
     if (!node || !REVISION_ID.test(node.revisionId)
         || !Array.isArray(node.parentRevisionIds)
+        || node.parentRevisionIds.length > MAX_PARENTS
         || node.parentRevisionIds.some((parent) => !REVISION_ID.test(parent))) {
+      throw new TypeError("invalid authenticated revision graph");
+    }
+    if (graph.has(node.revisionId)) {
       throw new TypeError("invalid authenticated revision graph");
     }
     graph.set(node.revisionId, [...new Set(node.parentRevisionIds)]);
@@ -53,6 +61,9 @@ function mergeGraphs(previous, observed) {
   for (const [revision, parents] of validateGraph(observed)) {
     const known = merged.get(revision) ?? [];
     merged.set(revision, [...new Set([...known, ...parents])]);
+  }
+  if (merged.size > MAX_GRAPH_NODES) {
+    throw new TypeError("authenticated revision graph exceeds its node limit");
   }
   return merged;
 }

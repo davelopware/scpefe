@@ -41,6 +41,10 @@ static int inspect_saved(
     CHECK(scpefe_decoded_snapshot_revision_view(revision, &revision_view)
         == SCPEFE_STATUS_OK);
     CHECK(revision_view.parent_count == 1);
+    CHECK(revision_view.ancestor_count == 1);
+    CHECK(memcmp(revision_view.ancestor_graph[0].revision_id,
+        revision_view.parent_revision_ids, SCPEFE_REVISION_ID_SIZE) == 0);
+    CHECK(revision_view.ancestor_graph[0].parent_count == 0);
     CHECK(revision_view.timestamp_ms == 1726747300456u);
     CHECK(revision_view.content_size == strlen(" first \nsecond\n"));
     CHECK(memcmp(revision_view.content, " first \nsecond\n",

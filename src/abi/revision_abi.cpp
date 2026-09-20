@@ -6,7 +6,9 @@
 #include "format/snapshot_revision_data.hpp"
 #include "format/text_validation.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <cstddef>
 #include <new>
 #include <limits>
 #include <string>
@@ -20,6 +22,9 @@ using scpefe::format::SnapshotRevision;
 using scpefe::format::SnapshotRevisionData;
 
 namespace {
+
+constexpr std::size_t snapshot_revision_v1_base_size =
+    offsetof(scpefe_snapshot_revision_v1, ancestor_graph);
 
 bool has_complete_limits(const scpefe_revision_limits_v1 *limits)
 {
@@ -51,10 +56,13 @@ RevisionLimits limits_from_external(const scpefe_revision_limits_v1 &limits)
 }
 
 SnapshotRevisionData data_from_external(
-    const scpefe_snapshot_revision_v1 &revision
+    const scpefe_snapshot_revision_v1 &revision,
+    const RevisionLimits &limits
 )
 {
-    if (revision.struct_size < sizeof(scpefe_snapshot_revision_v1)
+    const bool has_ancestor_graph =
+        revision.struct_size >= sizeof(scpefe_snapshot_revision_v1);
+    if (revision.struct_size < snapshot_revision_v1_base_size
         || revision.format_version != SCPEFE_REVISION_FORMAT_VERSION
         || revision.slot_id_size != SCPEFE_SLOT_ID_SIZE
         || revision.content_hash_size != SCPEFE_CONTENT_HASH_SIZE
@@ -76,8 +84,17 @@ SnapshotRevisionData data_from_external(
         || !scpefe::format::span_is_valid(revision.content_hash,
             revision.content_hash_size)
         || !scpefe::format::span_is_valid(revision.content,
-            revision.content_size)) {
+            revision.content_size)
+        || (has_ancestor_graph && !scpefe::format::span_is_valid(
+            revision.ancestor_graph, revision.ancestor_count))) {
         throw RevisionFailure{RevisionError::invalid_argument};
+    }
+    if (revision.parent_count > limits.max_parent_count()
+        || (has_ancestor_graph
+            && (revision.ancestor_count > limits.max_collection_entries()
+                || (revision.ancestor_count != 0
+                    && limits.max_nesting_depth() < 4)))) {
+        throw RevisionFailure{RevisionError::limit_exceeded};
     }
 
     SnapshotRevisionData data;
@@ -119,16 +136,43 @@ SnapshotRevisionData data_from_external(
     if (revision.content_size != 0) {
         data.content.assign(revision.content, revision.content_size);
     }
+    const std::size_t ancestor_count = has_ancestor_graph
+        ? revision.ancestor_count : 0;
+    data.ancestor_graph.reserve(ancestor_count);
+    for (std::size_t index = 0; index < ancestor_count; ++index) {
+        const auto &external = revision.ancestor_graph[index];
+        if (external.parent_count > limits.max_parent_count()) {
+            throw RevisionFailure{RevisionError::limit_exceeded};
+        }
+        if (external.parent_count > std::numeric_limits<std::size_t>::max()
+                / SCPEFE_REVISION_ID_SIZE
+            || !scpefe::format::span_is_valid(external.revision_id,
+                SCPEFE_REVISION_ID_SIZE)
+            || !scpefe::format::span_is_valid(external.parent_revision_ids,
+                external.parent_count * SCPEFE_REVISION_ID_SIZE)) {
+            throw RevisionFailure{RevisionError::invalid_argument};
+        }
+        scpefe::format::RevisionGraphNodeData node;
+        std::memcpy(node.revision_id.data(), external.revision_id,
+            node.revision_id.size());
+        if (external.parent_count != 0) {
+            node.parent_revision_ids.assign(external.parent_revision_ids,
+                external.parent_revision_ids
+                    + external.parent_count * SCPEFE_REVISION_ID_SIZE);
+        }
+        data.ancestor_graph.push_back(std::move(node));
+    }
     return data;
 }
 
 void populate_external_view(
     const SnapshotRevisionData &data,
+    const std::vector<scpefe_revision_graph_node_v1> &ancestor_views,
     scpefe_snapshot_revision_v1 &view
 )
 {
     const std::uint32_t struct_size = view.struct_size;
-    view = scpefe_snapshot_revision_v1{
+    const scpefe_snapshot_revision_v1 complete{
         struct_size, SCPEFE_REVISION_FORMAT_VERSION,
         data.parent_revision_ids.data(),
         data.parent_revision_ids.size() / SCPEFE_REVISION_ID_SIZE,
@@ -140,15 +184,29 @@ void populate_external_view(
         data.device_name.data(), data.device_name.size(),
         data.content_hash.data(), data.content_hash.size(),
         data.content.data(), data.content.size(),
+        ancestor_views.data(), ancestor_views.size(),
     };
+    std::memcpy(&view, &complete,
+        std::min<std::size_t>(struct_size, sizeof(complete)));
 }
 
 } // namespace
 
 struct scpefe_decoded_snapshot_revision {
     explicit scpefe_decoded_snapshot_revision(SnapshotRevision value)
-        : implementation(std::move(value)) {}
+        : implementation(std::move(value))
+    {
+        const auto &graph = implementation.data().ancestor_graph;
+        ancestor_views.reserve(graph.size());
+        for (const auto &node : graph) {
+            ancestor_views.push_back(scpefe_revision_graph_node_v1{
+                node.revision_id.data(), node.parent_revision_ids.data(),
+                node.parent_revision_ids.size() / SCPEFE_REVISION_ID_SIZE,
+            });
+        }
+    }
     SnapshotRevision implementation;
+    std::vector<scpefe_revision_graph_node_v1> ancestor_views;
 };
 
 scpefe_status scpefe_revision_limits_default(scpefe_revision_limits_v1 *limits)
@@ -185,7 +243,7 @@ scpefe_status scpefe_snapshot_revision_encode(
     try {
         const RevisionLimits internal_limits = limits_from_external(*limits);
         const SnapshotRevision value = SnapshotRevision::create(
-            data_from_external(*revision), internal_limits
+            data_from_external(*revision, internal_limits), internal_limits
         );
         const std::vector<std::uint8_t> encoded = value.encode();
         if (encoded.size() > internal_limits.max_input_bytes()) {
@@ -241,10 +299,11 @@ scpefe_status scpefe_decoded_snapshot_revision_view(
 )
 {
     if (revision == nullptr || view == nullptr
-        || view->struct_size < sizeof(scpefe_snapshot_revision_v1)) {
+        || view->struct_size < snapshot_revision_v1_base_size) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
-    populate_external_view(revision->implementation.data(), *view);
+    populate_external_view(revision->implementation.data(),
+        revision->ancestor_views, *view);
     return SCPEFE_STATUS_OK;
 }
 

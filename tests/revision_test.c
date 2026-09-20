@@ -308,6 +308,43 @@ static int emits_readable_diagnostic_json(void)
     return 0;
 }
 
+static int bounds_and_validates_authenticated_ancestor_graph(void)
+{
+    scpefe_snapshot_revision_v1 revision = example_revision();
+    scpefe_revision_limits_v1 limits = {0};
+    scpefe_revision_graph_node_v1 nodes[12] = {0};
+    uint8_t ids[12][SCPEFE_REVISION_ID_SIZE] = {{0}};
+    size_t encoded_size = 0;
+    size_t index = 0;
+    limits.struct_size = sizeof(limits);
+    CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
+    for (index = 0; index < 12; ++index) {
+        ids[index][0] = (uint8_t)(index + 1);
+        nodes[index].revision_id = ids[index];
+    }
+    revision.ancestor_graph = nodes;
+    revision.ancestor_count = 12;
+    limits.max_collection_entries = 11;
+    CHECK(scpefe_snapshot_revision_encode(&revision, &limits, NULL, 0,
+        &encoded_size) == SCPEFE_STATUS_LIMIT_EXCEEDED);
+
+    CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
+    revision.ancestor_count = 1;
+    limits.max_nesting_depth = 3;
+    CHECK(scpefe_snapshot_revision_encode(&revision, &limits, NULL, 0,
+        &encoded_size) == SCPEFE_STATUS_LIMIT_EXCEEDED);
+
+    CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
+    revision.ancestor_count = 2;
+    nodes[0].parent_revision_ids = ids[1];
+    nodes[0].parent_count = 1;
+    nodes[1].parent_revision_ids = ids[0];
+    nodes[1].parent_count = 1;
+    CHECK(scpefe_snapshot_revision_encode(&revision, &limits, NULL, 0,
+        &encoded_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
+    return 0;
+}
+
 static int write_example_record(const char *path)
 {
     scpefe_revision_limits_v1 limits = {0};
@@ -331,6 +368,8 @@ int main(int argc, char **argv)
     result = rejects_malformed_records_and_limit_violations();
     if (result != 0) return result;
     result = emits_readable_diagnostic_json();
+    if (result != 0) return result;
+    result = bounds_and_validates_authenticated_ancestor_graph();
     if (result != 0) return result;
     if (argc == 2) return write_example_record(argv[1]);
     return argc == 1 ? 0 : __LINE__;

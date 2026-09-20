@@ -45,3 +45,12 @@ test("persists advancing witnesses across restarts and detects tampering", async
   await fs.writeFile(storePath, JSON.stringify(envelope));
   await assert.rejects(restarted.read(target), /integrity check failed/);
 });
+
+test("rejects authenticated graphs beyond client traversal limits", () => {
+  const graph = Array.from({ length: 1026 }, (_value, index) =>
+    node(index.toString(16).padStart(64, "0")));
+  assert.throws(() => compareHeadWitness(null,
+    observed(graph.at(-1).revisionId, graph)), /invalid authenticated revision graph/);
+  assert.throws(() => compareHeadWitness(null,
+    observed(a, [node(a, Array(9).fill(b))])), /invalid authenticated revision graph/);
+});

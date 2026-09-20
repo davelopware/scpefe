@@ -73,23 +73,36 @@ void set_revision_graph(napi_env env, napi_value object,
     const std::uint8_t *revision_id, const scpefe_snapshot_revision_v1 &revision)
 {
     napi_value graph;
-    napi_value node;
-    napi_value parents;
-    check(env, napi_create_array_with_length(env, 1, &graph));
-    check(env, napi_create_object(env, &node));
-    const std::string id = hexadecimal(revision_id, SCPEFE_REVISION_ID_SIZE);
-    set_string(env, node, "revisionId", id.data(), id.size());
-    check(env, napi_create_array_with_length(env, revision.parent_count, &parents));
-    for (std::size_t index = 0; index < revision.parent_count; ++index) {
-        const std::string parent = hexadecimal(
-            revision.parent_revision_ids + index * SCPEFE_REVISION_ID_SIZE,
-            SCPEFE_REVISION_ID_SIZE);
-        napi_value value;
-        check(env, napi_create_string_utf8(env, parent.data(), parent.size(), &value));
-        check(env, napi_set_element(env, parents, index, value));
+    check(env, napi_create_array_with_length(
+        env, revision.ancestor_count + 1, &graph));
+    const auto add_node = [&](std::size_t graph_index, const std::uint8_t *id_bytes,
+                              const std::uint8_t *parent_bytes,
+                              std::size_t parent_count) {
+        napi_value node;
+        napi_value parents;
+        check(env, napi_create_object(env, &node));
+        const std::string id = hexadecimal(id_bytes, SCPEFE_REVISION_ID_SIZE);
+        set_string(env, node, "revisionId", id.data(), id.size());
+        check(env, napi_create_array_with_length(env, parent_count, &parents));
+        for (std::size_t index = 0; index < parent_count; ++index) {
+            const std::string parent = hexadecimal(
+                parent_bytes + index * SCPEFE_REVISION_ID_SIZE,
+                SCPEFE_REVISION_ID_SIZE);
+            napi_value value;
+            check(env, napi_create_string_utf8(
+                env, parent.data(), parent.size(), &value));
+            check(env, napi_set_element(env, parents, index, value));
+        }
+        check(env, napi_set_named_property(env, node, "parentRevisionIds", parents));
+        check(env, napi_set_element(env, graph, graph_index, node));
+    };
+    for (std::size_t index = 0; index < revision.ancestor_count; ++index) {
+        const auto &ancestor = revision.ancestor_graph[index];
+        add_node(index, ancestor.revision_id, ancestor.parent_revision_ids,
+            ancestor.parent_count);
     }
-    check(env, napi_set_named_property(env, node, "parentRevisionIds", parents));
-    check(env, napi_set_element(env, graph, 0, node));
+    add_node(revision.ancestor_count, revision_id,
+        revision.parent_revision_ids, revision.parent_count);
     check(env, napi_set_named_property(env, object, "revisionGraph", graph));
 }
 
