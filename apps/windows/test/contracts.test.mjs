@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult,
+import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequest,
+  validateCreationResult,
   validateBackupResult, validateCompactionResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
@@ -43,6 +44,33 @@ test("requires irrecoverability and independent recovery acknowledgements", () =
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   });
+});
+
+test("creation form confirms owner and optional recovery passwords", () => {
+  const request = {
+    ownerPassword: "owner password words",
+    ownerPasswordConfirmation: "owner password words",
+    recoveryPassword: "different recovery words",
+    recoveryPasswordConfirmation: "different recovery words",
+    content: "hello", understandsIrrecoverable: true,
+    storedRecoverySeparately: true,
+  };
+  assert.deepEqual(validateCreateFormRequest(request), request);
+  assert.throws(() => validateCreateFormRequest({ ...request,
+    ownerPasswordConfirmation: "mistyped owner words" }),
+  /owner passwords do not match/);
+  assert.throws(() => validateCreateFormRequest({ ...request,
+    recoveryPasswordConfirmation: "mistyped recovery words" }),
+  /recovery passwords do not match/);
+  assert.deepEqual(validateCreateFormRequest({ ...request,
+    recoveryPassword: "", recoveryPasswordConfirmation: "",
+    storedRecoverySeparately: false }), {
+    ...request, recoveryPassword: "", recoveryPasswordConfirmation: "",
+    storedRecoverySeparately: false,
+  });
+  assert.throws(() => validateCreateFormRequest({ ...request,
+    recoveryPassword: "", recoveryPasswordConfirmation: "recovery only" }),
+  /recovery passwords do not match/);
 });
 
 test("accepts only validated read-only native results", () => {

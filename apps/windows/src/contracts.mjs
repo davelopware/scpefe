@@ -127,6 +127,30 @@ export function validateCreateRequest(value) {
     storedRecoverySeparately: recoveryPassword !== null };
 }
 
+export function validateCreateFormRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("create request must be an object");
+  }
+  const ownerPassword = requiredText(value.ownerPassword, "owner password", 4096);
+  const ownerPasswordConfirmation = requiredText(value.ownerPasswordConfirmation,
+    "owner password confirmation", 4096);
+  if (ownerPasswordConfirmation !== ownerPassword) {
+    throw new TypeError("owner passwords do not match");
+  }
+  const recoveryPassword = value.recoveryPassword === ""
+    ? "" : requiredText(value.recoveryPassword, "recovery password", 4096);
+  const recoveryPasswordConfirmation = value.recoveryPasswordConfirmation === ""
+    ? "" : requiredText(value.recoveryPasswordConfirmation,
+      "recovery password confirmation", 4096);
+  if (recoveryPasswordConfirmation !== recoveryPassword) {
+    throw new TypeError("recovery passwords do not match");
+  }
+  const validated = validateCreateRequest({ ...value, ownerPassword,
+    recoveryPassword });
+  return { ...validated, recoveryPassword, ownerPasswordConfirmation,
+    recoveryPasswordConfirmation };
+}
+
 export function validatePassword(value) {
   return requiredText(value, "password", 4096);
 }

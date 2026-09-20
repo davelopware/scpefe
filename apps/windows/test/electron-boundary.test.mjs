@@ -86,7 +86,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   await assert.rejects(exposed.compactDocument(), /invalid compaction result/);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
+    ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "",
+    recoveryPasswordConfirmation: "",
     content: "hello",
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
@@ -95,7 +97,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:create",
     request: {
       ownerPassword: "owner password words",
-      recoveryPassword: null,
+      ownerPasswordConfirmation: "owner password words",
+      recoveryPassword: "",
+      recoveryPasswordConfirmation: "",
       content: "hello",
       understandsIrrecoverable: true,
       storedRecoverySeparately: false,
@@ -104,7 +108,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   creationResult = { created: true };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.createDocument({
     ownerPassword: "owner password words",
+    ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "different recovery words",
+    recoveryPasswordConfirmation: "different recovery words",
     content: "hello",
     understandsIrrecoverable: true,
     storedRecoverySeparately: true,
@@ -113,7 +119,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:create",
     request: {
       ownerPassword: "owner password words",
+      ownerPasswordConfirmation: "owner password words",
       recoveryPassword: "different recovery words",
+      recoveryPasswordConfirmation: "different recovery words",
       content: "hello",
       understandsIrrecoverable: true,
       storedRecoverySeparately: true,
@@ -121,11 +129,22 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
+    ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "different recovery words",
+    recoveryPasswordConfirmation: "different recovery words",
     content: "hello",
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /recovery password storage must be acknowledged/);
+  assert.equal(invocations.filter(({ channel }) =>
+    channel === "document:create").length, 2);
+  await assert.rejects(exposed.createDocument({
+    ownerPassword: "owner password words",
+    ownerPasswordConfirmation: "owner password typo",
+    recoveryPassword: "", recoveryPasswordConfirmation: "",
+    content: "hello", understandsIrrecoverable: true,
+    storedRecoverySeparately: false,
+  }), /owner passwords do not match/);
   assert.equal(invocations.filter(({ channel }) =>
     channel === "document:create").length, 2);
   await assert.rejects(exposed.backupDocument(), /invalid backup result/);
