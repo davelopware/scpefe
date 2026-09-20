@@ -99,6 +99,14 @@ On Windows, also pass `NODE_API_LIBRARY` for the matching SDK import library.
 Copy the resulting `scpefe_electron_native.node` beside `apps/windows/native`
 as part of packaging; production packaging details remain a release task.
 
+For a repeatable, unsigned Windows preview build, see
+[`apps/windows/README.md`](apps/windows/README.md). From a Windows checkout with
+the documented prerequisites, the complete build and smoke test is one command:
+
+```powershell
+.\scripts\build-windows-preview.ps1
+```
+
 ## License
 
 SCPEFE software is licensed under [GPL-3.0-or-later](LICENSE). The public

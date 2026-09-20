@@ -8,6 +8,8 @@
   "scripts": {
     "build": "vite build && npm run build:preload",
     "build:preload": "vite build --config vite.preload.config.ts",
+    "preview:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-windows-preview.ps1",
+    "start": "electron .",
     "test": "npm run build:preload && node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
