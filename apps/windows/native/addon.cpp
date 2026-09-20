@@ -348,6 +348,7 @@ napi_value open_document(napi_env env, napi_callback_info info)
             view.client_profile_email_size);
         set_string(env, result, "deviceName", view.device_name,
             view.device_name_size);
+        set_number(env, result, "revisionTimestampMs", view.timestamp_ms);
         set_boolean(env, result, "readOnly", true);
         set_boolean(env, result, "canEdit",
             slot_access.can_edit != 0 && !slot_access.must_be_changed);
@@ -388,6 +389,7 @@ napi_value open_document(napi_env env, napi_callback_info info)
         set_string(env, result, "baseRevision", base_revision.data(),
             base_revision.size());
         set_revision_graph(env, result, revision_id.data(), view);
+        set_boolean(env, result, "manuallySealed", view.manually_sealed != 0);
         std::array<std::uint8_t, SCPEFE_WORK_JOURNAL_KEY_SIZE> journal_key{};
         std::size_t journal_key_size = 0;
         status = scpefe_unlocked_container_work_journal_key(
@@ -544,6 +546,61 @@ napi_value save_document(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value regular_save_document(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3)
+            throw std::runtime_error(
+                "regularSaveDocument expects a Buffer, password, and input");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes password{env, args[1]};
+        const std::string name = string_value(env, property(env, args[2], "name"));
+        const std::string email = string_value(env, property(env, args[2], "email"));
+        const std::string device = string_value(env, property(env, args[2], "deviceName"));
+        const std::string content = string_value(env, property(env, args[2], "content"));
+        double timestamp = 0;
+        check(env, napi_get_value_double(
+            env, property(env, args[2], "timestampMs"), &timestamp));
+        const scpefe_regular_save_v1 save{
+            sizeof(scpefe_regular_save_v1), container, container_size,
+            password.data(), password.size(), name.data(), name.size(),
+            email.data(), email.size(), device.data(), device.size(),
+            content.data(), content.size(), static_cast<std::uint64_t>(timestamp),
+        };
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_regular_save(&save, output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
+napi_value discard_provisional(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 2)
+            throw std::runtime_error("discardProvisional expects a Buffer and password");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes password{env, args[1]};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_provisional_save_discard(container, container_size,
+                password.data(), password.size(), output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
 napi_value merge_document(napi_env env, napi_callback_info info)
 {
     try {
@@ -638,6 +695,10 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"saveDocument", nullptr, save_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"regularSaveDocument", nullptr, regular_save_document, nullptr, nullptr,
+            nullptr, napi_default, nullptr},
+        {"discardProvisional", nullptr, discard_provisional, nullptr, nullptr,
+            nullptr, napi_default, nullptr},
         {"mergeDocument", nullptr, merge_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"updateLease", nullptr, update_lease, nullptr, nullptr, nullptr,
@@ -647,7 +708,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 7, methods));
+    check(env, napi_define_properties(env, exports, 9, methods));
     return exports;
 }
 

@@ -14,6 +14,12 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
   assert.match(main, /service\.lock\(["']app-lock["']\)/);
+  assert.match(main, /needsCloseDecision\(active\)/);
+  assert.match(main, /applyCloseDecision\(service/);
+  assert.match(main, /Manual save and exit/);
+  assert.match(main, /Discard and exit/);
+  assert.doesNotMatch(main,
+    /if \(closingAfterRelease \|\| !service\.active\?\.editMode\) return/);
   assert.match(main, /dist["'],\s*["']preload\.cjs/);
   assert.doesNotMatch(main, /preload\.mjs/);
   assert.match(config, /formats:\s*\[["']cjs["']\]/);
@@ -49,13 +55,14 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     },
   });
   assert.deepEqual(Object.keys(exposed), [
-    "getProfile", "saveProfile", "createDocument", "openDocument",
+    "getProfile", "saveProfile", "getClientSettings", "saveClientSettings",
+    "createDocument", "openDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
     "discardPendingPublication", "backupDocument", "createInvitation",
     "claimInvitation", "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
-    "onJournalWarning",
+    "onJournalWarning", "onRegularSave",
   ]);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",

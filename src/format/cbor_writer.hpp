@@ -11,6 +11,8 @@ class CborWriter {
 public:
     /* Appends an unsigned integer. */
     void unsigned_integer(std::uint64_t value);
+    /* Appends a Boolean value. */
+    void boolean(bool value);
     /* Appends a definite array header. */
     void array(std::size_t size);
     /* Appends a definite map header. */

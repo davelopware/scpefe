@@ -19,12 +19,17 @@ public:
     std::uint64_t unsigned_integer();
     /* Reads and verifies an expected unsigned integer. */
     void expect_unsigned(std::uint64_t expected);
+    /* Reads one Boolean value. */
+    bool boolean();
     /* Reads a definite array header at the supplied nesting depth. */
     std::size_t array(std::size_t depth);
     /* Reads a definite map header at the supplied nesting depth. */
     std::size_t map(std::size_t depth);
-    /* Reads a bounded byte string, optionally enforcing its exact size. */
-    std::vector<std::uint8_t> bytes(std::size_t required_size = 0);
+    /* Reads a bounded byte string, optionally enforcing exact and custom sizes. */
+    std::vector<std::uint8_t> bytes(
+        std::size_t required_size = 0,
+        std::size_t maximum_size = 0
+    );
     /* Reads a bounded, strictly valid UTF-8 text string. */
     std::string text();
     /* Reports whether every encoded byte has been consumed. */

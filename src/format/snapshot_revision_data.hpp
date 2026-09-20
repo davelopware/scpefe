@@ -36,6 +36,8 @@ struct SnapshotRevisionData {
     std::vector<std::uint8_t> content_hash;
     std::string content;
     std::vector<RevisionGraphNodeData> ancestor_graph;
+    bool manually_sealed{true};
+    std::vector<std::uint8_t> provisional_base_revision;
 };
 
 } // namespace scpefe::format

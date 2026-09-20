@@ -17,6 +17,8 @@ snapshot-revision-v1 = {
   10: content-hash,
   11: snapshot-v1,
   ? 12: [* revision-graph-node], ; authenticated retained ancestor graph
+  ? 13: false,                    ; present only for a provisional revision
+  ? 14: bstr,                     ; encoded sealed base; required with field 13
 }
 
 revision-graph-node = [

@@ -66,12 +66,17 @@ std::vector<std::uint8_t> ManualSave::create(
         reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
 
     format::SnapshotRevisionData data;
-    data.parent_revision_ids.assign(parent_id.begin(), parent_id.end());
-    data.ancestor_graph = parent_revision.data().ancestor_graph;
-    format::RevisionGraphNodeData parent_node;
-    parent_node.revision_id = parent_id;
-    parent_node.parent_revision_ids = parent_revision.data().parent_revision_ids;
-    data.ancestor_graph.push_back(std::move(parent_node));
+    if (parent_revision.data().manually_sealed) {
+        data.parent_revision_ids.assign(parent_id.begin(), parent_id.end());
+        data.ancestor_graph = parent_revision.data().ancestor_graph;
+        format::RevisionGraphNodeData parent_node;
+        parent_node.revision_id = parent_id;
+        parent_node.parent_revision_ids = parent_revision.data().parent_revision_ids;
+        data.ancestor_graph.push_back(std::move(parent_node));
+    } else {
+        data.parent_revision_ids = parent_revision.data().parent_revision_ids;
+        data.ancestor_graph = parent_revision.data().ancestor_graph;
+    }
     data.timestamp_ms = timestamp_ms;
     data.slot_id.assign(unlocked.slot_id.begin(), unlocked.slot_id.end());
     if (!unlocked.recovery_slot) {

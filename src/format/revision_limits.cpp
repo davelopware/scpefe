@@ -21,7 +21,7 @@ RevisionLimits::RevisionLimits(
 RevisionLimits RevisionLimits::defaults()
 {
     return RevisionLimits(
-        16u * 1024u * 1024u,
+        32u * 1024u * 1024u,
         8u,
         1024u,
         8u * 1024u * 1024u,

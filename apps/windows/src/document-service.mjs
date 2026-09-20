@@ -4,10 +4,10 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   validateBackupResult, validatePublicationResult, validateSaveResult,
-  validateWorkingCopy } from "./contracts.mjs";
+  validateWorkingCopy, validateClientSettings } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
-import { HeadWitnessStore } from "./head-witness.mjs";
+import { HeadWitnessStore, compareHeadWitness } from "./head-witness.mjs";
 import { createMergeDraft, hasConflictMarkers } from "./divergence-merge.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
@@ -24,17 +24,18 @@ function targetUnavailable(error) {
 }
 
 export class DocumentService {
-  constructor({ native, fs, profilePath, journalDirectory,
+  constructor({ native, fs, profilePath, settingsPath, journalDirectory,
     publicationCapabilities, witnessDirectory,
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
     inactivityMs = 120_000, now = () => Date.now(),
     utcNow = now, monotonicNow = now, randomSessionId = () => randomBytes(16),
     setTimer = setTimeout, clearTimer = clearTimeout,
-    onLocked = () => {}, onJournalWarning = () => {} }) {
+    onLocked = () => {}, onJournalWarning = () => {}, onRegularSave = () => {} }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
+    this.settingsPath = settingsPath ?? path.join(path.dirname(profilePath), "settings.json");
     this.nativeLineEnding = nativeLineEnding;
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
@@ -53,10 +54,13 @@ export class DocumentService {
     this.clearTimer = clearTimer;
     this.onLocked = onLocked;
     this.onJournalWarning = onJournalWarning;
+    this.onRegularSave = onRegularSave;
     this.checkpointTimer = null;
     this.inactivityTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatOperation = null;
+    this.regularSaveTimer = null;
+    this.clientSettings = validateClientSettings();
     this.leaseGeneration = 0;
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
@@ -80,6 +84,27 @@ export class DocumentService {
     await this.#atomicWrite(this.profilePath,
       Buffer.from(`${JSON.stringify(validated)}\n`, "utf8"), true);
     return validated;
+  }
+
+  async loadClientSettings() {
+    try {
+      this.clientSettings = validateClientSettings(JSON.parse(
+        await this.fs.readFile(this.settingsPath, "utf8")));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      this.clientSettings = validateClientSettings();
+    }
+    this.#scheduleRegularSave();
+    return this.clientSettings;
+  }
+
+  async saveClientSettings(settings) {
+    this.clientSettings = validateClientSettings(settings);
+    await this.fs.mkdir(path.dirname(this.settingsPath), { recursive: true });
+    await this.#atomicWrite(this.settingsPath,
+      Buffer.from(`${JSON.stringify(this.clientSettings)}\n`, "utf8"), true);
+    this.#scheduleRegularSave();
+    return this.clientSettings;
   }
 
   async createDocument(target, request) {
@@ -201,6 +226,17 @@ export class DocumentService {
           && journal.baseRevision === nativeOpened.baseRevision) {
         recovery = journal;
       }
+      if (!nativeOpened.opened.invitationRequired && !nativeOpened.manuallySealed
+          && !recovery) {
+        recovery = { text: nativeOpened.opened.content,
+          baseRevision: nativeOpened.baseRevision,
+          cursor: { start: 0, end: 0 }, target, state: "unsaved",
+          updateTime: Number.isSafeInteger(nativeOpened.revisionTimestampMs)
+            ? nativeOpened.revisionTimestampMs : this.now(),
+          authorName: nativeOpened.profileName ?? "",
+          deviceName: nativeOpened.deviceName ?? "" };
+        unresolvedJournal = true;
+      }
       if (!journal && !recoveredPublication) {
         await this.publications.cleanupOrphanedRecoveryBase(target);
       }
@@ -210,18 +246,7 @@ export class DocumentService {
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     const targetOpened = nativeOpened.opened;
-    let headMismatch = null;
-    try {
-      const { comparison, previous } = await this.witnesses.observe(
-        target, this.#observation(nativeOpened));
-      headMismatch = this.#headMismatch(comparison.kind, previous, nativeOpened);
-    } catch (error) {
-      headMismatch = Object.freeze({ kind: "witness-error",
-        title: "Local head witness could not be authenticated",
-        explanation: `${error.message}. The document remains available read-only, but editing and saving are blocked until you explicitly accept this authenticated head.`,
-        editingBlocked: true, observedDocumentId: nativeOpened.documentId,
-        observedHead: nativeOpened.baseRevision });
-    }
+    const { headMismatch } = await this.#observeHead(target, nativeOpened);
     const slotCanEdit = nativeOpened.opened.invitationRequired
       ? false : nativeOpened.opened.canEdit;
     const opened = nativeOpened.opened.invitationRequired
@@ -235,7 +260,9 @@ export class DocumentService {
         ...(headMismatch ? { headMismatch } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
-          updateTime: recovery.updateTime } } : {}) });
+          updateTime: recovery.updateTime,
+          ...(recovery.authorName ? { authorName: recovery.authorName } : {}),
+          ...(recovery.deviceName ? { deviceName: recovery.deviceName } : {}) } } : {}) });
     this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
@@ -268,6 +295,8 @@ export class DocumentService {
     this.active.editMode = true;
     this.active.working = { content: this.active.opened.content,
       cursor: { start: 0, end: 0 } };
+    this.active.dirty = !this.active.manuallySealed;
+    this.#scheduleRegularSave();
     return validateEditMode({ ...this.active.opened, readOnly: false });
   }
 
@@ -367,6 +396,9 @@ export class DocumentService {
 
   async discardRecoveredWork() {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
+    if (!this.active.manuallySealed) {
+      return this.#discardProvisional(this.active);
+    }
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
     this.active.unresolvedJournal = false;
@@ -377,6 +409,21 @@ export class DocumentService {
       ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
       ...(this.active.headMismatch ? { headMismatch: this.active.headMismatch } : {}) });
     return this.active.opened;
+  }
+
+  async discardWorkingCopy() {
+    const active = this.active;
+    if (!active?.editMode || !active.dirty) {
+      throw new Error("No unsaved working copy is available");
+    }
+    if (!active.manuallySealed) return this.#discardProvisional(active);
+    this.#cancelCheckpoint();
+    await this.journals.clear(active.documentId);
+    active.dirty = false;
+    active.unresolvedJournal = false;
+    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    await this.exitEditMode();
+    return active.opened;
   }
 
   async acceptHeadMismatch() {
@@ -460,7 +507,9 @@ export class DocumentService {
       const localBytes = Buffer.from(active.pendingRecord.publication.candidate, "base64");
       const local = this.#validateNativeOpened(
         this.native.openDocument(localBytes, active.password));
-      const ancestorBytes = Buffer.from(active.pendingRecord.publication.base, "base64");
+      const ancestorBytes = Buffer.from(
+        active.pendingRecord.publication.mergeAncestor
+          ?? active.pendingRecord.publication.base, "base64");
       const ancestor = this.#validateNativeOpened(
         this.native.openDocument(ancestorBytes, active.password));
       try {
@@ -603,6 +652,24 @@ export class DocumentService {
     return active.opened;
   }
 
+  async discardUnsavedForClose() {
+    if (!this.active) throw new Error("Open a document first");
+    if (this.active.pendingPublication) {
+      const resumed = await this.reconnectPendingPublication();
+      if (resumed.publicationState !== "target-published") {
+        const error = new Error(
+          "The pending save cannot be discarded safely until its target is available and unchanged");
+        error.code = "CLOSE_DISCARD_BLOCKED";
+        throw error;
+      }
+    }
+    const active = this.active;
+    if (active.recovery) return this.discardRecoveredWork();
+    if (!active.manuallySealed) return this.#discardProvisional(active);
+    if (active.editMode && active.dirty) return this.discardWorkingCopy();
+    return active.opened;
+  }
+
   updateWorkingCopy(value) {
     if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
     if (this.active.pendingPublication && !this.active.pendingRecord?.merge) {
@@ -610,7 +677,8 @@ export class DocumentService {
     }
     const working = validateWorkingCopy(value);
     this.active.working = working;
-    this.active.dirty = working.content !== this.active.opened.content;
+    this.active.dirty = !this.active.manuallySealed
+      || working.content !== this.active.opened.content;
     if (this.active.dirty) this.#scheduleCheckpoint();
     this.notifyActivity();
     return { checkpointScheduled: this.active.dirty,
@@ -631,6 +699,7 @@ export class DocumentService {
     const active = this.active;
     if (!active) return { locked: true, journalSaved: true, warning: null };
     this.#cancelCheckpoint();
+    this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
     this.inactivityTimer = null;
     await this.#stopHeartbeat();
@@ -662,6 +731,7 @@ export class DocumentService {
   async exitEditMode() {
     const active = this.active;
     if (!active?.editMode) return { released: false };
+    this.#cancelRegularSave();
     await this.#stopHeartbeat();
     await this.#flushActive(active);
     await this.#queuePublication(async () => {
@@ -686,6 +756,116 @@ export class DocumentService {
     active.leaseSessionId = null;
     this.suspendedLeases.delete(active.documentId);
     return { released: true };
+  }
+
+  async regularSaveDocument() {
+    const active = this.active;
+    if (!this.clientSettings.regularSaveEnabled || !active?.editMode
+        || !active.dirty || !active.working || active.pendingPublication
+        || active.headMismatch) {
+      return Object.freeze({ published: false });
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const canonical = canonicalizeDocumentText(active.working.content);
+    const mergeAncestor = this.#regularSaveMergeAncestor(active);
+    await this.#flushActive(active);
+    let published;
+    let reopened;
+    let candidate;
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        try {
+          if (inspected.documentId !== active.documentId
+              || inspected.baseRevision !== active.baseRevision
+              || !inspected.lease.active || !active.leaseSessionId
+              || !Buffer.from(inspected.lease.sessionId, "hex")
+                .equals(active.leaseSessionId)
+              || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+            const error = new Error(
+              "The target changed before the regular save could be published");
+            error.code = "REGULAR_SAVE_DIVERGED";
+            throw error;
+          }
+          candidate = this.native.regularSaveDocument(current, active.password, {
+            ...profile, content: canonical, timestampMs: Date.now(),
+          });
+          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+            throw new Error("Native bridge did not produce a provisional container");
+          }
+          await this.publications.publish({ documentId: active.documentId,
+            journalKey: active.journalKey, target: active.target,
+            base: current, candidate, text: canonical,
+            cursor: { ...active.working.cursor }, baseRevision: active.baseRevision,
+            purpose: "regular-save", state: "unsaved",
+            ...(mergeAncestor ? { mergeAncestor } : {}) });
+          published = await this.fs.readFile(active.target);
+          reopened = this.#validateNativeOpened(
+            this.native.openDocument(published, active.password));
+          if (reopened.opened.content !== canonical || reopened.manuallySealed) {
+            throw new Error("Regular save verification failed");
+          }
+        } finally {
+          inspected.journalKey.fill(0);
+        }
+      });
+    } catch (error) {
+      if (error?.code === "REGULAR_SAVE_DIVERGED") {
+        return this.#preserveRegularSaveConflict(
+          active, profile, canonical, mergeAncestor);
+      }
+      if (error.publicationPrepared) {
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        if (active.pendingRecord?.publication) {
+          let target = null;
+          try { target = await this.fs.readFile(active.target); } catch {}
+          const expectedBase = Buffer.from(active.pendingRecord.publication.base, "base64");
+          const expectedCandidate = Buffer.from(
+            active.pendingRecord.publication.candidate, "base64");
+          if (target && !target.equals(expectedBase) && !target.equals(expectedCandidate)) {
+            active.pendingRecord = await this.publications.markDiverged(
+              active.documentId, active.journalKey, active.pendingRecord);
+          }
+          active.pendingPublication = true;
+          active.unresolvedJournal = true;
+          active.opened = validateOpenedDocument({ ...active.opened,
+            content: canonical,
+            publicationState: active.pendingRecord.state === "conflict"
+              ? "conflict" : "pending-publication" });
+        }
+      }
+      if (targetUnavailable(error)) {
+        this.onJournalWarning(
+          "The target is unavailable; regular save was skipped and work remains unsaved locally.");
+        return Object.freeze({ published: false });
+      }
+      throw error;
+    }
+    active.journalKey.fill(0);
+    active.opened = reopened.opened;
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.baseContainer = Buffer.from(published);
+    active.targetContent = canonical;
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    active.manuallySealed = false;
+    active.dirty = true;
+    active.unresolvedJournal = true;
+    await this.journals.write(active.documentId, active.journalKey, {
+      text: canonical, baseRevision: active.baseRevision,
+      cursor: { ...active.working.cursor }, target: active.target,
+      state: "unsaved", updateTime: this.now(),
+    });
+    const result = Object.freeze({ published: true, provisional: true,
+      content: canonical });
+    this.onRegularSave(result);
+    return result;
   }
 
   async saveDocument(content) {
@@ -833,12 +1013,12 @@ export class DocumentService {
 
   async backupDocument(target) {
     if (!this.active) throw new Error("Open a document first");
+    if (!this.active.manuallySealed) {
+      throw new Error("Manually save the document before creating a backup");
+    }
     if (this.active.dirty || this.active.recovery || this.active.pendingPublication
         || this.active.unresolvedJournal) {
       throw new Error("Save or discard changes before creating a backup");
-    }
-    if (!this.active.manuallySealed) {
-      throw new Error("Manually save the document before creating a backup");
     }
     const activeTarget = this.active.target;
     const candidate = await this.fs.readFile(activeTarget);
@@ -881,7 +1061,9 @@ export class DocumentService {
     }
     return { opened, documentId: value.documentId,
       baseRevision: value.baseRevision, revisionGraph, journalKey: value.journalKey,
-      lease: Object.freeze({ ...rawLease }), manuallySealed: value.manuallySealed ?? true };
+      lease: Object.freeze({ ...rawLease }), manuallySealed: value.manuallySealed ?? true,
+      revisionTimestampMs: value.revisionTimestampMs,
+      profileName: value.profileName, deviceName: value.deviceName };
   }
 
   async #acquireLease(forceTakeover) {
@@ -1023,6 +1205,7 @@ export class DocumentService {
       throw new Error("Pending publication candidate hash does not match its journal");
     }
     const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
+    let mergeAncestor;
     try {
       const invitationClaim = record.publication.purpose === "invitation-claim";
       if (opened.documentId !== documentId
@@ -1032,7 +1215,19 @@ export class DocumentService {
             && opened.opened.content !== (record.merge?.localContent ?? record.text))) {
         throw new Error("Pending publication candidate does not match its document");
       }
+      if (record.publication.mergeAncestor) {
+        const ancestor = Buffer.from(record.publication.mergeAncestor, "base64");
+        mergeAncestor = this.#validateNativeOpened(
+          this.native.openDocument(ancestor, password));
+        if (mergeAncestor.documentId !== documentId
+            || !mergeAncestor.manuallySealed
+            || !mergeAncestor.journalKey.equals(opened.journalKey)) {
+          throw new Error(
+            "Pending publication merge ancestor does not match its document");
+        }
+      }
     } finally {
+      mergeAncestor?.journalKey.fill(0);
       opened.journalKey.fill(0);
     }
   }
@@ -1098,19 +1293,29 @@ export class DocumentService {
         const { headMismatch, slotCanEdit } = await this.#observeHead(target, reopened);
         baseOpened.journalKey.fill(0);
         targetOpened?.journalKey.fill(0);
+        const regularSave = record.publication.purpose === "regular-save"
+          && !reopened.manuallySealed;
+        const recovery = regularSave ? { content: reopened.opened.content,
+          cursor: { start: 0, end: 0 }, state: "unsaved",
+          updateTime: Number.isSafeInteger(reopened.revisionTimestampMs)
+            ? reopened.revisionTimestampMs : this.now(),
+          ...(reopened.profileName ? { authorName: reopened.profileName } : {}),
+          ...(reopened.deviceName ? { deviceName: reopened.deviceName } : {}) } : null;
         const opened = validateOpenedDocument({ ...reopened.opened,
           canEdit: headMismatch ? false : slotCanEdit,
           publicationState: "target-published",
           ...(reopened.lease.active ? { lease: reopened.lease } : {}),
+          ...(recovery ? { recovery } : {}),
           ...(headMismatch ? { headMismatch } : {}) });
         this.active = { target, password: reopenPassword, opened, editMode: false,
           documentId: reopened.documentId, baseRevision: reopened.baseRevision,
           revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
           slotCanEdit, headMismatch,
-          journalKey: Buffer.from(reopened.journalKey), recovery: null,
+          journalKey: Buffer.from(reopened.journalKey), recovery,
           baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
           working: null, dirty: false, manuallySealed: reopened.manuallySealed,
-          pendingPublication: false, pendingRecord: null, unresolvedJournal: false,
+          pendingPublication: false, pendingRecord: null,
+          unresolvedJournal: recovery !== null,
           continuousDue: null, journalWarning: null };
         reopened.journalKey.fill(0);
         this.onJournalWarning("Interrupted publication was completed and verified.");
@@ -1182,11 +1387,137 @@ export class DocumentService {
     active.recovery = null;
   }
 
+  async #discardProvisional(active) {
+    if (active.headMismatch) {
+      throw new Error("Resolve the head mismatch before discarding provisional work");
+    }
+    if (!active.editMode) {
+      await this.#acquireLease(false);
+      active.editMode = true;
+    }
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        try {
+          if (inspected.baseRevision !== active.baseRevision
+              || !inspected.lease.active || !active.leaseSessionId
+              || !Buffer.from(inspected.lease.sessionId, "hex")
+                .equals(active.leaseSessionId)
+              || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+            throw new Error(
+              "The target changed before provisional work could be discarded");
+          }
+          const candidate = this.native.discardProvisional(current, active.password);
+          const candidateOpened = this.#validateNativeOpened(
+            this.native.openDocument(candidate, active.password));
+          try {
+            if (!candidateOpened.manuallySealed) {
+              throw new Error("Discard did not restore a manually sealed revision");
+            }
+            await this.publications.publish({ documentId: active.documentId,
+              journalKey: active.journalKey, target: active.target,
+              base: current, candidate, text: candidateOpened.opened.content,
+              cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
+              purpose: "provisional-discard" });
+          } finally {
+            candidateOpened.journalKey.fill(0);
+          }
+        } finally {
+          inspected.journalKey.fill(0);
+        }
+      });
+      await this.journals.clear(active.documentId);
+      await this.#adoptPublishedCandidate(active);
+      await this.exitEditMode();
+      return active.opened;
+    } catch (error) {
+      if (error.publicationPrepared) {
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        if (active.pendingRecord?.publication) {
+          let target = null;
+          try { target = await this.fs.readFile(active.target); } catch {}
+          const expectedBase = Buffer.from(active.pendingRecord.publication.base, "base64");
+          const expectedCandidate = Buffer.from(
+            active.pendingRecord.publication.candidate, "base64");
+          if (target && !target.equals(expectedBase) && !target.equals(expectedCandidate)) {
+            active.pendingRecord = await this.publications.markDiverged(
+              active.documentId, active.journalKey, active.pendingRecord);
+          }
+          active.pendingPublication = true;
+          active.unresolvedJournal = true;
+          active.opened = validateOpenedDocument({ ...active.opened,
+            content: active.pendingRecord.text,
+            publicationState: active.pendingRecord.state === "conflict"
+              ? "conflict" : "pending-publication" });
+        }
+      }
+      active.editMode = false;
+      await this.#stopHeartbeat();
+      throw error;
+    }
+  }
+
+  #regularSaveMergeAncestor(active) {
+    if (active.manuallySealed) return undefined;
+    const mergeAncestor = this.native.discardProvisional(
+      active.baseContainer, active.password);
+    const ancestorOpened = this.#validateNativeOpened(
+      this.native.openDocument(mergeAncestor, active.password));
+    try {
+      if (ancestorOpened.documentId !== active.documentId
+          || !ancestorOpened.manuallySealed
+          || !ancestorOpened.journalKey.equals(active.journalKey)) {
+        throw new Error(
+          "Provisional base did not restore the authenticated sealed ancestor");
+      }
+    } finally {
+      ancestorOpened.journalKey.fill(0);
+    }
+    return mergeAncestor;
+  }
+
+  async #preserveRegularSaveConflict(active, profile, canonical, mergeAncestor) {
+    const candidate = this.native.regularSaveDocument(
+      active.baseContainer, active.password, {
+        ...profile, content: canonical, timestampMs: Date.now(),
+      });
+    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      throw new Error("Native bridge did not produce a provisional container");
+    }
+    let record = await this.publications.prepare({
+      documentId: active.documentId, journalKey: active.journalKey,
+      target: active.target, base: active.baseContainer, candidate,
+      text: canonical, cursor: { ...active.working.cursor },
+      baseRevision: active.baseRevision, purpose: "regular-save",
+      ...(mergeAncestor ? { mergeAncestor } : {}), state: "unsaved",
+    });
+    record = await this.publications.markDiverged(
+      active.documentId, active.journalKey, record);
+    active.pendingPublication = true;
+    active.pendingRecord = record;
+    active.unresolvedJournal = true;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      content: canonical, publicationState: "conflict" });
+    this.onJournalWarning(
+      "The target changed before regular save; unsaved work was preserved for divergence resolution.");
+    return Object.freeze({ published: false, conflict: true, content: canonical });
+  }
+
   async #observeHead(target, opened) {
     let headMismatch = null;
     try {
-      const { comparison, previous } = await this.witnesses.observe(
-        target, this.#observation(opened));
+      const observation = this.#observation(opened);
+      let result;
+      if (opened.manuallySealed) {
+        result = await this.witnesses.observe(target, observation);
+      } else {
+        const previous = await this.witnesses.read(target);
+        result = { comparison: compareHeadWitness(previous, observation), previous };
+      }
+      const { comparison, previous } = result;
       headMismatch = this.#headMismatch(comparison.kind, previous, opened);
     } catch (error) {
       headMismatch = Object.freeze({ kind: "witness-error",
@@ -1262,13 +1593,34 @@ export class DocumentService {
     this.checkpointTimer = null;
   }
 
+  #scheduleRegularSave() {
+    this.#cancelRegularSave();
+    const active = this.active;
+    if (!this.clientSettings.regularSaveEnabled || !active?.editMode) return;
+    this.regularSaveTimer = this.setTimer(() => {
+      this.regularSaveTimer = null;
+      void this.regularSaveDocument().catch((error) => {
+        this.onJournalWarning(`Regular save failed: ${error.message}`);
+      }).finally(() => {
+        if (active === this.active && active.editMode) this.#scheduleRegularSave();
+      });
+    }, this.clientSettings.regularSaveIntervalMs);
+    this.regularSaveTimer?.unref?.();
+  }
+
+  #cancelRegularSave() {
+    if (this.regularSaveTimer !== null) this.clearTimer(this.regularSaveTimer);
+    this.regularSaveTimer = null;
+  }
+
   #queuePublication(operation) {
     const queued = this.publicationChain.catch(() => {}).then(operation);
     this.publicationChain = queued;
     return queued;
   }
 
-  async #atomicWrite(target, bytes, replace, isCurrent = () => true) {
+  async #atomicWrite(target, bytes, replace, isCurrent = () => true,
+    expectedTarget = null) {
     const transaction = `${target}.scpefe-txn-${process.pid}-${Date.now()}`;
     let handle;
     try {
@@ -1281,6 +1633,14 @@ export class DocumentService {
         const error = new Error("Publication no longer belongs to the current state");
         error.code = "STALE_HEARTBEAT";
         throw error;
+      }
+      if (expectedTarget !== null) {
+        const observed = await this.fs.readFile(target);
+        if (!observed.equals(expectedTarget)) {
+          const error = new Error("Publication target changed before replacement");
+          error.code = "TARGET_CHANGED";
+          throw error;
+        }
       }
       if (replace) {
         await this.fs.rename(transaction, target);

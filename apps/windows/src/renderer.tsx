@@ -4,19 +4,21 @@ import "./styles.css";
 
 type Profile = { name: string; email: string; deviceName: string };
 type Cursor = { start: number; end: number };
-type Recovery = { content: string; state: "unsaved"; updateTime: number; cursor: Cursor };
+type Recovery = { content: string; state: "unsaved"; updateTime: number; cursor: Cursor;
+  authorName?: string; deviceName?: string };
 type Lease = { active: boolean; holderName: string; holderEmail: string;
   deviceName: string; holderUtcMs: number; durationMs: number };
 type HeadMismatch = { kind: "rollback" | "divergence" | "replacement" | "witness-error";
   title: string; explanation: string; editingBlocked: true };
 type PublicationState = "target-published" | "pending-publication" | "conflict";
-type SaveState = "unsaved" | PublicationState;
+type SaveState = "unsaved" | "provisional" | PublicationState;
+type ClientSettings = { regularSaveEnabled: boolean; regularSaveIntervalMs: number };
 type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   canAddPasswords?: boolean; invitationRequired?: false;
-  headMismatch?: HeadMismatch };
+  headMismatch?: HeadMismatch; provisional?: true };
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true };
 
 function isDocumentOpened(value: Opened | null): value is DocumentOpened {
@@ -27,6 +29,8 @@ type LockResult = { locked: true; journalSaved: boolean; warning: string | null 
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
   saveProfile(profile: Profile): Promise<Profile>;
+  getClientSettings(): Promise<ClientSettings>;
+  saveClientSettings(settings: ClientSettings): Promise<ClientSettings>;
   createDocument(request: object): Promise<{ created: true } | null>;
   openDocument(password: string): Promise<Opened | null>;
   enterEditMode(): Promise<DocumentOpened>;
@@ -51,10 +55,15 @@ declare global { interface Window { scpefe: {
   lock(): Promise<LockResult>;
   onLocked(listener: (result: LockResult) => void): () => void;
   onJournalWarning(listener: (warning: string) => void): () => void;
+  onRegularSave(listener: (result: { published: true; provisional: true;
+    content: string }) => void): () => void;
 }; } }
 
 function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [clientSettings, setClientSettings] = useState<ClientSettings>({
+    regularSaveEnabled: false, regularSaveIntervalMs: 120_000,
+  });
   const [opened, setOpened] = useState<Opened | null>(null);
   const [message, setMessage] = useState("");
   const [workingText, setWorkingText] = useState("");
@@ -66,7 +75,10 @@ function App() {
   const [lineEndings, setLineEndings] = useState<"lf" | "native">("lf");
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
-  useEffect(() => { window.scpefe.getProfile().then(setProfile).catch(showError); }, []);
+  useEffect(() => {
+    window.scpefe.getProfile().then(setProfile).catch(showError);
+    window.scpefe.getClientSettings().then(setClientSettings).catch(showError);
+  }, []);
   const showError = (error: unknown) => setMessage(error instanceof Error ? error.message : String(error));
   useEffect(() => {
     const stopLocked = window.scpefe.onLocked((result) => {
@@ -76,11 +88,17 @@ function App() {
       setMessage(result.warning ?? "Document locked. Enter its password to unlock again.");
     });
     const stopWarning = window.scpefe.onJournalWarning(setMessage);
+    const stopRegularSave = window.scpefe.onRegularSave((result) => {
+      setSaveState("provisional");
+      setOpened((current) => isDocumentOpened(current) ? { ...current,
+        content: result.content, provisional: true } : current);
+      setMessage("Regular save published provisionally; changes remain unsaved until manual save.");
+    });
     const activity = () => { void window.scpefe.activity(); };
     window.addEventListener("keydown", activity);
     window.addEventListener("pointerdown", activity);
     return () => {
-      stopLocked(); stopWarning();
+      stopLocked(); stopWarning(); stopRegularSave();
       window.removeEventListener("keydown", activity);
       window.removeEventListener("pointerdown", activity);
     };
@@ -95,6 +113,20 @@ function App() {
         deviceName: String(data.get("deviceName")),
       }));
       setMessage("Local profile saved.");
+    } catch (error) { showError(error); }
+  }
+
+  async function saveClientSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      const result = await window.scpefe.saveClientSettings({
+        regularSaveEnabled: data.get("regularSaveEnabled") === "on",
+        regularSaveIntervalMs: Number(data.get("regularSaveIntervalSeconds")) * 1000,
+      });
+      setClientSettings(result);
+      setMessage(result.regularSaveEnabled
+        ? "Regular provisional saves enabled." : "Regular provisional saves disabled.");
     } catch (error) { showError(error); }
   }
 
@@ -121,12 +153,17 @@ function App() {
       setOpened(result);
       const content = result && !result.invitationRequired ? result.content : "";
       setWorkingText(content);
-      setSaveState(result && !result.invitationRequired && result.recovery ? "unsaved"
+      setSaveState(result && !result.invitationRequired && result.provisional ? "provisional"
+        : result && !result.invitationRequired && result.recovery ? "unsaved"
         : result && !result.invitationRequired
           ? result.publicationState : "target-published");
       setHistory([content]);
       setHistoryIndex(0);
-      if (result && !result.invitationRequired && result.lease?.active) {
+      if (result && !result.invitationRequired && result.recovery) {
+        const source = [result.recovery.authorName, result.recovery.deviceName]
+          .filter(Boolean).join(" on ");
+        setMessage(`Recovered unsaved work${source ? ` from ${source}` : ""}. Restore or discard it before editing.`);
+      } else if (result && !result.invitationRequired && result.lease?.active) {
         setMessage(`Editing lease held by ${result.lease.holderName || "another editor"} (${result.lease.holderEmail}) on ${result.lease.deviceName}.`);
       }
     }
@@ -217,7 +254,8 @@ function App() {
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: result.content,
         readOnly: result.publicationState !== "target-published",
-        publicationState: result.publicationState } : current);
+        publicationState: result.publicationState,
+        provisional: undefined } : current);
       setSaveState(result.publicationState);
       setMessage(result.publicationState === "pending-publication"
         ? "Manual save is pending publication; its exact candidate is stored locally."
@@ -340,7 +378,7 @@ function App() {
 
   if (opened?.invitationRequired) return <main><h1>Claim invitation</h1><p>Choose a private replacement password to claim this invitation with your configured identity.</p><form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password" minLength={12} required /></label><button>Replace password and claim identity</button></form><button onClick={lock}>Cancel and lock</button><p role="status">{message}</p></main>;
   if (!profile) return <main><h1>Set up this client</h1><p>Name, email, and device name are required before creating a document.</p><form onSubmit={saveProfile}><label>Name<input name="name" required /></label><label>Email<input name="email" type="email" required /></label><label>Device name<input name="deviceName" required /></label><button>Save local profile</button></form><p role="status">{message}</p></main>;
-  return <main><h1>SCPEFE</h1><p>{profile.name} · {profile.email} · {profile.deviceName}</p><section><h2>Create</h2><p className="warning">There is no account reset: without a valid owner or recovery password, the document is permanently irrecoverable.</p><form onSubmit={create}><label>Initial text<textarea name="content" /></label><label>Owner password<input name="ownerPassword" type="password" minLength={12} required /></label><label>Independent recovery password (strongly recommended)<input name="recoveryPassword" type="password" minLength={12} /></label><small>Store the recovery password safely offline and separately from the owner password and document.</small><label className="check"><input name="understandsIrrecoverable" type="checkbox" required /> I understand that lost passwords cannot be recovered.</label><label className="check"><input name="storedRecoverySeparately" type="checkbox" /> I will store the recovery password independently.</label><button>Create encrypted document…</button></form></section><section><h2>Open document</h2><form onSubmit={open}><label>Password<input name="password" type="password" required /></label><button>Choose document…</button></form>{opened && <><p className="mode">{opened.readOnly ? "Read-only mode" : "Edit mode"} · {saveState === "unsaved" ? "Unsaved edits" : saveState === "pending-publication" ? "Manual save pending publication" : saveState === "conflict" ? "Divergence needs resolution" : "Published to target"}</p>{opened.headMismatch && <div className="warning" role="alert"><strong>{opened.headMismatch.title}</strong><p>{opened.headMismatch.explanation}</p><button onClick={acceptHeadMismatch}>Accept current authenticated head</button></div>}{opened.recovery && <div className="warning" role="alert"><p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p><button disabled={!opened.canEdit} onClick={restoreRecovery}>Restore unsaved work</button><button onClick={discardRecovery}>Discard recovered work</button></div>}{(opened.publicationState === "pending-publication" || opened.publicationState === "conflict") && <div className="warning" role="alert"><p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p><button onClick={reconnectPublication}>Retry publication</button><button onClick={discardPublication}>Discard pending save</button></div>}<div className="toolbar" aria-label="Editing tools"><button disabled={opened.readOnly || historyIndex === 0} onClick={() => moveHistory(-1)}>Undo</button><button disabled={opened.readOnly || historyIndex === history.length - 1} onClick={() => moveHistory(1)}>Redo</button></div><textarea ref={editor} aria-label="Document text" value={workingText} readOnly={opened.readOnly} onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value, { start: event.target.selectionStart, end: event.target.selectionEnd })} /><fieldset><legend>Find and replace</legend><label>Find<input ref={findInput} value={findText} onChange={(event) => setFindText(event.target.value)} /></label><label>Replace with<input value={replaceText} onChange={(event) => setReplaceText(event.target.value)} /></label><div className="toolbar"><button onClick={findNext}>Find next</button><button disabled={opened.readOnly} onClick={replaceSelection}>Replace</button><button disabled={opened.readOnly} onClick={replaceAll}>Replace all</button></div></fieldset>{opened.readOnly ? <button disabled={!opened.canEdit || opened.publicationState !== "target-published"} onClick={enterEditMode}>Enter edit mode</button> : <button onClick={save}>Save</button>}{!opened.readOnly && opened.canAddPasswords && <form onSubmit={createInvitation}><h3>Invite another person</h3><label>Temporary label<input name="temporaryLabel" required /></label><label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password" /></label><label className="check"><input name="canEdit" type="checkbox" /> May edit</label><button>Create invitation</button></form>}<button onClick={backup}>Back up…</button><button onClick={lock}>Lock now</button><fieldset><legend>Export plaintext</legend><p className="warning"><strong>Not password protected:</strong> the exported text may persist in backups or storage history.</p><label>Line endings<select value={lineEndings} onChange={(event) => setLineEndings(event.target.value as "lf" | "native")}><option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label><button onClick={exportPlaintext}>Export current text…</button></fieldset></>}</section><p role="status">{message}</p></main>;
+  return <main><h1>SCPEFE</h1><p>{profile.name} · {profile.email} · {profile.deviceName}</p><section><h2>Client settings</h2><form onSubmit={saveClientSettings}><label className="check"><input name="regularSaveEnabled" type="checkbox" defaultChecked={clientSettings.regularSaveEnabled} /> Enable regular provisional saves</label><label>Interval (seconds)<input name="regularSaveIntervalSeconds" type="number" min="10" max="86400" defaultValue={clientSettings.regularSaveIntervalMs / 1000} required /></label><small>Regular saves update the target but remain unsaved until you manually save.</small><button>Save client settings</button></form></section><section><h2>Create</h2><p className="warning">There is no account reset: without a valid owner or recovery password, the document is permanently irrecoverable.</p><form onSubmit={create}><label>Initial text<textarea name="content" /></label><label>Owner password<input name="ownerPassword" type="password" minLength={12} required /></label><label>Independent recovery password (strongly recommended)<input name="recoveryPassword" type="password" minLength={12} /></label><small>Store the recovery password safely offline and separately from the owner password and document.</small><label className="check"><input name="understandsIrrecoverable" type="checkbox" required /> I understand that lost passwords cannot be recovered.</label><label className="check"><input name="storedRecoverySeparately" type="checkbox" /> I will store the recovery password independently.</label><button>Create encrypted document…</button></form></section><section><h2>Open document</h2><form onSubmit={open}><label>Password<input name="password" type="password" required /></label><button>Choose document…</button></form>{opened && <><p className="mode">{opened.readOnly ? "Read-only mode" : "Edit mode"} · {saveState === "unsaved" ? "Unsaved edits" : saveState === "provisional" ? "Provisionally saved · still unsaved" : saveState === "pending-publication" ? "Manual save pending publication" : saveState === "conflict" ? "Divergence needs resolution" : "Published to target"}</p>{opened.headMismatch && <div className="warning" role="alert"><strong>{opened.headMismatch.title}</strong><p>{opened.headMismatch.explanation}</p><button onClick={acceptHeadMismatch}>Accept current authenticated head</button></div>}{opened.recovery && <div className="warning" role="alert"><p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p><button disabled={!opened.canEdit} onClick={restoreRecovery}>Restore unsaved work</button><button onClick={discardRecovery}>Discard recovered work</button></div>}{(opened.publicationState === "pending-publication" || opened.publicationState === "conflict") && <div className="warning" role="alert"><p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p><button onClick={reconnectPublication}>Retry publication</button><button onClick={discardPublication}>Discard pending save</button></div>}<div className="toolbar" aria-label="Editing tools"><button disabled={opened.readOnly || historyIndex === 0} onClick={() => moveHistory(-1)}>Undo</button><button disabled={opened.readOnly || historyIndex === history.length - 1} onClick={() => moveHistory(1)}>Redo</button></div><textarea ref={editor} aria-label="Document text" value={workingText} readOnly={opened.readOnly} onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value, { start: event.target.selectionStart, end: event.target.selectionEnd })} /><fieldset><legend>Find and replace</legend><label>Find<input ref={findInput} value={findText} onChange={(event) => setFindText(event.target.value)} /></label><label>Replace with<input value={replaceText} onChange={(event) => setReplaceText(event.target.value)} /></label><div className="toolbar"><button onClick={findNext}>Find next</button><button disabled={opened.readOnly} onClick={replaceSelection}>Replace</button><button disabled={opened.readOnly} onClick={replaceAll}>Replace all</button></div></fieldset>{opened.readOnly ? <button disabled={!opened.canEdit || opened.publicationState !== "target-published"} onClick={enterEditMode}>Enter edit mode</button> : <button onClick={save}>Save</button>}{!opened.readOnly && opened.canAddPasswords && <form onSubmit={createInvitation}><h3>Invite another person</h3><label>Temporary label<input name="temporaryLabel" required /></label><label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password" /></label><label className="check"><input name="canEdit" type="checkbox" /> May edit</label><button>Create invitation</button></form>}<button onClick={backup}>Back up…</button><button onClick={lock}>Lock now</button><fieldset><legend>Export plaintext</legend><p className="warning"><strong>Not password protected:</strong> the exported text may persist in backups or storage history.</p><label>Line endings<select value={lineEndings} onChange={(event) => setLineEndings(event.target.value as "lf" | "native")}><option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label><button onClick={exportPlaintext}>Export current text…</button></fieldset></>}</section><p role="status">{message}</p></main>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

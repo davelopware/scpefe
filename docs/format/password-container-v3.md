@@ -21,11 +21,21 @@ data.
 A manual save preserves the complete slot area, decrypted 16-octet document ID,
 and encrypted editing-lease block. It generates a fresh snapshot nonce, records
 the new ciphertext length, and encrypts the document ID, lease block, and new
-deterministic snapshot revision with the existing document key. The new revision has one parent: the
-32-octet generic hash of the exact previous encoded revision. This construction
+deterministic snapshot revision with the existing document key. A save from a
+sealed head has one parent: the 32-octet generic hash of the exact previous
+encoded revision. This construction
 keeps all password slots usable, avoids nonce reuse, and authenticates every
 immutable header field. Version-2 containers remain readable but cannot be
 rewritten because their slot wrappers authenticate the mutable fields.
+
+A regular save marks the snapshot revision provisional with deterministic-CBOR
+field 13 set to `false` and retains the exact encoded sealed base revision in
+field 14. The first regular save uses that sealed base as its parent; later
+regular saves replace the provisional head while retaining the same parent and
+sealed base, so timer events do not add history nodes. A manual save of a
+provisional head removes fields 13 and 14 and seals the consolidated revision
+without adding another node. Explicit discard restores field 14 only after the
+caller has revalidated the current head and editing lease.
 
 A password change replaces only the 65-octet wrapper belonging to the slot
 authenticated by the current password. The slot's existing independent salt

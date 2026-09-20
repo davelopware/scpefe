@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { DocumentService } from "./document-service.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -10,11 +11,12 @@ const require = createRequire(import.meta.url);
 const native = require(path.join(here, "..", "native", "scpefe_electron_native.node"));
 let window;
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const service = new DocumentService({
     native,
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
+    settingsPath: path.join(app.getPath("userData"), "settings.json"),
     journalDirectory: path.join(app.getPath("userData"), "work-journals"),
     publicationCapabilities: {
       sameFilesystemTransaction: true,
@@ -24,9 +26,15 @@ app.whenReady().then(() => {
     onLocked: (result) => window?.webContents.send("document:locked", result),
     onJournalWarning: (warning) =>
       window?.webContents.send("document:journal-warning", warning),
+    onRegularSave: (result) =>
+      window?.webContents.send("document:regular-saved", result),
   });
+  await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
+  ipcMain.handle("settings:get", () => service.loadClientSettings());
+  ipcMain.handle("settings:save", (_event, settings) =>
+    service.saveClientSettings(settings));
   ipcMain.handle("document:create", async (_event, request) => {
     const chosen = await dialog.showSaveDialog(window, {
       title: "Create encrypted document",
@@ -123,13 +131,41 @@ app.whenReady().then(() => {
     },
   });
   let closingAfterRelease = false;
+  let closeOperation = null;
   window.on("close", (event) => {
-    if (closingAfterRelease || !service.active?.editMode) return;
+    if (closingAfterRelease) return;
+    const active = service.active;
+    const regularSavePending = active?.pendingRecord?.publication?.purpose
+      === "regular-save";
+    const needsUnsavedDecision = needsCloseDecision(active);
+    if (!active || (!active.editMode && !needsUnsavedDecision)) return;
     event.preventDefault();
-    void service.exitEditMode().catch(() => service.lock("app-exit")).finally(() => {
+    if (closeOperation) return;
+    closeOperation = (async () => {
+      if (needsUnsavedDecision) {
+        const choice = await dialog.showMessageBox(window, {
+          type: "warning", title: "Unsaved changes",
+          message: service.active.manuallySealed && !regularSavePending
+            ? "This document has unsaved changes."
+            : "This document is only provisionally saved.",
+          detail: "Manual save seals the changes. Discard restores the last manually saved content.",
+          buttons: ["Cancel", "Manual save and exit", "Discard and exit"],
+          defaultId: 0, cancelId: 0, noLink: true,
+        });
+        const proceed = await applyCloseDecision(service,
+          ["cancel", "save", "discard"][choice.response]);
+        if (!proceed) return;
+      }
+      if (service.active?.editMode) {
+        try { await service.exitEditMode(); }
+        catch { await service.lock("app-exit"); }
+      }
       closingAfterRelease = true;
       window.close();
-    });
+    })().catch((error) => {
+      window?.webContents.send("document:journal-warning",
+        `Could not finish exit: ${error.message}`);
+    }).finally(() => { closeOperation = null; });
   });
   powerMonitor.on("lock-screen", () => { void service.lock("screen-lock"); });
   window.on("blur", () => { void service.lock("background"); });

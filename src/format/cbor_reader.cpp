@@ -19,13 +19,25 @@ void CborReader::expect_unsigned(std::uint64_t expected)
 {
     if (unsigned_integer() != expected) fail(RevisionError::malformed_cbor);
 }
+bool CborReader::boolean()
+{
+    require_available(1);
+    const std::uint8_t value = data_[position_++];
+    if (value == 0xf4u) return false;
+    if (value == 0xf5u) return true;
+    fail(RevisionError::malformed_cbor);
+}
 std::size_t CborReader::array(std::size_t depth) { return collection(4, depth); }
 std::size_t CborReader::map(std::size_t depth) { return collection(5, depth); }
 
-std::vector<std::uint8_t> CborReader::bytes(std::size_t required_size)
+std::vector<std::uint8_t> CborReader::bytes(
+    std::size_t required_size,
+    std::size_t maximum_size)
 {
     const std::uint64_t length = head(2);
-    if (length > limits_.max_byte_string_bytes()) fail(RevisionError::limit_exceeded);
+    const std::size_t limit = maximum_size == 0
+        ? limits_.max_byte_string_bytes() : maximum_size;
+    if (length > limit) fail(RevisionError::limit_exceeded);
     if (required_size != 0 && length != required_size) fail(RevisionError::malformed_cbor);
     require_available(length);
     std::vector<std::uint8_t> value(data_ + position_, data_ + position_ + length);
