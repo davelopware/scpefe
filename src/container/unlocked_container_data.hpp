@@ -21,12 +21,16 @@ struct EditingLeaseData {
 
 /* Authenticated administrative metadata for one ordinary invitation slot. */
 struct ManagedSlotData {
+    /* Wipes decrypted administrative identity values before releasing storage. */
+    ~ManagedSlotData();
+
     std::array<std::uint8_t, 16> slot_id{};
     std::array<std::uint8_t, 16> actual_slot_id{};
     std::uint8_t permissions{};
     bool must_be_changed{};
     bool slot_id_known{true};
     bool permissions_known{true};
+    bool must_be_changed_known{true};
     bool identity_known{true};
     std::string identity_name;
     std::string identity_email;

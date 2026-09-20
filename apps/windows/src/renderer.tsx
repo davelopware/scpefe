@@ -18,7 +18,7 @@ type ProfileMismatch = { slotName: string; slotEmail: string;
 type ManagedSlot = { slotId: string; identityName: string; identityEmail: string;
   canEdit: boolean; canAddPasswords: boolean; canRemovePasswords: boolean;
   mustBeChanged: boolean; slotIdKnown?: boolean; permissionsKnown?: boolean;
-  identityKnown?: boolean };
+  mustBeChangedKnown?: boolean; identityKnown?: boolean };
 type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
@@ -56,7 +56,9 @@ function ManagedSlotControls({ slot, canUpdate, canRemove, onUpdate, onRemove }:
   return <li className="managed-slot"><h4>{label}</h4>
     {slot.identityKnown === false && <p>Identity is unknown until this legacy slot authenticates and reconciles.</p>}
     {slot.permissionsKnown === false && <p>Current permissions are unknown. Saving replaces them with the choices below.</p>}
-    {slot.mustBeChanged && <p>Invitation not yet claimed; its temporary password must be replaced.</p>}
+    {slot.mustBeChangedKnown === false
+      ? <p>Claim state is protected by the slot password and is not yet known administratively.</p>
+      : slot.mustBeChanged && <p>Invitation not yet claimed; its temporary password must be replaced.</p>}
     <form onSubmit={(event) => { event.preventDefault(); void onUpdate(slot,
       canEdit, canAddPasswords, canRemovePasswords); }}>
       <fieldset disabled={!canUpdate}><legend>Permissions for {label}</legend>

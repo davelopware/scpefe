@@ -678,7 +678,7 @@ scpefe_status scpefe_unlocked_container_managed_slot_count(
     if (unlocked == nullptr || slot_count == nullptr)
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     *slot_count = !unlocked->data.must_be_changed
-        && (unlocked->data.permissions & 6u) == 6u
+        && (unlocked->data.permissions & 4u) != 0
         ? unlocked->data.managed_slots.size() : 0;
     return SCPEFE_STATUS_OK;
 }
@@ -690,7 +690,7 @@ scpefe_status scpefe_unlocked_container_managed_slot(
     if (unlocked == nullptr || slot == nullptr
         || slot->struct_size < sizeof(*slot)
         || unlocked->data.must_be_changed
-        || (unlocked->data.permissions & 6u) != 6u
+        || (unlocked->data.permissions & 4u) == 0
         || index >= unlocked->data.managed_slots.size())
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     const auto &value = unlocked->data.managed_slots[index];
@@ -701,7 +701,8 @@ scpefe_status scpefe_unlocked_container_managed_slot(
         (value.permissions & 4u) != 0, value.must_be_changed,
         value.identity_name.data(), value.identity_name.size(),
         value.identity_email.data(), value.identity_email.size(),
-        value.slot_id_known, value.permissions_known, value.identity_known};
+        value.slot_id_known, value.permissions_known, value.identity_known,
+        value.must_be_changed_known};
     return SCPEFE_STATUS_OK;
 }
 

@@ -21,6 +21,20 @@ static_assert(!std::is_copy_assignable_v<UnlockedContainerData>);
 static_assert(std::is_nothrow_move_constructible_v<UnlockedContainerData>);
 static_assert(std::is_nothrow_move_assignable_v<UnlockedContainerData>);
 
+ManagedSlotData::~ManagedSlotData()
+{
+    sodium_memzero(slot_id.data(), slot_id.size());
+    sodium_memzero(actual_slot_id.data(), actual_slot_id.size());
+    permissions = 0;
+    must_be_changed = false;
+    slot_id_known = false;
+    permissions_known = false;
+    must_be_changed_known = false;
+    identity_known = false;
+    clear_string(identity_name);
+    clear_string(identity_email);
+}
+
 UnlockedContainerData::UnlockedContainerData(UnlockedContainerData &&other) noexcept
 {
     *this = std::move(other);
@@ -38,18 +52,12 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     recovery_slot = other.recovery_slot;
     owner_slot = other.owner_slot;
     must_be_changed = other.must_be_changed;
-    slot_identity_name = std::move(other.slot_identity_name);
-    slot_identity_email = std::move(other.slot_identity_email);
-    editing_lease = std::move(other.editing_lease);
-    managed_slots = std::move(other.managed_slots);
-    encoded_snapshot_revision = std::move(other.encoded_snapshot_revision);
-    sodium_memzero(other.document_id.data(), other.document_id.size());
-    sodium_memzero(other.slot_id.data(), other.slot_id.size());
-    sodium_memzero(other.work_journal_key.data(), other.work_journal_key.size());
-    other.permissions = 0;
-    other.recovery_slot = false;
-    other.owner_slot = false;
-    other.must_be_changed = false;
+    slot_identity_name = other.slot_identity_name;
+    slot_identity_email = other.slot_identity_email;
+    editing_lease = other.editing_lease;
+    managed_slots = other.managed_slots;
+    encoded_snapshot_revision = other.encoded_snapshot_revision;
+    other.clear();
     return *this;
 }
 
@@ -84,6 +92,7 @@ void UnlockedContainerData::clear() noexcept
         slot.must_be_changed = false;
         slot.slot_id_known = false;
         slot.permissions_known = false;
+        slot.must_be_changed_known = false;
         slot.identity_known = false;
         clear_string(slot.identity_name);
         clear_string(slot.identity_email);

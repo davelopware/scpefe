@@ -214,6 +214,8 @@ export function validateOpenedDocument(value) {
         || typeof slot.mustBeChanged !== "boolean"
         || (slot.slotIdKnown !== undefined && typeof slot.slotIdKnown !== "boolean")
         || (slot.permissionsKnown !== undefined && typeof slot.permissionsKnown !== "boolean")
+        || (slot.mustBeChangedKnown !== undefined
+          && typeof slot.mustBeChangedKnown !== "boolean")
         || (slot.identityKnown !== undefined && typeof slot.identityKnown !== "boolean")) {
       throw new TypeError("host returned invalid managed slot details");
     }

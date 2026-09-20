@@ -191,6 +191,7 @@ typedef struct scpefe_managed_slot_v1 {
     int slot_id_known;
     int permissions_known;
     int identity_known;
+    int must_be_changed_known;
 } scpefe_managed_slot_v1;
 
 /* Borrowed authenticated details of the encrypted advisory editing lease. */

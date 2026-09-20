@@ -88,10 +88,30 @@ const legacyOpened = native.openDocument(legacyFixture, owner);
 assert.equal(legacyOpened.managedSlots.length, 1);
 assert.equal(legacyOpened.managedSlots[0].slotIdKnown, false);
 assert.equal(legacyOpened.managedSlots[0].permissionsKnown, false);
+assert.equal(legacyOpened.managedSlots[0].mustBeChangedKnown, false);
 assert.equal(legacyOpened.managedSlots[0].identityKnown, false);
 assert.match(legacyOpened.managedSlots[0].identityName, /Legacy invitation 1/);
 const legacyHandle = legacyOpened.managedSlots[0].slotId;
 const legacyWrapper = firstInvitationPasswordRecord(legacyFixture);
+const legacyClaimBeforeMigration = native.claimInvitation(legacyFixture, temporary, {
+  newPassword: "legacy claim password before migration words",
+  name: "Grace Hopper", email: "grace@example.test",
+});
+assert.equal(native.openDocument(legacyClaimBeforeMigration, owner)
+  .managedSlots[0].slotId, legacyHandle);
+const legacyRestricted = native.updateSlotPermissions(legacyFixture, owner, {
+  slotId: legacyHandle, canEdit: false, canAddPasswords: false,
+  canRemovePasswords: false,
+});
+const restrictedTemporary = native.openDocument(legacyRestricted, temporary);
+assert.equal(restrictedTemporary.mustBeChanged, true);
+assert.equal(restrictedTemporary.content, "");
+const restrictedClaimed = native.claimInvitation(legacyRestricted, temporary, {
+  newPassword: "violet-cascade-orbit-tundra-8492",
+  name: "Grace Hopper", email: "grace@example.test",
+});
+assert.equal(native.openDocument(restrictedClaimed,
+  "violet-cascade-orbit-tundra-8492").canEdit, false);
 const legacyUpgraded = native.updateSlotPermissions(legacyFixture, owner, {
   slotId: legacyHandle, canEdit: true, canAddPasswords: false,
   canRemovePasswords: false,
@@ -135,3 +155,36 @@ const ownerReconciled = native.reconcileIdentity(saved, owner, {
 assert.equal(native.openDocument(ownerReconciled, owner).slotIdentityName,
   "Ada Lovelace");
 assert.equal(native.openDocument(ownerReconciled, recovery).recoverySlot, true);
+
+const removeAdministratorTemporary = "marble-cedar-quartz-signal-4821";
+const removeAdministratorPassword = "ember-harbor-velvet-planet-9506";
+const removalTargetTemporary = "falcon-iris-meadow-cipher-3718";
+const removeAdministratorInvitation = native.addInvitation(original, owner, {
+  temporaryPassword: removeAdministratorTemporary,
+  temporaryLabel: "Remove-only administrator", canEdit: true,
+  canAddPasswords: false, canRemovePasswords: true,
+});
+const withRemovalTarget = native.addInvitation(removeAdministratorInvitation, owner, {
+  temporaryPassword: removalTargetTemporary, temporaryLabel: "Removal target",
+  canEdit: false, canAddPasswords: false, canRemovePasswords: false,
+});
+const removeAdministratorClaimed = native.claimInvitation(withRemovalTarget,
+  removeAdministratorTemporary, { newPassword: removeAdministratorPassword,
+    name: "Remove Administrator", email: "remove@example.test" });
+const removeAdministratorOpened = native.openDocument(
+  removeAdministratorClaimed, removeAdministratorPassword);
+assert.equal(removeAdministratorOpened.canAddPasswords, false);
+assert.equal(removeAdministratorOpened.canRemovePasswords, true);
+assert.equal(removeAdministratorOpened.managedSlots.length, 2);
+const removalTarget = removeAdministratorOpened.managedSlots.find(
+  (slot) => slot.identityName === "Removal target");
+assert.ok(removalTarget);
+assert.throws(() => native.updateSlotPermissions(removeAdministratorClaimed,
+  removeAdministratorPassword, { slotId: removalTarget.slotId, canEdit: true,
+    canAddPasswords: false, canRemovePasswords: false }));
+const removedByRemoveOnly = native.removeSlot(removeAdministratorClaimed,
+  removeAdministratorPassword, removalTarget.slotId);
+assert.throws(() => native.openDocument(removedByRemoveOnly,
+  removalTargetTemporary));
+assert.equal(native.openDocument(removedByRemoveOnly,
+  removeAdministratorPassword).canRemovePasswords, true);
