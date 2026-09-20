@@ -132,7 +132,7 @@ export class PublicationService {
   }
 
   async prepare({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, reopenPassword }) {
+    baseRevision, purpose, reopenPassword }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
@@ -151,6 +151,7 @@ export class PublicationService {
         baseFile: recoveryBasePath(target),
         candidate: candidate.toString("base64"),
         stage: "prepared",
+        ...(purpose ? { purpose } : {}),
         ...(reopenPassword ? { reopenPassword } : {}),
       },
     };
@@ -159,11 +160,11 @@ export class PublicationService {
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, reopenPassword }) {
+    baseRevision, purpose, reopenPassword }) {
     let record;
     try {
       record = await this.prepare({ documentId, journalKey, target, base,
-        candidate, text, cursor, baseRevision, reopenPassword });
+        candidate, text, cursor, baseRevision, purpose, reopenPassword });
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };

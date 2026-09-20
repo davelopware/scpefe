@@ -56,10 +56,16 @@ function validateRecord(value) {
         || !Buffer.from(candidate, "base64").length
         || typeof base !== "string" || !Buffer.from(base, "base64").length
         || hash(Buffer.from(base, "base64")) !== value.publication.baseHash
+        || (value.publication.purpose !== undefined
+          && value.publication.purpose !== "invitation-claim")
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"
             || !value.publication.reopenPassword
-            || value.publication.reopenPassword.length > 4096))) {
+            || value.publication.reopenPassword.length > 4096))
+        || (value.publication.purpose === "invitation-claim"
+          && (value.publication.reopenPassword === undefined || value.text !== ""))
+        || (value.publication.reopenPassword !== undefined
+          && value.publication.purpose !== "invitation-claim")) {
       throw new TypeError("invalid publication transaction");
     }
     publication = {
@@ -72,6 +78,8 @@ function validateRecord(value) {
       base,
       candidate,
       stage: value.publication.stage,
+      ...(value.publication.purpose
+        ? { purpose: value.publication.purpose } : {}),
       ...(value.publication.reopenPassword
         ? { reopenPassword: value.publication.reopenPassword } : {}),
     };

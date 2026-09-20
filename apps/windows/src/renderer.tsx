@@ -16,6 +16,11 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   canAddPasswords?: boolean; invitationRequired?: false;
   headMismatch?: HeadMismatch };
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true };
+
+function isDocumentOpened(value: Opened | null): value is DocumentOpened {
+  return value !== null && value.invitationRequired !== true;
+}
+
 type LockResult = { locked: true; journalSaved: boolean; warning: string | null };
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
@@ -27,7 +32,7 @@ declare global { interface Window { scpefe: {
     publicationState: PublicationState }>;
   reconnectPendingPublication(): Promise<{ content: string;
     publicationState: PublicationState }>;
-  discardPendingPublication(): Promise<Opened>;
+  discardPendingPublication(): Promise<DocumentOpened>;
   backupDocument(): Promise<{ backedUp: true } | null>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
   claimInvitation(password: string): Promise<DocumentOpened>;
@@ -202,9 +207,10 @@ function App() {
     try {
       const result = await window.scpefe.saveDocument(workingText);
       setWorkingText(result.content);
-      setOpened((current) => current && { ...current, content: result.content,
+      setOpened((current) => isDocumentOpened(current) ? { ...current,
+        content: result.content,
         readOnly: result.publicationState !== "target-published",
-        publicationState: result.publicationState });
+        publicationState: result.publicationState } : current);
       setSaveState(result.publicationState);
       setMessage(result.publicationState === "pending-publication"
         ? "Manual save is pending publication; its exact candidate is stored locally."
@@ -217,8 +223,9 @@ function App() {
   async function reconnectPublication() {
     try {
       const result = await window.scpefe.reconnectPendingPublication();
-      setOpened((current) => current && { ...current, content: result.content,
-        readOnly: true, publicationState: result.publicationState });
+      setOpened((current) => isDocumentOpened(current) ? { ...current,
+        content: result.content, readOnly: true,
+        publicationState: result.publicationState } : current);
       setWorkingText(result.content);
       setSaveState(result.publicationState);
       setMessage(result.publicationState === "target-published"

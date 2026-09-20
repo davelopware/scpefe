@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -263,6 +264,13 @@ test("restart finishes an interrupted invitation claim with its replacement cred
 
     await assert.rejects(first.claimInvitation(replacement), /simulated interruption/);
     assert.equal(await fs.readFile(target, "utf8"), "claimed");
+    const pendingClaim = await first.journals.read(
+      "31".repeat(16), Buffer.alloc(32, 7));
+    assert.equal(pendingClaim.text, "");
+    assert.equal(pendingClaim.publication.purpose, "invitation-claim");
+    assert.equal(pendingClaim.publication.reopenPassword, replacement);
+    assert.equal(Buffer.from(pendingClaim.publication.candidate, "base64").toString(),
+      "claimed");
     const journalBytes = await fs.readFile(path.join(directory, "work-journals",
       `${"31".repeat(16)}.work-journal`));
     assert.equal(journalBytes.includes(Buffer.from(replacement)), false);
@@ -412,6 +420,50 @@ test("generates a one-time invitation secret and publishes it under the held lea
   assert.doesNotMatch(JSON.stringify(service.active),
     new RegExp(result.temporaryPassword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal((await fs.readFile(target)).toString(), "candidate");
+});
+
+test("ordinary pending publications still require candidate plaintext to match", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-candidate-text-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  const base = Buffer.from("container");
+  const candidate = Buffer.from("saved:different text");
+  const documentId = "71".repeat(16);
+  const baseRevision = "72".repeat(32);
+  const journalKey = Buffer.alloc(32, 17);
+  await fs.writeFile(target, base);
+  const native = { openDocument: (bytes) => ({
+    content: bytes.toString().startsWith("saved:")
+      ? bytes.toString().slice(6) : "base",
+    readOnly: true, canEdit: true, documentId, baseRevision,
+    journalKey: Buffer.from(journalKey),
+  }) };
+  const writer = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+  await writer.journals.write(documentId, journalKey, {
+    text: "expected text", baseRevision, cursor: { start: 0, end: 0 },
+    target, state: "pending-publication", updateTime: 1,
+    publication: {
+      id: "73".repeat(16), target,
+      transactionFile: path.join(directory, ".document.scpefe-txn-test"),
+      baseFile: path.join(directory, ".document.scpefe.scpefe-recovery-base"),
+      candidateHash: createHash("sha256").update(candidate).digest("hex"),
+      baseHash: createHash("sha256").update(base).digest("hex"),
+      base: base.toString("base64"), candidate: candidate.toString("base64"),
+      stage: "prepared",
+    },
+  });
+
+  const warnings = [];
+  const restarted = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities,
+    onJournalWarning: (warning) => warnings.push(warning) });
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.publicationState, "pending-publication");
+  assert.equal(await fs.readFile(target, "utf8"), "container");
+  assert.equal(warnings.some((warning) =>
+    warning.includes("candidate does not match its document")), true);
 });
 
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
@@ -228,7 +228,9 @@ export class DocumentService {
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
         canEdit: headMismatch ? false : slotCanEdit,
-        ...(pendingRecord ? { content: pendingRecord.text } : {}), publicationState,
+        ...(pendingRecord?.publication.purpose !== "invitation-claim"
+          ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
+        publicationState,
         ...(headMismatch ? { headMismatch } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
@@ -321,7 +323,7 @@ export class DocumentService {
       await this.publications.publish({ documentId: active.documentId,
         journalKey: active.journalKey, target: active.target, base: current, candidate,
         text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
-        reopenPassword: replacement });
+        purpose: "invitation-claim", reopenPassword: replacement });
       reopened = this.#validateNativeOpened(this.native.openDocument(
         await this.fs.readFile(active.target), replacement));
       if (reopened.opened.invitationRequired) {
@@ -874,9 +876,17 @@ export class DocumentService {
 
   #validateCandidate(record, password, documentId) {
     const candidate = Buffer.from(record.publication.candidate, "base64");
+    const candidateHash = createHash("sha256").update(candidate).digest("hex");
+    if (candidateHash !== record.publication.candidateHash) {
+      throw new Error("Pending publication candidate hash does not match its journal");
+    }
     const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
     try {
-      if (opened.documentId !== documentId || opened.opened.content !== record.text) {
+      const invitationClaim = record.publication.purpose === "invitation-claim";
+      if (opened.documentId !== documentId
+          || (invitationClaim && (record.publication.reopenPassword !== password
+            || record.text !== "" || opened.opened.invitationRequired))
+          || (!invitationClaim && opened.opened.content !== record.text)) {
         throw new Error("Pending publication candidate does not match its document");
       }
     } finally {
