@@ -15,6 +15,7 @@
 #include <cstring>
 #include <algorithm>
 #include <new>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -82,6 +83,9 @@ struct scpefe_unlocked_container {
         : data(std::move(value)) {}
     UnlockedContainerData data;
 };
+
+static_assert(std::is_nothrow_constructible_v<scpefe_unlocked_container,
+    UnlockedContainerData &&>);
 
 scpefe_status scpefe_password_container_create(
     const std::uint8_t *password,
@@ -498,6 +502,99 @@ scpefe_status scpefe_password_container_claim_invitation(
       catch (const std::bad_alloc &) { return SCPEFE_STATUS_OUT_OF_MEMORY; }
 }
 
+scpefe_status scpefe_password_container_update_slot_permissions(
+    const scpefe_slot_permissions_update_v1 *update,
+    std::uint8_t *output, std::size_t output_capacity, std::size_t *output_size)
+{
+    if (update == nullptr || update->struct_size < sizeof(*update)
+        || output_size == nullptr || update->container_size == 0
+        || update->administrator_password_size == 0
+        || update->slot_id_size != SCPEFE_SLOT_ID_SIZE
+        || !scpefe::format::span_is_valid(update->container, update->container_size)
+        || !scpefe::format::span_is_valid(update->administrator_password,
+            update->administrator_password_size)
+        || !scpefe::format::span_is_valid(update->slot_id, update->slot_id_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    try {
+        std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> slot_id{};
+        std::copy_n(update->slot_id, slot_id.size(), slot_id.begin());
+        std::uint8_t permissions = update->can_edit ? 1u : 0u;
+        if (update->can_add_passwords) permissions |= 2u;
+        if (update->can_remove_passwords) permissions |= 4u;
+        const auto encoded = RecoverablePasswordContainer::update_slot_permissions(
+            update->container, update->container_size,
+            update->administrator_password, update->administrator_password_size,
+            slot_id, permissions);
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) { return external_status(failure.error); }
+      catch (const std::bad_alloc &) { return SCPEFE_STATUS_OUT_OF_MEMORY; }
+}
+
+scpefe_status scpefe_password_container_remove_slot(
+    const scpefe_slot_remove_v1 *remove,
+    std::uint8_t *output, std::size_t output_capacity, std::size_t *output_size)
+{
+    if (remove == nullptr || remove->struct_size < sizeof(*remove)
+        || output_size == nullptr || remove->container_size == 0
+        || remove->administrator_password_size == 0
+        || remove->slot_id_size != SCPEFE_SLOT_ID_SIZE
+        || !scpefe::format::span_is_valid(remove->container, remove->container_size)
+        || !scpefe::format::span_is_valid(remove->administrator_password,
+            remove->administrator_password_size)
+        || !scpefe::format::span_is_valid(remove->slot_id, remove->slot_id_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    try {
+        std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> slot_id{};
+        std::copy_n(remove->slot_id, slot_id.size(), slot_id.begin());
+        const auto encoded = RecoverablePasswordContainer::remove_slot(
+            remove->container, remove->container_size,
+            remove->administrator_password, remove->administrator_password_size,
+            slot_id);
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) { return external_status(failure.error); }
+      catch (const std::bad_alloc &) { return SCPEFE_STATUS_OUT_OF_MEMORY; }
+}
+
+scpefe_status scpefe_password_container_reconcile_identity(
+    const scpefe_slot_identity_reconcile_v1 *reconcile,
+    std::uint8_t *output, std::size_t output_capacity, std::size_t *output_size)
+{
+    if (reconcile == nullptr || reconcile->struct_size < sizeof(*reconcile)
+        || output_size == nullptr || reconcile->container_size == 0
+        || reconcile->password_size == 0 || reconcile->profile_name_size == 0
+        || reconcile->profile_email_size == 0
+        || !scpefe::format::span_is_valid(reconcile->container,
+            reconcile->container_size)
+        || !scpefe::format::span_is_valid(reconcile->password,
+            reconcile->password_size)
+        || !scpefe::format::valid_utf8(reconcile->profile_name,
+            reconcile->profile_name_size)
+        || !scpefe::format::valid_utf8(reconcile->profile_email,
+            reconcile->profile_email_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    try {
+        const auto encoded = RecoverablePasswordContainer::reconcile_identity(
+            reconcile->container, reconcile->container_size,
+            reconcile->password, reconcile->password_size,
+            {reconcile->profile_name, reconcile->profile_name_size},
+            {reconcile->profile_email, reconcile->profile_email_size});
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) { return external_status(failure.error); }
+      catch (const std::bad_alloc &) { return SCPEFE_STATUS_OUT_OF_MEMORY; }
+}
+
 scpefe_status scpefe_password_container_unlock_with_limits(
     const std::uint8_t *container,
     std::size_t container_size,
@@ -522,7 +619,8 @@ scpefe_status scpefe_password_container_unlock_with_limits(
         UnlockedContainerData data = PasswordContainer::unlock(
             container, container_size, password, password_size, internal_limits
         );
-        *unlocked = new scpefe_unlocked_container(std::move(data));
+        *unlocked = new (std::nothrow) scpefe_unlocked_container(std::move(data));
+        if (*unlocked == nullptr) return SCPEFE_STATUS_OUT_OF_MEMORY;
         return SCPEFE_STATUS_OK;
     } catch (const ContainerFailure &failure) {
         return external_status(failure.error);
@@ -576,6 +674,40 @@ scpefe_status scpefe_unlocked_container_slot_access(
     };
     std::memcpy(access, &value, std::min<std::size_t>(
         struct_size, sizeof(scpefe_unlocked_slot_access_v1)));
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_unlocked_container_managed_slot_count(
+    const scpefe_unlocked_container *unlocked, std::size_t *slot_count)
+{
+    if (unlocked == nullptr || slot_count == nullptr)
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *slot_count = !unlocked->data.must_be_changed
+        && (unlocked->data.permissions & 4u) != 0
+        ? unlocked->data.managed_slots.size() : 0;
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_unlocked_container_managed_slot(
+    const scpefe_unlocked_container *unlocked, std::size_t index,
+    scpefe_managed_slot_v1 *slot)
+{
+    if (unlocked == nullptr || slot == nullptr
+        || slot->struct_size < sizeof(*slot)
+        || unlocked->data.must_be_changed
+        || (unlocked->data.permissions & 4u) == 0
+        || index >= unlocked->data.managed_slots.size())
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    const auto &value = unlocked->data.managed_slots[index];
+    const auto struct_size = slot->struct_size;
+    *slot = scpefe_managed_slot_v1{struct_size,
+        value.slot_id.data(), value.slot_id.size(),
+        (value.permissions & 1u) != 0, (value.permissions & 2u) != 0,
+        (value.permissions & 4u) != 0, value.must_be_changed,
+        value.identity_name.data(), value.identity_name.size(),
+        value.identity_email.data(), value.identity_email.size(),
+        value.slot_id_known, value.permissions_known, value.identity_known,
+        value.must_be_changed_known};
     return SCPEFE_STATUS_OK;
 }
 

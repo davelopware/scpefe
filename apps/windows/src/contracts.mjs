@@ -190,11 +190,51 @@ export function validateOpenedDocument(value) {
     throw new TypeError("host returned invalid provisional state");
   }
   const provisional = value.provisional === true || value.manuallySealed === false;
+  let profileMismatch;
+  if (value.profileMismatch !== undefined) {
+    const mismatch = value.profileMismatch;
+    if (!mismatch || typeof mismatch !== "object"
+        || typeof mismatch.slotName !== "string"
+        || typeof mismatch.slotEmail !== "string"
+        || typeof mismatch.profileName !== "string"
+        || typeof mismatch.profileEmail !== "string") {
+      throw new TypeError("host returned invalid profile mismatch details");
+    }
+    profileMismatch = Object.freeze({ ...mismatch, editingBlocked: true });
+  }
+  if (value.managedSlots !== undefined && !Array.isArray(value.managedSlots)) {
+    throw new TypeError("host returned invalid managed slots");
+  }
+  const managedSlots = value.managedSlots?.map((slot) => {
+    if (!slot || typeof slot !== "object" || !/^[0-9a-f]{32}$/.test(slot.slotId)
+        || typeof slot.identityName !== "string" || typeof slot.identityEmail !== "string"
+        || typeof slot.canEdit !== "boolean"
+        || typeof slot.canAddPasswords !== "boolean"
+        || typeof slot.canRemovePasswords !== "boolean"
+        || typeof slot.mustBeChanged !== "boolean"
+        || (slot.slotIdKnown !== undefined && typeof slot.slotIdKnown !== "boolean")
+        || (slot.permissionsKnown !== undefined && typeof slot.permissionsKnown !== "boolean")
+        || (slot.mustBeChangedKnown !== undefined
+          && typeof slot.mustBeChangedKnown !== "boolean")
+        || (slot.identityKnown !== undefined && typeof slot.identityKnown !== "boolean")) {
+      throw new TypeError("host returned invalid managed slot details");
+    }
+    return Object.freeze({ ...slot });
+  });
   return Object.freeze({ content: value.content, readOnly: true,
     canEdit: value.canEdit, publicationState,
     ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
+    ...(value.canRemovePasswords !== undefined
+      ? { canRemovePasswords: value.canRemovePasswords } : {}),
+    ...(value.recoverySlot !== undefined ? { recoverySlot: value.recoverySlot } : {}),
+    ...(value.slotId !== undefined ? { slotId: value.slotId } : {}),
+    ...(value.slotIdentityName !== undefined
+      ? { slotIdentityName: value.slotIdentityName,
+        slotIdentityEmail: value.slotIdentityEmail } : {}),
+    ...(managedSlots ? { managedSlots: Object.freeze(managedSlots) } : {}),
+    ...(profileMismatch ? { profileMismatch } : {}),
     ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),
     ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
@@ -210,6 +250,9 @@ export function validateEditMode(value) {
     publicationState: "target-published",
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
+    ...(value.canRemovePasswords !== undefined
+      ? { canRemovePasswords: value.canRemovePasswords } : {}),
+    ...(value.managedSlots !== undefined ? { managedSlots: value.managedSlots } : {}),
     ...(value.invitationRequired !== undefined
       ? { invitationRequired: false } : {}) });
 }

@@ -150,6 +150,65 @@ test("view-only slots cannot enter edit mode", async (t) => {
   await assert.rejects(service.enterEditMode(), /does not permit editing/);
 });
 
+test("profile mismatch stays read-only until lease-backed reconciliation", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-identity-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Grace", "Private PC");
+  await fs.writeFile(target, "base");
+  const native = withLease({
+    openDocument(bytes) {
+      const reconciled = bytes.toString() === "reconciled";
+      return { content: "secret", readOnly: true, canEdit: false,
+        canAddPasswords: true, canRemovePasswords: true, recoverySlot: false,
+        slotId: "12".repeat(16), slotIdentityName: reconciled ? "Grace" : "Old Grace",
+        slotIdentityEmail: reconciled ? "grace@example.test" : "old@example.test",
+        managedSlots: [], documentId: "31".repeat(16),
+        baseRevision: "42".repeat(32), journalKey: Buffer.alloc(32, 5) };
+    },
+    reconcileIdentity(bytes, _password, input) {
+      assert.equal(bytes.toString(), "base");
+      assert.equal(input.name, "Grace");
+      assert.equal(input.email, "grace@example.test");
+      return Buffer.from("identity-reconciled");
+    },
+    saveDocument(bytes, _password, input) {
+      assert.equal(bytes.toString(), "identity-reconciled");
+      assert.equal(input.name, "Grace");
+      assert.equal(input.email, "grace@example.test");
+      return Buffer.from("reconciled");
+    },
+  });
+  const service = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+  const opened = await service.openDocument(target, "password words");
+  assert.equal(opened.canEdit, false);
+  assert.equal(opened.content, "secret");
+  assert.equal(opened.profileMismatch.editingBlocked, true);
+  await assert.rejects(service.enterEditMode(), /Reconcile/);
+  const reconciled = await service.reconcileIdentity();
+  assert.equal(reconciled.slotIdentityName, "Grace");
+  assert.equal(reconciled.canEdit, false);
+  assert.equal(reconciled.profileMismatch, undefined);
+  assert.equal((await fs.readFile(target)).toString(), "reconciled");
+});
+
+test("recovery use never raises a profile mismatch", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-recovery-profile-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Grace", "Private PC");
+  await fs.writeFile(target, "base");
+  const service = new DocumentService({ fs, profilePath, publicationCapabilities,
+    native: withLease({ openDocument: () => ({ content: "secret", readOnly: true,
+      canEdit: true, recoverySlot: true, slotIdentityName: "",
+      slotIdentityEmail: "", documentId: "51".repeat(16),
+      baseRevision: "62".repeat(32), journalKey: Buffer.alloc(32, 7) }) }) });
+  const opened = await service.openDocument(target, "recovery password words");
+  assert.equal(opened.canEdit, true);
+  assert.equal(opened.profileMismatch, undefined);
+});
+
 test("view-only slots create exact backups without changing the active target", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

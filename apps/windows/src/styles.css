@@ -6,3 +6,9 @@ textarea { min-height: 10rem; } .warning { border-left: .3rem solid #b54708; pad
 .check { display: flex; align-items: center; } .mode { font-weight: 700; color: #245c3d; }
 .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; }
 fieldset { display: grid; gap: .7rem; border: 1px solid #bac5d0; }
+.slot-administration { max-width: 760px; margin: 1rem auto 2rem; padding: 1.25rem;
+  box-sizing: border-box; background: white; border-radius: .5rem; }
+.managed-slots { display: grid; gap: 1rem; padding: 0; list-style: none; }
+.managed-slot { display: grid; gap: .7rem; padding: 1rem; border: 1px solid #bac5d0;
+  border-radius: .4rem; }
+.managed-slot h4, .managed-slot p { margin: 0; }

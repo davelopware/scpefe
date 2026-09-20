@@ -15,7 +15,7 @@ static uint32_t read_u32(const uint8_t *input)
 static const uint8_t *invitation_record(const uint8_t *container, size_t size,
     size_t *record_size)
 {
-    static const uint8_t magic[] = {'S','C','P','I','N','V','0','2'};
+    static const uint8_t magic[] = {'S','C','P','I','N','V','0','3'};
     size_t offset;
     for (offset = 0; offset + sizeof(magic) + 12 < size; ++offset) {
         if (memcmp(container + offset, magic, sizeof(magic)) == 0) break;
@@ -24,6 +24,9 @@ static const uint8_t *invitation_record(const uint8_t *container, size_t size,
         return NULL;
     offset += 12;
     *record_size = 44 + read_u32(container + offset + 40);
+    if (*record_size > size - offset) return NULL;
+    if (*record_size + 28 > size - offset) return NULL;
+    *record_size += 28 + read_u32(container + offset + *record_size + 24);
     if (*record_size > size - offset) return NULL;
     return container + offset;
 }
@@ -81,6 +84,61 @@ static scpefe_status change(const uint8_t *container, size_t size,
         container, size, (const uint8_t *)current, strlen(current),
         (const uint8_t *)replacement, strlen(replacement),
         *result, *result_size, result_size);
+}
+
+static scpefe_status update_permissions(const uint8_t *container, size_t size,
+    const char *administrator, const uint8_t slot_id[SCPEFE_SLOT_ID_SIZE],
+    int edit, int add_passwords, int remove_passwords,
+    uint8_t **result, size_t *result_size)
+{
+    const scpefe_slot_permissions_update_v1 request = {
+        sizeof(request), container, size,
+        (const uint8_t *)administrator, strlen(administrator),
+        slot_id, SCPEFE_SLOT_ID_SIZE, edit, add_passwords, remove_passwords
+    };
+    scpefe_status status = scpefe_password_container_update_slot_permissions(
+        &request, NULL, 0, result_size);
+    if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) return status;
+    *result = (uint8_t *)malloc(*result_size);
+    if (*result == NULL) return SCPEFE_STATUS_OUT_OF_MEMORY;
+    return scpefe_password_container_update_slot_permissions(
+        &request, *result, *result_size, result_size);
+}
+
+static scpefe_status remove_slot(const uint8_t *container, size_t size,
+    const char *administrator, const uint8_t slot_id[SCPEFE_SLOT_ID_SIZE],
+    uint8_t **result, size_t *result_size)
+{
+    const scpefe_slot_remove_v1 request = {
+        sizeof(request), container, size,
+        (const uint8_t *)administrator, strlen(administrator),
+        slot_id, SCPEFE_SLOT_ID_SIZE
+    };
+    scpefe_status status = scpefe_password_container_remove_slot(
+        &request, NULL, 0, result_size);
+    if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) return status;
+    *result = (uint8_t *)malloc(*result_size);
+    if (*result == NULL) return SCPEFE_STATUS_OUT_OF_MEMORY;
+    return scpefe_password_container_remove_slot(
+        &request, *result, *result_size, result_size);
+}
+
+static scpefe_status reconcile(const uint8_t *container, size_t size,
+    const char *password, const char *name, const char *email,
+    uint8_t **result, size_t *result_size)
+{
+    const scpefe_slot_identity_reconcile_v1 request = {
+        sizeof(request), container, size,
+        (const uint8_t *)password, strlen(password),
+        name, strlen(name), email, strlen(email)
+    };
+    scpefe_status status = scpefe_password_container_reconcile_identity(
+        &request, NULL, 0, result_size);
+    if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) return status;
+    *result = (uint8_t *)malloc(*result_size);
+    if (*result == NULL) return SCPEFE_STATUS_OUT_OF_MEMORY;
+    return scpefe_password_container_reconcile_identity(
+        &request, *result, *result_size, result_size);
 }
 
 static int access(const uint8_t *container, size_t size, const char *password,
@@ -225,6 +283,53 @@ int main(void)
     CHECK(add(container, size, recovery,
         "violet-correct-horse-battery-planet-92831", 0, 1,
         &extra, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
+    {
+        uint8_t managed_id[SCPEFE_SLOT_ID_SIZE];
+        uint8_t owner_id[SCPEFE_SLOT_ID_SIZE];
+        uint8_t *administered = NULL, *reconciled = NULL, *removed = NULL;
+        size_t administered_size = 0, reconciled_size = 0, removed_size = 0;
+        size_t managed_count = 0;
+        scpefe_managed_slot_v1 managed = {0};
+        CHECK(scpefe_password_container_unlock(claimed, claimed_size,
+            (const uint8_t *)owner, sizeof(owner) - 1, &unlocked)
+            == SCPEFE_STATUS_OK);
+        CHECK(scpefe_unlocked_container_managed_slot_count(unlocked, &managed_count)
+            == SCPEFE_STATUS_OK && managed_count == 1);
+        managed.struct_size = sizeof(managed);
+        CHECK(scpefe_unlocked_container_managed_slot(unlocked, 0, &managed)
+            == SCPEFE_STATUS_OK);
+        memcpy(managed_id, managed.slot_id, sizeof(managed_id));
+        slot.struct_size = sizeof(slot);
+        CHECK(scpefe_unlocked_container_slot_access(unlocked, &slot)
+            == SCPEFE_STATUS_OK);
+        memcpy(owner_id, slot.slot_id, sizeof(owner_id));
+        scpefe_unlocked_container_destroy(unlocked); unlocked = NULL;
+        CHECK(remove_slot(claimed, claimed_size, owner, owner_id,
+            &removed, &removed_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
+        CHECK(update_permissions(claimed, claimed_size, owner, managed_id,
+            0, 1, 0, &administered, &administered_size)
+            == SCPEFE_STATUS_INVALID_ARGUMENT);
+        CHECK(update_permissions(claimed, claimed_size, owner, managed_id,
+            0, 0, 0, &administered, &administered_size) == SCPEFE_STATUS_OK);
+        CHECK(access(administered, administered_size, replacement, &slot) == 0);
+        CHECK(slot.can_edit == 0 && slot.can_add_passwords == 0
+            && slot.can_remove_passwords == 0);
+        CHECK(reconcile(administered, administered_size, replacement,
+            "Rear Admiral Grace Hopper", "hopper@example.test",
+            &reconciled, &reconciled_size) == SCPEFE_STATUS_OK);
+        CHECK(access(reconciled, reconciled_size, replacement, &slot) == 0);
+        CHECK(slot.identity_name_size == strlen("Rear Admiral Grace Hopper")
+            && slot.identity_email_size == strlen("hopper@example.test"));
+        CHECK(remove_slot(reconciled, reconciled_size, owner, managed_id,
+            &removed, &removed_size) == SCPEFE_STATUS_OK);
+        CHECK(scpefe_password_container_unlock(removed, removed_size,
+            (const uint8_t *)replacement, sizeof(replacement) - 1, &unlocked)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(access(removed, removed_size, owner, &slot) == 0);
+        CHECK(slot.can_edit == 1 && slot.can_add_passwords == 1
+            && slot.can_remove_passwords == 1);
+        free(removed); free(reconciled); free(administered);
+    }
     free(extra); free(rewrapped); free(delegated_invitation);
     free(claimed); free(invited); free(container);
     return 0;

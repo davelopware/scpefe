@@ -15,6 +15,38 @@
 namespace scpefe::format {
 namespace {
 
+extern "C" void sodium_memzero(void *buffer, std::size_t size);
+
+void clear_identity_string(std::string &value) noexcept
+{
+    if (!value.empty()) sodium_memzero(value.data(), value.size());
+    value.clear();
+}
+
+void read_identity_text(CborReader &reader, std::string &output)
+{
+    std::string temporary = reader.text();
+    struct Guard {
+        std::string &value;
+        ~Guard() { clear_identity_string(value); }
+    } guard{temporary};
+    output = temporary;
+}
+
+void read_slot_identifier(CborReader &reader, std::vector<std::uint8_t> &output)
+{
+    auto temporary = reader.bytes(slot_id_size);
+    struct Guard {
+        std::vector<std::uint8_t> &value;
+        ~Guard()
+        {
+            if (!value.empty()) sodium_memzero(value.data(), value.size());
+            value.clear();
+        }
+    } guard{temporary};
+    output = temporary;
+}
+
 std::string revision_key(const std::uint8_t *value)
 {
     return std::string(reinterpret_cast<const char *>(value), revision_id_size);
@@ -60,6 +92,16 @@ void validate_ancestor_graph(
 }
 
 } // namespace
+
+SnapshotRevisionData::~SnapshotRevisionData()
+{
+    if (!slot_id.empty()) sodium_memzero(slot_id.data(), slot_id.size());
+    slot_id.clear();
+    clear_identity_string(slot_identity_name);
+    clear_identity_string(slot_identity_email);
+    clear_identity_string(client_profile_name);
+    clear_identity_string(client_profile_email);
+}
 
 void SnapshotRevision::validate_data(
     const SnapshotRevisionData &data,
@@ -202,11 +244,11 @@ SnapshotRevision SnapshotRevision::decode(
         );
     }
     reader.expect_unsigned(3); revision.data_.timestamp_ms = reader.unsigned_integer();
-    reader.expect_unsigned(4); revision.data_.slot_id = reader.bytes(slot_id_size);
-    reader.expect_unsigned(5); revision.data_.slot_identity_name = reader.text();
-    reader.expect_unsigned(6); revision.data_.slot_identity_email = reader.text();
-    reader.expect_unsigned(7); revision.data_.client_profile_name = reader.text();
-    reader.expect_unsigned(8); revision.data_.client_profile_email = reader.text();
+    reader.expect_unsigned(4); read_slot_identifier(reader, revision.data_.slot_id);
+    reader.expect_unsigned(5); read_identity_text(reader, revision.data_.slot_identity_name);
+    reader.expect_unsigned(6); read_identity_text(reader, revision.data_.slot_identity_email);
+    reader.expect_unsigned(7); read_identity_text(reader, revision.data_.client_profile_name);
+    reader.expect_unsigned(8); read_identity_text(reader, revision.data_.client_profile_email);
     reader.expect_unsigned(9); revision.data_.device_name = reader.text();
     reader.expect_unsigned(10); revision.data_.content_hash = reader.bytes(content_hash_size);
     reader.expect_unsigned(11);

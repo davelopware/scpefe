@@ -54,7 +54,7 @@ the block and expose an inactive lease with the default duration. Lease-only
 updates re-encrypt this payload with a fresh nonce and preserve the exact
 revision bytes, so they never create history revisions.
 
-Invitation-capable writers may place an `SCPINV02` extension between the fixed
+Invitation-capable readers accept the earlier `SCPINV02` extension between the fixed
 owner/recovery wrappers and encrypted snapshot. It contains a little-endian
 32-bit invitation count followed by independently salted and nonced invitation
 records. Each record carries a 16-octet salt, 24-octet nonce, 32-bit ciphertext
@@ -68,3 +68,43 @@ and one authenticates the current encrypted snapshot. Adding, claiming, or
 rewrapping an invitation refreshes the snapshot nonce and both authenticators.
 This binds every accepted record to the current container state, so a previously
 valid temporary-password record cannot be replayed after it has been claimed.
+
+Current writers use `SCPINV03`. Each password-encrypted record is followed by a
+24-octet nonce, a 32-bit ciphertext length, and an XChaCha20-Poly1305 ciphertext
+under the purpose-separated slot-state key. That administrative plaintext repeats
+an opaque management ID, the immutable password-slot ID when known, permissions,
+`mustBeChanged` flag, display name, email, and independent known-value flags, but
+never contains the document key. This allows a full administrative slot to list,
+update, or remove ordinary invitation slots without knowing their passwords, while
+keeping identity and policy metadata encrypted. The keyed state authenticator
+covers both ciphertexts. A managed permission or identity update re-randomizes the
+administrative ciphertext and snapshot and refreshes both authenticators. Removing
+a record rebuilds the extension; removing its final record removes the extension.
+Permanent owner and recovery/master wrappers are outside this extension and cannot
+be demoted or removed.
+
+Readers enumerate `SCPINV02` records by deriving a stable opaque management ID from
+the authenticated immutable salt and nonce and the slot-state key. The handle
+therefore survives a claim or password rewrap before migration. Values that were
+available only inside the unknown password wrapper are explicitly marked unknown.
+In particular, permission knowledge and `mustBeChanged` knowledge are separate, so
+an administrative permission update cannot clear the password wrapper's claim
+requirement or expose content early. Claiming uses the effective managed permissions
+when it creates the replacement password wrapper. The first
+administrative update or identity reconciliation rebuilds the extension as
+`SCPINV03` while copying each original password salt, nonce, length, and ciphertext
+byte-for-byte. Consequently migration neither needs nor changes an invited person's
+password. Authentication by that person can later populate the immutable slot ID
+and identity without changing the management ID.
+
+Any authenticated slot with remove-password permission may enumerate the managed
+records needed to select a removal target. Changing permissions remains restricted
+to a full administrator holding both add-password and remove-password permission.
+
+Current writers also place an authenticated `SCPOWN01` owner-identity block after
+the lease and before the revision. It binds the permanent owner slot ID to its name
+and email independently of whichever slot authored the current revision. New
+documents write it at creation. An owner-authenticated operation upgrades an older
+payload when the owner-authored revision still supplies the identity, and explicit
+owner reconciliation can establish or replace it. Recovery use never treats an
+identity difference as a profile mismatch.

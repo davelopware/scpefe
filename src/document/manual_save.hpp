@@ -7,7 +7,7 @@
 
 namespace scpefe::document {
 
-/* Seals a child revision into an existing editor-capable container. */
+/* Seals an edited child or a content-preserving identity reconciliation. */
 class ManualSave {
 public:
     /* Creates a replacement container containing the attributed child revision. */

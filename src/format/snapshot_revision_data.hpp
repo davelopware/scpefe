@@ -25,6 +25,9 @@ struct RevisionGraphNodeData {
 
 /* Semantic values owned by a SnapshotRevision. */
 struct SnapshotRevisionData {
+    /* Wipes decoded identity strings and slot identifiers on destruction. */
+    ~SnapshotRevisionData();
+
     std::vector<std::uint8_t> parent_revision_ids;
     std::uint64_t timestamp_ms{};
     std::vector<std::uint8_t> slot_id;

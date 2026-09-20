@@ -45,6 +45,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
   claimInvitation: async (password) => validateOpenedDocument(
     await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
+  reconcileIdentity: async () => validateOpenedDocument(
+    await ipcRenderer.invoke("document:reconcile-identity")),
+  updateSlotPermissions: async (request) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:update-slot-permissions", request)),
+  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot", slotId),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

@@ -81,7 +81,8 @@ function validateRecord(value) {
             || hash(Buffer.from(mergeAncestor, "base64")) !== mergeAncestorHash
             || value.publication.purpose !== "regular-save"))
         || (value.publication.purpose !== undefined
-          && !["invitation-claim", "regular-save", "provisional-discard"]
+          && !["invitation-claim", "regular-save", "provisional-discard",
+            "identity-reconciliation", "slot-administration"]
             .includes(value.publication.purpose))
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"
