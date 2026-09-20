@@ -65,6 +65,9 @@ if (-not (Test-Path $VcpkgToolchain)) {
 Push-Location $WindowsRoot
 try {
     Invoke-Checked "npm.cmd" @("ci")
+    # Current Electron packages install their runtime lazily; fetch it now so
+    # packaging never depends on a developer having launched Electron first.
+    Invoke-Checked "node" @("node_modules/electron/install.js")
     $Package = Get-Content "package.json" -Raw | ConvertFrom-Json
     $ElectronVersion = [string]$Package.dependencies.electron
     if ($ElectronVersion -notmatch '^\d+\.\d+\.\d+$') {
