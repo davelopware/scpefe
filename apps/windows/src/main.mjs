@@ -7,19 +7,24 @@ import { randomUUID } from "node:crypto";
 import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
-import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
+import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
+  DocumentService } from "./document-service.mjs";
 import { applySwitchDecision, finishDocumentSwitch,
   OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
-  openTargetFromCommandLine, acknowledgementToken } from "./single-instance.mjs";
+  openTargetFromCommandLine, openTargetFromUrl, acknowledgementToken,
+  OrderedOpenRequests } from "./single-instance.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const native = require(path.join(here, "..", "native", "scpefe_electron_native.node"));
 let window;
 let service;
-let pendingExternalOpen = null;
 const openRequests = new OpenRequestQueue();
+const externalRequests = new OrderedOpenRequests({ randomToken: randomUUID });
+let externalDrainRunning = false;
+let externalOpenInProgress = false;
+const smokeDirectory = process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_DIR || null;
 const initialOpenTarget = openTargetFromCommandLine(process.argv);
 const instanceRequestToken = randomUUID();
 const instanceAcknowledgementPath = path.join(app.getPath("temp"),
@@ -37,6 +42,24 @@ async function sendJournalSummary() {
     window.webContents.send("document:journal-warning",
       `Unresolved journals could not be inspected: ${error.message}`);
   }
+}
+
+async function smokeLog(event, details = {}) {
+  if (!smokeDirectory) return;
+  await fs.mkdir(smokeDirectory, { recursive: true });
+  await fs.appendFile(path.join(smokeDirectory, "events.jsonl"),
+    `${JSON.stringify({ event, pid: process.pid, ...details })}\n`);
+}
+
+function acknowledgementPath(token) {
+  return path.join(app.getPath("temp"), `scpefe-open-${token}.ack`);
+}
+
+async function acknowledgeRequest(request, status) {
+  if (!request.ack) return;
+  await fs.writeFile(acknowledgementPath(request.ack), JSON.stringify({
+    acknowledgementToken: request.ack, requestToken: request.token, status,
+  }), { mode: 0o600 }).catch(() => {});
 }
 
 async function prepareDocumentSwitch() {
@@ -59,7 +82,23 @@ async function prepareDocumentSwitch() {
     });
     decision = ["cancel", "save", "discard"][choice.response];
   }
-  const outcome = await applySwitchDecision(service, decision);
+  let outcome;
+  try {
+    outcome = await applySwitchDecision(service, decision);
+  } catch (error) {
+    if (error?.code !== "DOCUMENT_SWITCH_UNREADABLE_JOURNAL") throw error;
+    const confirmation = await dialog.showMessageBox(window, {
+      type: "warning", title: "Permanently discard unreadable recovery work?",
+      message: "The recovery journal for this authenticated document cannot be read.",
+      detail: "Only this document's encrypted journal will be deleted. This cannot be undone.",
+      buttons: ["Cancel", "Permanently discard journal and open"],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (confirmation.response !== 1) return false;
+    await service.discardUnreadableJournalForSwitch(
+      DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
+    outcome = await applySwitchDecision(service, "discard");
+  }
   if (!outcome.proceed) return false;
   if (outcome.pendingPublication) {
     const disclosure = await dialog.showMessageBox(window, {
@@ -81,29 +120,51 @@ async function prepareDocumentSwitch() {
   return true;
 }
 
-async function offerExternalOpen(target) {
-  if (!target) return;
-  pendingExternalOpen = { token: randomUUID(), target };
+async function drainExternalRequests() {
+  if (externalDrainRunning || !service || !window || window.isDestroyed()) return;
+  const request = externalRequests.take();
+  if (!request) return;
+  externalDrainRunning = true;
   window.show();
+  if (window.isMinimized()) window.restore();
   window.focus();
-  window.webContents.send("document:external-open-requested",
-    { token: pendingExternalOpen.token });
+  await smokeLog("presented", { requestToken: request.token,
+    target: request.target ? path.basename(request.target) : null,
+    source: request.source });
+  if (!request.target) {
+    await acknowledgeRequest(request, "focused");
+    externalRequests.complete(request.token);
+    externalDrainRunning = false;
+    return drainExternalRequests();
+  }
+  window.webContents.send("document:external-open-requested", { token: request.token });
+  await acknowledgeRequest(request, "presented");
+  externalDrainRunning = false;
+  if (smokeDirectory) {
+    const delay = Number(process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS || 400);
+    setTimeout(() => {
+      if (externalRequests.current(request.token)) {
+        void acknowledgeRequest(request, "smoke-completed");
+        externalRequests.complete(request.token);
+        void smokeLog("completed", { requestToken: request.token,
+          target: path.basename(request.target) }).then(drainExternalRequests);
+      }
+    }, delay)?.unref?.();
+  }
 }
 
 function routeSecondInstance(commandLine, workingDirectory, additionalData) {
   const token = acknowledgementToken(additionalData);
-  if (token) {
-    void fs.writeFile(path.join(app.getPath("temp"), `scpefe-open-${token}.ack`),
-      "received", { flag: "wx", mode: 0o600 }).catch(() => {});
+  if (process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_STALL === "1") {
+    void smokeLog("request-intentionally-unacknowledged", { hasToken: Boolean(token) });
+    return;
   }
   const target = openTargetFromAdditionalData(additionalData)
     ?? openTargetFromCommandLine(commandLine, workingDirectory);
-  if (window) {
-    if (window.isMinimized()) window.restore();
-    window.show();
-    window.focus();
-  }
-  if (target) void openRequests.run(() => offerExternalOpen(target)).catch((error) => {
+  externalRequests.enqueue({ target, acknowledgementToken: token,
+    source: "second-instance" });
+  void smokeLog("queued", { target: target ? path.basename(target) : null,
+    source: "second-instance" }).then(drainExternalRequests).catch((error) => {
     window?.webContents.send("document:journal-warning",
       `Could not handle the open request: ${error.message}`);
   });
@@ -113,26 +174,76 @@ if (!hasInstanceLock) {
   // The existing instance remains authoritative; never kill or bypass it.
   void (async () => {
     const deadline = Date.now() + 3000;
-    let acknowledged = false;
+    let acknowledgementStatus = null;
     while (Date.now() < deadline) {
-      try { await fs.access(instanceAcknowledgementPath); acknowledged = true; break; }
-      catch { await new Promise((resolve) => setTimeout(resolve, 100)); }
+      try {
+        const result = JSON.parse(await fs.readFile(instanceAcknowledgementPath, "utf8"));
+        if (result.acknowledgementToken === instanceRequestToken
+            && ["presented", "focused", "opened", "canceled", "smoke-completed"]
+              .includes(result.status)) {
+          acknowledgementStatus = result.status;
+          break;
+        }
+      }
+      catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!acknowledgementStatus) {
+      await smokeLog("handoff-timeout", { existingInstancePreserved: true });
+      if (!smokeDirectory) {
+        await app.whenReady();
+        await dialog.showMessageBox({
+          type: "warning", title: "SCPEFE is already running",
+          message: "The existing SCPEFE instance did not respond.",
+          detail: "It was not killed or bypassed because it may hold unsaved encrypted work. Use Windows Task Manager to end it manually only after considering that risk, then try again.",
+          buttons: ["Close"], defaultId: 0, noLink: true,
+        });
+      }
+    } else if (acknowledgementStatus === "presented") {
+      const outcomeDeadline = Date.now()
+        + (smokeDirectory ? 20_000 : 300_000);
+      while (Date.now() < outcomeDeadline) {
+        try {
+          const result = JSON.parse(
+            await fs.readFile(instanceAcknowledgementPath, "utf8"));
+          if (result.acknowledgementToken === instanceRequestToken
+              && ["opened", "canceled", "smoke-completed"].includes(result.status)) {
+            acknowledgementStatus = result.status;
+            break;
+          }
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await smokeLog("handoff-acknowledged", { status: acknowledgementStatus });
+    } else {
+      await smokeLog("handoff-acknowledged", { status: acknowledgementStatus });
     }
     await fs.unlink(instanceAcknowledgementPath).catch(() => {});
-    if (!acknowledged) {
-      await app.whenReady();
-      await dialog.showMessageBox({
-        type: "warning", title: "SCPEFE is already running",
-        message: "The existing SCPEFE instance did not respond.",
-        detail: "It was not killed or bypassed because it may hold unsaved encrypted work. Use Windows Task Manager to end it manually only after considering that risk, then try again.",
-        buttons: ["Close"], defaultId: 0, noLink: true,
-      });
-    }
     app.quit();
   })();
 } else app.on("second-instance",
   (_event, commandLine, workingDirectory, additionalData) =>
     routeSecondInstance(commandLine, workingDirectory, additionalData));
+
+if (hasInstanceLock) {
+  if (initialOpenTarget) {
+    externalRequests.enqueue({ target: initialOpenTarget, source: "command-line" });
+    void smokeLog("queued", { target: path.basename(initialOpenTarget),
+      source: "command-line" });
+  }
+  app.on("open-file", (event, filePath) => {
+    event.preventDefault();
+    const target = openTargetFromCommandLine(["SCPEFE", filePath]);
+    if (target) externalRequests.enqueue({ target, source: "open-file" });
+    void drainExternalRequests();
+  });
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    const target = openTargetFromUrl(url);
+    if (target) externalRequests.enqueue({ target, source: "open-url" });
+    void drainExternalRequests();
+  });
+}
 
 if (hasInstanceLock) app.whenReady().then(async () => {
   service = new DocumentService({
@@ -188,17 +299,26 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:open-external", async (_event, request) => {
     if (!request || typeof request !== "object"
         || typeof request.token !== "string" || typeof request.password !== "string"
-        || !pendingExternalOpen || request.token !== pendingExternalOpen.token) {
+        || !externalRequests.current(request.token) || externalOpenInProgress) {
       throw new TypeError("invalid external open request");
     }
-    const pending = pendingExternalOpen;
-    const opened = await openRequests.run(async () => {
-      if (!await prepareDocumentSwitch()) return null;
-      return service.openDocument(pending.target, request.password);
-    });
-    if (pendingExternalOpen?.token === pending.token) pendingExternalOpen = null;
-    await sendJournalSummary();
-    return opened;
+    const pending = externalRequests.current(request.token);
+    externalOpenInProgress = true;
+    try {
+      const opened = await openRequests.run(async () => {
+        if (!await prepareDocumentSwitch()) return null;
+        return service.openDocument(pending.target, request.password);
+      });
+      await acknowledgeRequest(pending, opened ? "opened" : "canceled");
+      externalRequests.complete(pending.token);
+      await smokeLog("completed", { requestToken: pending.token,
+        target: path.basename(pending.target), outcome: opened ? "opened" : "canceled" });
+      await sendJournalSummary();
+      void drainExternalRequests();
+      return opened;
+    } finally {
+      externalOpenInProgress = false;
+    }
   });
   ipcMain.handle("document:enter-edit-mode", async () => {
     try {
@@ -327,12 +447,11 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   window.loadFile(path.join(here, "..", "dist", "index.html"));
   window.webContents.on("did-finish-load", () => {
     void sendJournalSummary();
-    if (initialOpenTarget) {
-      void openRequests.run(() => offerExternalOpen(initialOpenTarget)).catch((error) => {
-        window?.webContents.send("document:journal-warning",
-          `Could not handle the startup open request: ${error.message}`);
-      });
-    }
+    const delay = Number(process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_READY_DELAY_MS || 0);
+    setTimeout(() => {
+      externalRequests.setReady();
+      void smokeLog("renderer-ready").then(drainExternalRequests);
+    }, delay);
   });
 });
 

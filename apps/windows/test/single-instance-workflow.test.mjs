@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 import { openTargetFromAdditionalData,
-  openTargetFromCommandLine, acknowledgementToken } from "../src/single-instance.mjs";
+  openTargetFromCommandLine, openTargetFromUrl, acknowledgementToken,
+  OrderedOpenRequests } from "../src/single-instance.mjs";
 import { applySwitchDecision, finishDocumentSwitch,
   OpenRequestQueue } from "../src/switch-document.mjs";
 
@@ -19,6 +20,34 @@ test("accepts only SCPEFE shell targets from command lines and instance metadata
     acknowledgementToken: "123e4567-e89b-42d3-a456-426614174000",
   }), "123e4567-e89b-42d3-a456-426614174000");
   assert.equal(acknowledgementToken({ acknowledgementToken: "../unsafe" }), null);
+  assert.equal(openTargetFromUrl("file:///safe/document.scpefe"),
+    "/safe/document.scpefe");
+  assert.equal(openTargetFromUrl(
+    "scpefe://open?target=file%3A%2F%2F%2Fsafe%2Flinked.scpefe"),
+  "/safe/linked.scpefe");
+  assert.equal(openTargetFromUrl("https://example.test/document.scpefe"), null);
+});
+
+test("stages lifecycle requests until ready and holds strict FIFO through completion", () => {
+  let number = 0;
+  const requests = new OrderedOpenRequests({ randomToken: () => `token-${++number}` });
+  const first = requests.enqueue({ target: "/first.scpefe", source: "command-line" });
+  const second = requests.enqueue({ target: "/second.scpefe",
+    acknowledgementToken: "ack-2", source: "second-instance" });
+  const third = requests.enqueue({ target: "/third.scpefe",
+    acknowledgementToken: "ack-3", source: "open-file" });
+  assert.equal(requests.take(), null);
+  requests.setReady();
+  assert.equal(requests.take(), first);
+  assert.equal(requests.take(), null);
+  assert.equal(requests.current(second.token), null);
+  assert.equal(requests.complete(first.token), first);
+  assert.equal(requests.take(), second);
+  assert.throws(() => requests.complete(third.token), /not active/);
+  requests.complete(second.token);
+  assert.equal(requests.take(), third);
+  requests.complete(third.token);
+  assert.equal(requests.size, 0);
 });
 
 test("serializes racing shell open requests even after one fails", async () => {
@@ -106,6 +135,15 @@ test("a resumed manual pending save is not sealed a second time", async () => {
   assert.equal(saveCalls, 0);
 });
 
+test("unreadable recovery journals require the trusted document-scoped path", async () => {
+  const service = { active: { dirty: false, recovery: null, manuallySealed: true,
+    pendingPublication: false, pendingRecord: null, unresolvedJournal: true,
+    unreadableJournal: true, editMode: false } };
+  await assert.rejects(applySwitchDecision(service, "discard"),
+    (error) => error.code === "DOCUMENT_SWITCH_UNREADABLE_JOURNAL");
+  assert.equal(service.active.unresolvedJournal, true);
+});
+
 test("finishing a switch releases edit mode before locking", async () => {
   const calls = [];
   const service = { active: { editMode: true },
@@ -133,4 +171,13 @@ test("renderer makes external requests and unresolved journals accessible alerts
   assert.match(renderer, /Recovery work needs attention/);
   assert.match(renderer, /aria-labelledby="external-open-heading"/);
   assert.match(renderer, /Document password/);
+});
+
+test("main registers file and URL lifecycle events before draining staged requests", async () => {
+  const main = await fs.readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
+  assert.match(main, /app\.on\("open-file"/);
+  assert.match(main, /app\.on\("open-url"/);
+  assert.match(main, /externalRequests\.setReady\(\)/);
+  assert.match(main, /acknowledgeRequest\(request, "presented"\)/);
+  assert.match(main, /acknowledgeRequest\(pending, opened \? "opened" : "canceled"\)/);
 });

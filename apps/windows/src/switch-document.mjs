@@ -15,6 +15,11 @@ export async function applySwitchDecision(service, decision) {
     return Object.freeze({ proceed: true, pendingPublication: false });
   }
   if (decision === "discard") {
+    if (service.active.unreadableJournal) {
+      throw switchError(
+        "The unreadable recovery journal requires explicit destructive confirmation",
+        "DOCUMENT_SWITCH_UNREADABLE_JOURNAL");
+    }
     if (service.active.pendingPublication) {
       await service.discardPendingPublication();
     }
