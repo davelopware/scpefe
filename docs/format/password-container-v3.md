@@ -18,10 +18,10 @@ length) with zero. That copy is the slot's additional authenticated data. The
 actual complete header remains the encrypted snapshot's additional authenticated
 data.
 
-A manual save preserves the complete slot area and the decrypted 16-octet
-document ID. It generates a fresh snapshot nonce, records the new ciphertext
-length, and encrypts the document ID followed by the new deterministic snapshot
-revision with the existing document key. The new revision has one parent: the
+A manual save preserves the complete slot area, decrypted 16-octet document ID,
+and encrypted editing-lease block. It generates a fresh snapshot nonce, records
+the new ciphertext length, and encrypts the document ID, lease block, and new
+deterministic snapshot revision with the existing document key. The new revision has one parent: the
 32-octet generic hash of the exact previous encoded revision. This construction
 keeps all password slots usable, avoids nonce reuse, and authenticates every
 immutable header field. Version-2 containers remain readable but cannot be
@@ -34,3 +34,12 @@ key and resulting wrapper change. The document key, slot
 identifier, permissions, header, other wrappers, and encrypted snapshot bytes
 remain unchanged. Before replacement, the new password is assessed locally and
 tried against every other slot so one password cannot address two slots.
+
+Current version-3 writers place a `SCPLEAS1` editing-lease block between the
+document ID and revision. The block contains an active flag, 16-octet session
+ID, heartbeat counter, holder UTC milliseconds, file-defined duration
+(600,000 milliseconds by default), and length-prefixed UTF-8 holder name,
+email, and device name. Readers also accept early version-3 payloads without
+the block and expose an inactive lease with the default duration. Lease-only
+updates re-encrypt this payload with a fresh nonce and preserve the exact
+revision bytes, so they never create history revisions.

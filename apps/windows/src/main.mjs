@@ -45,7 +45,22 @@ app.whenReady().then(() => {
     if (chosen.canceled || chosen.filePaths.length !== 1) return null;
     return service.openDocument(chosen.filePaths[0], password);
   });
-  ipcMain.handle("document:enter-edit-mode", () => service.enterEditMode());
+  ipcMain.handle("document:enter-edit-mode", async () => {
+    try {
+      return await service.enterEditMode();
+    } catch (error) {
+      if (error?.code !== "LEASE_CLOCK_UNCERTAIN") throw error;
+      const confirmation = await dialog.showMessageBox(window, {
+        type: "warning", title: "Force editing-lease takeover?",
+        message: "The current lease cannot be proved expired because the clocks disagree.",
+        detail: "Force takeover only after confirming the named holder is no longer editing.",
+        buttons: ["Cancel", "Force takeover"], defaultId: 0, cancelId: 0,
+        noLink: true,
+      });
+      if (confirmation.response !== 1) throw error;
+      return service.enterEditMode({ forceTakeover: true });
+    }
+  });
   ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
   ipcMain.handle("document:export-plaintext", async (_event, request) => {
     const warning = await dialog.showMessageBox(window, {
@@ -82,6 +97,15 @@ app.whenReady().then(() => {
       sandbox: true,
       preload: path.join(here, "..", "dist", "preload.cjs"),
     },
+  });
+  let closingAfterRelease = false;
+  window.on("close", (event) => {
+    if (closingAfterRelease || !service.active?.editMode) return;
+    event.preventDefault();
+    void service.exitEditMode().catch(() => service.lock("app-exit")).finally(() => {
+      closingAfterRelease = true;
+      window.close();
+    });
   });
   powerMonitor.on("lock-screen", () => { void service.lock("screen-lock"); });
   window.on("blur", () => { void service.lock("background"); });

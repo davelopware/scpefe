@@ -58,6 +58,28 @@ void set_boolean(napi_env env, napi_value object, const char *name, bool value)
     check(env, napi_set_named_property(env, object, name, boolean));
 }
 
+void set_number(napi_env env, napi_value object, const char *name, std::uint64_t value)
+{
+    napi_value number;
+    check(env, napi_create_double(env, static_cast<double>(value), &number));
+    check(env, napi_set_named_property(env, object, name, number));
+}
+
+std::uint64_t number_value(napi_env env, napi_value value)
+{
+    double result = 0;
+    check(env, napi_get_value_double(env, value, &result));
+    if (result < 0) throw std::runtime_error("expected a non-negative number");
+    return static_cast<std::uint64_t>(result);
+}
+
+bool boolean_value(napi_env env, napi_value value)
+{
+    bool result = false;
+    check(env, napi_get_value_bool(env, value, &result));
+    return result;
+}
+
 void set_buffer(napi_env env, napi_value object, const char *name,
     const std::uint8_t *value, std::size_t size)
 {
@@ -176,6 +198,10 @@ napi_value open_document(napi_env env, napi_callback_info info)
         slot_access.struct_size = sizeof(slot_access);
         if (status == SCPEFE_STATUS_OK)
             status = scpefe_unlocked_container_slot_access(unlocked, &slot_access);
+        scpefe_editing_lease_v1 editing_lease{};
+        editing_lease.struct_size = sizeof(editing_lease);
+        if (status == SCPEFE_STATUS_OK)
+            status = scpefe_unlocked_container_editing_lease(unlocked, &editing_lease);
         scpefe_revision_limits_v1 limits{};
         limits.struct_size = sizeof(limits);
         if (status == SCPEFE_STATUS_OK)
@@ -207,6 +233,22 @@ napi_value open_document(napi_env env, napi_callback_info info)
             view.device_name_size);
         set_boolean(env, result, "readOnly", true);
         set_boolean(env, result, "canEdit", slot_access.can_edit != 0);
+        napi_value lease;
+        check(env, napi_create_object(env, &lease));
+        set_boolean(env, lease, "active", editing_lease.active != 0);
+        const std::string lease_session = hexadecimal(
+            editing_lease.session_id, editing_lease.session_id_size);
+        set_string(env, lease, "sessionId", lease_session.data(), lease_session.size());
+        set_number(env, lease, "heartbeatCounter", editing_lease.heartbeat_counter);
+        set_number(env, lease, "holderUtcMs", editing_lease.holder_utc_ms);
+        set_number(env, lease, "durationMs", editing_lease.duration_ms);
+        set_string(env, lease, "holderName", editing_lease.holder_name,
+            editing_lease.holder_name_size);
+        set_string(env, lease, "holderEmail", editing_lease.holder_email,
+            editing_lease.holder_email_size);
+        set_string(env, lease, "deviceName", editing_lease.device_name,
+            editing_lease.device_name_size);
+        check(env, napi_set_named_property(env, result, "lease", lease));
         const std::string document_id = hexadecimal(
             unlocked_view.document_id, unlocked_view.document_id_size);
         set_string(env, result, "documentId", document_id.data(), document_id.size());
@@ -246,6 +288,78 @@ napi_value open_document(napi_env env, napi_callback_info info)
     } catch (const std::exception &error) {
         scpefe_decoded_snapshot_revision_destroy(revision);
         scpefe_unlocked_container_destroy(unlocked);
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
+std::array<std::uint8_t, SCPEFE_LEASE_SESSION_ID_SIZE> parse_session_id(
+    const std::string &hex)
+{
+    if (hex.size() != SCPEFE_LEASE_SESSION_ID_SIZE * 2)
+        throw std::runtime_error("lease session ID must contain 32 hex characters");
+    std::array<std::uint8_t, SCPEFE_LEASE_SESSION_ID_SIZE> result{};
+    auto digit = [](char value) -> std::uint8_t {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        throw std::runtime_error("lease session ID must be lowercase hexadecimal");
+    };
+    for (std::size_t i = 0; i < result.size(); ++i)
+        result[i] = static_cast<std::uint8_t>(digit(hex[i * 2]) * 16 + digit(hex[i * 2 + 1]));
+    return result;
+}
+
+napi_value update_lease(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        bool is_buffer = false;
+        if (argc != 3) throw std::runtime_error("updateLease expects a Buffer, password, and lease");
+        check(env, napi_is_buffer(env, args[0], &is_buffer));
+        if (!is_buffer) throw std::runtime_error("updateLease expects a Buffer");
+        void *container = nullptr;
+        size_t container_size = 0;
+        check(env, napi_get_buffer_info(env, args[0], &container, &container_size));
+        const std::string password = string_value(env, args[1]);
+        const bool active = boolean_value(env, property(env, args[2], "active"));
+        const auto session = parse_session_id(string_value(
+            env, property(env, args[2], "sessionId")));
+        const std::string name = string_value(env, property(env, args[2], "holderName"));
+        const std::string email = string_value(env, property(env, args[2], "holderEmail"));
+        const std::string device = string_value(env, property(env, args[2], "deviceName"));
+        const scpefe_editing_lease_v1 lease{
+            sizeof(scpefe_editing_lease_v1), active, session.data(), session.size(),
+            number_value(env, property(env, args[2], "heartbeatCounter")),
+            number_value(env, property(env, args[2], "holderUtcMs")),
+            number_value(env, property(env, args[2], "durationMs")),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size(),
+        };
+        const scpefe_editing_lease_update_v1 update{
+            sizeof(scpefe_editing_lease_update_v1),
+            static_cast<const std::uint8_t *>(container), container_size,
+            reinterpret_cast<const std::uint8_t *>(password.data()), password.size(),
+            lease,
+        };
+        std::size_t size = 0;
+        scpefe_status status = scpefe_editing_lease_update(&update, nullptr, 0, &size);
+        if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) {
+            throw_status(env, status);
+            return nullptr;
+        }
+        void *bytes = nullptr;
+        napi_value result;
+        check(env, napi_create_buffer(env, size, &bytes, &result));
+        status = scpefe_editing_lease_update(&update,
+            static_cast<std::uint8_t *>(bytes), size, &size);
+        if (status != SCPEFE_STATUS_OK) {
+            throw_status(env, status);
+            return nullptr;
+        }
+        return result;
+    } catch (const std::exception &error) {
         napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
         return nullptr;
     }
@@ -313,8 +427,10 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"saveDocument", nullptr, save_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"updateLease", nullptr, update_lease, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 3, methods));
+    check(env, napi_define_properties(env, exports, 4, methods));
     return exports;
 }
 

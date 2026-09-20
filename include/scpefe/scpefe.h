@@ -43,6 +43,8 @@ typedef enum scpefe_status {
 #define SCPEFE_CONTENT_HASH_SIZE 32u
 #define SCPEFE_DOCUMENT_ID_SIZE 16u
 #define SCPEFE_WORK_JOURNAL_KEY_SIZE 32u
+#define SCPEFE_LEASE_SESSION_ID_SIZE 16u
+#define SCPEFE_DEFAULT_LEASE_DURATION_MS 600000u
 
 /* Reads the host's monotonic clock in milliseconds. */
 typedef scpefe_status (*scpefe_monotonic_time_ms_fn)(
@@ -96,6 +98,33 @@ typedef struct scpefe_unlocked_slot_access_v1 {
     int can_edit;
     int recovery_slot;
 } scpefe_unlocked_slot_access_v1;
+
+/* Borrowed authenticated details of the encrypted advisory editing lease. */
+typedef struct scpefe_editing_lease_v1 {
+    uint32_t struct_size;
+    int active;
+    const uint8_t *session_id;
+    size_t session_id_size;
+    uint64_t heartbeat_counter;
+    uint64_t holder_utc_ms;
+    uint64_t duration_ms;
+    const char *holder_name;
+    size_t holder_name_size;
+    const char *holder_email;
+    size_t holder_email_size;
+    const char *device_name;
+    size_t device_name_size;
+} scpefe_editing_lease_v1;
+
+/* Inputs for replacing encrypted lease state without changing document history. */
+typedef struct scpefe_editing_lease_update_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *password;
+    size_t password_size;
+    scpefe_editing_lease_v1 lease;
+} scpefe_editing_lease_update_v1;
 
 /* Validated inputs used to seal and publish a child snapshot revision. */
 typedef struct scpefe_manual_save_v1 {
@@ -305,6 +334,20 @@ SCPEFE_API scpefe_status scpefe_unlocked_container_view(
 SCPEFE_API scpefe_status scpefe_unlocked_container_slot_access(
     const scpefe_unlocked_container *unlocked,
     scpefe_unlocked_slot_access_v1 *access
+);
+
+/* Borrows authenticated lease state until the unlocked owner is destroyed. */
+SCPEFE_API scpefe_status scpefe_unlocked_container_editing_lease(
+    const scpefe_unlocked_container *unlocked,
+    scpefe_editing_lease_v1 *lease
+);
+
+/* Replaces encrypted lease state while preserving the current revision. */
+SCPEFE_API scpefe_status scpefe_editing_lease_update(
+    const scpefe_editing_lease_update_v1 *update,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
 );
 
 /* Copies the purpose-separated key for this document's app-private work journal. */

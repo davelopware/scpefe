@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
@@ -8,6 +9,8 @@ import { PublicationService } from "./publication.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
+const HEARTBEAT_MS = 120_000;
+const DEFAULT_LEASE_DURATION_MS = 600_000;
 
 export class DocumentService {
   constructor({ native, fs, profilePath, journalDirectory,
@@ -15,6 +18,7 @@ export class DocumentService {
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
     inactivityMs = 120_000, now = () => Date.now(),
+    utcNow = now, monotonicNow = now, randomSessionId = () => randomBytes(16),
     setTimer = setTimeout, clearTimer = clearTimeout,
     onLocked = () => {}, onJournalWarning = () => {} }) {
     this.native = native;
@@ -29,14 +33,23 @@ export class DocumentService {
     this.checkpointContinuousMs = checkpointContinuousMs;
     this.inactivityMs = inactivityMs;
     this.now = now;
+    this.utcNow = utcNow;
+    this.monotonicNow = monotonicNow;
+    this.randomSessionId = randomSessionId;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.onLocked = onLocked;
     this.onJournalWarning = onJournalWarning;
     this.checkpointTimer = null;
     this.inactivityTimer = null;
+    this.heartbeatTimer = null;
+    this.heartbeatOperation = null;
+    this.leaseGeneration = 0;
     this.flushChain = Promise.resolve();
+    this.publicationChain = Promise.resolve();
     this.active = null;
+    this.suspendedLeases = new Map();
+    this.leaseObservations = new Map();
   }
 
   async loadProfile() {
@@ -68,9 +81,11 @@ export class DocumentService {
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new Error("Native bridge did not produce a container");
     }
-    await this.#atomicWrite(target, candidate, false);
-    const published = await this.fs.readFile(target);
-    if (!published.equals(candidate)) throw new Error("Published container verification failed");
+    await this.#queuePublication(async () => {
+      await this.#atomicWrite(target, candidate, false);
+      const published = await this.fs.readFile(target);
+      if (!published.equals(candidate)) throw new Error("Published container verification failed");
+    });
     return { created: true };
   }
 
@@ -108,6 +123,7 @@ export class DocumentService {
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     const opened = validateOpenedDocument({ ...nativeOpened.opened,
+      lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
       ...(recovery ? { recovery: { content: recovery.text,
         cursor: recovery.cursor, state: "unsaved",
         updateTime: recovery.updateTime } } : {}) });
@@ -121,7 +137,7 @@ export class DocumentService {
     return opened;
   }
 
-  enterEditMode() {
+  async enterEditMode({ forceTakeover = false } = {}) {
     if (!this.active) throw new Error("Open a document first");
     if (this.active.pendingPublication) {
       throw new Error("Resolve the interrupted publication before editing");
@@ -132,6 +148,7 @@ export class DocumentService {
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
+    await this.#acquireLease(forceTakeover);
     this.active.editMode = true;
     this.active.working = { content: this.active.opened.content,
       cursor: { start: 0, end: 0 } };
@@ -144,9 +161,13 @@ export class DocumentService {
 
   async restoreRecoveredWork() {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
+    if (this.active.pendingPublication) {
+      throw new Error("Resolve the interrupted publication before editing");
+    }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
+    await this.#acquireLease(false);
     this.active.editMode = true;
     this.active.working = { content: this.active.recovery.text,
       cursor: { ...this.active.recovery.cursor } };
@@ -163,7 +184,7 @@ export class DocumentService {
     this.active.recovery = null;
     this.active.opened = validateOpenedDocument({
       content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.opened.canEdit });
+      canEdit: this.active.opened.canEdit, lease: this.active.opened.lease });
     return this.active.opened;
   }
 
@@ -194,7 +215,10 @@ export class DocumentService {
   async lock(reason = "app-lock") {
     const active = this.active;
     if (!active) return { locked: true, journalSaved: true, warning: null };
-    this.#cancelTimers();
+    this.#cancelCheckpoint();
+    if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
+    this.inactivityTimer = null;
+    await this.#stopHeartbeat();
     let journalSaved = true;
     let warning = null;
     try {
@@ -203,6 +227,12 @@ export class DocumentService {
       journalSaved = false;
       warning = `Latest changes could not be checkpointed: ${error.message}`;
     } finally {
+      if (active.leaseSessionId) {
+        this.suspendedLeases.set(active.documentId, {
+          sessionId: Buffer.from(active.leaseSessionId),
+          counter: active.leaseCounter,
+        });
+      }
       active.journalKey.fill(0);
       active.working = null;
       active.recovery = null;
@@ -212,6 +242,35 @@ export class DocumentService {
     const result = Object.freeze({ locked: true, journalSaved, warning, reason });
     this.onLocked(result);
     return result;
+  }
+
+  async exitEditMode() {
+    const active = this.active;
+    if (!active?.editMode) return { released: false };
+    await this.#stopHeartbeat();
+    await this.#flushActive(active);
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.openDocument(current, active.password));
+      const sameSession = inspected.lease.active
+        && Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId);
+      if (sameSession && inspected.lease.heartbeatCounter !== active.leaseCounter) {
+        const error = new Error("Editing lease changed before it could be released");
+        error.code = "LEASE_CHANGED";
+        throw error;
+      }
+      if (sameSession) {
+        const candidate = this.native.updateLease(current, active.password,
+          { ...inspected.lease, active: false });
+        await this.#atomicWrite(active.target, candidate, true);
+      }
+    });
+    active.editMode = false;
+    active.working = null;
+    active.leaseSessionId = null;
+    this.suspendedLeases.delete(active.documentId);
+    return { released: true };
   }
 
   async saveDocument(content) {
@@ -228,31 +287,42 @@ export class DocumentService {
     const canonical = canonicalizeDocumentText(content);
     this.#cancelCheckpoint();
     await this.flushChain.catch(() => {});
-    const current = await this.fs.readFile(this.active.target);
-    const candidate = this.native.saveDocument(current, this.active.password, {
-      ...profile, content: canonical, timestampMs: Date.now(),
-    });
-    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
-      throw new Error("Native bridge did not produce a container");
-    }
+    const active = this.active;
+    let reopened;
     try {
-      await this.publications.publish({
-        documentId: this.active.documentId,
-        journalKey: this.active.journalKey,
-        target: this.active.target,
-        base: current,
-        candidate,
-        text: canonical,
-        cursor: { start: 0, end: 0 },
-        baseRevision: this.active.baseRevision,
+      reopened = await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const currentLease = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password)).lease;
+        if (!currentLease.active || !active.leaseSessionId
+            || !Buffer.from(currentLease.sessionId, "hex").equals(active.leaseSessionId)
+            || currentLease.heartbeatCounter !== active.leaseCounter) {
+          throw new Error("Editing lease is no longer held by this session");
+        }
+        const candidate = this.native.saveDocument(current, active.password, {
+          ...profile, content: canonical, timestampMs: Date.now(),
+        });
+        if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+          throw new Error("Native bridge did not produce a container");
+        }
+        await this.publications.publish({
+          documentId: active.documentId,
+          journalKey: active.journalKey,
+          target: active.target,
+          base: current,
+          candidate,
+          text: canonical,
+          cursor: { start: 0, end: 0 },
+          baseRevision: active.baseRevision,
+        });
+        const published = await this.fs.readFile(active.target);
+        return this.#validateNativeOpened(
+          this.native.openDocument(published, active.password));
       });
     } catch (error) {
-      if (error.publicationPrepared) this.active.pendingPublication = true;
+      if (error.publicationPrepared) active.pendingPublication = true;
       throw error;
     }
-    const published = await this.fs.readFile(this.active.target);
-    const reopened = this.#validateNativeOpened(
-      this.native.openDocument(published, this.active.password));
     if (reopened.opened.content !== canonical) {
       reopened.journalKey.fill(0);
       throw new Error("Saved document verification failed");
@@ -289,8 +359,127 @@ export class DocumentService {
         || !Buffer.isBuffer(value?.journalKey) || value.journalKey.length !== 32) {
       throw new TypeError("native bridge returned incomplete recovery metadata");
     }
+    const rawLease = value.lease ?? { active: false, sessionId: "0".repeat(32),
+      heartbeatCounter: 0, holderUtcMs: 0, durationMs: DEFAULT_LEASE_DURATION_MS,
+      holderName: "", holderEmail: "", deviceName: "" };
+    if (typeof rawLease.active !== "boolean"
+        || !/^[0-9a-f]{32}$/.test(rawLease.sessionId)
+        || !Number.isSafeInteger(rawLease.heartbeatCounter)
+        || !Number.isSafeInteger(rawLease.holderUtcMs)
+        || !Number.isSafeInteger(rawLease.durationMs) || rawLease.durationMs <= 0) {
+      throw new TypeError("native bridge returned invalid editing lease metadata");
+    }
     return { opened, documentId: value.documentId,
-      baseRevision: value.baseRevision, journalKey: value.journalKey };
+      baseRevision: value.baseRevision, journalKey: value.journalKey,
+      lease: Object.freeze({ ...rawLease }) };
+  }
+
+  async #acquireLease(forceTakeover) {
+    const active = this.active;
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    await this.#queuePublication(async () => {
+      const bytes = await this.fs.readFile(active.target);
+      const latest = this.#validateNativeOpened(
+        this.native.openDocument(bytes, active.password));
+      const lease = latest.lease;
+      const suspended = this.suspendedLeases.get(active.documentId);
+      const sessionMatches = lease.active && suspended
+        && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
+      const age = this.utcNow() - lease.holderUtcMs;
+      if (sessionMatches && lease.heartbeatCounter !== suspended.counter) {
+        const error = new Error("Editing lease changed while this session was locked");
+        error.code = "LEASE_CHANGED";
+        error.lease = lease;
+        throw error;
+      }
+      const sameSession = sessionMatches && age >= 0 && age < lease.durationMs;
+      if (lease.active && !sameSession) {
+        const reliableExpiry = age >= lease.durationMs;
+        const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
+        const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
+        this.leaseObservations.set(key, firstSeen);
+        const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
+        if (!reliableExpiry && !observedStale && !forceTakeover) {
+          const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
+          error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
+          error.lease = lease;
+          throw error;
+        }
+      }
+      const sessionId = sameSession ? suspended.sessionId : this.randomSessionId();
+      const nextLease = {
+        active: true, sessionId: sessionId.toString("hex"),
+        heartbeatCounter: sameSession ? lease.heartbeatCounter + 1 : 1,
+        holderUtcMs: this.utcNow(), durationMs: lease.durationMs,
+        holderName: profile.name, holderEmail: profile.email,
+        deviceName: profile.deviceName,
+      };
+      const candidate = this.native.updateLease(bytes, active.password, nextLease);
+      await this.#atomicWrite(active.target, candidate, true);
+      active.leaseSessionId = Buffer.from(sessionId);
+      active.leaseCounter = nextLease.heartbeatCounter;
+    });
+    this.leaseGeneration += 1;
+    this.#scheduleHeartbeat(this.leaseGeneration);
+  }
+
+  #scheduleHeartbeat(generation) {
+    this.#cancelHeartbeat();
+    this.heartbeatTimer = this.setTimer(() => {
+      this.heartbeatTimer = null;
+      if (generation !== this.leaseGeneration) return;
+      const operation = this.#refreshLease(generation);
+      this.heartbeatOperation = operation;
+      void operation.catch((error) => {
+        if (error?.code === "STALE_HEARTBEAT"
+            || generation !== this.leaseGeneration) return;
+        this.onJournalWarning(`Editing lease refresh failed: ${error.message}`);
+        void this.lock("lease-refresh-failed");
+      }).finally(() => {
+        if (this.heartbeatOperation === operation) this.heartbeatOperation = null;
+      });
+    }, HEARTBEAT_MS);
+    this.heartbeatTimer?.unref?.();
+  }
+
+  async #refreshLease(generation) {
+    const active = this.active;
+    if (!active?.editMode || !active.leaseSessionId
+        || generation !== this.leaseGeneration) return;
+    await this.#queuePublication(async () => {
+      this.#requireCurrentHeartbeat(active, generation);
+      const bytes = await this.fs.readFile(active.target);
+      this.#requireCurrentHeartbeat(active, generation);
+      const latest = this.#validateNativeOpened(
+        this.native.openDocument(bytes, active.password));
+      if (!latest.lease.active
+          || !Buffer.from(latest.lease.sessionId, "hex").equals(active.leaseSessionId)
+          || latest.lease.heartbeatCounter !== active.leaseCounter) {
+        active.editMode = false;
+        throw new Error("Editing lease was replaced by another client");
+      }
+      const nextLease = { ...latest.lease,
+        heartbeatCounter: latest.lease.heartbeatCounter + 1,
+        holderUtcMs: this.utcNow() };
+      this.#requireCurrentHeartbeat(active, generation);
+      await this.#atomicWrite(active.target,
+        this.native.updateLease(bytes, active.password, nextLease), true,
+        () => active === this.active && generation === this.leaseGeneration);
+      active.leaseCounter = nextLease.heartbeatCounter;
+      this.#requireCurrentHeartbeat(active, generation);
+    });
+    if (active === this.active && active.editMode
+        && generation === this.leaseGeneration) this.#scheduleHeartbeat(generation);
+  }
+
+  #requireCurrentHeartbeat(active, generation) {
+    if (active !== this.active || !active.editMode
+        || generation !== this.leaseGeneration) {
+      const error = new Error("Heartbeat no longer belongs to the active lease");
+      error.code = "STALE_HEARTBEAT";
+      throw error;
+    }
   }
 
   #scheduleCheckpoint() {
@@ -329,10 +518,16 @@ export class DocumentService {
     active.journalWarning = null;
   }
 
-  #cancelTimers() {
-    this.#cancelCheckpoint();
-    if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
-    this.inactivityTimer = null;
+  #cancelHeartbeat() {
+    if (this.heartbeatTimer !== null) this.clearTimer(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  async #stopHeartbeat() {
+    this.leaseGeneration += 1;
+    this.#cancelHeartbeat();
+    const operation = this.heartbeatOperation;
+    if (operation) await operation.catch(() => {});
   }
 
   #cancelCheckpoint() {
@@ -340,7 +535,13 @@ export class DocumentService {
     this.checkpointTimer = null;
   }
 
-  async #atomicWrite(target, bytes, replace) {
+  #queuePublication(operation) {
+    const queued = this.publicationChain.catch(() => {}).then(operation);
+    this.publicationChain = queued;
+    return queued;
+  }
+
+  async #atomicWrite(target, bytes, replace, isCurrent = () => true) {
     const transaction = `${target}.scpefe-txn-${process.pid}-${Date.now()}`;
     let handle;
     try {
@@ -349,6 +550,11 @@ export class DocumentService {
       await handle.sync();
       await handle.close();
       handle = null;
+      if (!isCurrent()) {
+        const error = new Error("Publication no longer belongs to the current state");
+        error.code = "STALE_HEARTBEAT";
+        throw error;
+      }
       if (replace) {
         await this.fs.rename(transaction, target);
       } else {

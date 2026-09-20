@@ -5,7 +5,10 @@ import "./styles.css";
 type Profile = { name: string; email: string; deviceName: string };
 type Cursor = { start: number; end: number };
 type Recovery = { content: string; state: "unsaved"; updateTime: number; cursor: Cursor };
-type Opened = { content: string; readOnly: boolean; canEdit: boolean; recovery?: Recovery };
+type Lease = { active: boolean; holderName: string; holderEmail: string;
+  deviceName: string; holderUtcMs: number; durationMs: number };
+type Opened = { content: string; readOnly: boolean; canEdit: boolean;
+  recovery?: Recovery; lease?: Lease };
 type LockResult = { locked: true; journalSaved: boolean; warning: string | null };
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
@@ -92,6 +95,9 @@ function App() {
       setWorkingText(result?.content ?? "");
       setHistory([result?.content ?? ""]);
       setHistoryIndex(0);
+      if (result?.lease?.active) {
+        setMessage(`Editing lease held by ${result.lease.holderName || "another editor"} (${result.lease.holderEmail}) on ${result.lease.deviceName}.`);
+      }
     }
     catch (error) { showError(error); }
   }

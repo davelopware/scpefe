@@ -11,6 +11,7 @@
 #include "format/revision_limits.hpp"
 
 #include <cstring>
+#include <algorithm>
 #include <new>
 #include <utility>
 #include <vector>
@@ -370,6 +371,78 @@ scpefe_status scpefe_unlocked_container_slot_access(
         (unlocked->data.permissions & 1u) != 0, unlocked->data.recovery_slot,
     };
     return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_unlocked_container_editing_lease(
+    const scpefe_unlocked_container *unlocked,
+    scpefe_editing_lease_v1 *lease)
+{
+    if (unlocked == nullptr || lease == nullptr
+        || lease->struct_size < sizeof(scpefe_editing_lease_v1))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    const auto &value = unlocked->data.editing_lease;
+    const std::uint32_t struct_size = lease->struct_size;
+    *lease = scpefe_editing_lease_v1{
+        struct_size, value.active, value.session_id.data(), value.session_id.size(),
+        value.heartbeat_counter, value.holder_utc_ms, value.duration_ms,
+        value.holder_name.data(), value.holder_name.size(),
+        value.holder_email.data(), value.holder_email.size(),
+        value.device_name.data(), value.device_name.size(),
+    };
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_editing_lease_update(
+    const scpefe_editing_lease_update_v1 *update,
+    std::uint8_t *output, std::size_t output_capacity, std::size_t *output_size)
+{
+    if (update == nullptr
+        || update->struct_size < sizeof(scpefe_editing_lease_update_v1)
+        || update->lease.struct_size < sizeof(scpefe_editing_lease_v1)
+        || output_size == nullptr
+        || !scpefe::format::span_is_valid(update->container, update->container_size)
+        || update->container_size == 0
+        || !scpefe::format::span_is_valid(update->password, update->password_size)
+        || update->password_size == 0
+        || update->lease.session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
+        || !scpefe::format::span_is_valid(
+            update->lease.session_id, update->lease.session_id_size)
+        || update->lease.duration_ms == 0
+        || !scpefe::format::valid_utf8(
+            update->lease.holder_name, update->lease.holder_name_size)
+        || !scpefe::format::valid_utf8(
+            update->lease.holder_email, update->lease.holder_email_size)
+        || !scpefe::format::valid_utf8(
+            update->lease.device_name, update->lease.device_name_size)) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        scpefe::container::EditingLeaseData lease;
+        lease.active = update->lease.active != 0;
+        std::copy_n(update->lease.session_id, lease.session_id.size(),
+            lease.session_id.begin());
+        lease.heartbeat_counter = update->lease.heartbeat_counter;
+        lease.holder_utc_ms = update->lease.holder_utc_ms;
+        lease.duration_ms = update->lease.duration_ms;
+        lease.holder_name.assign(update->lease.holder_name,
+            update->lease.holder_name_size);
+        lease.holder_email.assign(update->lease.holder_email,
+            update->lease.holder_email_size);
+        lease.device_name.assign(update->lease.device_name,
+            update->lease.device_name_size);
+        const auto encoded = RecoverablePasswordContainer::replace_editing_lease(
+            update->container, update->container_size,
+            update->password, update->password_size, lease);
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size())
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) {
+        return external_status(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
 }
 
 scpefe_status scpefe_unlocked_container_work_journal_key(
