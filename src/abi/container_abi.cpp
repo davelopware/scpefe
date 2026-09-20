@@ -5,6 +5,7 @@
 #include "container/recoverable_password_container.hpp"
 #include "container/unlocked_container_data.hpp"
 #include "document/new_document.hpp"
+#include "document/compaction.hpp"
 #include "document/manual_save.hpp"
 #include "document/provisional_save.hpp"
 #include "document/merge_save.hpp"
@@ -12,8 +13,9 @@
 #include "format/text_validation.hpp"
 #include "format/revision_limits.hpp"
 
-#include <cstring>
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -218,6 +220,52 @@ scpefe_status scpefe_password_container_unlock(
     return scpefe_password_container_unlock_with_limits(
         container, container_size, password, password_size, &limits, unlocked
     );
+}
+
+scpefe_status scpefe_compact_document(
+    const scpefe_compaction_v1 *compaction,
+    std::uint8_t *output,
+    std::size_t output_capacity,
+    std::size_t *output_size
+)
+{
+    if (compaction == nullptr
+        || compaction->struct_size < sizeof(scpefe_compaction_v1)
+        || output_size == nullptr
+        || !scpefe::format::span_is_valid(
+            compaction->container, compaction->container_size)
+        || compaction->container_size == 0
+        || !scpefe::format::span_is_valid(
+            compaction->password, compaction->password_size)
+        || compaction->password_size == 0
+        || compaction->lease_session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
+        || !scpefe::format::span_is_valid(
+            compaction->lease_session_id,
+            compaction->lease_session_id_size)) {
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        std::array<std::uint8_t, SCPEFE_LEASE_SESSION_ID_SIZE> session_id{};
+        std::copy_n(compaction->lease_session_id, session_id.size(),
+            session_id.begin());
+        const auto encoded = scpefe::document::Compaction::create(
+            compaction->container, compaction->container_size,
+            compaction->password, compaction->password_size,
+            session_id, compaction->lease_heartbeat_counter);
+        *output_size = encoded.size();
+        if (output == nullptr || output_capacity < encoded.size()) {
+            return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+        }
+        std::memcpy(output, encoded.data(), encoded.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const ContainerFailure &failure) {
+        return external_status(failure.error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return failure.error == scpefe::format::RevisionError::limit_exceeded
+            ? SCPEFE_STATUS_LIMIT_EXCEEDED : SCPEFE_STATUS_INVALID_ARGUMENT;
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
 }
 
 scpefe_status scpefe_manual_save(

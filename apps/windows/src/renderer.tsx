@@ -83,11 +83,12 @@ function ManagedSlotControls({ slot, canUpdate, canRemove, onUpdate, onRemove }:
   </li>;
 }
 
-function SlotAdministration({ opened, onUpdate, onRemove }: {
+function SlotAdministration({ opened, onUpdate, onRemove, onCompact }: {
   opened: DocumentOpened;
   onUpdate(slot: ManagedSlot, canEdit: boolean, canAddPasswords: boolean,
     canRemovePasswords: boolean): Promise<void>;
   onRemove(slot: ManagedSlot): Promise<void>;
+  onCompact(): Promise<void>;
 }) {
   const slots = opened.managedSlots ?? [];
   const canUpdate = !opened.readOnly && opened.canAddPasswords === true
@@ -97,6 +98,9 @@ function SlotAdministration({ opened, onUpdate, onRemove }: {
     <h2 id="slot-administration-heading">Password-slot administration</h2>
     <p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent and is never listed as an ordinary slot.</p>
     {opened.readOnly && <p>Enter edit mode to publish permission changes or remove a slot.</p>}
+    {canUpdate && <><h3>History compaction</h3>
+      <p className="warning">Compaction permanently removes older embedded history from this container after creating an exact verified backup. It cannot remove external copies.</p>
+      <button type="button" onClick={() => { void onCompact(); }}>Compact history…</button></>}
     <p className="warning">Removing a slot affects only this updated document and does not revoke older copies or information already obtained.</p>
     {slots.length === 0 ? <p>No ordinary invitation slots exist.</p>
       : <ul className="managed-slots">{slots.map((slot) =>
@@ -124,6 +128,8 @@ declare global { interface Window { scpefe: {
     publicationState: PublicationState }>;
   discardPendingPublication(): Promise<DocumentOpened>;
   backupDocument(): Promise<{ backedUp: true } | null>;
+  compactDocument(): Promise<{ compacted: true; backupCreated: true;
+    previousHead: string; head: string } | null>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
   claimInvitation(password: string): Promise<DocumentOpened>;
   reconcileIdentity(): Promise<DocumentOpened>;
@@ -429,6 +435,14 @@ function App() {
     } catch (error) { showError(error); }
   }
 
+  async function compact() {
+    try {
+      const result = await window.scpefe.compactDocument();
+      if (result) setMessage(
+        "Verified backup created and document history compacted.");
+    } catch (error) { showError(error); }
+  }
+
   function moveHistory(offset: number) {
     const next = historyIndex + offset;
     if (next < 0 || next >= history.length) return;
@@ -497,7 +511,8 @@ function App() {
     document.body.append(host);
     const root = createRoot(host);
     root.render(<SlotAdministration opened={opened}
-      onUpdate={updateManagedSlot} onRemove={removeManagedSlot} />);
+      onUpdate={updateManagedSlot} onRemove={removeManagedSlot}
+      onCompact={compact} />);
     return () => { root.unmount(); host.remove(); };
   }, [opened]);
 

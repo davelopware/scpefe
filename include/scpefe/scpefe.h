@@ -242,6 +242,18 @@ typedef struct scpefe_manual_save_v1 {
 /* Validated inputs used to create or amend one provisional snapshot revision. */
 typedef scpefe_manual_save_v1 scpefe_regular_save_v1;
 
+/* Inputs for replacing sealed history with one shallow continuity baseline. */
+typedef struct scpefe_compaction_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *password;
+    size_t password_size;
+    const uint8_t *lease_session_id;
+    size_t lease_session_id_size;
+    uint64_t lease_heartbeat_counter;
+} scpefe_compaction_v1;
+
 /* Validated inputs used to seal a user-resolved two-parent merge revision. */
 typedef struct scpefe_merge_save_v1 {
     uint32_t struct_size;
@@ -445,6 +457,14 @@ SCPEFE_API scpefe_status scpefe_provisional_save_discard(
 /* Seals a resolved merge after authenticating related current and local heads. */
 SCPEFE_API scpefe_status scpefe_merge_save(
     const scpefe_merge_save_v1 *save,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Creates a shallow baseline while preserving the document and credential state. */
+SCPEFE_API scpefe_status scpefe_compact_document(
+    const scpefe_compaction_v1 *compaction,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalizeDocumentText, validateCreateRequest, validateCreationResult,
-  validateBackupResult,
+  validateBackupResult, validateCompactionResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
   validateWorkingCopy, validateMergeDraft } from "../src/contracts.mjs";
@@ -93,6 +93,17 @@ test("backup results expose success without a host filesystem path", () => {
   assert.throws(() => validateBackupResult({
     backedUp: true, target: "C:\\Users\\Ada\\secret.scpefe",
   }), /invalid backup result/);
+});
+
+test("compaction results bind the verified backup and continuity heads", () => {
+  assert.deepEqual(validateCompactionResult({ compacted: true, backupCreated: true,
+    previousHead: "12".repeat(32), head: "34".repeat(32) }), {
+    compacted: true, backupCreated: true,
+    previousHead: "12".repeat(32), head: "34".repeat(32),
+  });
+  assert.throws(() => validateCompactionResult({ compacted: true,
+    backupCreated: false, previousHead: "12".repeat(32), head: "34".repeat(32) }),
+  /invalid compaction result/);
 });
 
 test("plaintext export contracts expose only canonical text and line-ending choice", () => {

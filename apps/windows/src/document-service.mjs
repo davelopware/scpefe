@@ -3,7 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
-  validateBackupResult, validatePublicationResult, validateSaveResult,
+  validateBackupResult, validateCompactionResult, validatePublicationResult,
+  validateSaveResult,
   validateWorkingCopy, validateClientSettings } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
@@ -14,6 +15,7 @@ const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
+export const COMPACTION_CONFIRMATION = "I understand that compaction irreversibly removes older history from this container and cannot delete copies held by backups, sync tools, caches, or storage providers.";
 const UNAVAILABLE_CODES = new Set([
   "ENOENT", "ENOTDIR", "EACCES", "EIO", "ENODEV", "ESTALE", "ETIMEDOUT",
   "ECONNRESET",
@@ -1173,6 +1175,122 @@ export class DocumentService {
       throw new Error("Backup changed the active target");
     }
     return validateBackupResult({ backedUp: true });
+  }
+
+  async compactDocument(confirmation) {
+    const active = this.active;
+    if (!active?.editMode || !active.opened.canAddPasswords
+        || !active.opened.canRemovePasswords) {
+      throw new Error("Enter edit mode with a full administrative slot first");
+    }
+    if (confirmation !== COMPACTION_CONFIRMATION) {
+      throw new Error("Confirm irreversible local history removal before compacting");
+    }
+    if (!active.manuallySealed || active.dirty || active.recovery
+        || active.pendingPublication || active.unresolvedJournal
+        || active.headMismatch || active.opened.publicationState !== "target-published") {
+      throw new Error(
+        "Compaction requires a clean, manually sealed, conflict-free document");
+    }
+    let reopened;
+    let published;
+    const previousHead = active.baseRevision;
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        try {
+          if (inspected.documentId !== active.documentId
+              || inspected.baseRevision !== previousHead
+              || !inspected.manuallySealed
+              || !inspected.lease.active || !active.leaseSessionId
+              || !Buffer.from(inspected.lease.sessionId, "hex")
+                .equals(active.leaseSessionId)
+              || inspected.lease.heartbeatCounter !== active.leaseCounter) {
+            throw new Error("The target or editing lease changed before compaction");
+          }
+          await this.publications.publishReplica({
+            target: this.suggestedBackupTarget(), candidate: current });
+          const revalidated = await this.fs.readFile(active.target);
+          if (!revalidated.equals(current)) {
+            throw new Error("The target changed after the pre-compaction backup");
+          }
+          const candidate = this.native.compactDocument(current, active.password, {
+            sessionId: active.leaseSessionId.toString("hex"),
+            heartbeatCounter: active.leaseCounter,
+          });
+          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+            throw new Error("Native bridge did not produce a compacted container");
+          }
+          const candidateOpened = this.#validateNativeOpened(
+            this.native.openDocument(candidate, active.password));
+          try {
+            this.#verifyCompaction(active, inspected, candidateOpened, previousHead);
+          } finally {
+            candidateOpened.journalKey.fill(0);
+          }
+          await this.publications.publish({ documentId: active.documentId,
+            journalKey: active.journalKey, target: active.target,
+            base: current, candidate, text: active.opened.content,
+            cursor: { start: 0, end: 0 }, baseRevision: previousHead,
+            purpose: "compaction" });
+          published = await this.fs.readFile(active.target);
+          reopened = this.#validateNativeOpened(
+            this.native.openDocument(published, active.password));
+          this.#verifyCompaction(active, inspected, reopened, previousHead);
+        } finally {
+          inspected.journalKey.fill(0);
+        }
+      });
+    } catch (error) {
+      if (error.publicationPrepared) {
+        active.pendingPublication = true;
+        active.unresolvedJournal = true;
+        active.pendingRecord = await this.journals.read(
+          active.documentId, active.journalKey);
+        active.opened = validateEditMode({ ...active.opened,
+          readOnly: false, publicationState: "pending-publication" });
+      }
+      throw error;
+    }
+    active.journalKey.fill(0);
+    active.opened = validateEditMode({ ...reopened.opened, readOnly: false });
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.baseContainer = Buffer.from(published);
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    active.manuallySealed = true;
+    active.dirty = false;
+    await this.witnesses.observe(active.target, active.observation);
+    return validateCompactionResult({ compacted: true, backupCreated: true,
+      previousHead, head: active.baseRevision });
+  }
+
+  #verifyCompaction(active, before, after, previousHead) {
+    const baseline = after.revisionGraph.find(
+      (node) => node.revisionId === after.baseRevision);
+    if (after.documentId !== before.documentId
+        || !after.journalKey.equals(before.journalKey)
+        || after.opened.content !== before.opened.content
+        || !after.manuallySealed
+        || after.revisionGraph.length !== 1
+        || !baseline || baseline.parentRevisionIds.length !== 1
+        || baseline.parentRevisionIds[0] !== previousHead
+        || after.lease.sessionId !== before.lease.sessionId
+        || after.lease.heartbeatCounter !== before.lease.heartbeatCounter
+        || after.opened.slotId !== before.opened.slotId
+        || after.opened.recoverySlot !== before.opened.recoverySlot
+        || after.opened.slotIdentityName !== before.opened.slotIdentityName
+        || after.opened.slotIdentityEmail !== before.opened.slotIdentityEmail
+        || after.opened.canAddPasswords !== active.opened.canAddPasswords
+        || after.opened.canRemovePasswords !== active.opened.canRemovePasswords
+        || JSON.stringify(after.opened.managedSlots ?? [])
+          !== JSON.stringify(before.opened.managedSlots ?? [])) {
+      throw new Error("Compacted document verification failed");
+    }
   }
 
   #validateNativeOpened(value) {

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
+  validateCompactionResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft } from "./contracts.mjs";
@@ -41,6 +42,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   backupDocument: async () => {
     const value = await ipcRenderer.invoke("document:backup");
     return value === null ? null : validateBackupResult(value);
+  },
+  compactDocument: async () => {
+    const value = await ipcRenderer.invoke("document:compact");
+    return value === null ? null : validateCompactionResult(value);
   },
   createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
   claimInvitation: async (password) => validateOpenedDocument(

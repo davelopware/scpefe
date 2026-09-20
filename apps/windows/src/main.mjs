@@ -4,7 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
-import { DocumentService } from "./document-service.mjs";
+import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -88,6 +88,20 @@ app.whenReady().then(async () => {
     });
     if (chosen.canceled || !chosen.filePath) return null;
     return service.backupDocument(chosen.filePath);
+  });
+  ipcMain.handle("document:compact", async () => {
+    const confirmation = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "Permanently compact document history?",
+      message: "Compaction irreversibly removes older history from this container.",
+      detail: "It cannot delete historical copies held by backups, sync tools, caches, or storage providers. An exact verified backup replica will be created first.",
+      buttons: ["Cancel", "Create backup and compact"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return null;
+    return service.compactDocument(COMPACTION_CONFIRMATION);
   });
   ipcMain.handle("document:create-invitation", (_event, request) =>
     service.createInvitation(request));

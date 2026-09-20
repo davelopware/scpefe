@@ -570,6 +570,34 @@ napi_value update_lease(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value compact_document(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3)
+            throw std::runtime_error(
+                "compactDocument expects a Buffer, password, and held lease");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes password{env, args[1]};
+        const auto session = parse_session_id(string_value(
+            env, property(env, args[2], "sessionId")));
+        const scpefe_compaction_v1 request{
+            sizeof(request), container, container_size,
+            password.data(), password.size(), session.data(), session.size(),
+            number_value(env, property(env, args[2], "heartbeatCounter")),
+        };
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_compact_document(&request, output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
 napi_value save_document(napi_env env, napi_callback_info info)
 {
     try {
@@ -847,6 +875,8 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"updateLease", nullptr, update_lease, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"compactDocument", nullptr, compact_document, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
         {"addInvitation", nullptr, add_invitation, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
@@ -858,7 +888,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 12, methods));
+    check(env, napi_define_properties(env, exports, 13, methods));
     return exports;
 }
 
