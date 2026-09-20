@@ -1,7 +1,9 @@
 #include "container/unlocked_container_data.hpp"
 
+#include <cstring>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 extern "C" void sodium_memzero(void *buffer, std::size_t size);
 
@@ -14,12 +16,45 @@ void clear_string(std::string &value) noexcept
     value.clear();
 }
 
+void move_string_without_allocation(
+    std::string &destination, std::string &source) noexcept
+{
+    if (source.size() <= destination.capacity()) {
+        destination.resize(source.size());
+        if (!source.empty()) {
+            std::memcpy(destination.data(), source.data(), source.size());
+            sodium_memzero(source.data(), source.size());
+        }
+        source.clear();
+        return;
+    }
+    destination = std::move(source);
+    clear_string(source);
+}
+
+void move_lease_without_allocation(
+    EditingLeaseData &destination, EditingLeaseData &source) noexcept
+{
+    destination.session_id = source.session_id;
+    destination.heartbeat_counter = source.heartbeat_counter;
+    destination.holder_utc_ms = source.holder_utc_ms;
+    destination.duration_ms = source.duration_ms;
+    destination.active = source.active;
+    move_string_without_allocation(destination.holder_name, source.holder_name);
+    move_string_without_allocation(destination.holder_email, source.holder_email);
+    move_string_without_allocation(destination.device_name, source.device_name);
+}
+
 } // namespace
 
 static_assert(!std::is_copy_constructible_v<UnlockedContainerData>);
 static_assert(!std::is_copy_assignable_v<UnlockedContainerData>);
 static_assert(std::is_nothrow_move_constructible_v<UnlockedContainerData>);
 static_assert(std::is_nothrow_move_assignable_v<UnlockedContainerData>);
+static_assert(std::is_nothrow_move_assignable_v<std::string>);
+static_assert(std::is_nothrow_move_assignable_v<EditingLeaseData>);
+static_assert(std::is_nothrow_move_assignable_v<std::vector<ManagedSlotData>>);
+static_assert(std::is_nothrow_move_assignable_v<std::vector<std::uint8_t>>);
 
 ManagedSlotData::~ManagedSlotData()
 {
@@ -52,11 +87,11 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     recovery_slot = other.recovery_slot;
     owner_slot = other.owner_slot;
     must_be_changed = other.must_be_changed;
-    slot_identity_name = other.slot_identity_name;
-    slot_identity_email = other.slot_identity_email;
-    editing_lease = other.editing_lease;
-    managed_slots = other.managed_slots;
-    encoded_snapshot_revision = other.encoded_snapshot_revision;
+    move_string_without_allocation(slot_identity_name, other.slot_identity_name);
+    move_string_without_allocation(slot_identity_email, other.slot_identity_email);
+    move_lease_without_allocation(editing_lease, other.editing_lease);
+    managed_slots = std::move(other.managed_slots);
+    encoded_snapshot_revision = std::move(other.encoded_snapshot_revision);
     other.clear();
     return *this;
 }

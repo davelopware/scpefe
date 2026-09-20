@@ -191,11 +191,17 @@ std::vector<std::uint8_t> encode_owner_identity(
     std::string_view name, std::string_view email)
 {
     std::vector<std::uint8_t> result;
-    result.insert(result.end(), owner_identity_magic.begin(), owner_identity_magic.end());
-    result.insert(result.end(), slot_id.begin(), slot_id.end());
-    append_text(result, name);
-    append_text(result, email);
-    return result;
+    try {
+        result.insert(result.end(), owner_identity_magic.begin(),
+            owner_identity_magic.end());
+        result.insert(result.end(), slot_id.begin(), slot_id.end());
+        append_text(result, name);
+        append_text(result, email);
+        return result;
+    } catch (...) {
+        if (!result.empty()) sodium_memzero(result.data(), result.size());
+        throw;
+    }
 }
 
 std::size_t decode_owner_identity(const std::uint8_t *input, std::size_t size,
@@ -811,9 +817,10 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
         const auto initial_revision = format::SnapshotRevision::decode(
             encoded_snapshot_revision, encoded_snapshot_revision_size,
             format::RevisionLimits::defaults());
-        const auto owner_identity = encode_owner_identity(owner_slot_id,
+        auto owner_identity = encode_owner_identity(owner_slot_id,
             initial_revision.data().slot_identity_name,
             initial_revision.data().slot_identity_email);
+        const auto owner_identity_clear = clear_on_scope_exit(owner_identity);
         std::vector<std::uint8_t> output(encoded_size(
             encoded_snapshot_revision_size, has_recovery,
             initial_revision.data().slot_identity_name.size(),
@@ -1516,7 +1523,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     output.insert(output.end(), metadata_cipher.begin(), metadata_cipher.end());
     output.resize(output.size() + slot_state_auth_size);
     const auto output_snapshot_offset = output.size();
-    const auto identity_upgrade = owner_identity_upgrade(creator);
+    auto identity_upgrade = owner_identity_upgrade(creator);
+    const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
     rerandomize_snapshot(container, container_size, layout,
         document_key, output, output_snapshot_offset,
         identity_upgrade.empty() ? nullptr : &identity_upgrade);
@@ -1709,7 +1717,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::update_slot_permissions(
     metadata.permissions = permissions;
     metadata.permissions_known = true;
     all_metadata[index] = metadata;
-    const auto identity_upgrade = owner_identity_upgrade(administrator);
+    auto identity_upgrade = owner_identity_upgrade(administrator);
+    const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
     return rebuild_managed_records(container, container_size, layout,
         document_key.data(), all_metadata,
         std::numeric_limits<std::size_t>::max(),
@@ -1735,7 +1744,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::remove_slot(
         container, container_size, layout, document_key.data());
     ManagedSlotData ignored;
     const auto matched = find_managed_record(all_metadata, slot_id, ignored);
-    const auto identity_upgrade = owner_identity_upgrade(administrator);
+    auto identity_upgrade = owner_identity_upgrade(administrator);
+    const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
     return rebuild_managed_records(container, container_size, layout,
         document_key.data(), all_metadata, matched,
         identity_upgrade.empty() ? nullptr : &identity_upgrade);

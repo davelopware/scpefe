@@ -15,6 +15,7 @@
 #include <cstring>
 #include <algorithm>
 #include <new>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -82,6 +83,9 @@ struct scpefe_unlocked_container {
         : data(std::move(value)) {}
     UnlockedContainerData data;
 };
+
+static_assert(std::is_nothrow_constructible_v<scpefe_unlocked_container,
+    UnlockedContainerData &&>);
 
 scpefe_status scpefe_password_container_create(
     const std::uint8_t *password,
@@ -615,7 +619,8 @@ scpefe_status scpefe_password_container_unlock_with_limits(
         UnlockedContainerData data = PasswordContainer::unlock(
             container, container_size, password, password_size, internal_limits
         );
-        *unlocked = new scpefe_unlocked_container(std::move(data));
+        *unlocked = new (std::nothrow) scpefe_unlocked_container(std::move(data));
+        if (*unlocked == nullptr) return SCPEFE_STATUS_OUT_OF_MEMORY;
         return SCPEFE_STATUS_OK;
     } catch (const ContainerFailure &failure) {
         return external_status(failure.error);
