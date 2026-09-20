@@ -652,6 +652,24 @@ export class DocumentService {
     return active.opened;
   }
 
+  async discardUnsavedForClose() {
+    if (!this.active) throw new Error("Open a document first");
+    if (this.active.pendingPublication) {
+      const resumed = await this.reconnectPendingPublication();
+      if (resumed.publicationState !== "target-published") {
+        const error = new Error(
+          "The pending save cannot be discarded safely until its target is available and unchanged");
+        error.code = "CLOSE_DISCARD_BLOCKED";
+        throw error;
+      }
+    }
+    const active = this.active;
+    if (active.recovery) return this.discardRecoveredWork();
+    if (!active.manuallySealed) return this.#discardProvisional(active);
+    if (active.editMode && active.dirty) return this.discardWorkingCopy();
+    return active.opened;
+  }
+
   updateWorkingCopy(value) {
     if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
     if (this.active.pendingPublication && !this.active.pendingRecord?.merge) {

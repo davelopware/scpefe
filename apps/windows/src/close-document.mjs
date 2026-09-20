@@ -22,12 +22,11 @@ export async function applyCloseDecision(service, decision) {
     return true;
   }
   if (decision !== "discard") throw new TypeError("invalid close decision");
-  if (service.active.pendingPublication) {
-    await service.discardPendingPublication();
-  } else if (service.active.recovery) {
-    await service.discardRecoveredWork();
-  } else {
-    await service.discardWorkingCopy();
+  await service.discardUnsavedForClose();
+  if (needsCloseDecision(service.active)) {
+    const error = new Error("Discard did not restore a manually sealed close state");
+    error.code = "CLOSE_DISCARD_BLOCKED";
+    throw error;
   }
   return true;
 }

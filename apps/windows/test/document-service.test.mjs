@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { applyCloseDecision } from "../src/close-document.mjs";
 import { DocumentService } from "../src/document-service.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
@@ -1719,6 +1720,72 @@ test("second regular save resolves divergence from the sealed ancestor", async (
   assert.equal(published.sealed, true);
   assert.equal(restarted.active.pendingPublication, false);
 });
+
+async function interruptSecondRegularSave(fixture) {
+  await fixture.service.regularSaveDocument();
+  fixture.service.updateWorkingCopy({ content: "local amended",
+    cursor: { start: 13, end: 13 } });
+  fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+    if (property !== "rename") return target[property];
+    return async () => {
+      const error = new Error("provider unavailable before replacement");
+      error.code = "ENOENT";
+      throw error;
+    };
+  } });
+  assert.deepEqual(await fixture.service.regularSaveDocument(), {
+    published: false });
+  assert.equal(fixture.service.active.pendingPublication, true);
+  assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).content,
+    "local unsaved");
+}
+
+test("discard close restores sealed base after interrupted second regular save", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+    "scpefe-regular-close-discard-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await regularPublicationFixture(directory);
+  await interruptSecondRegularSave(fixture);
+  fixture.service.publications.fs = fs;
+
+  assert.equal(await applyCloseDecision(fixture.service, "discard"), true);
+  assert.deepEqual(await fs.readFile(fixture.target), fixture.initial);
+  assert.equal(fixture.service.active.manuallySealed, true);
+  assert.equal(fixture.service.active.pendingPublication, false);
+
+  const restarted = new DocumentService(fixture.options);
+  const opened = await restarted.openDocument(fixture.target, "password words");
+  assert.equal(opened.content, "base");
+  assert.equal(opened.provisional, undefined);
+  assert.equal(restarted.active.manuallySealed, true);
+});
+
+test("discard close refuses while interrupted regular-save target is unavailable",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      "scpefe-regular-close-unavailable-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    await interruptSecondRegularSave(fixture);
+    const unavailableFs = new Proxy(fs, { get(target, property) {
+      if (property !== "readFile") return target[property];
+      return async (file, ...args) => {
+        if (file === fixture.target) {
+          const error = new Error("provider unavailable");
+          error.code = "ENOENT";
+          throw error;
+        }
+        return target.readFile(file, ...args);
+      };
+    } });
+    fixture.service.fs = unavailableFs;
+    fixture.service.publications.fs = unavailableFs;
+
+    await assert.rejects(applyCloseDecision(fixture.service, "discard"),
+      (error) => error.code === "CLOSE_DISCARD_BLOCKED");
+    assert.equal(fixture.service.active.pendingPublication, true);
+    assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).sealed, false);
+  });
 
 for (const fault of ["before-replace", "race", "post-replace"]) {
   test(`regular-save ${fault} recovers as logically unsaved`, async (t) => {

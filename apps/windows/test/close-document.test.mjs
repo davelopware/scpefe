@@ -14,7 +14,11 @@ function recoveredService() {
       this.active.working = { content: "provisional" };
     },
     async saveDocument(content) { calls.push(`save:${content}`); },
-    async discardRecoveredWork() { calls.push("discard-recovery"); },
+    async discardUnsavedForClose() {
+      calls.push("discard-recovery");
+      this.active.recovery = null;
+      this.active.manuallySealed = true;
+    },
   };
   return { service, calls };
 }
