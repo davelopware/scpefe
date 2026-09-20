@@ -11,6 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "windows-preview-process.ps1")
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -28,29 +30,6 @@ function Require-Command {
     param([Parameter(Mandatory = $true)][string]$Name)
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command '$Name' was not found on PATH. See apps/windows/README.md."
-    }
-}
-
-function Invoke-PackagedTest {
-    param(
-        [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string]$Script,
-        [Parameter(Mandatory = $true)][string]$Addon
-    )
-
-    Write-Host "> $Executable $Script $Addon"
-    $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $StartInfo.FileName = $Executable
-    $StartInfo.Arguments = '"{0}" "{1}"' -f $Script, $Addon
-    $StartInfo.UseShellExecute = $false
-    $Process = [System.Diagnostics.Process]::Start($StartInfo)
-    try {
-        $Process.WaitForExit()
-        if ($Process.ExitCode -ne 0) {
-            throw "Packaged test failed with exit code $($Process.ExitCode): $Script"
-        }
-    } finally {
-        $Process.Dispose()
     }
 }
 
@@ -233,9 +212,13 @@ try {
                 "$($HostProbe.ExitCode): $ProbeError"
         }
     } finally {
-        if (-not $HostProbe.HasExited) { $HostProbe.Kill() }
+        if (-not $HostProbe.HasExited) {
+            $HostProbe.Kill()
+            $HostProbe.WaitForExit()
+        }
         $HostProbe.Dispose()
     }
+    $null = Wait-ExecutableReleased (Join-Path $PackageRoot "SCPEFE.exe")
 
     Invoke-PackagedTest `
         (Join-Path $PackageRoot "SCPEFE.exe") `
