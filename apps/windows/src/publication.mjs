@@ -14,6 +14,25 @@ async function readIfPresent(fs, file) {
   }
 }
 
+function collisionTarget(target, collision) {
+  if (collision === 0) return target;
+  const extension = path.extname(target);
+  const stem = extension ? target.slice(0, -extension.length) : target;
+  return `${stem}-${collision}${extension}`;
+}
+
+async function sameFile(fs, left, right) {
+  try {
+    const [leftStat, rightStat] = await Promise.all([
+      fs.stat(left), fs.stat(right),
+    ]);
+    return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 const REPLACEMENT_GUARANTEES = new Set([
   "atomic-replace", "best-effort-replace",
 ]);
@@ -58,6 +77,54 @@ export class PublicationService {
 
   replacementCapabilities() {
     return this.capabilities;
+  }
+
+  async publishReplica({ target, candidate }) {
+    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      throw new TypeError("backup candidate must contain container bytes");
+    }
+    const id = randomBytes(16).toString("hex");
+    const transactionFile = path.join(path.dirname(target),
+      `.${path.basename(target)}.scpefe-backup-txn-${id}`);
+    let handle;
+    let publishedTarget;
+    try {
+      handle = await this.fs.open(transactionFile, "wx", 0o600);
+      await handle.writeFile(candidate);
+      await handle.sync();
+      await handle.close();
+      handle = null;
+
+      for (let collision = 0; ; collision += 1) {
+        const proposed = collisionTarget(target, collision);
+        try {
+          await this.fs.link(transactionFile, proposed);
+          publishedTarget = proposed;
+          break;
+        } catch (error) {
+          if (error?.code !== "EEXIST") throw error;
+        }
+      }
+
+      handle = await this.fs.open(publishedTarget, "r+");
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      const published = await this.fs.readFile(publishedTarget);
+      if (!published.equals(candidate)) {
+        throw new Error("Backup replica verification failed");
+      }
+      await this.fs.unlink(transactionFile);
+      return { completed: true };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      if (publishedTarget
+          && await sameFile(this.fs, publishedTarget, transactionFile).catch(() => false)) {
+        await this.fs.unlink(publishedTarget).catch(() => {});
+      }
+      await this.fs.unlink(transactionFile).catch(() => {});
+      throw error;
+    }
   }
 
   async prepare({ documentId, journalKey, target, base, candidate, text, cursor,

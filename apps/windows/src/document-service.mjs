@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
-  validatePublicationResult, validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
+  validateBackupResult, validatePublicationResult, validateSaveResult,
+  validateWorkingCopy } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 import { HeadWitnessStore } from "./head-witness.mjs";
@@ -117,9 +118,11 @@ export class DocumentService {
     let pendingPublication = false;
     let pendingRecord = null;
     let publicationState = "target-published";
+    let unresolvedJournal = false;
     try {
       const journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
+      unresolvedJournal = journal !== null;
       if (journal?.publication) {
         pendingPublication = true;
         pendingRecord = journal;
@@ -132,6 +135,7 @@ export class DocumentService {
           pendingPublication = false;
           pendingRecord = null;
           publicationState = "target-published";
+          unresolvedJournal = false;
           const published = await this.fs.readFile(target);
           bytes = published;
           nativeOpened.journalKey.fill(0);
@@ -154,6 +158,7 @@ export class DocumentService {
         recovery = journal;
       }
     } catch (error) {
+      unresolvedJournal = true;
       this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
     }
     const targetOpened = nativeOpened.opened;
@@ -184,8 +189,8 @@ export class DocumentService {
       slotCanEdit, headMismatch,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
-      working: null, dirty: false,
-      pendingPublication, pendingRecord,
+      working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
+      pendingPublication, pendingRecord, unresolvedJournal,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
@@ -243,6 +248,7 @@ export class DocumentService {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
+    this.active.unresolvedJournal = false;
     this.active.opened = validateOpenedDocument({
       content: this.active.opened.content, readOnly: true,
       canEdit: this.active.headMismatch ? false : this.active.slotCanEdit,
@@ -324,6 +330,7 @@ export class DocumentService {
       active.documentId, active.journalKey, active.pendingRecord);
     active.pendingPublication = false;
     active.pendingRecord = null;
+    active.unresolvedJournal = false;
     active.working = null;
     active.dirty = false;
     active.opened = validateOpenedDocument({ content: active.targetContent,
@@ -464,6 +471,7 @@ export class DocumentService {
             baseRevision: active.baseRevision,
           });
           active.pendingPublication = true;
+          active.unresolvedJournal = true;
           active.working = { content: canonical, cursor: { start: 0, end: 0 } };
           active.dirty = false;
           active.opened = validateOpenedDocument({ ...active.opened,
@@ -500,6 +508,7 @@ export class DocumentService {
     } catch (error) {
       if (error.publicationPrepared) {
         active.pendingPublication = true;
+        active.unresolvedJournal = true;
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
         active.opened = validateOpenedDocument({ ...active.opened,
@@ -530,8 +539,10 @@ export class DocumentService {
     reopened.journalKey.fill(0);
     this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
     this.active.dirty = false;
+    this.active.manuallySealed = true;
     this.active.pendingPublication = false;
     this.active.pendingRecord = null;
+    this.active.unresolvedJournal = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
     this.notifyActivity();
@@ -547,6 +558,33 @@ export class DocumentService {
       : validated.content;
     await this.fs.writeFile(target, Buffer.from(content, "utf8"));
     return validatePlaintextExportResult({ exported: true });
+  }
+
+  suggestedBackupTarget() {
+    if (!this.active) throw new Error("Open a document first");
+    const parsed = path.parse(this.active.target);
+    const stem = parsed.ext.toLowerCase() === ".scpefe" ? parsed.name : parsed.base;
+    const timestamp = new Date(this.now()).toISOString()
+      .replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    return path.join(parsed.dir, `${stem}.backup-${timestamp}.scpefe`);
+  }
+
+  async backupDocument(target) {
+    if (!this.active) throw new Error("Open a document first");
+    if (this.active.dirty || this.active.recovery || this.active.pendingPublication
+        || this.active.unresolvedJournal) {
+      throw new Error("Save or discard changes before creating a backup");
+    }
+    if (!this.active.manuallySealed) {
+      throw new Error("Manually save the document before creating a backup");
+    }
+    const activeTarget = this.active.target;
+    const candidate = await this.fs.readFile(activeTarget);
+    await this.publications.publishReplica({ target, candidate });
+    if (this.active.target !== activeTarget) {
+      throw new Error("Backup changed the active target");
+    }
+    return validateBackupResult({ backedUp: true });
   }
 
   #validateNativeOpened(value) {
@@ -575,9 +613,13 @@ export class DocumentService {
         || !revisionGraph.some((node) => node.revisionId === value.baseRevision)) {
       throw new TypeError("native bridge returned an invalid authenticated revision graph");
     }
+    if (value.manuallySealed !== undefined
+        && typeof value.manuallySealed !== "boolean") {
+      throw new TypeError("native bridge returned invalid revision state");
+    }
     return { opened, documentId: value.documentId,
       baseRevision: value.baseRevision, revisionGraph, journalKey: value.journalKey,
-      lease: Object.freeze({ ...rawLease }) };
+      lease: Object.freeze({ ...rawLease }), manuallySealed: value.manuallySealed ?? true };
   }
 
   async #acquireLease(forceTakeover) {
@@ -789,7 +831,8 @@ export class DocumentService {
           slotCanEdit, headMismatch,
           journalKey: Buffer.from(reopened.journalKey), recovery: null,
           baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
-          working: null, dirty: false, pendingPublication: false, pendingRecord: null,
+          working: null, dirty: false, manuallySealed: reopened.manuallySealed,
+          pendingPublication: false, pendingRecord: null, unresolvedJournal: false,
           continuousDue: null, journalWarning: null };
         reopened.journalKey.fill(0);
         this.onJournalWarning("Interrupted publication was completed and verified.");
@@ -821,7 +864,8 @@ export class DocumentService {
       journalKey: Buffer.from(baseOpened.journalKey), recovery: null,
       baseContainer: Buffer.from(targetBytes && !invalidTarget ? targetBytes : bootstrap.base),
       targetContent: currentOpened.opened.content,
-      working: null, dirty: false, pendingPublication: true, pendingRecord: record,
+      working: null, dirty: false, manuallySealed: currentOpened.manuallySealed,
+      pendingPublication: true, pendingRecord: record, unresolvedJournal: true,
       continuousDue: null, journalWarning: null };
     baseOpened.journalKey.fill(0);
     targetOpened?.journalKey.fill(0);
@@ -855,6 +899,8 @@ export class DocumentService {
     active.dirty = false;
     active.pendingPublication = false;
     active.pendingRecord = null;
+    active.manuallySealed = reopened.manuallySealed;
+    active.unresolvedJournal = false;
     active.recovery = null;
   }
 
@@ -917,6 +963,7 @@ export class DocumentService {
       this.journals.write(active.documentId, active.journalKey, record));
     this.flushChain = operation;
     await operation;
+    active.unresolvedJournal = true;
     active.continuousDue = null;
     active.journalWarning = null;
   }

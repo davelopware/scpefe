@@ -116,6 +116,81 @@ test("view-only slots cannot enter edit mode", async (t) => {
   await assert.rejects(service.enterEditMode(), /does not permit editing/);
 });
 
+test("view-only slots create exact backups without changing the active target", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "notes.scpefe");
+  const bytes = Buffer.from([0, 255, 1, 2, 128, 64]);
+  await fs.writeFile(target, bytes);
+  const service = new DocumentService({ fs, publicationCapabilities,
+    profilePath: path.join(directory, "profile.json"),
+    now: () => Date.UTC(2026, 8, 20, 1, 2, 3),
+    native: { openDocument: () => ({ content: "hello", readOnly: true,
+      canEdit: false, documentId: "31".repeat(16),
+      baseRevision: "42".repeat(32), journalKey: Buffer.alloc(32, 5) }) } });
+  await service.openDocument(target, "password words");
+  const suggested = path.join(directory, "notes.backup-20260920T010203Z.scpefe");
+  assert.equal(service.suggestedBackupTarget(), suggested);
+  assert.deepEqual(await service.backupDocument(suggested), { backedUp: true });
+  assert.deepEqual(await fs.readFile(suggested), bytes);
+  assert.deepEqual(await fs.readFile(target), bytes);
+  assert.equal(service.active.target, target);
+  assert.equal(service.active.opened.canEdit, false);
+});
+
+test("backup requires clean, manually sealed state", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-gates-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "notes.scpefe");
+  const backup = path.join(directory, "notes.backup-20260920T010203Z.scpefe");
+  await fs.writeFile(target, "container");
+  const service = new DocumentService({ fs, publicationCapabilities,
+    profilePath: path.join(directory, "profile.json"),
+    native: { openDocument: () => ({ content: "hello", readOnly: true,
+      canEdit: true, manuallySealed: false, documentId: "51".repeat(16),
+      baseRevision: "62".repeat(32), journalKey: Buffer.alloc(32, 7) }) } });
+  await service.openDocument(target, "password words");
+  await assert.rejects(service.backupDocument(backup), /Manually save/);
+  service.active.manuallySealed = true;
+  service.active.dirty = true;
+  await assert.rejects(service.backupDocument(backup), /Save or discard/);
+  service.active.dirty = false;
+  service.active.pendingPublication = true;
+  await assert.rejects(service.backupDocument(backup), /Save or discard/);
+  await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+});
+
+test("reopened authenticated journal states block backup", async (t) => {
+  for (const [index, state] of ["unsaved", "pending-publication", "conflict"].entries()) {
+    await t.test(state, async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+        `scpefe-backup-journal-${state}-`));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const target = path.join(directory, "notes.scpefe");
+      const backup = path.join(directory, "notes.backup.scpefe");
+      const documentId = `${70 + index}`.repeat(16);
+      const baseRevision = `${80 + index}`.repeat(32);
+      const journalKey = Buffer.alloc(32, 20 + index);
+      await fs.writeFile(target, "container");
+      const options = { fs, publicationCapabilities,
+        profilePath: path.join(directory, "profile.json"),
+        native: { openDocument: () => ({ content: "hello", readOnly: true,
+          canEdit: false, manuallySealed: true, documentId, baseRevision,
+          journalKey: Buffer.from(journalKey) }) } };
+      const writer = new DocumentService(options);
+      await writer.journals.write(documentId, journalKey, {
+        text: "durable local work", baseRevision, cursor: { start: 0, end: 0 },
+        target, state, updateTime: 42,
+      });
+
+      const reopened = new DocumentService(options);
+      await reopened.openDocument(target, "password words");
+      await assert.rejects(reopened.backupDocument(backup), /Save or discard/);
+      await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+    });
+  }
+});
+
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-journal-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

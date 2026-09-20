@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
-  validatePlaintextExportRequest, validatePlaintextExportResult,
+  validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validatePublicationResult, validateRecoveredWork } from "./contracts.mjs";
 
@@ -28,6 +28,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:reconnect-publication")),
   discardPendingPublication: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:discard-publication")),
+  backupDocument: async () => {
+    const value = await ipcRenderer.invoke("document:backup");
+    return value === null ? null : validateBackupResult(value);
+  },
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

@@ -32,6 +32,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:export-plaintext") {
           return { exported: true, target: "C:\\Users\\Ada\\secret.txt" };
         }
+        if (channel === "document:backup") {
+          return { backedUp: true, target: "C:\\Users\\Ada\\backup.scpefe" };
+        }
         return null;
       } },
   };
@@ -45,7 +48,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "createDocument", "openDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
-    "discardPendingPublication", "exportPlaintext", "updateWorkingCopy", "activity",
+    "discardPendingPublication", "backupDocument", "exportPlaintext",
+    "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
     "onJournalWarning",
   ]);
@@ -56,4 +60,5 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /invalid creation result/);
+  await assert.rejects(exposed.backupDocument(), /invalid backup result/);
 });
