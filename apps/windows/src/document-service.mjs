@@ -260,11 +260,13 @@ export class DocumentService {
         profileEmail: profile.email, editingBlocked: true }) : null;
     const slotCanEdit = nativeOpened.opened.invitationRequired
       ? false : nativeOpened.opened.canEdit;
+    const migrationRequired = nativeOpened.containerFormatVersion < 3;
     const opened = nativeOpened.opened.invitationRequired
       ? nativeOpened.opened
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-        canEdit: headMismatch || profileMismatch ? false : slotCanEdit,
+        canEdit: headMismatch || profileMismatch || migrationRequired ? false : slotCanEdit,
+        ...(migrationRequired ? { migrationRequired: true } : {}),
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
@@ -279,6 +281,7 @@ export class DocumentService {
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
       slotCanEdit, headMismatch, profileMismatch,
+      migrationRequired,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
@@ -302,6 +305,9 @@ export class DocumentService {
     }
     if (this.active.profileMismatch) {
       throw new Error("Reconcile the password-slot identity before editing");
+    }
+    if (this.active.migrationRequired) {
+      throw new Error("This older container must be migrated before editing or saving");
     }
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
@@ -1284,6 +1290,115 @@ export class DocumentService {
       previousHead, head: active.baseRevision });
   }
 
+  async migrateDocument(backupTarget) {
+    const active = this.active;
+    if (!active?.migrationRequired) throw new Error("No older container is open");
+    if (!active.slotCanEdit || active.headMismatch || active.profileMismatch
+        || active.recovery || active.pendingPublication || active.unresolvedJournal
+        || !active.manuallySealed) {
+      throw new Error("Migration requires a clean, editable, conflict-free document");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const selectedBackupTarget = backupTarget === undefined
+      ? this.suggestedBackupTarget() : backupTarget;
+    if (typeof selectedBackupTarget !== "string" || !selectedBackupTarget
+        || selectedBackupTarget.includes("\0")
+        || path.resolve(selectedBackupTarget) === path.resolve(active.target)) {
+      throw new TypeError("A distinct pre-migration backup target is required");
+    }
+    const sessionId = this.randomSessionId();
+    let published;
+    let reopened;
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const before = this.#validateNativeOpened(
+          this.native.openDocument(current, active.password));
+        try {
+          if (before.containerFormatVersion !== 2
+              || before.documentId !== active.documentId
+              || before.baseRevision !== active.baseRevision) {
+            throw new Error("The target changed before migration");
+          }
+          const age = this.utcNow() - before.lease.holderUtcMs;
+          if (before.lease.active && !(age >= before.lease.durationMs)) {
+            throw new Error(`Editing lease held by ${before.lease.holderName || "another editor"}`);
+          }
+          try {
+            await this.publications.publishReplica({
+              target: selectedBackupTarget, candidate: current });
+          } catch (cause) {
+            const error = new Error(
+              "The required pre-migration backup could not be created and verified");
+            error.code = "MIGRATION_BACKUP_FAILED";
+            error.cause = cause;
+            throw error;
+          }
+          if (!(await this.fs.readFile(active.target)).equals(current)) {
+            throw new Error("The target changed after the pre-migration backup");
+          }
+          const nextLease = { active: true, sessionId: sessionId.toString("hex"),
+            heartbeatCounter: 1, holderUtcMs: this.utcNow(),
+            durationMs: before.lease.durationMs, holderName: profile.name,
+            holderEmail: profile.email, deviceName: profile.deviceName };
+          const candidate = this.native.migrateDocument(current, active.password, {
+            ...profile, ...nextLease, timestampMs: this.now(),
+          });
+          const checked = this.#validateNativeOpened(
+            this.native.openDocument(candidate, active.password));
+          try {
+            if (checked.containerFormatVersion !== 3
+                || checked.documentId !== before.documentId
+                || checked.opened.content !== before.opened.content
+                || checked.historyEventType !== "format-migration"
+                || checked.revisionGraph.find((node) => node.revisionId === checked.baseRevision)
+                  ?.parentRevisionIds[0] !== before.baseRevision
+                || !checked.journalKey.equals(before.journalKey)
+                || checked.lease.sessionId !== nextLease.sessionId) {
+              throw new Error("Migrated container verification failed");
+            }
+          } finally { checked.journalKey.fill(0); }
+          await this.publications.publish({ documentId: active.documentId,
+            journalKey: active.journalKey, target: active.target,
+            base: current, candidate, text: active.opened.content,
+            cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
+            purpose: "format-migration" });
+          published = await this.fs.readFile(active.target);
+          reopened = this.#validateNativeOpened(
+            this.native.openDocument(published, active.password));
+        } finally { before.journalKey.fill(0); }
+      });
+    } catch (error) {
+      if (error.publicationPrepared) {
+        active.pendingPublication = true;
+        active.unresolvedJournal = true;
+        active.pendingRecord = await this.journals.read(active.documentId, active.journalKey);
+      }
+      throw error;
+    }
+    active.journalKey.fill(0);
+    active.opened = validateEditMode({ ...reopened.opened, readOnly: false });
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.baseContainer = Buffer.from(published);
+    active.journalKey = Buffer.from(reopened.journalKey);
+    reopened.journalKey.fill(0);
+    active.migrationRequired = false;
+    active.editMode = true;
+    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    active.dirty = false;
+    active.leaseSessionId = Buffer.from(sessionId);
+    active.leaseCounter = 1;
+    this.leaseGeneration += 1;
+    this.#scheduleHeartbeat(this.leaseGeneration);
+    await this.witnesses.observe(active.target, active.observation);
+    return Object.freeze({ migrated: true, backupCreated: true,
+      compatibilityWarning: "Older SCPEFE clients may not open the migrated document.",
+      opened: active.opened });
+  }
+
   #verifyCompaction(active, before, after, previousHead) {
     const baseline = after.revisionGraph.find(
       (node) => node.revisionId === after.baseRevision);
@@ -1338,11 +1453,20 @@ export class DocumentService {
         && typeof value.manuallySealed !== "boolean") {
       throw new TypeError("native bridge returned invalid revision state");
     }
+    const containerFormatVersion = value.containerFormatVersion ?? 3;
+    const historyEventType = value.historyEventType ?? "";
+    const historyEventDetail = value.historyEventDetail ?? "";
+    if (![2, 3].includes(containerFormatVersion)
+        || typeof historyEventType !== "string"
+        || typeof historyEventDetail !== "string") {
+      throw new TypeError("native bridge returned invalid format metadata");
+    }
     return { opened, documentId: value.documentId,
       baseRevision: value.baseRevision, revisionGraph, journalKey: value.journalKey,
       lease: Object.freeze({ ...rawLease }), manuallySealed: value.manuallySealed ?? true,
       revisionTimestampMs: value.revisionTimestampMs,
-      profileName: value.profileName, deviceName: value.deviceName };
+      profileName: value.profileName, deviceName: value.deviceName,
+      containerFormatVersion, historyEventType, historyEventDetail };
   }
 
   async #acquireLease(forceTakeover) {
@@ -1487,11 +1611,14 @@ export class DocumentService {
     let mergeAncestor;
     try {
       const invitationClaim = record.publication.purpose === "invitation-claim";
+      const migration = record.publication.purpose === "format-migration";
       if (opened.documentId !== documentId
           || (invitationClaim && (record.publication.reopenPassword !== password
             || record.text !== "" || opened.opened.invitationRequired))
           || (!invitationClaim
-            && opened.opened.content !== (record.merge?.localContent ?? record.text))) {
+            && opened.opened.content !== (record.merge?.localContent ?? record.text))
+          || (migration && (opened.containerFormatVersion !== 3
+            || opened.historyEventType !== "format-migration"))) {
         throw new Error("Pending publication candidate does not match its document");
       }
       if (record.publication.mergeAncestor) {
@@ -1589,7 +1716,7 @@ export class DocumentService {
         this.active = { target, password: reopenPassword, opened, editMode: false,
           documentId: reopened.documentId, baseRevision: reopened.baseRevision,
           revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
-          slotCanEdit, headMismatch,
+          slotCanEdit, headMismatch, migrationRequired: false,
           journalKey: Buffer.from(reopened.journalKey), recovery,
           baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
           working: null, dirty: false, manuallySealed: reopened.manuallySealed,
@@ -1614,15 +1741,18 @@ export class DocumentService {
 
     const currentOpened = targetOpened && !invalidTarget ? targetOpened : baseOpened;
     const { headMismatch, slotCanEdit } = await this.#observeHead(target, currentOpened);
+    const migrationRequired = currentOpened.containerFormatVersion < 3;
     const opened = validateOpenedDocument({ ...baseOpened.opened,
       content: record.text, canEdit: headMismatch ? false : slotCanEdit,
       publicationState,
+      ...(migrationRequired ? { migrationRequired: true } : {}),
       ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     this.active = { target, password, opened, editMode: false,
       documentId: baseOpened.documentId, baseRevision: currentOpened.baseRevision,
       revisionGraph: currentOpened.revisionGraph,
       observation: this.#observation(currentOpened), slotCanEdit, headMismatch,
+      migrationRequired,
       journalKey: Buffer.from(baseOpened.journalKey), recovery: null,
       baseContainer: Buffer.from(targetBytes && !invalidTarget ? targetBytes : bootstrap.base),
       targetContent: currentOpened.opened.content,
@@ -1653,6 +1783,7 @@ export class DocumentService {
     active.observation = this.#observation(reopened);
     active.slotCanEdit = slotCanEdit;
     active.headMismatch = headMismatch;
+    active.migrationRequired = reopened.containerFormatVersion < 3;
     active.baseContainer = Buffer.from(published);
     active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);

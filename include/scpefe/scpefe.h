@@ -254,6 +254,23 @@ typedef struct scpefe_compaction_v1 {
     uint64_t lease_heartbeat_counter;
 } scpefe_compaction_v1;
 
+/* Inputs for migrating one supported older container and acquiring its lease. */
+typedef struct scpefe_migration_v1 {
+    uint32_t struct_size;
+    const uint8_t *container;
+    size_t container_size;
+    const uint8_t *password;
+    size_t password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    uint64_t timestamp_ms;
+    scpefe_editing_lease_v1 lease;
+} scpefe_migration_v1;
+
 /* Validated inputs used to seal a user-resolved two-parent merge revision. */
 typedef struct scpefe_merge_save_v1 {
     uint32_t struct_size;
@@ -342,6 +359,10 @@ typedef struct scpefe_snapshot_revision_v1 {
     int manually_sealed;
     const uint8_t *provisional_base_revision;
     size_t provisional_base_revision_size;
+    const char *event_type;
+    size_t event_type_size;
+    const char *event_detail;
+    size_t event_detail_size;
 } scpefe_snapshot_revision_v1;
 
 /* Returns the supported C ABI version. */
@@ -465,6 +486,14 @@ SCPEFE_API scpefe_status scpefe_merge_save(
 /* Creates a shallow baseline while preserving the document and credential state. */
 SCPEFE_API scpefe_status scpefe_compact_document(
     const scpefe_compaction_v1 *compaction,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_size
+);
+
+/* Migrates a supported older container without requiring unknown slot passwords. */
+SCPEFE_API scpefe_status scpefe_migrate_document(
+    const scpefe_migration_v1 *migration,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_size

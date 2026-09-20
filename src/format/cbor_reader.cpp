@@ -15,6 +15,13 @@ CborReader::CborReader(
 }
 
 std::uint64_t CborReader::unsigned_integer() { return head(0); }
+std::uint64_t CborReader::peek_unsigned()
+{
+    const auto saved = position_;
+    const auto value = head(0);
+    position_ = saved;
+    return value;
+}
 void CborReader::expect_unsigned(std::uint64_t expected)
 {
     if (unsigned_integer() != expected) fail(RevisionError::malformed_cbor);

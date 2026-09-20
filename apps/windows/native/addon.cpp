@@ -338,6 +338,8 @@ napi_value open_document(napi_env env, napi_callback_info info)
         }
         napi_value result;
         check(env, napi_create_object(env, &result));
+        set_number(env, result, "containerFormatVersion",
+            static_cast<const std::uint8_t *>(bytes)[7]);
         if (slot_access.must_be_changed)
             set_string(env, result, "content", "", 0);
         else
@@ -450,6 +452,10 @@ napi_value open_document(napi_env env, napi_callback_info info)
             base_revision.size());
         set_revision_graph(env, result, revision_id.data(), view);
         set_boolean(env, result, "manuallySealed", view.manually_sealed != 0);
+        set_string(env, result, "historyEventType", view.event_type,
+            view.event_type_size);
+        set_string(env, result, "historyEventDetail", view.event_detail,
+            view.event_detail_size);
         std::array<std::uint8_t, SCPEFE_WORK_JOURNAL_KEY_SIZE> journal_key{};
         std::size_t journal_key_size = 0;
         status = scpefe_unlocked_container_work_journal_key(
@@ -591,6 +597,41 @@ napi_value compact_document(napi_env env, napi_callback_info info)
         return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
             std::size_t *size) {
             return scpefe_compact_document(&request, output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
+napi_value migrate_document(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 3)
+            throw std::runtime_error("migrateDocument expects a Buffer, password, and input");
+        const auto [container, container_size] = buffer_value(env, args[0]);
+        const SecretBytes password{env, args[1]};
+        const std::string name = string_value(env, property(env, args[2], "name"));
+        const std::string email = string_value(env, property(env, args[2], "email"));
+        const std::string device = string_value(env, property(env, args[2], "deviceName"));
+        const auto session = parse_session_id(string_value(
+            env, property(env, args[2], "sessionId")));
+        scpefe_editing_lease_v1 lease{sizeof(lease), 1, session.data(), session.size(),
+            number_value(env, property(env, args[2], "heartbeatCounter")),
+            number_value(env, property(env, args[2], "holderUtcMs")),
+            number_value(env, property(env, args[2], "durationMs")),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size()};
+        const scpefe_migration_v1 request{sizeof(request), container, container_size,
+            password.data(), password.size(), name.data(), name.size(),
+            email.data(), email.size(), device.data(), device.size(),
+            number_value(env, property(env, args[2], "timestampMs")), lease};
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_migrate_document(&request, output, capacity, size);
         });
     } catch (const std::exception &error) {
         napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
@@ -877,6 +918,8 @@ napi_value initialize(napi_env env, napi_value exports)
             napi_default, nullptr},
         {"compactDocument", nullptr, compact_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"migrateDocument", nullptr, migrate_document, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
         {"addInvitation", nullptr, add_invitation, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
@@ -888,7 +931,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 13, methods));
+    check(env, napi_define_properties(env, exports, 14, methods));
     return exports;
 }
 

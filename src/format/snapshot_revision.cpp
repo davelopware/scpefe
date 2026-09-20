@@ -101,6 +101,8 @@ SnapshotRevisionData::~SnapshotRevisionData()
     clear_identity_string(slot_identity_email);
     clear_identity_string(client_profile_name);
     clear_identity_string(client_profile_email);
+    clear_identity_string(event_type);
+    clear_identity_string(event_detail);
 }
 
 void SnapshotRevision::validate_data(
@@ -123,6 +125,8 @@ void SnapshotRevision::validate_data(
         || data.client_profile_name.size() > limits.max_text_bytes()
         || data.client_profile_email.size() > limits.max_text_bytes()
         || data.device_name.size() > limits.max_text_bytes()
+        || data.event_type.size() > limits.max_text_bytes()
+        || data.event_detail.size() > limits.max_text_bytes()
         || data.content.size() > limits.max_text_bytes()
         || revision_id_size > limits.max_byte_string_bytes()
         || slot_id_size > limits.max_byte_string_bytes()
@@ -135,10 +139,16 @@ void SnapshotRevision::validate_data(
         || !valid_utf8(data.client_profile_name.data(), data.client_profile_name.size())
         || !valid_utf8(data.client_profile_email.data(), data.client_profile_email.size())
         || !valid_utf8(data.device_name.data(), data.device_name.size())
+        || !valid_utf8(data.event_type.data(), data.event_type.size())
+        || !valid_utf8(data.event_detail.data(), data.event_detail.size())
         || !valid_canonical_document_text(data.content.data(), data.content.size())) {
         throw RevisionFailure{RevisionError::invalid_argument};
     }
     validate_ancestor_graph(data.ancestor_graph, limits);
+    if (data.event_type.empty() != data.event_detail.empty()
+        || (!data.event_type.empty() && !data.manually_sealed)) {
+        throw RevisionFailure{RevisionError::invalid_argument};
+    }
     if (data.manually_sealed != data.provisional_base_revision.empty()) {
         throw RevisionFailure{RevisionError::invalid_argument};
     }
@@ -172,7 +182,7 @@ std::vector<std::uint8_t> SnapshotRevision::encode() const
 {
     CborWriter writer;
     writer.map(11 + (data_.ancestor_graph.empty() ? 0 : 1)
-        + (data_.manually_sealed ? 0 : 2));
+        + (data_.manually_sealed ? 0 : 2) + (data_.event_type.empty() ? 0 : 2));
     writer.unsigned_integer(1); writer.unsigned_integer(snapshot_revision_format_version);
     const std::size_t parent_count = data_.parent_revision_ids.size() / revision_id_size;
     writer.unsigned_integer(2); writer.array(parent_count);
@@ -211,6 +221,10 @@ std::vector<std::uint8_t> SnapshotRevision::encode() const
         writer.bytes(data_.provisional_base_revision.data(),
             data_.provisional_base_revision.size());
     }
+    if (!data_.event_type.empty()) {
+        writer.unsigned_integer(15); writer.text(data_.event_type.data(), data_.event_type.size());
+        writer.unsigned_integer(16); writer.text(data_.event_detail.data(), data_.event_detail.size());
+    }
     return writer.take_output();
 }
 
@@ -222,7 +236,7 @@ SnapshotRevision SnapshotRevision::decode(
 {
     CborReader reader(encoded, encoded_size, limits);
     const std::size_t field_count = reader.map(1);
-    if (field_count < 11 || field_count > 14)
+    if (field_count < 11 || field_count > 16)
         throw RevisionFailure{RevisionError::malformed_cbor};
     reader.expect_unsigned(1);
     if (reader.unsigned_integer() != snapshot_revision_format_version) {
@@ -265,9 +279,8 @@ SnapshotRevision SnapshotRevision::decode(
         throw RevisionFailure{RevisionError::malformed_cbor};
     }
     std::size_t remaining_fields = field_count - 11;
-    if (remaining_fields != 0) {
-        const auto next_key = reader.unsigned_integer();
-        if (next_key == 12) {
+    if (remaining_fields != 0 && reader.peek_unsigned() == 12) {
+            reader.expect_unsigned(12);
             const std::size_t node_count = reader.array(2);
             if (node_count > limits.max_collection_entries())
                 throw RevisionFailure{RevisionError::limit_exceeded};
@@ -300,26 +313,29 @@ SnapshotRevision SnapshotRevision::decode(
                 throw;
             }
             --remaining_fields;
-        } else if (next_key == 13) {
-            revision.data_.manually_sealed = reader.boolean();
-            if (revision.data_.manually_sealed)
-                throw RevisionFailure{RevisionError::malformed_cbor};
-            --remaining_fields;
-        } else {
-            throw RevisionFailure{RevisionError::malformed_cbor};
-        }
     }
-    if (remaining_fields != 0 && revision.data_.manually_sealed) {
+    if (remaining_fields != 0 && revision.data_.manually_sealed
+        && reader.peek_unsigned() == 13) {
         reader.expect_unsigned(13);
         revision.data_.manually_sealed = reader.boolean();
         if (revision.data_.manually_sealed)
             throw RevisionFailure{RevisionError::malformed_cbor};
         --remaining_fields;
     }
-    if (remaining_fields != 0) {
+    if (remaining_fields != 0 && reader.peek_unsigned() == 14) {
         reader.expect_unsigned(14);
         revision.data_.provisional_base_revision = reader.bytes(
             0, limits.max_input_bytes());
+        --remaining_fields;
+    }
+    if (remaining_fields != 0 && reader.peek_unsigned() == 15) {
+        reader.expect_unsigned(15);
+        read_identity_text(reader, revision.data_.event_type);
+        --remaining_fields;
+    }
+    if (remaining_fields != 0 && reader.peek_unsigned() == 16) {
+        reader.expect_unsigned(16);
+        read_identity_text(reader, revision.data_.event_detail);
         --remaining_fields;
     }
     if (remaining_fields != 0 || !reader.finished())

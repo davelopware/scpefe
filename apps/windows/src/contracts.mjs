@@ -190,6 +190,10 @@ export function validateOpenedDocument(value) {
     throw new TypeError("host returned invalid provisional state");
   }
   const provisional = value.provisional === true || value.manuallySealed === false;
+  const migrationRequired = value.migrationRequired === true;
+  if (value.migrationRequired !== undefined && typeof value.migrationRequired !== "boolean") {
+    throw new TypeError("host returned invalid migration state");
+  }
   let profileMismatch;
   if (value.profileMismatch !== undefined) {
     const mismatch = value.profileMismatch;
@@ -222,7 +226,9 @@ export function validateOpenedDocument(value) {
     return Object.freeze({ ...slot });
   });
   return Object.freeze({ content: value.content, readOnly: true,
-    canEdit: value.canEdit, publicationState,
+    canEdit: migrationRequired ? false : value.canEdit, publicationState,
+    ...(migrationRequired ? { migrationRequired: true,
+      migrationWarning: "Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first." } : {}),
     ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
@@ -357,6 +363,16 @@ export function validateCompactionResult(value) {
   }
   return Object.freeze({ compacted: true, backupCreated: true,
     previousHead: value.previousHead, head: value.head });
+}
+
+export function validateMigrationResult(value) {
+  if (!value || typeof value !== "object" || value.migrated !== true
+      || value.backupCreated !== true || typeof value.compatibilityWarning !== "string") {
+    throw new TypeError("host returned an invalid migration result");
+  }
+  return Object.freeze({ migrated: true, backupCreated: true,
+    compatibilityWarning: value.compatibilityWarning,
+    opened: validateEditMode(value.opened) });
 }
 
 export function validateWorkingCopy(value) {

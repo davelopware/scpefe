@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -104,6 +105,46 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
     compactedHead, documentId, journalKey, native, options, service };
 }
 
+async function migrationFixture(t, prefix = "scpefe-migration-fixture-", fsImpl = fs) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
+  const legacy = Buffer.from("legacy-container");
+  const candidate = Buffer.from("migrated-container");
+  await fs.writeFile(target, legacy);
+  const oldHead = "71".repeat(32); const newHead = "72".repeat(32);
+  const documentId = "73".repeat(16); const journalKey = Buffer.alloc(32, 0x74);
+  const inactive = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
+    holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
+    deviceName: "" };
+  const activeLease = { active: true, sessionId: "75".repeat(16), heartbeatCounter: 1,
+    holderUtcMs: 1000, durationMs: 600_000, holderName: "Ada",
+    holderEmail: "ada@example.test", deviceName: "Desk" };
+  const native = { migrationHook: null, openDocument(bytes) {
+    const current = bytes.equals(candidate);
+    if (!current && !bytes.equals(legacy)) throw new Error("unexpected migration bytes");
+    return { content: "preserved text", readOnly: true, canEdit: true,
+      documentId, baseRevision: current ? newHead : oldHead,
+      revisionGraph: current ? [{ revisionId: newHead, parentRevisionIds: [oldHead] },
+        { revisionId: oldHead, parentRevisionIds: [] }]
+        : [{ revisionId: oldHead, parentRevisionIds: [] }],
+      journalKey: Buffer.from(journalKey), manuallySealed: true,
+      containerFormatVersion: current ? 3 : 2,
+      historyEventType: current ? "format-migration" : "",
+      historyEventDetail: current ? "container-version-2-to-3" : "",
+      lease: current ? activeLease : inactive };
+  }, migrateDocument() { native.migrationHook?.(); return candidate; } };
+  const options = { native, fs: fsImpl, profilePath, publicationCapabilities,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"), now: () => 1000,
+    utcNow: () => 1000, randomSessionId: () => Buffer.alloc(16, 0x75),
+    setTimer: () => ({ unref() {} }), clearTimer: () => {} };
+  const service = new DocumentService(options);
+  await service.openDocument(target, "owner password words");
+  return { directory, target, legacy, candidate, native, options, service };
+}
+
 test("requires a profile, publishes once, verifies, and reopens read-only", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-desktop-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -187,6 +228,121 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   assert.equal(calls.length, 1);
   assert.equal(calls[0].understandsIrrecoverable, true);
   assert.equal(calls[0].storedRecoverySeparately, true);
+});
+
+test("older containers remain read-only until verified-backup migration", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-migration-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
+  const legacy = Buffer.from("legacy-container");
+  const migrated = Buffer.from("migrated-container");
+  await fs.writeFile(target, legacy);
+  const oldHead = "41".repeat(32);
+  const newHead = "42".repeat(32);
+  const documentId = "43".repeat(16);
+  const journalKey = Buffer.alloc(32, 0x44);
+  const native = { openDocument(bytes) {
+    const current = bytes.equals(migrated);
+    return { content: "preserved text", readOnly: true, canEdit: true,
+      canAddPasswords: true, canRemovePasswords: true,
+      documentId, baseRevision: current ? newHead : oldHead,
+      revisionGraph: current
+        ? [{ revisionId: newHead, parentRevisionIds: [oldHead] },
+          { revisionId: oldHead, parentRevisionIds: [] }]
+        : [{ revisionId: oldHead, parentRevisionIds: [] }],
+      journalKey: Buffer.from(journalKey), manuallySealed: true,
+      containerFormatVersion: current ? 3 : 2,
+      historyEventType: current ? "format-migration" : "",
+      historyEventDetail: current ? "container-version-2-to-3" : "",
+      lease: current ? { active: true, sessionId: "55".repeat(16),
+        heartbeatCounter: 1, holderUtcMs: 1000, durationMs: 600_000,
+        holderName: "Ada", holderEmail: "ada@example.test", deviceName: "Desk" }
+        : { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
+          holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
+          deviceName: "" } };
+  }, migrateDocument(bytes, _password, input) {
+    assert.ok(bytes.equals(legacy));
+    assert.equal(input.sessionId, "55".repeat(16));
+    return migrated;
+  } };
+  const service = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities, journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"), now: () => 1000,
+    utcNow: () => 1000, randomSessionId: () => Buffer.alloc(16, 0x55),
+    setTimer: () => ({ unref() {} }), clearTimer: () => {} });
+  const opened = await service.openDocument(target, "owner password words");
+  assert.equal(opened.migrationRequired, true);
+  assert.equal(opened.canEdit, false);
+  await assert.rejects(service.enterEditMode(), /must be migrated before editing or saving/);
+  const result = await service.migrateDocument();
+  assert.equal(result.migrated, true);
+  assert.match(result.compatibilityWarning, /Older SCPEFE clients/);
+  assert.ok((await fs.readFile(target)).equals(migrated));
+  assert.ok((await fs.readFile(path.join(directory,
+    "document.backup-19700101T000001Z.scpefe"))).equals(legacy));
+});
+
+test("failed pre-migration backup leaves the older target untouched", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-migration-fail-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
+  const legacy = Buffer.from("legacy-container");
+  await fs.writeFile(target, legacy);
+  let migrated = false;
+  const native = { openDocument: () => ({ content: "text", readOnly: true,
+    canEdit: true, documentId: "61".repeat(16), baseRevision: "62".repeat(32),
+    revisionGraph: [{ revisionId: "62".repeat(32), parentRevisionIds: [] }],
+    journalKey: Buffer.alloc(32, 0x63), manuallySealed: true,
+    containerFormatVersion: 2, historyEventType: "", historyEventDetail: "" }),
+  migrateDocument() { migrated = true; return Buffer.from("bad"); } };
+  const service = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities, now: () => 1000 });
+  await service.openDocument(target, "owner password words");
+  await assert.rejects(service.migrateDocument(target), /distinct pre-migration/);
+  const unavailable = path.join(directory, "missing", "backup.scpefe");
+  await assert.rejects(service.migrateDocument(unavailable),
+    (error) => error.code === "MIGRATION_BACKUP_FAILED");
+  assert.equal(migrated, false);
+  assert.ok((await fs.readFile(target)).equals(legacy));
+});
+
+test("migration target race is tracked and never overwrites the competing value", async (t) => {
+  const fixture = await migrationFixture(t, "scpefe-migration-race-");
+  const competing = Buffer.from("competing-container");
+  fixture.native.migrationHook = () => fsSync.writeFileSync(fixture.target, competing);
+  await assert.rejects(fixture.service.migrateDocument(), /Publication/);
+  assert.ok((await fs.readFile(fixture.target)).equals(competing));
+  const pending = await fixture.service.journals.read(
+    fixture.service.active.documentId, fixture.service.active.journalKey);
+  assert.equal(pending.publication.purpose, "format-migration");
+  assert.ok(Buffer.from(pending.publication.candidate, "base64").equals(fixture.candidate));
+});
+
+test("restart completes an interrupted tracked migration publication", async (t) => {
+  const fixture = await migrationFixture(t, "scpefe-migration-restart-");
+  const realRename = fs.rename.bind(fs);
+  let interrupted = false;
+  const faultFs = { ...fs, async rename(from, to) {
+    if (!interrupted && to === fixture.target && from.includes("scpefe-txn")) {
+      interrupted = true;
+      throw new Error("simulated migration replace interruption");
+    }
+    return realRename(from, to);
+  } };
+  fixture.service.fs = faultFs;
+  fixture.service.publications.fs = faultFs;
+  fixture.service.journals.fs = faultFs;
+  await assert.rejects(fixture.service.migrateDocument(),
+    (error) => error.publicationPrepared === true);
+  const pending = await fixture.service.journals.read(
+    fixture.service.active.documentId, fixture.service.active.journalKey);
+  assert.equal(pending.publication.purpose, "format-migration");
+  const restarted = new DocumentService({ ...fixture.options, fs });
+  const opened = await restarted.openDocument(fixture.target, "owner password words");
+  assert.equal(opened.migrationRequired, undefined);
+  assert.ok((await fs.readFile(fixture.target)).equals(fixture.candidate));
 });
 
 test("view-only slots cannot enter edit mode", async (t) => {

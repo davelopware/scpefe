@@ -41,6 +41,7 @@ else()
         src/document/manual_save.cpp
         src/document/provisional_save.cpp
         src/document/merge_save.cpp
+        src/document/migration.cpp
         src/security/password_strength.cpp
         third_party/zxcvbn-c/zxcvbn.c
     )
@@ -143,6 +144,12 @@ if(SCPEFE_BUILD_NODE_ADDON)
             NAME scpefe.native-addon-compaction
             COMMAND ${NODE_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-compaction-addon.integration.mjs
+                $<TARGET_FILE:scpefe_electron_native>
+        )
+        add_test(
+            NAME scpefe.native-addon-migration
+            COMMAND ${NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-migration-addon.integration.mjs
                 $<TARGET_FILE:scpefe_electron_native>
         )
     endif()

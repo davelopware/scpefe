@@ -3,6 +3,7 @@ import { validateCreateRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
+  validateMigrationResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft } from "./contracts.mjs";
@@ -46,6 +47,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   compactDocument: async () => {
     const value = await ipcRenderer.invoke("document:compact");
     return value === null ? null : validateCompactionResult(value);
+  },
+  migrateDocument: async () => {
+    const value = await ipcRenderer.invoke("document:migrate");
+    return value === null ? null : validateMigrationResult(value);
   },
   createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
   claimInvitation: async (password) => validateOpenedDocument(

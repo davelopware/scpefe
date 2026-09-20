@@ -18,6 +18,20 @@ length) with zero. That copy is the slot's additional authenticated data. The
 actual complete header remains the encrypted snapshot's additional authenticated
 data.
 
+A container migrated from version 2 places a `SCPMIG01` extension immediately
+after its permanent base-slot wrappers. The extension records one wrapper
+version per base slot and retains the exact authenticated version-2 header.
+Unknown-password version-2 wrappers are copied byte-for-byte and continue to
+authenticate against that retained header; a later password rewrap upgrades
+only the addressed wrapper to version 3. Invitation wrappers already carry
+independent salt, nonce, and ciphertext records and are likewise copied exactly.
+The newly encrypted snapshot authenticates the current version-3 header.
+
+Migration adds a sealed snapshot revision whose content and content hash are
+unchanged and whose optional fields 15 and 16 identify the
+`format-migration` event and its source/target versions. This makes migration a
+history event without presenting it as a text edit.
+
 A manual save preserves the complete slot area, decrypted 16-octet document ID,
 and encrypted editing-lease block. It generates a fresh snapshot nonce, records
 the new ciphertext length, and encrypts the document ID, lease block, and new
