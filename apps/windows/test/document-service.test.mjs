@@ -916,7 +916,8 @@ test("serializes a delayed heartbeat ahead of save without overwriting it", asyn
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(saveFinished, false);
   delayed.release();
-  assert.deepEqual(await saving, { saved: true, content: "saved after heartbeat" });
+  assert.deepEqual(await saving, { saved: true, content: "saved after heartbeat",
+    publicationState: "target-published" });
   assert.equal(await fs.readFile(target, "utf8"), "saved:saved after heartbeat");
   assert.equal(native.currentLease().heartbeatCounter, 2);
 });
