@@ -4,6 +4,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   validateSaveResult, validateWorkingCopy } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
+import { PublicationService } from "./publication.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
@@ -21,6 +22,7 @@ export class DocumentService {
     this.nativeLineEnding = nativeLineEnding;
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
+    this.publications = new PublicationService({ fs, journals: this.journals, now });
     this.checkpointIdleMs = checkpointIdleMs;
     this.checkpointContinuousMs = checkpointContinuousMs;
     this.inactivityMs = inactivityMs;
@@ -73,12 +75,29 @@ export class DocumentService {
   async openDocument(target, password) {
     const bytes = await this.fs.readFile(target);
     const validatedPassword = validatePassword(password);
-    const nativeOpened = this.#validateNativeOpened(
+    let nativeOpened = this.#validateNativeOpened(
       this.native.openDocument(bytes, validatedPassword));
     let recovery = null;
+    let pendingPublication = false;
     try {
       const journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
+      if (journal?.publication) {
+        pendingPublication = true;
+        const resumed = await this.publications.resume(
+          nativeOpened.documentId, nativeOpened.journalKey, journal);
+        if (resumed.completed) {
+          pendingPublication = false;
+          const published = await this.fs.readFile(target);
+          nativeOpened.journalKey.fill(0);
+          nativeOpened = this.#validateNativeOpened(
+            this.native.openDocument(published, validatedPassword));
+          this.onJournalWarning("Interrupted publication was completed and verified.");
+        } else if (resumed.reason === "ambiguous") {
+          this.onJournalWarning(
+            "Interrupted publication needs confirmation; recovery data was preserved.");
+        }
+      }
       if (journal?.state === "unsaved"
           && journal.baseRevision === nativeOpened.baseRevision) {
         recovery = journal;
@@ -93,7 +112,8 @@ export class DocumentService {
     this.active = { target, password: validatedPassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
-      working: null, dirty: false, continuousDue: null, journalWarning: null };
+      working: null, dirty: false, pendingPublication,
+      continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
     return opened;
@@ -101,6 +121,9 @@ export class DocumentService {
 
   enterEditMode() {
     if (!this.active) throw new Error("Open a document first");
+    if (this.active.pendingPublication) {
+      throw new Error("Resolve the interrupted publication before editing");
+    }
     if (this.active.recovery) {
       throw new Error("Restore or discard recovered work before editing");
     }
@@ -191,6 +214,8 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const canonical = canonicalizeDocumentText(content);
+    this.#cancelCheckpoint();
+    await this.flushChain.catch(() => {});
     const current = await this.fs.readFile(this.active.target);
     const candidate = this.native.saveDocument(current, this.active.password, {
       ...profile, content: canonical, timestampMs: Date.now(),
@@ -198,18 +223,28 @@ export class DocumentService {
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new Error("Native bridge did not produce a container");
     }
-    await this.#atomicWrite(this.active.target, candidate, true);
+    try {
+      await this.publications.publish({
+        documentId: this.active.documentId,
+        journalKey: this.active.journalKey,
+        target: this.active.target,
+        base: current,
+        candidate,
+        text: canonical,
+        cursor: { start: 0, end: 0 },
+        baseRevision: this.active.baseRevision,
+      });
+    } catch (error) {
+      if (error.publicationPrepared) this.active.pendingPublication = true;
+      throw error;
+    }
     const published = await this.fs.readFile(this.active.target);
-    if (!published.equals(candidate)) throw new Error("Published container verification failed");
     const reopened = this.#validateNativeOpened(
       this.native.openDocument(published, this.active.password));
     if (reopened.opened.content !== canonical) {
       reopened.journalKey.fill(0);
       throw new Error("Saved document verification failed");
     }
-    this.#cancelCheckpoint();
-    await this.flushChain.catch(() => {});
-    await this.journals.clear(this.active.documentId);
     this.active.journalKey.fill(0);
     this.active.opened = reopened.opened;
     this.active.documentId = reopened.documentId;
@@ -218,6 +253,7 @@ export class DocumentService {
     reopened.journalKey.fill(0);
     this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
     this.active.dirty = false;
+    this.active.pendingPublication = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
     this.notifyActivity();
@@ -264,7 +300,7 @@ export class DocumentService {
   }
 
   async #flushActive(active) {
-    if (!active?.dirty || !active.working) return;
+    if (!active?.dirty || !active.working || active.pendingPublication) return;
     const record = {
       text: active.working.content,
       baseRevision: active.baseRevision,

@@ -199,17 +199,65 @@ test("verified save waits for an in-flight checkpoint before clearing its journa
   await checkpointStarted;
 
   const saving = service.saveDocument("saved work");
-  await saveVerified;
   const clearRanBeforeCheckpoint = clearStarted;
+  releaseWrite();
   releaseClear();
   if (clearRanBeforeCheckpoint) await journalCleared;
-  releaseWrite();
+  await saveVerified;
   await saving;
   await service.flushChain;
 
   const journalPath = path.join(directory, "work-journals",
     `${"66".repeat(16)}.work-journal`);
   await assert.rejects(fs.readFile(journalPath), (error) => error.code === "ENOENT");
+});
+
+test("restart completes a tracked save while lock preserves its publication", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-restart-save-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(target, "container");
+  await fs.writeFile(profilePath, JSON.stringify({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk PC",
+  }));
+  const native = {
+    openDocument(bytes) {
+      return { content: bytes.toString().startsWith("saved:")
+        ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
+      documentId: "aa".repeat(16), baseRevision: "bb".repeat(32),
+      journalKey: Buffer.alloc(32, 19) };
+    },
+    saveDocument(_bytes, _password, input) {
+      return Buffer.from(`saved:${input.content}`);
+    },
+  };
+  let interrupt = true;
+  const interruptedFs = Object.create(fs);
+  interruptedFs.rename = async (source, destination) => {
+    if (interrupt && source.includes(".scpefe-txn-")) {
+      interrupt = false;
+      throw new Error("simulated interruption");
+    }
+    return fs.rename(source, destination);
+  };
+  const service = new DocumentService({ native, fs: interruptedFs, profilePath });
+  await service.openDocument(target, "password words");
+  service.enterEditMode();
+  service.updateWorkingCopy({ content: "saved after restart",
+    cursor: { start: 19, end: 19 } });
+  await assert.rejects(service.saveDocument("saved after restart"), /interruption/);
+  await service.lock();
+
+  const warnings = [];
+  const restarted = new DocumentService({ native, fs, profilePath,
+    onJournalWarning: (warning) => warnings.push(warning) });
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.content, "saved after restart");
+  assert.deepEqual(warnings,
+    ["Interrupted publication was completed and verified."]);
+  assert.equal(await fs.readFile(target, "utf8"), "saved:saved after restart");
+  await restarted.lock();
 });
 
 test("plaintext export writes only current text with selected line endings", async (t) => {
