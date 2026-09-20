@@ -62,6 +62,7 @@ int main(void)
     static const char owner[] = "owner passphrase with independent words";
     static const char recovery[] = "offline recovery passphrase is different";
     static const char temporary[] = "cobalt-lantern-river-planet-73";
+    static const char delegated[] = "delegated-indigo-orbit-harbour-91";
     static const char replacement[] = "new invited passphrase with private words";
     const scpefe_new_document_v1 document = {
         sizeof(document), "Ada", 3, "ada@example.test", 16, "PC", 2,
@@ -70,7 +71,9 @@ int main(void)
         (const uint8_t *)recovery, sizeof(recovery) - 1
     };
     uint8_t *container = NULL, *invited = NULL, *claimed = NULL, *extra = NULL;
+    uint8_t *delegated_invitation = NULL;
     size_t size = 0, invited_size = 0, claimed_size = 0, extra_size = 0;
+    size_t delegated_size = 0;
     scpefe_unlocked_container *unlocked = NULL;
     scpefe_unlocked_slot_access_v1 slot = {0};
     CHECK(scpefe_new_document_create(&document, NULL, 0, &size)
@@ -85,6 +88,28 @@ int main(void)
     CHECK(slot.can_edit == 1 && slot.can_add_passwords == 0
         && slot.must_be_changed == 1 && slot.recovery_slot == 0);
     CHECK(slot.identity_name_size == strlen("New colleague"));
+    {
+        uint8_t *tampered = (uint8_t *)malloc(invited_size);
+        CHECK(tampered != NULL);
+        memcpy(tampered, invited, invited_size);
+        tampered[invited_size - 1] ^= 1;
+        CHECK(scpefe_password_container_unlock(tampered, invited_size,
+            (const uint8_t *)temporary, sizeof(temporary) - 1, &unlocked)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(unlocked == NULL);
+        free(tampered);
+    }
+    extra_size = 0;
+    CHECK(scpefe_password_container_change_password(invited, invited_size,
+        (const uint8_t *)temporary, sizeof(temporary) - 1,
+        (const uint8_t *)replacement, sizeof(replacement) - 1,
+        NULL, 0, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
+    CHECK(add(container, size, owner, delegated, 1, 1,
+        &delegated_invitation, &delegated_size) == SCPEFE_STATUS_OK);
+    CHECK(add(delegated_invitation, delegated_size, delegated,
+        "nested invitation must never be created", 1, 0,
+        &extra, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
+    free(extra); extra = NULL;
     CHECK(claim(invited, invited_size, temporary, replacement,
         &claimed, &claimed_size) == SCPEFE_STATUS_OK);
     CHECK(scpefe_password_container_unlock(claimed, claimed_size,
@@ -94,6 +119,9 @@ int main(void)
     CHECK(slot.must_be_changed == 0
         && slot.identity_name_size == strlen("Grace Hopper")
         && slot.identity_email_size == strlen("grace@example.test"));
+    CHECK(claim(claimed, claimed_size, replacement,
+        "second claim must not replace claimed identity", &extra, &extra_size)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
     CHECK(add(claimed, claimed_size, replacement,
         "another safely generated invitation phrase", 1, 0,
         &extra, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
@@ -104,6 +132,6 @@ int main(void)
     CHECK(add(container, size, recovery,
         "violet-correct-horse-battery-planet-92831", 0, 1,
         &extra, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
-    free(extra); free(claimed); free(invited); free(container);
+    free(extra); free(delegated_invitation); free(claimed); free(invited); free(container);
     return 0;
 }

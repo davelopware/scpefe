@@ -114,6 +114,33 @@ test("view-only slots cannot enter edit mode", async (t) => {
   await assert.rejects(service.enterEditMode(), /does not permit editing/);
 });
 
+test("unclaimed invitations expose only the claim workflow", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-invite-open-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Grace", "Private PC");
+  await fs.writeFile(target, "container");
+  const native = { openDocument: () => ({
+    content: "", readOnly: true, canEdit: false, canAddPasswords: false,
+    mustBeChanged: true, slotIdentityName: "Temporary colleague label",
+    slotIdentityEmail: "invited@example.test", profileName: "Document author",
+    profileEmail: "author@example.test", deviceName: "Author device",
+    documentId: "11".repeat(16), baseRevision: "22".repeat(32),
+    revisionGraph: [{ revisionId: "22".repeat(32), parentRevisionIds: [] }],
+    journalKey: Buffer.alloc(32, 3), lease: { active: true,
+      sessionId: "12".repeat(16), heartbeatCounter: 4, holderUtcMs: 1,
+      durationMs: 600_000, holderName: "Lease holder",
+      holderEmail: "holder@example.test", deviceName: "Lease device" },
+  }) };
+  const service = new DocumentService({ native, fs, profilePath,
+    publicationCapabilities });
+
+  const opened = await service.openDocument(target, "temporary password words");
+
+  assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
+  assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
+});
+
 test("generates a one-time invitation secret and publishes it under the held lease", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-invite-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

@@ -40,12 +40,17 @@ test("accepts only validated read-only native results", () => {
 });
 
 test("permits only the invitation claim surface before password replacement", () => {
-  assert.deepEqual(validateOpenedDocument({ content: "", readOnly: true,
+  const opened = validateOpenedDocument({ content: "", readOnly: true,
     canEdit: false, canAddPasswords: false, mustBeChanged: true,
-    slotIdentityName: "New colleague" }), {
-    content: "", readOnly: true, canEdit: false, canAddPasswords: false,
-    invitationRequired: true, temporaryLabel: "New colleague",
+    slotIdentityName: "New colleague", slotIdentityEmail: "invite@example.test",
+    profileName: "Document author", profileEmail: "author@example.test",
+    deviceName: "Author device", lease: { active: true,
+      holderName: "Lease holder", holderEmail: "holder@example.test",
+      deviceName: "Lease device", sessionId: "ab".repeat(16),
+      heartbeatCounter: 4, holderUtcMs: 1, durationMs: 600000 },
   });
+  assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
+  assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: true,
     canEdit: false, mustBeChanged: true }), /exposed before claim/);
 });

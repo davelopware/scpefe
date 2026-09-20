@@ -141,14 +141,17 @@ export class DocumentService {
         editingBlocked: true, observedDocumentId: nativeOpened.documentId,
         observedHead: nativeOpened.baseRevision });
     }
-    const slotCanEdit = nativeOpened.opened.canEdit;
-    const opened = validateOpenedDocument({ ...nativeOpened.opened,
-      lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-      canEdit: headMismatch ? false : slotCanEdit,
-      ...(headMismatch ? { headMismatch } : {}),
-      ...(recovery ? { recovery: { content: recovery.text,
-        cursor: recovery.cursor, state: "unsaved",
-        updateTime: recovery.updateTime } } : {}) });
+    const slotCanEdit = nativeOpened.opened.invitationRequired
+      ? false : nativeOpened.opened.canEdit;
+    const opened = nativeOpened.opened.invitationRequired
+      ? nativeOpened.opened
+      : validateOpenedDocument({ ...nativeOpened.opened,
+        lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
+        canEdit: headMismatch ? false : slotCanEdit,
+        ...(headMismatch ? { headMismatch } : {}),
+        ...(recovery ? { recovery: { content: recovery.text,
+          cursor: recovery.cursor, state: "unsaved",
+          updateTime: recovery.updateTime } } : {}) });
     this.active = { target, password: validatedPassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),

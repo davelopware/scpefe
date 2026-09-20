@@ -9,6 +9,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string_view>
 
 extern "C" {
@@ -69,6 +70,16 @@ constexpr std::size_t owner_salt_offset = 72;
 constexpr std::size_t owner_nonce_offset = 88;
 constexpr std::size_t recovery_salt_offset = 116;
 constexpr std::size_t recovery_nonce_offset = 132;
+
+template<typename Buffer>
+auto clear_on_scope_exit(Buffer &buffer)
+{
+    using Value = typename Buffer::value_type;
+    return std::unique_ptr<Buffer, void (*)(Buffer *)>{&buffer, [](Buffer *value) {
+        if (!value->empty())
+            sodium_memzero(value->data(), value->size() * sizeof(Value));
+    }};
+}
 
 void write_u32(std::uint8_t *out, std::uint32_t value)
 {
@@ -509,6 +520,10 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
     std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
     std::array<std::uint8_t, slot_plaintext_size> slot{};
     std::vector<std::uint8_t> snapshot;
+    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
+    const auto snapshot_key_clear = clear_on_scope_exit(snapshot_key);
+    const auto slot_clear = clear_on_scope_exit(slot);
+    const auto snapshot_clear = clear_on_scope_exit(snapshot);
     try {
         const auto slot_aad = slot_additional_data(container);
         bool authenticated = false;
@@ -532,6 +547,7 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
         }
         UnlockedContainerData result;
         std::vector<std::uint8_t> invitation;
+        const auto invitation_clear = clear_on_scope_exit(invitation);
         if (!authenticated) {
             for (const auto &record : layout.invitations) {
                 if (decrypt_invitation(record, password, password_size,
@@ -573,7 +589,6 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
         result.encoded_snapshot_revision.assign(
             snapshot.begin() + document_id_size + lease_size, snapshot.end());
         clear(wrapping_key, snapshot_key, slot, snapshot);
-        if (!invitation.empty()) sodium_memzero(invitation.data(), invitation.size());
         return result;
     } catch (...) {
         clear(wrapping_key, snapshot_key, slot, snapshot);
@@ -628,6 +643,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
             }
         }
         std::vector<std::uint8_t> invited;
+        const auto invited_clear = clear_on_scope_exit(invited);
         if (!authenticated) {
             for (const auto &record : layout.invitations) {
                 if (decrypt_invitation(record, password, password_size,
@@ -738,6 +754,11 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
     std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
     std::array<std::uint8_t, slot_plaintext_size> slot{}, candidate_slot{};
     std::vector<std::uint8_t> snapshot;
+    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
+    const auto snapshot_key_clear = clear_on_scope_exit(snapshot_key);
+    const auto slot_clear = clear_on_scope_exit(slot);
+    const auto candidate_slot_clear = clear_on_scope_exit(candidate_slot);
+    const auto snapshot_clear = clear_on_scope_exit(snapshot);
     try {
         const auto normalized_aad = slot_additional_data(container);
         const std::uint8_t *slot_aad = normalized_aad.data();
@@ -761,6 +782,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
         }
         if (!authenticated) {
             std::vector<std::uint8_t> invited;
+            const auto invited_clear = clear_on_scope_exit(invited);
             for (const auto &record : layout.invitations) {
                 if (!decrypt_invitation(record, current_password, current_password_size,
                     wrapping_key, invited)) continue;
@@ -785,16 +807,14 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
                     + record.ciphertext_size;
                 output.insert(output.end(), container + old_end,
                     container + container_size);
-                sodium_memzero(invited.data(), invited.size());
-                sodium_memzero(wrapping_key.data(), wrapping_key.size());
                 return output;
             }
         }
         for (const auto &record : layout.invitations) {
             std::vector<std::uint8_t> invited;
+            const auto invited_clear = clear_on_scope_exit(invited);
             if (decrypt_invitation(record, new_password, new_password_size,
                 wrapping_key, invited)) {
-                if (!invited.empty()) sodium_memzero(invited.data(), invited.size());
                 throw ContainerFailure{ContainerError::password_already_in_use};
             }
         }
@@ -876,7 +896,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
         throw ContainerFailure{ContainerError::invalid_argument};
     const auto creator = unlock(container, container_size, creator_password,
         creator_password_size, format::RevisionLimits::defaults());
-    if ((creator.permissions & 2u) == 0 || (permissions & ~creator.permissions) != 0)
+    if (creator.must_be_changed || (creator.permissions & 2u) == 0
+        || (permissions & ~creator.permissions) != 0)
         throw ContainerFailure{ContainerError::invalid_argument};
     try {
         (void)unlock(container, container_size, temporary_password,
@@ -893,6 +914,9 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     std::array<std::uint8_t, key_size> wrapping_key{};
     std::array<std::uint8_t, slot_plaintext_size> base_slot{};
     std::vector<std::uint8_t> creator_plain;
+    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
+    const auto base_slot_clear = clear_on_scope_exit(base_slot);
+    const auto creator_plain_clear = clear_on_scope_exit(creator_plain);
     const auto aad = slot_additional_data(container);
     bool found = false;
     unsigned long long written = 0;
@@ -919,6 +943,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     randombytes_buf(slot_id.data(), slot_id.size());
     auto plain = invitation_plaintext(document_key, slot_id, permissions,
         must_change_flag, temporary_label, {});
+    const auto plain_clear = clear_on_scope_exit(plain);
     std::array<std::uint8_t, salt_size> salt{};
     std::array<std::uint8_t, nonce_size> nonce{};
     randombytes_buf(salt.data(), salt.size());
@@ -946,10 +971,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     output.insert(output.end(), cipher.begin(), cipher.end());
     output.insert(output.end(), container + layout.snapshot_offset,
         container + container_size);
-    sodium_memzero(wrapping_key.data(), wrapping_key.size());
-    sodium_memzero(base_slot.data(), base_slot.size());
-    if (!creator_plain.empty()) sodium_memzero(creator_plain.data(), creator_plain.size());
-    if (!plain.empty()) sodium_memzero(plain.data(), plain.size());
     return output;
 }
 
@@ -976,6 +997,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     require_sodium();
     std::array<std::uint8_t, key_size> wrapping_key{};
     std::vector<std::uint8_t> plain;
+    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
+    const auto plain_clear = clear_on_scope_exit(plain);
     const InvitationRecord *matched = nullptr;
     for (const auto &record : layout.invitations) {
         if (decrypt_invitation(record, temporary_password, temporary_password_size,
@@ -989,6 +1012,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
         throw ContainerFailure{ContainerError::invalid_argument};
     auto replacement_plain = invitation_plaintext(plain.data(), access.slot_id,
         access.permissions, 0, profile_name, profile_email);
+    const auto replacement_plain_clear = clear_on_scope_exit(replacement_plain);
     derive_wrapping_key(wrapping_key, new_password, new_password_size, matched->salt);
     std::vector<std::uint8_t> cipher(replacement_plain.size() + tag_size);
     unsigned long long written = 0;
@@ -1003,9 +1027,6 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     const auto old_end = matched->offset + invitation_prefix_size
         + matched->ciphertext_size;
     output.insert(output.end(), container + old_end, container + container_size);
-    sodium_memzero(wrapping_key.data(), wrapping_key.size());
-    sodium_memzero(plain.data(), plain.size());
-    sodium_memzero(replacement_plain.data(), replacement_plain.size());
     return output;
 }
 
@@ -1031,6 +1052,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
     std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
     std::array<std::uint8_t, slot_plaintext_size> slot{};
     std::vector<std::uint8_t> plaintext, replacement;
+    const auto plaintext_clear = clear_on_scope_exit(plaintext);
+    const auto replacement_clear = clear_on_scope_exit(replacement);
     try {
         const auto old_aad = slot_additional_data(container);
         bool authenticated = false;
@@ -1049,6 +1072,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
             }
         }
         std::vector<std::uint8_t> invited;
+        const auto invited_clear = clear_on_scope_exit(invited);
         if (!authenticated) {
             for (const auto &record : layout.invitations) {
                 if (decrypt_invitation(record, password, password_size,
