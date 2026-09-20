@@ -291,7 +291,7 @@ test("restart completes a tracked save while lock preserves its publication", as
       return Buffer.from(`saved:${input.content}`);
     },
   };
-  let interrupt = true;
+  let interrupt = false;
   const interruptedFs = Object.create(fs);
   interruptedFs.rename = async (source, destination) => {
     if (interrupt && source.includes(".scpefe-txn-")) {
@@ -300,10 +300,12 @@ test("restart completes a tracked save while lock preserves its publication", as
     }
     return fs.rename(source, destination);
   };
-  const service = new DocumentService({ native, fs: interruptedFs, profilePath,
-    publicationCapabilities });
+  const leasedNative = withLease(native);
+  const service = new DocumentService({ native: leasedNative, fs: interruptedFs,
+    profilePath, publicationCapabilities });
   await service.openDocument(target, "password words");
-  service.enterEditMode();
+  await service.enterEditMode();
+  interrupt = true;
   service.updateWorkingCopy({ content: "saved after restart",
     cursor: { start: 19, end: 19 } });
   await assert.rejects(service.saveDocument("saved after restart"), /interruption/);
@@ -321,7 +323,8 @@ test("restart completes a tracked save while lock preserves its publication", as
   assert.equal(afterLock.publication.candidate, pending.publication.candidate);
 
   const warnings = [];
-  const restarted = new DocumentService({ native, fs, profilePath, publicationCapabilities,
+  const restarted = new DocumentService({ native: leasedNative, fs, profilePath,
+    publicationCapabilities,
     onJournalWarning: (warning) => warnings.push(warning) });
   const opened = await restarted.openDocument(target, "password words");
   assert.equal(opened.content, "saved after restart");
@@ -347,10 +350,11 @@ test("a persisted prepare with a lost acknowledgement survives lock and restart"
     journalKey: Buffer.alloc(32, 21) }),
     saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
   };
-  const service = new DocumentService({ native, fs, profilePath,
+  const leasedNative = withLease(native);
+  const service = new DocumentService({ native: leasedNative, fs, profilePath,
     publicationCapabilities });
   await service.openDocument(target, "password words");
-  service.enterEditMode();
+  await service.enterEditMode();
   service.updateWorkingCopy({ content: "durable candidate",
     cursor: { start: 17, end: 17 } });
   const write = service.journals.write.bind(service.journals);
@@ -369,7 +373,7 @@ test("a persisted prepare with a lost acknowledgement survives lock and restart"
   assert.equal(pending.state, "pending-publication");
   assert.equal(pending.publication.stage, "prepared");
 
-  const restarted = new DocumentService({ native, fs, profilePath,
+  const restarted = new DocumentService({ native: leasedNative, fs, profilePath,
     publicationCapabilities });
   const opened = await restarted.openDocument(target, "password words");
   assert.equal(opened.content, "durable candidate");
@@ -416,7 +420,7 @@ test("coordinates holders, heartbeats, lock suspension, resumption, and expiry",
   let utc = 1_000;
   let mono = 1_000;
   const timers = [];
-  const first = new DocumentService({ native, fs,
+  const first = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: await writeProfile(directory, "Ada", "Desk"),
     utcNow: () => utc, monotonicNow: () => mono,
     setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
@@ -427,7 +431,7 @@ test("coordinates holders, heartbeats, lock suspension, resumption, and expiry",
   assert.equal(acquired.heartbeatCounter, 1);
   assert.equal(timers.some((timer) => timer.delay === 120_000), true);
 
-  const second = new DocumentService({ native, fs,
+  const second = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: await writeProfile(directory, "Grace", "Laptop"),
     utcNow: () => utc, monotonicNow: () => mono });
   const inspected = await second.openDocument(target, "password words");
@@ -461,14 +465,14 @@ test("uncertain clocks require observation or explicit forced confirmation", asy
   const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
     canEdit: true, documentId: "cc".repeat(16), baseRevision: "dd".repeat(32),
     journalKey: Buffer.alloc(32, 5) }) });
-  const holder = new DocumentService({ native, fs,
+  const holder = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: await writeProfile(directory, "Ada", "Wrong clock"),
     utcNow: () => 9_000_000, monotonicNow: () => 0 });
   await holder.openDocument(target, "password words");
   await holder.enterEditMode();
 
   let monotonic = 10;
-  const observer = new DocumentService({ native, fs,
+  const observer = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: await writeProfile(directory, "Grace", "Observer"),
     utcNow: () => 1_000, monotonicNow: () => monotonic });
   await observer.openDocument(target, "password words");
@@ -480,7 +484,7 @@ test("uncertain clocks require observation or explicit forced confirmation", asy
   await assert.rejects(holder.saveDocument("must not publish"),
     /lease is no longer held/);
 
-  const forced = new DocumentService({ native, fs,
+  const forced = new DocumentService({ native, fs, publicationCapabilities,
     profilePath: await writeProfile(directory, "Katherine", "Confirmed"),
     utcNow: () => 500, monotonicNow: () => 20 });
   await forced.openDocument(target, "password words");
@@ -501,7 +505,8 @@ test("serializes a delayed heartbeat ahead of save without overwriting it", asyn
     saveDocument(_bytes, _password, input) { return Buffer.from(`saved:${input.content}`); },
   });
   const timers = [];
-  const service = new DocumentService({ native, fs, inactivityMs: 999_999,
+  const service = new DocumentService({ native, fs, publicationCapabilities,
+    inactivityMs: 999_999,
     profilePath: await writeProfile(directory, "Ada", "Desk"),
     setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimer() {} });
@@ -530,7 +535,8 @@ test("lock and release invalidate and await an in-flight heartbeat", async (t) =
     canEdit: true, documentId: "12".repeat(16), baseRevision: "34".repeat(32),
     journalKey: Buffer.alloc(32, 7) }) });
   const timers = [];
-  const service = new DocumentService({ native, fs, inactivityMs: 999_999,
+  const service = new DocumentService({ native, fs, publicationCapabilities,
+    inactivityMs: 999_999,
     profilePath: await writeProfile(directory, "Ada", "Desk"),
     setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimer() {} });
@@ -571,7 +577,8 @@ test("resumes only an unchanged valid suspended lease and flags counter changes"
     journalKey: Buffer.alloc(32, 8) }) });
   let utc = 10_000;
   let sessions = 0;
-  const service = new DocumentService({ native, fs, utcNow: () => utc,
+  const service = new DocumentService({ native, fs, publicationCapabilities,
+    utcNow: () => utc,
     randomSessionId: () => Buffer.alloc(16, ++sessions),
     profilePath: await writeProfile(directory, "Ada", "Desk") });
   await service.openDocument(target, "password words");
