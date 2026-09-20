@@ -14,12 +14,10 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
   assert.match(main, /service\.lock\(["']app-lock["']\)/);
-  assert.match(main, /active\.recovery/);
-  assert.match(main, /!active\.manuallySealed/);
+  assert.match(main, /needsCloseDecision\(active\)/);
+  assert.match(main, /applyCloseDecision\(service/);
   assert.match(main, /Manual save and exit/);
   assert.match(main, /Discard and exit/);
-  assert.match(main, /service\.restoreRecoveredWork\(\)/);
-  assert.match(main, /service\.discardRecoveredWork\(\)/);
   assert.doesNotMatch(main,
     /if \(closingAfterRelease \|\| !service\.active\?\.editMode\) return/);
   assert.match(main, /dist["'],\s*["']preload\.cjs/);

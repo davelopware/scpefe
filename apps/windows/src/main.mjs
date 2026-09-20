@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { DocumentService } from "./document-service.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -136,8 +137,7 @@ app.whenReady().then(async () => {
     const active = service.active;
     const regularSavePending = active?.pendingRecord?.publication?.purpose
       === "regular-save";
-    const needsUnsavedDecision = active && (active.dirty || active.recovery
-      || !active.manuallySealed || regularSavePending);
+    const needsUnsavedDecision = needsCloseDecision(active);
     if (!active || (!active.editMode && !needsUnsavedDecision)) return;
     event.preventDefault();
     if (closeOperation) return;
@@ -152,27 +152,9 @@ app.whenReady().then(async () => {
           buttons: ["Cancel", "Manual save and exit", "Discard and exit"],
           defaultId: 0, cancelId: 0, noLink: true,
         });
-        if (choice.response === 0) return;
-        if (choice.response === 1) {
-          if (service.active.pendingPublication) {
-            const resumed = await service.reconnectPendingPublication();
-            if (resumed.publicationState !== "target-published") {
-              throw new Error(
-                "Resolve the saved divergence in the app before exiting");
-            }
-          }
-          if (service.active.recovery) await service.restoreRecoveredWork();
-          else if (!service.active.editMode) await service.enterEditMode();
-          await service.saveDocument(service.active.working.content);
-        } else {
-          if (service.active.pendingPublication) {
-            await service.discardPendingPublication();
-          } else if (service.active.recovery) {
-            await service.discardRecoveredWork();
-          } else {
-            await service.discardWorkingCopy();
-          }
-        }
+        const proceed = await applyCloseDecision(service,
+          ["cancel", "save", "discard"][choice.response]);
+        if (!proceed) return;
       }
       if (service.active?.editMode) {
         try { await service.exitEditMode(); }

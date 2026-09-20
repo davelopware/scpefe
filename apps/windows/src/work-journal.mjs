@@ -55,6 +55,8 @@ function validateRecord(value) {
   if (value.publication !== undefined) {
     const candidate = value.publication?.candidate;
     const base = value.publication?.base;
+    const mergeAncestor = value.publication?.mergeAncestor;
+    const mergeAncestorHash = value.publication?.mergeAncestorHash;
     if (!value.publication || typeof value.publication !== "object"
         || !["unsaved", "pending-publication", "conflict"].includes(value.state)
         || typeof value.publication.id !== "string"
@@ -71,6 +73,13 @@ function validateRecord(value) {
         || !Buffer.from(candidate, "base64").length
         || typeof base !== "string" || !Buffer.from(base, "base64").length
         || hash(Buffer.from(base, "base64")) !== value.publication.baseHash
+        || ((mergeAncestor === undefined) !== (mergeAncestorHash === undefined))
+        || (mergeAncestor !== undefined
+          && (typeof mergeAncestor !== "string"
+            || !Buffer.from(mergeAncestor, "base64").length
+            || !/^[0-9a-f]{64}$/.test(mergeAncestorHash)
+            || hash(Buffer.from(mergeAncestor, "base64")) !== mergeAncestorHash
+            || value.publication.purpose !== "regular-save"))
         || (value.publication.purpose !== undefined
           && !["invitation-claim", "regular-save", "provisional-discard"]
             .includes(value.publication.purpose))
@@ -95,6 +104,7 @@ function validateRecord(value) {
       baseHash: value.publication.baseHash,
       base,
       candidate,
+      ...(mergeAncestor ? { mergeAncestor, mergeAncestorHash } : {}),
       stage: value.publication.stage,
       ...(value.publication.purpose
         ? { purpose: value.publication.purpose } : {}),

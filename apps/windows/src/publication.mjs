@@ -132,7 +132,8 @@ export class PublicationService {
   }
 
   async prepare({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, purpose, reopenPassword, state = "pending-publication" }) {
+    baseRevision, purpose, reopenPassword, mergeAncestor,
+    state = "pending-publication" }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
@@ -148,6 +149,10 @@ export class PublicationService {
         candidateHash: hash(candidate),
         baseHash: hash(base),
         base: base.toString("base64"),
+        ...(mergeAncestor ? {
+          mergeAncestorHash: hash(mergeAncestor),
+          mergeAncestor: mergeAncestor.toString("base64"),
+        } : {}),
         baseFile: recoveryBasePath(target),
         candidate: candidate.toString("base64"),
         stage: "prepared",
@@ -160,11 +165,12 @@ export class PublicationService {
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, purpose, reopenPassword, state }) {
+    baseRevision, purpose, reopenPassword, mergeAncestor, state }) {
     let record;
     try {
       record = await this.prepare({ documentId, journalKey, target, base,
-        candidate, text, cursor, baseRevision, purpose, reopenPassword, state });
+        candidate, text, cursor, baseRevision, purpose, reopenPassword,
+        mergeAncestor, state });
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };

@@ -507,7 +507,9 @@ export class DocumentService {
       const localBytes = Buffer.from(active.pendingRecord.publication.candidate, "base64");
       const local = this.#validateNativeOpened(
         this.native.openDocument(localBytes, active.password));
-      const ancestorBytes = Buffer.from(active.pendingRecord.publication.base, "base64");
+      const ancestorBytes = Buffer.from(
+        active.pendingRecord.publication.mergeAncestor
+          ?? active.pendingRecord.publication.base, "base64");
       const ancestor = this.#validateNativeOpened(
         this.native.openDocument(ancestorBytes, active.password));
       try {
@@ -748,6 +750,7 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const canonical = canonicalizeDocumentText(active.working.content);
+    const mergeAncestor = this.#regularSaveMergeAncestor(active);
     await this.#flushActive(active);
     let published;
     let reopened;
@@ -779,7 +782,8 @@ export class DocumentService {
             journalKey: active.journalKey, target: active.target,
             base: current, candidate, text: canonical,
             cursor: { ...active.working.cursor }, baseRevision: active.baseRevision,
-            purpose: "regular-save", state: "unsaved" });
+            purpose: "regular-save", state: "unsaved",
+            ...(mergeAncestor ? { mergeAncestor } : {}) });
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
             this.native.openDocument(published, active.password));
@@ -792,7 +796,8 @@ export class DocumentService {
       });
     } catch (error) {
       if (error?.code === "REGULAR_SAVE_DIVERGED") {
-        return this.#preserveRegularSaveConflict(active, profile, canonical);
+        return this.#preserveRegularSaveConflict(
+          active, profile, canonical, mergeAncestor);
       }
       if (error.publicationPrepared) {
         active.pendingRecord = await this.journals.read(
@@ -1182,6 +1187,7 @@ export class DocumentService {
       throw new Error("Pending publication candidate hash does not match its journal");
     }
     const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
+    let mergeAncestor;
     try {
       const invitationClaim = record.publication.purpose === "invitation-claim";
       if (opened.documentId !== documentId
@@ -1191,7 +1197,19 @@ export class DocumentService {
             && opened.opened.content !== (record.merge?.localContent ?? record.text))) {
         throw new Error("Pending publication candidate does not match its document");
       }
+      if (record.publication.mergeAncestor) {
+        const ancestor = Buffer.from(record.publication.mergeAncestor, "base64");
+        mergeAncestor = this.#validateNativeOpened(
+          this.native.openDocument(ancestor, password));
+        if (mergeAncestor.documentId !== documentId
+            || !mergeAncestor.manuallySealed
+            || !mergeAncestor.journalKey.equals(opened.journalKey)) {
+          throw new Error(
+            "Pending publication merge ancestor does not match its document");
+        }
+      }
     } finally {
+      mergeAncestor?.journalKey.fill(0);
       opened.journalKey.fill(0);
     }
   }
@@ -1424,7 +1442,26 @@ export class DocumentService {
     }
   }
 
-  async #preserveRegularSaveConflict(active, profile, canonical) {
+  #regularSaveMergeAncestor(active) {
+    if (active.manuallySealed) return undefined;
+    const mergeAncestor = this.native.discardProvisional(
+      active.baseContainer, active.password);
+    const ancestorOpened = this.#validateNativeOpened(
+      this.native.openDocument(mergeAncestor, active.password));
+    try {
+      if (ancestorOpened.documentId !== active.documentId
+          || !ancestorOpened.manuallySealed
+          || !ancestorOpened.journalKey.equals(active.journalKey)) {
+        throw new Error(
+          "Provisional base did not restore the authenticated sealed ancestor");
+      }
+    } finally {
+      ancestorOpened.journalKey.fill(0);
+    }
+    return mergeAncestor;
+  }
+
+  async #preserveRegularSaveConflict(active, profile, canonical, mergeAncestor) {
     const candidate = this.native.regularSaveDocument(
       active.baseContainer, active.password, {
         ...profile, content: canonical, timestampMs: Date.now(),
@@ -1436,7 +1473,8 @@ export class DocumentService {
       documentId: active.documentId, journalKey: active.journalKey,
       target: active.target, base: active.baseContainer, candidate,
       text: canonical, cursor: { ...active.working.cursor },
-      baseRevision: active.baseRevision, purpose: "regular-save", state: "unsaved",
+      baseRevision: active.baseRevision, purpose: "regular-save",
+      ...(mergeAncestor ? { mergeAncestor } : {}), state: "unsaved",
     });
     record = await this.publications.markDiverged(
       active.documentId, active.journalKey, record);

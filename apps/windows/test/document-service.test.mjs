@@ -1630,6 +1630,10 @@ async function regularPublicationFixture(directory) {
       return Buffer.from(JSON.stringify({ content: input.content, sealed: true,
         parent: value.sealed ? revisionId(bytes) : value.parent }));
     },
+    mergeDocument(currentBytes, localBytes, _password, input) {
+      return Buffer.from(JSON.stringify({ content: input.content, sealed: true,
+        parent: revisionId(currentBytes), localParent: revisionId(localBytes) }));
+    },
     discardProvisional(bytes) {
       return Buffer.from(JSON.stringify(JSON.parse(bytes.toString()).base));
     },
@@ -1669,6 +1673,51 @@ test("regular-save divergence remains restart-safe and accessible", async (t) =>
   assert.equal(opened.publicationState, "conflict");
   assert.equal(opened.content, "local unsaved");
   assert.equal(restarted.active.pendingRecord.state, "conflict");
+});
+
+test("second regular save resolves divergence from the sealed ancestor", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+    "scpefe-regular-second-diverged-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await regularPublicationFixture(directory);
+  await fixture.service.regularSaveDocument();
+  fixture.service.updateWorkingCopy({ content: "local amended",
+    cursor: { start: 13, end: 13 } });
+  const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+    parent: fixture.revisionId(fixture.initial) }));
+  let publicationTargetReads = 0;
+  fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+    if (property !== "readFile") return target[property];
+    return async (file, ...args) => {
+      const bytes = await target.readFile(file, ...args);
+      if (file === fixture.target && ++publicationTargetReads === 1) {
+        await target.writeFile(file, remote);
+      }
+      return bytes;
+    };
+  } });
+
+  await assert.rejects(fixture.service.regularSaveDocument(),
+    (error) => error.publicationPrepared === true);
+  const record = await fixture.service.journals.read(
+    fixture.service.active.documentId, fixture.service.active.journalKey);
+  assert.deepEqual(Buffer.from(record.publication.mergeAncestor, "base64"),
+    fixture.initial);
+  await fixture.service.exitEditMode();
+
+  const restarted = new DocumentService(fixture.options);
+  const opened = await restarted.openDocument(fixture.target, "password words");
+  assert.equal(opened.publicationState, "conflict");
+  assert.equal(opened.content, "local amended");
+  const draft = await restarted.beginDivergenceResolution();
+  assert.equal(draft.ancestorRevision, fixture.revisionId(fixture.initial));
+  assert.match(draft.content, /^<<<<<<< local/m);
+  assert.deepEqual(await restarted.saveDivergenceResolution("resolved"), {
+    saved: true, content: "resolved", publicationState: "target-published" });
+  const published = JSON.parse(await fs.readFile(fixture.target, "utf8"));
+  assert.equal(published.content, "resolved");
+  assert.equal(published.sealed, true);
+  assert.equal(restarted.active.pendingPublication, false);
 });
 
 for (const fault of ["before-replace", "race", "post-replace"]) {
