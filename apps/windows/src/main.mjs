@@ -249,6 +249,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
+  ipcMain.handle("profile:reconcile-active", () => service.reconcileProfile());
   ipcMain.handle("settings:get", () => service.loadClientSettings());
   ipcMain.handle("settings:save", (_event, settings) =>
     service.saveClientSettings(settings));

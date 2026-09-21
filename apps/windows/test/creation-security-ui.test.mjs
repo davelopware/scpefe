@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import React, { Fragment, useState } from "react";
 import { JSDOM } from "jsdom";
-import { cleanup, render, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { PasswordConfirmationFields } from
-  "../src/creation-security-controls.mjs";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://scpefe.invalid/",
@@ -16,6 +11,14 @@ globalThis.HTMLElement = dom.window.HTMLElement;
 globalThis.Node = dom.window.Node;
 globalThis.MutationObserver = dom.window.MutationObserver;
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+const ReactModule = await import("react");
+const React = ReactModule.default;
+const { Fragment, useState } = ReactModule;
+const { cleanup, render, within } = await import("@testing-library/react");
+const userEvent = (await import("@testing-library/user-event")).default;
+const { PasswordConfirmationFields } = await import(
+  "../src/creation-security-controls.mjs");
 
 function CreationSecurityFields() {
   const [ownerRevealed, setOwnerRevealed] = useState(false);

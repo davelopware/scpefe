@@ -86,10 +86,51 @@ export class DocumentService {
 
   async saveProfile(profile) {
     const validated = validateProfile(profile);
+    const previous = await this.loadProfile();
+    const identityChanged = previous !== null
+      && (previous.name !== validated.name || previous.email !== validated.email);
+    if (identityChanged && this.active?.opened
+        && !this.active.opened.invitationRequired
+        && !this.active.opened.recoverySlot
+        && this.active.opened.slotIdentityName !== undefined
+        && (this.active.editMode || this.active.dirty)) {
+      throw new Error(
+        "Leave edit mode and resolve unsaved changes before changing profile identity");
+    }
     await this.fs.mkdir(path.dirname(this.profilePath), { recursive: true });
     await this.#atomicWrite(this.profilePath,
       Buffer.from(`${JSON.stringify(validated)}\n`, "utf8"), true);
+    if (identityChanged) await this.reconcileProfile();
     return validated;
+  }
+
+  async reconcileProfile() {
+    const active = this.active;
+    if (!active || active.opened.invitationRequired) return null;
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const hasIdentity = !active.opened.recoverySlot
+      && active.opened.slotIdentityName !== undefined
+      && active.opened.slotIdentityEmail !== undefined;
+    const mismatch = hasIdentity
+      && (active.opened.slotIdentityName !== profile.name
+        || active.opened.slotIdentityEmail !== profile.email)
+      ? Object.freeze({ slotName: active.opened.slotIdentityName,
+        slotEmail: active.opened.slotIdentityEmail, profileName: profile.name,
+        profileEmail: profile.email, editingBlocked: true }) : null;
+    if (mismatch && (active.editMode || active.dirty)) {
+      throw new Error(
+        "Leave edit mode and resolve unsaved changes before refreshing profile identity");
+    }
+    active.profileMismatch = mismatch;
+    const refreshed = { ...active.opened,
+      readOnly: mismatch ? true : !active.editMode,
+      canEdit: mismatch || active.headMismatch || active.migrationRequired
+        ? false : active.slotCanEdit,
+      ...(mismatch ? { profileMismatch: mismatch } : { profileMismatch: undefined }) };
+    active.opened = active.editMode && !mismatch
+      ? validateEditMode(refreshed) : validateOpenedDocument(refreshed);
+    return active.opened;
   }
 
   async loadClientSettings() {
@@ -400,6 +441,9 @@ export class DocumentService {
     if (!active || active.opened.invitationRequired) {
       throw new Error("Open and claim a document first");
     }
+    if (active.profileMismatch) {
+      throw new Error("Reconcile the password-slot identity before administering passwords");
+    }
     if (active.dirty || active.recovery || active.pendingPublication
         || active.unresolvedJournal) {
       throw new Error("Resolve or discard document changes before changing a password");
@@ -483,6 +527,9 @@ export class DocumentService {
 
   async createInvitation(request) {
     const active = this.active;
+    if (active?.profileMismatch) {
+      throw new Error("Reconcile the password-slot identity before administering passwords");
+    }
     if (!active?.editMode || !active.opened.canAddPasswords) {
       throw new Error("Enter edit mode with an add-password slot first");
     }
@@ -532,6 +579,9 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const replacement = validatePassword(newPassword);
+    if (replacement.length < 12) {
+      throw new TypeError("replacement password must contain at least 12 characters");
+    }
     let reopened;
     let published;
     await this.#queuePublication(async () => {
@@ -649,6 +699,9 @@ export class DocumentService {
 
   async updateSlotPermissions(request) {
     const active = this.active;
+    if (active?.profileMismatch) {
+      throw new Error("Reconcile the password-slot identity before administering passwords");
+    }
     if (!active?.editMode || !active.opened.canAddPasswords
         || !active.opened.canRemovePasswords) {
       throw new Error("Enter edit mode with a full administrative slot first");
@@ -668,6 +721,9 @@ export class DocumentService {
 
   async removeSlot(slotId) {
     const active = this.active;
+    if (active?.profileMismatch) {
+      throw new Error("Reconcile the password-slot identity before administering passwords");
+    }
     if (!active?.editMode || !active.opened.canRemovePasswords) {
       throw new Error("Enter edit mode with a remove-password slot first");
     }

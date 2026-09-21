@@ -252,6 +252,7 @@ type LockResult = { locked: true; journalSaved: boolean; warning: string | null 
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
   saveProfile(profile: Profile): Promise<Profile>;
+  reconcileProfile(): Promise<DocumentOpened | null>;
   getClientSettings(): Promise<ClientSettings>;
   saveClientSettings(settings: ClientSettings): Promise<ClientSettings>;
   getUnresolvedJournalSummary(): Promise<JournalSummary>;
@@ -283,7 +284,8 @@ declare global { interface Window { scpefe: {
     newPasswordConfirmation: string }): Promise<DocumentOpened>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
   copyInvitationPassphrase(password: string): Promise<boolean>;
-  claimInvitation(password: string): Promise<DocumentOpened>;
+  claimInvitation(request: { newPassword: string;
+    newPasswordConfirmation: string }): Promise<DocumentOpened>;
   cancelInvitationClaim(): Promise<boolean>;
   reconcileIdentity(): Promise<DocumentOpened>;
   updateSlotPermissions(request: object): Promise<DocumentOpened>;
@@ -345,6 +347,7 @@ function App() {
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
+  const profileConfirmation = useRef<HTMLButtonElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
@@ -522,24 +525,19 @@ function App() {
 
   async function commitProfile(candidate: Profile) {
     try {
+      const identityChanged = profile !== null
+        && (profile.name !== candidate.name || profile.email !== candidate.email);
       const saved = await window.scpefe.saveProfile(candidate);
+      const authoritative = identityChanged ? await window.scpefe.reconcileProfile() : null;
       setProfile(saved);
       setPendingProfile(null);
       setProfileError("");
-      setOpened((current) => {
-        if (!isDocumentOpened(current) || current.recoverySlot
-            || current.slotIdentityName === undefined
-            || (current.slotIdentityName === saved.name
-              && current.slotIdentityEmail === saved.email)) return current;
-        return { ...current, canEdit: false, profileMismatch: {
-          slotName: current.slotIdentityName, slotEmail: current.slotIdentityEmail ?? "",
-          profileName: saved.name, profileEmail: saved.email, editingBlocked: true,
-        } };
-      });
+      if (authoritative) setOpened(authoritative);
       setDialog(null);
       setMessage("Local profile saved.");
     } catch (error) {
       setProfileError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => profileConfirmation.current?.focus());
     }
   }
 
@@ -632,7 +630,8 @@ function App() {
     }
     try {
       setClaimError("");
-      const result = await window.scpefe.claimInvitation(password);
+      const result = await window.scpefe.claimInvitation({ newPassword: password,
+        newPasswordConfirmation: String(data.get("newPasswordConfirmation")) });
       form.reset();
       setInvitationStaged(false); showOpenedResult(result);
       setMessage("Invitation claimed and replacement password safely published.");
@@ -701,30 +700,39 @@ function App() {
 
   async function reconcileIdentity() {
     try {
+      setPasswordError("");
       const result = await window.scpefe.reconcileIdentity();
       setOpened(result);
       setMessage("Password-slot identity reconciled through a sealed publication.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function updateManagedSlot(slot: ManagedSlot, canEdit: boolean,
     canAddPasswords: boolean, canRemovePasswords: boolean) {
     try {
+      setPasswordError("");
       const result = await window.scpefe.updateSlotPermissions({ slotId: slot.slotId,
         canEdit, canAddPasswords, canRemovePasswords });
       setOpened(result);
       setMessage("Slot permissions published.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function removeManagedSlot(slot: ManagedSlot) {
     try {
+      setPasswordError("");
       const result = await window.scpefe.removeSlot(slot.slotId);
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         managedSlots: current.managedSlots?.filter(
           (candidate) => candidate.slotId !== slot.slotId) } : current);
       setMessage(result.warning);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function restoreRecovery() {
@@ -1008,8 +1016,10 @@ function App() {
       close={profile ? closeDialog : undefined}><p>Name, email, and device name identify this client locally. This profile is self-asserted and is not an authenticated account.</p>
       {pendingProfile ? <div className="warning" role="alert">
         <p>Changing your name or email does not silently change identities already claimed in documents. Those documents may request explicit identity reconciliation before editing.</p>
+        {profileError && <p className="dialog-error">{profileError}</p>}
         <div className="dialog-actions"><button type="button" onClick={() => setPendingProfile(null)}>Go back</button>
-          <button type="button" autoFocus onClick={() => void commitProfile(pendingProfile)}>
+          <button ref={profileConfirmation} type="button" autoFocus
+            onClick={() => void commitProfile(pendingProfile)}>
             Save identity change</button></div></div>
         : <form onSubmit={saveProfile}><label>Name<input name="name" defaultValue={profile?.name} required autoFocus /></label>
           <label>Email<input name="email" type="email" defaultValue={profile?.email} required /></label>
@@ -1080,7 +1090,15 @@ function App() {
           }
         }}>Copy</button><button type="button" onClick={() => {
           setInvitationPassphrase(null); setMessage("Invitation created.");
-        }}>Done</button></div></section> : <>
+        }}>Done</button></div></section> : opened.profileMismatch ? <>
+        <section className="warning" aria-labelledby="reconcile-heading">
+          <h3 id="reconcile-heading">Identity reconciliation required</h3>
+          <p>This slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client uses {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}. Password administration and editing remain blocked until you explicitly reconcile it.</p>
+          <button type="button" autoFocus onClick={reconcileIdentity}>
+            Reconcile identity and publish</button>
+        </section>
+        {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
+        <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></> : <>
         <form onSubmit={changePassword}><h3>Change this password</h3>
           <p>{opened.recoverySlot
             ? "This is the recovery/master slot. Store its replacement safely offline and do not use it routinely."
@@ -1090,11 +1108,6 @@ function App() {
           <label>Confirm new password<input name="newPasswordConfirmation" type="password" minLength={12} required /></label>
           {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
           <button>Change password</button></form>
-        {opened.profileMismatch && <section className="warning" aria-labelledby="reconcile-heading">
-          <h3 id="reconcile-heading">Identity reconciliation</h3>
-          <p>This slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client uses {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}. Editing remains blocked until you explicitly reconcile it.</p>
-          <button type="button" onClick={reconcileIdentity}>Reconcile identity and publish</button>
-        </section>}
         {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) < 7
           && <form onSubmit={createInvitation}><h3>Invite another person</h3>
             <label>Temporary label<input name="temporaryLabel" required /></label>

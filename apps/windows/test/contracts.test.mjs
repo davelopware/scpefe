@@ -9,6 +9,7 @@ import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequ
   validateWorkingCopy, validateMergeDraft, validateExternalOpenRequest,
   validateUnresolvedJournalSummary, validatePasswordChangeRequest,
   validateInvitationCreateRequest, validateInvitationResult,
+  validateInvitationClaimRequest,
   validateSlotPermissionsRequest, validateSlotId } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
@@ -38,6 +39,19 @@ test("password administration requests are narrow and enforce confirmations", ()
   assert.deepEqual(validateInvitationResult({ created: true,
     temporaryPassword: "one time secret" }), { created: true,
     temporaryPassword: "one time secret" });
+  assert.throws(() => validateInvitationResult({ created: true,
+    temporaryPassword: "" }), /invalid invitation result/);
+  assert.deepEqual(validateInvitationClaimRequest({
+    newPassword: "replacement password words",
+    newPasswordConfirmation: "replacement password words", ignored: "private",
+  }), { newPassword: "replacement password words" });
+  assert.throws(() => validateInvitationClaimRequest({
+    newPassword: "short", newPasswordConfirmation: "short",
+  }), /at least 12/);
+  assert.throws(() => validateInvitationClaimRequest({
+    newPassword: "replacement password words",
+    newPasswordConfirmation: "mismatched password words",
+  }), /do not match/);
   const slotId = "ab".repeat(16);
   assert.equal(validateSlotId(slotId), slotId);
   assert.deepEqual(validateSlotPermissionsRequest({ slotId, canEdit: true,

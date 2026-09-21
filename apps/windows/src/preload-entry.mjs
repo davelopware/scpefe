@@ -11,7 +11,8 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
   validateUnresolvedJournalSummary, validateExternalOpenRequest,
   validatePasswordChangeRequest, validateInvitationCreateRequest,
-  validateInvitationResult, validateSlotPermissionsRequest,
+  validateInvitationResult, validateInvitationClaimRequest,
+  validateSlotPermissionsRequest,
   validateSlotId } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
@@ -20,6 +21,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value === null ? null : validateProfile(value);
   },
   saveProfile: (profile) => ipcRenderer.invoke("profile:save", validateProfile(profile)),
+  reconcileProfile: async () => {
+    const value = await ipcRenderer.invoke("profile:reconcile-active");
+    return value === null ? null : validateOpenedDocument(value);
+  },
   getClientSettings: async () => validateClientSettings(
     await ipcRenderer.invoke("settings:get")),
   saveClientSettings: async (settings) => validateClientSettings(
@@ -89,8 +94,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     if (value !== true) throw new TypeError("host did not copy the invitation passphrase");
     return true;
   },
-  claimInvitation: async (password) => validateOpenedDocument(
-    await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
+  claimInvitation: async (request) => {
+    const validated = validateInvitationClaimRequest(request);
+    return validateOpenedDocument(await ipcRenderer.invoke(
+      "document:claim-invitation", validated.newPassword));
+  },
   cancelInvitationClaim: async () => {
     const value = await ipcRenderer.invoke("document:cancel-invitation-claim");
     if (typeof value !== "boolean") throw new TypeError("host returned invalid claim cancellation");

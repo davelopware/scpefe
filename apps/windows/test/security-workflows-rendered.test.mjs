@@ -45,7 +45,15 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       IS_REACT_ACT_ENVIRONMENT: true });
 
     let profile = null;
+    let serviceOpened = null;
+    let editing = false;
     let copied = "";
+    let copyAttempts = 0;
+    let passwordAttempts = 0;
+    let invitationAttempts = 0;
+    let permissionAttempts = 0;
+    let removalAttempts = 0;
+    let reconcileAttempts = 0;
     const calls = [];
     const listeners = {};
     const managedSlot = { slotId: "ab".repeat(16), identityName: "Grace",
@@ -64,7 +72,26 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     };
     dom.window.scpefe = {
       getProfile: async () => profile,
-      saveProfile: async (value) => { calls.push(["profile", value]); profile = value; return value; },
+      saveProfile: async (value) => {
+        calls.push(["profile", value]);
+        if (profile && editing && (value.name !== profile.name || value.email !== profile.email)) {
+          throw new Error("Leave edit mode before changing profile identity");
+        }
+        profile = value; return value;
+      },
+      reconcileProfile: async () => {
+        if (!serviceOpened) return null;
+        const mismatch = !serviceOpened.recoverySlot
+          && (serviceOpened.slotIdentityName !== profile.name
+            || serviceOpened.slotIdentityEmail !== profile.email)
+          ? { slotName: serviceOpened.slotIdentityName,
+            slotEmail: serviceOpened.slotIdentityEmail, profileName: profile.name,
+            profileEmail: profile.email, editingBlocked: true } : null;
+        serviceOpened = { ...serviceOpened, readOnly: true,
+          canEdit: mismatch ? false : serviceOpened.canEdit,
+          ...(mismatch ? { profileMismatch: mismatch } : {}) };
+        return serviceOpened;
+      },
       getClientSettings: async () => ({ regularSaveEnabled: false,
         regularSaveIntervalMs: 120000 }),
       saveClientSettings: async (value) => value,
@@ -72,23 +99,42 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       activity: async () => ({}), chooseCreateTarget: async () => null,
       cancelCreateTarget: async () => {}, createDocument: async () => null,
       chooseOpenTarget: async () => ({ selected: true, name: "notes.scpefe" }),
-      cancelOpenTarget: async () => {}, openSelectedDocument: async () => openResult,
-      unlockDocument: async () => openResult, openExternalDocument: async () => null,
-      enterEditMode: async () => editable,
-      changePassword: async (value) => { calls.push(["password", value]); return editable; },
-      createInvitation: async (value) => { calls.push(["invitation", value]);
+      cancelOpenTarget: async () => {}, openSelectedDocument: async () => {
+        serviceOpened = openResult; return serviceOpened;
+      },
+      unlockDocument: async () => { serviceOpened = openResult; return serviceOpened; },
+      openExternalDocument: async () => null,
+      enterEditMode: async () => { editing = true; serviceOpened = {
+        ...(serviceOpened ?? editable), readOnly: false, canEdit: true };
+        return serviceOpened; },
+      changePassword: async (value) => { passwordAttempts += 1;
+        if (passwordAttempts === 1) throw new Error("Password publication failed safely");
+        calls.push(["password", value]); return editable; },
+      createInvitation: async (value) => { invitationAttempts += 1;
+        if (invitationAttempts === 1) throw new Error("Invitation publication failed safely");
+        calls.push(["invitation", value]);
         return { created: true, temporaryPassword: "generated invitation secret" }; },
-      copyInvitationPassphrase: async (value) => { copied = value; return true; },
-      updateSlotPermissions: async (value) => { calls.push(["permissions", value]); return editable; },
-      removeSlot: async (value) => { calls.push(["remove", value]);
+      copyInvitationPassphrase: async (value) => {
+        copyAttempts += 1;
+        if (copyAttempts === 1) throw new Error("Clipboard unavailable");
+        copied = value; return true;
+      },
+      updateSlotPermissions: async (value) => { permissionAttempts += 1;
+        if (permissionAttempts === 1) throw new Error("Permission publication failed safely");
+        calls.push(["permissions", value]); return editable; },
+      removeSlot: async (value) => { removalAttempts += 1;
+        if (removalAttempts === 1) throw new Error("Removal publication failed safely");
+        calls.push(["remove", value]);
         return { removed: true, warning: "removed safely" }; },
-      reconcileIdentity: async () => { calls.push(["reconcile"]); return {
+      reconcileIdentity: async () => { reconcileAttempts += 1;
+        if (reconcileAttempts === 1) throw new Error("Reconciliation publication failed safely");
+        calls.push(["reconcile"]); serviceOpened = {
         ...readOnly, slotIdentityName: profile.name, slotIdentityEmail: profile.email,
-      }; },
+      }; return serviceOpened; },
       compactDocument: async () => null, migrateDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
-      updateWorkingCopy: async () => ({}), lock: async () => ({ locked: true,
-        journalSaved: true, warning: null }),
+      updateWorkingCopy: async () => ({}), lock: async () => { editing = false;
+        return { locked: true, journalSaved: true, warning: null }; },
       onLocked: (listener) => listen("locked", listener),
       onJournalWarning: (listener) => listen("warning", listener),
       onRegularSave: (listener) => listen("regular", listener),
@@ -138,6 +184,11 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.type(ui.getByLabelText(dialog, "Confirm new password"),
       "replacement password words");
     await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /Password publication failed safely/);
+    assert.equal(ui.getByLabelText(dialog, "Current password").value,
+      "current password words", "failed password publication retains a recoverable input");
+    await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "password"), true));
     assert.equal(ui.getByLabelText(dialog, "Current password").value, "",
       "successful password change clears secrets immediately");
@@ -147,10 +198,20 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.type(ui.getByLabelText(invitationForm, "Temporary label"), "New colleague");
     await user.click(ui.getByLabelText(invitationForm, "May edit"));
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
+    assert.match((await ui.findByRole(invitationForm, "alert")).textContent,
+      /Invitation publication failed safely/);
+    assert.equal(ui.getByLabelText(invitationForm, "Temporary label").value,
+      "New colleague");
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
     const once = await ui.findByLabelText(dialog, "One-time temporary passphrase");
     assert.equal(once.value, "generated invitation secret");
     assert.doesNotMatch(ui.getByRole(document.body, "status").textContent,
       /generated invitation secret/);
+    await user.click(ui.getByRole(dialog, "button", { name: "Copy" }));
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /Clipboard unavailable/);
+    assert.equal(ui.getByLabelText(dialog, "One-time temporary passphrase").value,
+      "generated invitation secret", "copy failure keeps the one-time result recoverable");
     await user.click(ui.getByRole(dialog, "button", { name: "Copy" }));
     assert.equal(copied, "generated invitation secret");
     await user.click(ui.getByRole(dialog, "button", { name: "Done" }));
@@ -161,12 +222,31 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByLabelText(permissionGroup, "May add passwords"));
     await user.click(ui.getByRole(permissionGroup, "button",
       { name: "Publish permission changes" }));
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /Permission publication failed safely/);
+    await user.click(ui.getByRole(permissionGroup, "button",
+      { name: "Publish permission changes" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "permissions"), true));
     await user.click(ui.getByRole(dialog, "button", { name: "Remove this password slot…" }));
     const removalAlert = ui.getByRole(dialog, "alert");
     await user.click(ui.getByRole(removalAlert, "button", { name: "Confirm slot removal" }));
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /Removal publication failed safely/);
+    await user.click(ui.getByRole(dialog, "button", { name: "Remove this password slot…" }));
+    const retryRemovalAlert = ui.getByText(dialog,
+      /Removal blocks this password only in the updated document/).closest("[role='alert']");
+    await user.click(ui.getByRole(retryRemovalAlert, "button",
+      { name: "Confirm slot removal" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "remove"), true));
-    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+    const dismissForm = ui.getByRole(dialog, "heading",
+      { name: "Invite another person" }).closest("form");
+    await user.type(ui.getByLabelText(dismissForm, "Temporary label"), "Dismissed result");
+    await user.click(ui.getByRole(dismissForm, "button", { name: "Create invitation" }));
+    await ui.findByLabelText(dialog, "One-time temporary passphrase");
+    await user.keyboard("{Escape}");
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(document.body.textContent.includes("generated invitation secret"), false,
+      "Escape dismisses and clears the one-time secret");
 
     await command("Security", /Profile/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Profile" });
@@ -175,11 +255,46 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Save local profile" }));
     assert.ok(await ui.findByRole(dialog, "alert"));
     await user.click(ui.getByRole(dialog, "button", { name: "Save identity change" }));
+    await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent,
+      /Leave edit mode/));
+    assert.equal(document.activeElement,
+      ui.getByRole(dialog, "button", { name: "Save identity change" }),
+      "failed identity save focuses its retry action");
+    await user.click(ui.getByRole(dialog, "button", { name: "Go back" }));
+    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    await command("Security", "Lock");
+    openResult = readOnly;
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "owner password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    await command("Security", /Profile/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Profile" });
+    const retryName = ui.getByLabelText(dialog, "Name");
+    await user.clear(retryName); await user.type(retryName, "Ada Lovelace");
+    await user.click(ui.getByRole(dialog, "button", { name: "Save local profile" }));
+    await user.click(await ui.findByRole(dialog, "button", { name: "Save identity change" }));
     const mismatch = await ui.findByRole(document.body, "dialog", { name: "Profile mismatch" });
     await user.click(ui.getByRole(mismatch, "button", { name: "Open Passwords to reconcile" }));
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    assert.equal(ui.queryByRole(dialog, "heading", { name: "Change this password" }), null,
+      "authoritative mismatch blocks password administration");
+    await user.click(ui.getByRole(dialog, "button", { name: "Reconcile identity and publish" }));
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /Reconciliation publication failed safely/);
     await user.click(ui.getByRole(dialog, "button", { name: "Reconcile identity and publish" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "reconcile"), true));
+
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+    serviceOpened = { ...serviceOpened, managedSlots: Array.from({ length: 7 },
+      (_, index) => ({ ...managedSlot, slotId: index.toString(16).padStart(32, "0") })) };
+    await command("Edit", "Edit Contents");
+    await command("Security", /Passwords/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    assert.match(ui.getByRole(dialog, "note").textContent,
+      /limit of eight ordinary password slots/);
+    assert.equal(ui.queryByRole(dialog, "heading", { name: "Invite another person" }), null);
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
 
     listeners.locked({ locked: true, journalSaved: true, warning: null });
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
@@ -202,4 +317,18 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.queryByRole(dialog, "button", { name: "Compact history…" }), null);
     assert.equal(ui.getByRole(dialog, "group", { name: /Permissions for Grace/ }).disabled,
       true, "view-only slots cannot change another slot's permissions");
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+    listeners.locked({ locked: true, journalSaved: true, warning: null });
+    openResult = { ...readOnly, recoverySlot: true, canEdit: true,
+      canAddPasswords: true, canRemovePasswords: true,
+      slotIdentityName: "", slotIdentityEmail: "" };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "recovery password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    await command("Security", /Passwords/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    assert.match(dialog.textContent, /This is the recovery\/master slot/);
+    assert.equal(ui.queryByRole(dialog, "heading",
+      { name: "Identity reconciliation required" }), null);
   });

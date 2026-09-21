@@ -692,6 +692,74 @@ test("profile mismatch stays read-only until lease-backed reconciliation", async
   assert.equal((await fs.readFile(target)).toString(), "reconciled");
 });
 
+test("profile identity changes establish authoritative mismatch and deny administration",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-profile-change-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const profilePath = await writeProfile(directory, "Ada", "Desk");
+    await fs.writeFile(target, "base");
+    const native = withLease({
+      openDocument(bytes) {
+        const reconciled = bytes.toString() === "reconciled";
+        return { content: "secret", readOnly: true, canEdit: true,
+          canAddPasswords: true, canRemovePasswords: true, recoverySlot: false,
+          slotId: "81".repeat(16), slotIdentityName: reconciled ? "Grace" : "Ada",
+          slotIdentityEmail: reconciled ? "grace@example.test" : "ada@example.test",
+          managedSlots: [], documentId: "82".repeat(16),
+          baseRevision: "83".repeat(32), journalKey: Buffer.alloc(32, 0x84) };
+      },
+      reconcileIdentity() { return Buffer.from("identity-reconciled"); },
+      saveDocument(bytes) {
+        assert.equal(bytes.toString(), "identity-reconciled");
+        return Buffer.from("reconciled");
+      },
+    });
+    const service = new DocumentService({ native, fs, profilePath,
+      publicationCapabilities });
+    await service.openDocument(target, "owner password words");
+    await service.saveProfile({ name: "Grace", email: "grace@example.test",
+      deviceName: "Desk" });
+    const authoritative = await service.reconcileProfile();
+    assert.equal(authoritative.profileMismatch.profileName, "Grace");
+    assert.equal(authoritative.canEdit, false);
+    assert.equal(service.active.profileMismatch.editingBlocked, true);
+    await assert.rejects(service.changePassword({ currentPassword: "owner password words",
+      newPassword: "replacement password words" }), /Reconcile/);
+    await assert.rejects(service.createInvitation({ temporaryLabel: "Blocked" }),
+      /Reconcile/);
+    await assert.rejects(service.updateSlotPermissions({ slotId: "85".repeat(16) }),
+      /Reconcile/);
+    await assert.rejects(service.removeSlot("85".repeat(16)), /Reconcile/);
+    const reconciled = await service.reconcileIdentity();
+    assert.equal(reconciled.profileMismatch, undefined);
+    assert.equal((await fs.readFile(target, "utf8")), "reconciled");
+  });
+
+test("profile identity changes fail before persistence while editing", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-profile-edit-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
+  await fs.writeFile(target, "base");
+  const service = new DocumentService({ fs, profilePath, publicationCapabilities,
+    native: withLease({ openDocument: () => ({ content: "secret", readOnly: true,
+      canEdit: true, recoverySlot: false, slotIdentityName: "Ada",
+      slotIdentityEmail: "ada@example.test", documentId: "91".repeat(16),
+      baseRevision: "92".repeat(32), journalKey: Buffer.alloc(32, 0x93) }) }) });
+  await service.openDocument(target, "owner password words");
+  await service.enterEditMode();
+  await service.saveProfile({ name: "Ada", email: "ada@example.test",
+    deviceName: "Portable" });
+  const deviceRefresh = await service.reconcileProfile();
+  assert.equal(deviceRefresh.readOnly, false,
+    "a device-only profile refresh preserves the active edit session");
+  assert.equal(deviceRefresh.profileMismatch, undefined);
+  await assert.rejects(service.saveProfile({ name: "Grace",
+    email: "grace@example.test", deviceName: "Portable" }), /Leave edit mode/);
+  assert.equal((await service.loadProfile()).name, "Ada");
+});
+
 test("recovery use never raises a profile mismatch", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-recovery-profile-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -1094,6 +1162,7 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
 
   assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
   assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
+  await assert.rejects(service.claimInvitation("short"), /at least 12/);
 });
 
 test("restart finishes an interrupted invitation claim with its replacement credential",

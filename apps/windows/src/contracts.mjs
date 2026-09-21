@@ -225,10 +225,27 @@ export function validateInvitationCreateRequest(value) {
 export function validateInvitationResult(value) {
   if (!value || typeof value !== "object" || value.created !== true
       || typeof value.temporaryPassword !== "string"
+      || value.temporaryPassword.length === 0
+      || value.temporaryPassword.length > 4096
       || Object.keys(value).some((key) => !["created", "temporaryPassword"].includes(key))) {
     throw new TypeError("host returned an invalid invitation result");
   }
   return Object.freeze({ created: true, temporaryPassword: value.temporaryPassword });
+}
+
+export function validateInvitationClaimRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("invitation claim request must be an object");
+  }
+  const newPassword = validatePassword(value.newPassword);
+  const confirmation = validatePassword(value.newPasswordConfirmation);
+  if (newPassword.length < 12) {
+    throw new TypeError("replacement password must contain at least 12 characters");
+  }
+  if (newPassword !== confirmation) {
+    throw new TypeError("replacement passwords do not match");
+  }
+  return Object.freeze({ newPassword });
 }
 
 export function validateSlotPermissionsRequest(value) {

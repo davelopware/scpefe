@@ -63,6 +63,7 @@ test("mounted shell keeps the session through picker, password, creation, and un
       { selected: true, name: "replacement.scpefe" },
       null,
       { selected: true, name: "invitation.scpefe" },
+      { selected: true, name: "invitation-success.scpefe" },
     ];
     const first = { content: "original plaintext", readOnly: true, canEdit: true,
       publicationState: "target-published", targetName: "first.scpefe" };
@@ -106,8 +107,11 @@ test("mounted shell keeps the session through picker, password, creation, and un
             publicationState: "target-published" } };
       },
       openExternalDocument: async () => null,
-      claimInvitation: async () => { claimCalls += 1;
-        throw new Error("Invitation publication failed safely"); },
+      claimInvitation: async () => {
+        claimCalls += 1;
+        if (claimCalls === 1) throw new Error("Invitation publication failed safely");
+        return replacement;
+      },
       cancelInvitationClaim: async () => { cancelClaimCalls += 1; return true; },
       enterEditMode: async () => ({ ...replacement, readOnly: false }),
       updateWorkingCopy: async () => ({}), saveDocument: async (content) =>
@@ -176,6 +180,14 @@ test("mounted shell keeps the session through picker, password, creation, and un
       "staged invitation leaves the original renderer session mounted");
     await user.type(ui.getByLabelText(claim, "New password"), "replacement password");
     await user.type(ui.getByLabelText(claim, "Confirm new password"),
+      "mismatched password");
+    await user.click(ui.getByRole(claim, "button",
+      { name: "Replace password and claim identity" }));
+    assert.equal(claimCalls, 0, "mismatched replacement never reaches the host");
+    assert.equal(document.activeElement,
+      ui.getByLabelText(claim, "Confirm new password"));
+    await user.clear(ui.getByLabelText(claim, "Confirm new password"));
+    await user.type(ui.getByLabelText(claim, "Confirm new password"),
       "replacement password");
     await user.click(ui.getByRole(claim, "button",
       { name: "Replace password and claim identity" }));
@@ -187,6 +199,17 @@ test("mounted shell keeps the session through picker, password, creation, and un
     assert.equal(editor.value, "original plaintext",
       "claim cancellation leaves the original renderer session intact");
 
+    await command("File", /Open/);
+    await submitPassword("Open document", "Open", "temporary password");
+    const retryClaim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
+    await user.type(ui.getByLabelText(retryClaim, "New password"), "replacement password");
+    await user.type(ui.getByLabelText(retryClaim, "Confirm new password"),
+      "replacement password");
+    await user.click(ui.getByRole(retryClaim, "button",
+      { name: "Replace password and claim identity" }));
+    await ui.waitFor(() => assert.equal(editor.value, "replacement plaintext"));
+    assert.equal(claimCalls, 2, "a fresh invitation claim retries through the host successfully");
+
     listeners.locked({ locked: true, journalSaved: true, warning: null });
     assert.equal(editor.value, "");
     await command("Security", "Unlock");
@@ -194,12 +217,12 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(editor.value, "", "canceling Unlock leaves the target securely locked");
     assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "Locked");
-    assert.equal(pickerCalls, 5, "canceling Unlock does not invoke a picker");
+    assert.equal(pickerCalls, 6, "canceling Unlock does not invoke a picker");
     await command("Security", "Unlock");
     dialog = await submitPassword("Unlock document", "Unlock", "wrong password");
     await ui.waitFor(() => assert.ok(ui.getByRole(dialog, "alert")));
     assert.equal(editor.value, "");
-    assert.equal(pickerCalls, 5, "Unlock does not invoke a picker");
+    assert.equal(pickerCalls, 6, "Unlock does not invoke a picker");
     await submitPassword("Unlock document", "Unlock", "correct password");
     await ui.waitFor(() => assert.equal(editor.value, "replacement plaintext"));
 
