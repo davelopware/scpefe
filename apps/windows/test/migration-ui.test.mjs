@@ -5,7 +5,7 @@ import test from "node:test";
 test("older-container migration is an accessible explicit choice", async () => {
   const renderer = await fs.readFile(
     new URL("../src/renderer.tsx", import.meta.url), "utf8");
-  assert.match(renderer, /opened\.migrationRequired && <FocusedDialog title="Older container">/);
+  assert.match(renderer, /visibleOpenedDialog === "migration"/);
   assert.match(renderer, /role="alert"/);
   assert.match(renderer, /Create verified backup and migrate…/);
   assert.match(renderer, /Keep read-only and close/);

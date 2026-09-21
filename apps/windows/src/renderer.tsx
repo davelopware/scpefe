@@ -34,9 +34,23 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true };
 type DialogName = "profile" | "open" | "find" | "replace" | "export"
   | "passwords" | null;
+type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
+  | "recovery" | "publication" | null;
 
 function isDocumentOpened(value: Opened | null): value is DocumentOpened {
   return value !== null && value.invitationRequired !== true;
+}
+
+function openedDialogName(value: Opened | null): OpenedDialogName {
+  if (value?.invitationRequired) return "claim";
+  if (!isDocumentOpened(value)) return null;
+  if (value.migrationRequired) return "migration";
+  if (value.profileMismatch) return "profile-mismatch";
+  if (value.headMismatch) return "head";
+  if (value.recovery) return "recovery";
+  if (value.publicationState === "pending-publication"
+    || value.publicationState === "conflict") return "publication";
+  return null;
 }
 
 const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> = [
@@ -52,7 +66,7 @@ const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> 
 ];
 
 function MenuBar({ enabled, run }: { enabled: Record<string, boolean>;
-  run(command: string): void }) {
+  run(command: string, returnFocus: HTMLButtonElement): void }) {
   const [open, setOpen] = useState<string | null>(null);
   const triggers = useRef<Record<string, HTMLButtonElement | null>>({});
   const menus = useRef<Record<string, HTMLDivElement | null>>({});
@@ -109,7 +123,9 @@ function MenuBar({ enabled, run }: { enabled: Record<string, boolean>;
           ? <hr key={index} role="separator" />
           : <button key={item[0]} type="button" role="menuitem"
             disabled={!enabled[item[0]]} onClick={() => {
-              triggers.current[name]?.focus(); setOpen(null); run(item[0]);
+              const returnFocus = triggers.current[name];
+              returnFocus?.focus(); setOpen(null);
+              if (returnFocus) run(item[0], returnFocus);
               requestAnimationFrame(() => {
                 if (!document.querySelector('[role="dialog"]')) triggers.current[name]?.focus();
               });
@@ -118,18 +134,22 @@ function MenuBar({ enabled, run }: { enabled: Record<string, boolean>;
 }
 
 let modalDepth = 0;
-function FocusedDialog({ title, children, close, initialFocus }: {
+function FocusedDialog({ title, children, close, initialFocus, returnFocus }: {
   title: string; children: React.ReactNode; close?: () => void;
-  initialFocus?: React.RefObject<HTMLElement | null> }) {
+  initialFocus?: React.RefObject<HTMLElement | null>; returnFocus?: HTMLElement | null }) {
   const dialog = useRef<HTMLElement>(null);
   useEffect(() => {
-    const prior = document.activeElement as HTMLElement | null;
+    const prior = returnFocus ?? document.activeElement as HTMLElement | null;
     const chrome = document.querySelector<HTMLElement>(".shell-chrome");
     modalDepth += 1; chrome?.setAttribute("inert", "");
     (initialFocus?.current ?? dialog.current?.querySelector<HTMLElement>(
       "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)"))?.focus();
     return () => { modalDepth -= 1; if (modalDepth === 0) chrome?.removeAttribute("inert");
-      requestAnimationFrame(() => { if (modalDepth === 0 && prior?.isConnected) prior.focus(); }); };
+      requestAnimationFrame(() => {
+        if (modalDepth !== 0 || document.querySelector('[aria-modal="true"]')) return;
+        if (prior?.isConnected) prior.focus();
+        else document.querySelector<HTMLElement>('[role="menubar"] > .menu > [role="menuitem"]')?.focus();
+      }); };
   }, []);
   return <div className="dialog-backdrop" onKeyDown={(event) => {
     if (event.key === "Escape" && close) { event.preventDefault(); close(); return; }
@@ -296,8 +316,11 @@ function App() {
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
+  const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
-  modalBusy.current = creating || dialog !== null;
+  const openedDialog = openedDialogName(opened);
+  const visibleOpenedDialog = !creating && dialog === null ? openedDialog : null;
+  modalBusy.current = creating || dialog !== null || openedDialog !== null;
   useEffect(() => {
     window.scpefe.getProfile().then((value) => {
       setProfile(value); if (!value) setDialog("profile");
@@ -325,6 +348,7 @@ function App() {
         setQueuedExternalOpenRequest(request);
         setMessage("Another open request is waiting for the current dialog.");
       } else {
+        dialogReturnFocus.current = document.activeElement as HTMLElement | null;
         setExternalOpenRequest(request); setDialog("open");
         setMessage("Another open request is waiting. Enter its document password to continue.");
       }
@@ -347,13 +371,14 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    if (!creating && dialog === null && queuedExternalOpenRequest) {
+    if (!creating && dialog === null && openedDialog === null && queuedExternalOpenRequest) {
+      dialogReturnFocus.current = document.activeElement as HTMLElement | null;
       setExternalOpenRequest(queuedExternalOpenRequest);
       setQueuedExternalOpenRequest(null);
       setDialog("open");
       setMessage("Another open request is waiting. Enter its document password to continue.");
     }
-  }, [creating, dialog, queuedExternalOpenRequest]);
+  }, [creating, dialog, openedDialog, queuedExternalOpenRequest]);
 
   function showOpenedResult(result: Opened | null) {
     setOpened(result);
@@ -386,7 +411,9 @@ function App() {
     lock: activeDocument, passwords: activeDocument, profile: profile !== null,
   };
 
-  async function runCommand(command: string) {
+  async function runCommand(command: string, returnFocus?: HTMLElement | null) {
+    if (modalBusy.current) return;
+    if (returnFocus?.isConnected) dialogReturnFocus.current = returnFocus;
     if (command === "new") {
       try { if (await window.scpefe.chooseCreateTarget()) setCreating(true); }
       catch (error) { showError(error); }
@@ -404,11 +431,12 @@ function App() {
 
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
-      if ((!event.ctrlKey && !event.metaKey) || event.altKey || creating || dialog !== null) return;
+      if ((!event.ctrlKey && !event.metaKey) || event.altKey || modalBusy.current) return;
       const commands: Record<string, string> = { n: "new", o: "open", s: "save",
         w: "close", z: "undo", y: "redo", f: "find", h: "replace" };
       const command = commands[event.key.toLowerCase()];
-      if (command && enabled[command]) { event.preventDefault(); void runCommand(command); }
+      if (command && enabled[command]) { event.preventDefault();
+        void runCommand(command, document.activeElement as HTMLElement | null); }
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
@@ -731,7 +759,8 @@ function App() {
   const closeDialog = () => setDialog(null);
 
   return <main className="app-shell"><div className="shell-chrome">
-    <MenuBar enabled={enabled} run={(command) => void runCommand(command)} />
+    <MenuBar enabled={enabled} run={(command, returnFocus) =>
+      void runCommand(command, returnFocus)} />
     <section className="editor-surface" aria-label="Document workspace">
       {!activeDocument && <p className="editor-placeholder">No document. Use File → New or File → Open.</p>}
       <textarea ref={editor} aria-label="Document text" value={activeDocument ? workingText : ""}
@@ -743,13 +772,14 @@ function App() {
       <span>{state}</span><span>{persistence}</span>
       <span>{journalSummary.total > 0 ? `${journalSummary.total} recovery item${journalSummary.total === 1 ? "" : "s"} need attention. ` : ""}{message}</span>
     </footer></div>
-    {creating && <CreationSecurityDialog onCancel={async () => {
+    {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={async () => {
       await window.scpefe.cancelCreateTarget(); setCreating(false);
     }} onCreate={async (request: object) => {
       const result = await window.scpefe.createDocument(request);
       if (result) { setCreating(false); setMessage("Encrypted blank document published successfully."); }
     }} />}
-    {dialog === "profile" && <FocusedDialog title={profile ? "Profile" : "Set up this client"}
+    {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title={profile ? "Profile" : "Set up this client"}
       close={profile ? closeDialog : undefined}><p>Name, email, and device name identify this client locally.</p>
       <form onSubmit={saveProfile}><label>Name<input name="name" defaultValue={profile?.name} required autoFocus /></label>
         <label>Email<input name="email" type="email" defaultValue={profile?.email} required /></label>
@@ -763,14 +793,16 @@ function App() {
         <small>Regular saves update the target but remain unsaved until you manually save.</small></fieldset>
         <div className="dialog-actions"><button type="button" onClick={closeDialog}>Close</button>
           <button>Save client settings</button></div></form>}</FocusedDialog>}
-    {dialog === "open" && <FocusedDialog title={externalOpenRequest ? "Open requested document" : "Open document"}
+    {dialog === "open" && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title={externalOpenRequest ? "Open requested document" : "Open document"}
       close={() => { setExternalOpenRequest(null); closeDialog(); }} initialFocus={openPassword}>
       <form onSubmit={externalOpenRequest ? openExternal : open}><label>Password
         <input ref={openPassword} name="password" type="password" required /></label>
         <div className="dialog-actions"><button type="button" onClick={() => {
           setExternalOpenRequest(null); closeDialog();
         }}>Cancel</button><button>Choose document…</button></div></form></FocusedDialog>}
-    {(dialog === "find" || dialog === "replace") && <FocusedDialog title="Find and replace"
+    {(dialog === "find" || dialog === "replace") && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title="Find and replace"
       close={closeDialog} initialFocus={findInput}>
       <label>Find<input ref={findInput} value={findText}
         onChange={(event) => setFindText(event.target.value)} /></label>
@@ -780,14 +812,16 @@ function App() {
         <button disabled={!activeDocument || opened.readOnly} onClick={replaceSelection}>Replace</button>
         <button disabled={!activeDocument || opened.readOnly} onClick={replaceAll}>Replace all</button>
         <button onClick={closeDialog}>Close</button></div></FocusedDialog>}
-    {dialog === "export" && activeDocument && <FocusedDialog title="Export plaintext" close={closeDialog}>
+    {dialog === "export" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Export plaintext" close={closeDialog}>
       <p className="warning"><strong>Not password protected:</strong> the exported text may persist in backups or storage history.</p>
       <label>Line endings<select value={lineEndings}
         onChange={(event) => setLineEndings(event.target.value as "lf" | "native")}>
         <option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label>
       <div className="dialog-actions"><button onClick={closeDialog}>Cancel</button>
         <button onClick={async () => { await exportPlaintext(); closeDialog(); }}>Export current text…</button></div></FocusedDialog>}
-    {dialog === "passwords" && activeDocument && <FocusedDialog title="Passwords" close={closeDialog}>
+    {dialog === "passwords" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Passwords" close={closeDialog}>
       {!opened.readOnly && opened.canAddPasswords && <form onSubmit={createInvitation}><h3>Invite another person</h3>
         <label>Temporary label<input name="temporaryLabel" required /></label>
         <label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password" /></label>
@@ -796,30 +830,36 @@ function App() {
       <SlotAdministration opened={opened} onUpdate={updateManagedSlot}
         onRemove={removeManagedSlot} onCompact={compact} />
       <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></FocusedDialog>}
-    {opened?.invitationRequired && <FocusedDialog title="Claim invitation">
+    {visibleOpenedDialog === "claim" && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Claim invitation">
       <p>Choose a private replacement password to claim this invitation with your configured identity.</p>
       <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
         minLength={12} required autoFocus /></label><button>Replace password and claim identity</button></form>
       <button onClick={lock}>Cancel and lock</button></FocusedDialog>}
-    {activeDocument && opened.migrationRequired && <FocusedDialog title="Older container">
+    {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title="Older container">
       <div className="warning" role="alert"><p>{opened.migrationWarning}</p>
         <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Keep read-only and close</button>
         <button onClick={migrate}>Create verified backup and migrate…</button></div></FocusedDialog>}
-    {activeDocument && opened.profileMismatch && <FocusedDialog title="Profile mismatch">
+    {visibleOpenedDialog === "profile-mismatch" && activeDocument && opened.profileMismatch && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title="Profile mismatch">
       <div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p>
         <p>The document remains available read-only. Editing is blocked until you explicitly reconcile the slot identity.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Lock now</button>
         <button onClick={reconcileIdentity}>Reconcile identity and publish</button></div></FocusedDialog>}
-    {activeDocument && opened.headMismatch && <FocusedDialog title={opened.headMismatch.title}>
+    {visibleOpenedDialog === "head" && activeDocument && opened.headMismatch && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title={opened.headMismatch.title}>
       <p>{opened.headMismatch.explanation}</p><button onClick={acceptHeadMismatch}>Accept current authenticated head</button>
     </FocusedDialog>}
-    {activeDocument && opened.recovery && <FocusedDialog title="Recovered work">
+    {visibleOpenedDialog === "recovery" && activeDocument && opened.recovery && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title="Recovered work">
       <p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p>
       <div className="dialog-actions"><button onClick={discardRecovery}>Discard recovered work</button>
         <button disabled={!opened.canEdit} onClick={restoreRecovery}>Restore unsaved work</button></div></FocusedDialog>}
-    {activeDocument && (opened.publicationState === "pending-publication" || opened.publicationState === "conflict")
-      && <FocusedDialog title={opened.publicationState === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
+    {visibleOpenedDialog === "publication" && activeDocument
+      && <FocusedDialog returnFocus={dialogReturnFocus.current}
+        title={opened.publicationState === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
         <p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
         <div className="dialog-actions"><button onClick={discardPublication}>Discard pending save</button>
           <button onClick={reconnectPublication}>Retry publication</button></div></FocusedDialog>}

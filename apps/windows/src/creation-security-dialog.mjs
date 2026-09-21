@@ -5,7 +5,7 @@ import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
 const h = React.createElement;
 
 /* Collects and validates creation secrets after a target has been selected. */
-export function CreationSecurityDialog({ onCreate, onCancel }) {
+export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
   const [ownerPassword, setOwnerPassword] = useState("");
   const [ownerConfirmation, setOwnerConfirmation] = useState("");
   const [recoveryPassword, setRecoveryPassword] = useState("");
@@ -23,7 +23,7 @@ export function CreationSecurityDialog({ onCreate, onCancel }) {
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
 
   useEffect(() => {
-    const prior = document.activeElement;
+    const prior = returnFocus ?? document.activeElement;
     const chrome = document.querySelector(".shell-chrome");
     chrome?.setAttribute("inert", "");
     ownerRef.current?.focus();
