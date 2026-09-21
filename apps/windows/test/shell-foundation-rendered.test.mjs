@@ -23,7 +23,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     getClientSettings: async () => ({ regularSaveEnabled: false, regularSaveIntervalMs: 120000 }),
     getUnresolvedJournalSummary: async () => ({ total: 0, pendingPublications: 0 }),
     saveProfile: async (value) => value, saveClientSettings: async (value) => value,
-    activity: async () => ({}), chooseCreateTarget: async () => null,
+    activity: async () => ({}), chooseCreateTarget: async () => { calls.push("new"); return null; },
     cancelCreateTarget: async () => {}, createDocument: async () => null,
     openDocument: async () => ({ content: "mounted document", readOnly: true, canEdit: true,
       publicationState: "target-published" }),
@@ -72,6 +72,19 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   ui.fireEvent.keyDown(file, { key: "Escape" });
   assert.equal(document.activeElement, ui.getByRole(document.body, "menuitem", { name: "File" }));
 
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "Edit" }));
+  const editMenu = ui.getByRole(document.body, "menu", { name: "Edit" });
+  assert.deepEqual(ui.getAllByRole(editMenu, "menuitem").map((item) => item.textContent),
+    ["Edit Contents", "UndoCtrl+Z", "RedoCtrl+Y", "Find…Ctrl+F", "Replace…Ctrl+H"]);
+  assert.equal(ui.getAllByRole(editMenu, "separator").length, 2);
+  ui.fireEvent.keyDown(editMenu, { key: "Escape" });
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "Security" }));
+  const securityMenu = ui.getByRole(document.body, "menu", { name: "Security" });
+  assert.deepEqual(ui.getAllByRole(securityMenu, "menuitem").map((item) => item.textContent),
+    ["Lock", "Passwords…", "Profile…"]);
+  assert.equal(ui.getAllByRole(securityMenu, "separator").length, 1);
+  ui.fireEvent.keyDown(securityMenu, { key: "Escape" });
+
   editor.focus();
   await user.keyboard("{Alt>}f{/Alt}");
   await ui.waitFor(() => assert.ok(ui.getByRole(document.body, "menu", { name: "File" })));
@@ -81,8 +94,9 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     .getAttribute("aria-expanded"), "true"));
   ui.fireEvent.keyDown(ui.getByRole(document.body, "menu", { name: "Edit" }), { key: "Escape" });
 
-  await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
-  await user.click(ui.getByRole(document.body, "menuitem", { name: /Open/ }));
+  editor.focus(); await user.keyboard("{Control>}n{/Control}");
+  await ui.waitFor(() => assert.deepEqual(calls, ["new"]));
+  await user.keyboard("{Control>}o{/Control}");
   const dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), true);
   const password = ui.getByLabelText(dialog, "Password");
@@ -93,6 +107,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   await user.type(password, "correct password");
   await user.click(choose);
   await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Open document" }), null));
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "Edit");
   assert.equal(editor.disabled, false); assert.equal(editor.readOnly, true);
   assert.equal(editor.value, "mounted document");
 
@@ -102,6 +118,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(document.activeElement, ui.getByLabelText(find, "Find"));
   await user.keyboard("{Escape}");
   await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null));
-  assert.equal(document.activeElement, editor);
-  assert.deepEqual(calls, []);
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "Document text");
+  assert.deepEqual(calls, ["new"]);
 });
