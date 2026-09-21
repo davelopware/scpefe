@@ -22,7 +22,14 @@ export class ReplacementCoordinator {
     const staged = await stageOpenReplacement({ makeCandidate: this.makeCandidate,
       target, password });
     if (staged.opened.invitationRequired) {
-      if (!await this.authorizeCurrent()) {
+      let authorized;
+      try {
+        authorized = await this.authorizeCurrent();
+      } catch (error) {
+        await disposeReplacement(staged);
+        throw error;
+      }
+      if (!authorized) {
         await disposeReplacement(staged);
         const error = new Error("The current document remains open");
         error.code = "DOCUMENT_REPLACEMENT_CANCELED";

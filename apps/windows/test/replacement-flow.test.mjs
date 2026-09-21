@@ -59,6 +59,18 @@ test("a canceled authorization disposes the candidate and preserves current stat
   assert.deepEqual(log.slice(-1), ["candidate:lock:replacement-canceled"]);
 });
 
+test("an authorization fault disposes the candidate and preserves current state", async () => {
+  const log = [];
+  const current = { content: "original", dirty: true };
+  const staged = await stageOpenReplacement({ makeCandidate: () => candidate(log),
+    target: "opaque-target", password: "password words" });
+  await assert.rejects(completeOpenReplacement({ staged,
+    authorizeCurrent: async () => { throw new Error("authorization failed"); } }),
+  /authorization failed/);
+  assert.deepEqual(current, { content: "original", dirty: true });
+  assert.deepEqual(log.slice(-1), ["candidate:lock:replacement-canceled"]);
+});
+
 test("new authorizes before publication and revalidates its blank edit candidate", async () => {
   const log = [];
   const request = { ownerPassword: "owner password words", content: "" };

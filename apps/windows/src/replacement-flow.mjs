@@ -25,7 +25,14 @@ export async function stageOpenReplacement({ makeCandidate, target, password }) 
 
 /* Re-authenticates after interaction and immediately before replacing the session. */
 export async function completeOpenReplacement({ staged, authorizeCurrent }) {
-  if (!await authorizeCurrent()) {
+  let authorized;
+  try {
+    authorized = await authorizeCurrent();
+  } catch (error) {
+    await disposeReplacement(staged);
+    throw error;
+  }
+  if (!authorized) {
     await disposeReplacement(staged);
     throw canceledReplacement();
   }
