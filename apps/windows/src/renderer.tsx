@@ -40,7 +40,7 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   migrationWarning?: string };
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
-type DialogName = "profile" | "open" | "find" | "replace" | "export"
+type DialogName = "profile" | "open" | "export"
   | "unlock" | "passwords" | "compaction" | null;
 type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
   | "recovery" | "publication" | null;
@@ -329,7 +329,10 @@ function App() {
   const [historyIndex, setHistoryIndex] = useState(0);
   const [findText, setFindText] = useState("");
   const [replaceText, setReplaceText] = useState("");
+  const [findOpen, setFindOpen] = useState(false);
+  const [findStatus, setFindStatus] = useState("");
   const [lineEndings, setLineEndings] = useState<"lf" | "native">("lf");
+  const [exportError, setExportError] = useState("");
   const [journalSummary, setJournalSummary] = useState<JournalSummary>({
     total: 0, pendingPublications: 0,
   });
@@ -359,6 +362,9 @@ function App() {
   const [claimError, setClaimError] = useState("");
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
+  const replaceInput = useRef<HTMLInputElement>(null);
+  const findReturnFocus = useRef<HTMLElement | null>(null);
+  const exportAction = useRef<HTMLButtonElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
   const profileConfirmation = useRef<HTMLButtonElement>(null);
   const editRetryAction = useRef<HTMLButtonElement>(null);
@@ -451,6 +457,10 @@ function App() {
         ? result.publicationState : "target-published");
     setHistory([content]);
     setHistoryIndex(0);
+    setFindOpen(false);
+    setFindText("");
+    setReplaceText("");
+    setFindStatus("");
     if (result && !result.invitationRequired && result.recovery) {
       const source = [result.recovery.authorName, result.recovery.deviceName]
         .filter(Boolean).join(" on ");
@@ -475,7 +485,10 @@ function App() {
   const enabled: Record<string, boolean> = {
     new: profile !== null, open: profile !== null,
     save: activeDocument && !opened.readOnly && dirty,
-    backup: activeDocument, export: activeDocument, close: false, exit: true,
+    backup: activeDocument && !dirty && saveState === "target-published"
+      && !opened.provisional && !opened.recovery && !opened.headMismatch
+      && !opened.profileMismatch && !opened.migrationRequired,
+    export: activeDocument, close: false, exit: true,
     edit: activeDocument && opened.readOnly && opened.canEdit
       && opened.publicationState === "target-published" && !opened.recovery
       && !opened.headMismatch && !opened.profileMismatch && !opened.migrationRequired,
@@ -499,8 +512,14 @@ function App() {
           setPendingOpenName(selected.name); setOpenError(""); setDialog("open");
         }
       } catch (error) { showError(error); }
-    } else if (command === "find" || command === "replace"
-      || command === "export" || command === "passwords" || command === "profile") {
+    } else if (command === "find" || command === "replace") {
+      findReturnFocus.current = returnFocus?.isConnected
+        ? returnFocus : document.activeElement as HTMLElement | null;
+      setFindOpen(true);
+      requestAnimationFrame(() => (command === "replace"
+        ? replaceInput.current : findInput.current)?.focus());
+    } else if (command === "export" || command === "passwords" || command === "profile") {
+      if (command === "export") setExportError("");
       setDialog(command as DialogName);
     } else if (command === "save") await save();
     else if (command === "backup") await backup();
@@ -949,6 +968,8 @@ function App() {
       setHistoryIndex(0);
       setFindText("");
       setReplaceText("");
+      setFindOpen(false);
+      setFindStatus("");
       setPendingProfile(null);
       setProfileError("");
       setOpenError("");
@@ -1094,6 +1115,7 @@ function App() {
     try {
       const result = await window.scpefe.backupDocument();
       if (result) setMessage("Verified byte-identical backup replica created.");
+      else setMessage("Backup canceled; the document and destination are unchanged.");
     } catch (error) { showError(error); }
   }
 
@@ -1123,32 +1145,51 @@ function App() {
   }
 
   function findNext() {
-    if (!findText || !editor.current) return;
+    if (!findText || !editor.current) {
+      setFindStatus("Enter text to find.");
+      return;
+    }
     const start = editor.current.selectionEnd;
     let match = workingText.indexOf(findText, start);
+    const wrapped = match < 0 && workingText.indexOf(findText) >= 0;
     if (match < 0) match = workingText.indexOf(findText);
-    if (match < 0) { setMessage("Text not found."); return; }
+    if (match < 0) {
+      setFindStatus("Text not found."); setMessage("Text not found."); return;
+    }
     editor.current.focus();
     editor.current.setSelectionRange(match, match + findText.length);
-    setMessage("Match selected.");
+    const status = wrapped ? "Match selected after wrapping to the start."
+      : "Match selected.";
+    setFindStatus(status); setMessage(status);
   }
 
   function replaceSelection() {
-    if (!findText || !editor.current || opened?.readOnly) return;
+    if (!findText || !editor.current || !activeDocument || opened.readOnly) return;
     const { selectionStart: start, selectionEnd: end } = editor.current;
     if (workingText.slice(start, end) !== findText) { findNext(); return; }
     const content = workingText.slice(0, start) + replaceText + workingText.slice(end);
     const next = start + replaceText.length;
     edit(content, { start: next, end: next });
-    requestAnimationFrame(() => editor.current?.setSelectionRange(next, next));
+    setFindStatus("Selected match replaced.");
+    setMessage("Selected match replaced.");
+    requestAnimationFrame(() => {
+      editor.current?.focus();
+      editor.current?.setSelectionRange(next, next);
+    });
   }
 
   function replaceAll() {
-    if (!findText || opened?.readOnly) return;
+    if (!findText || !activeDocument || opened.readOnly) return;
     const matches = workingText.split(findText).length - 1;
-    if (!matches) { setMessage("Text not found."); return; }
-    edit(workingText.split(findText).join(replaceText));
-    setMessage(`${matches} match${matches === 1 ? "" : "es"} replaced.`);
+    if (!matches) {
+      setFindStatus("Text not found."); setMessage("Text not found."); return;
+    }
+    const content = workingText.split(findText).join(replaceText);
+    const cursor = Math.min(editor.current?.selectionEnd ?? 0, content.length);
+    edit(content, { start: cursor, end: cursor });
+    const status = `${matches} match${matches === 1 ? "" : "es"} replaced.`;
+    setFindStatus(status); setMessage(status);
+    requestAnimationFrame(() => editor.current?.setSelectionRange(cursor, cursor));
   }
 
   function editorKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -1156,7 +1197,9 @@ function App() {
     if (modifier && event.key.toLowerCase() === "f") {
       event.preventDefault();
       dialogReturnFocus.current = editor.current;
-      setDialog("find");
+      findReturnFocus.current = editor.current;
+      setFindOpen(true);
+      requestAnimationFrame(() => findInput.current?.focus());
     } else if (modifier && event.key.toLowerCase() === "z") {
       event.preventDefault(); moveHistory(event.shiftKey ? 1 : -1);
     } else if (modifier && event.key.toLowerCase() === "y") {
@@ -1166,11 +1209,23 @@ function App() {
 
   async function exportPlaintext() {
     try {
+      setExportError("");
       const result = await window.scpefe.exportPlaintext({
         content: workingText, lineEndings,
       });
-      if (result) setMessage("Unprotected plaintext exported.");
-    } catch (error) { showError(error); }
+      if (result) {
+        setMessage("Unprotected plaintext exported.");
+        setDialog(null);
+      } else {
+        setMessage("Plaintext export canceled; the document and destination are unchanged.");
+        setDialog(null);
+      }
+    } catch (error) {
+      const value = error instanceof Error ? error.message : String(error);
+      setExportError(value);
+      setMessage(`Plaintext export failed; the document and destination are unchanged: ${value}`);
+      requestAnimationFrame(() => exportAction.current?.focus());
+    }
   }
 
   const state = opened?.invitationRequired ? "Invitation" : lockedDocument ? "Locked"
@@ -1186,6 +1241,7 @@ function App() {
     setPasswordError("");
     setInvitationPassphrase(null);
     setInvitationError("");
+    setExportError("");
     setDialog(null);
   };
 
@@ -1207,6 +1263,32 @@ function App() {
         disabled={!activeDocument} readOnly={!activeDocument || opened.readOnly}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
+      {findOpen && activeDocument && <section className="modeless-dialog" role="dialog"
+        aria-modal="false" aria-labelledby="find-replace-title" onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault(); setFindOpen(false);
+            requestAnimationFrame(() => (findReturnFocus.current?.isConnected
+              ? findReturnFocus.current : editor.current)?.focus());
+          }
+        }}><h2 id="find-replace-title">Find and replace</h2>
+        <label>Find<input ref={findInput} value={findText}
+          onChange={(event) => { setFindText(event.target.value); setFindStatus(""); }} /></label>
+        <label>Replace with<input ref={replaceInput} value={replaceText}
+          disabled={opened.readOnly}
+          onChange={(event) => setReplaceText(event.target.value)} /></label>
+        <div className="dialog-actions"><button type="button" disabled={!findText}
+          onClick={findNext}>Find next</button>
+          <button type="button" disabled={opened.readOnly || !findText}
+            onClick={replaceSelection}>Replace</button>
+          <button type="button" disabled={opened.readOnly || !findText}
+            onClick={replaceAll}>Replace all</button>
+          <button type="button" onClick={() => {
+            setFindOpen(false);
+            requestAnimationFrame(() => (findReturnFocus.current?.isConnected
+              ? findReturnFocus.current : editor.current)?.focus());
+          }}>Close</button></div>
+        <p className="modeless-status" role="status" aria-live="polite">{findStatus}</p>
+      </section>}
     </section>
     <footer className="status-bar" role="status" aria-live="polite" aria-atomic="true">
       <span aria-label="Document state">{state}</span>
@@ -1292,25 +1374,16 @@ function App() {
           void cancelOpen();
         }}>Cancel</button><button>{dialog === "unlock" ? "Unlock" : "Open"}</button>
         </div></form></FocusedDialog>}
-    {(dialog === "find" || dialog === "replace") && <FocusedDialog
-      returnFocus={dialogReturnFocus.current} title="Find and replace"
-      close={closeDialog} initialFocus={findInput}>
-      <label>Find<input ref={findInput} value={findText}
-        onChange={(event) => setFindText(event.target.value)} /></label>
-      <label>Replace with<input value={replaceText}
-        onChange={(event) => setReplaceText(event.target.value)} /></label>
-      <div className="dialog-actions"><button onClick={findNext}>Find next</button>
-        <button disabled={!activeDocument || opened.readOnly} onClick={replaceSelection}>Replace</button>
-        <button disabled={!activeDocument || opened.readOnly} onClick={replaceAll}>Replace all</button>
-        <button onClick={closeDialog}>Close</button></div></FocusedDialog>}
     {dialog === "export" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Export plaintext" close={closeDialog}>
       <p className="warning"><strong>Not password protected:</strong> the exported text may persist in backups or storage history.</p>
       <label>Line endings<select value={lineEndings}
         onChange={(event) => setLineEndings(event.target.value as "lf" | "native")}>
         <option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label>
+      {exportError && <p className="dialog-error" role="alert">{exportError}</p>}
       <div className="dialog-actions"><button onClick={closeDialog}>Cancel</button>
-        <button onClick={async () => { await exportPlaintext(); closeDialog(); }}>Export current text…</button></div></FocusedDialog>}
+        <button ref={exportAction} onClick={() => void exportPlaintext()}>
+          Export current text…</button></div></FocusedDialog>}
     {dialog === "passwords" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Passwords" close={closeDialog}>
       {invitationPassphrase ? <section aria-labelledby="invitation-result-title">

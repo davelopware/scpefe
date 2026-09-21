@@ -1411,11 +1411,19 @@ export class DocumentService {
 
   async exportPlaintext(target, request) {
     if (!this.active) throw new Error("Open a document first");
+    if (typeof target !== "string" || target.length === 0 || target.includes("\0")) {
+      throw new TypeError("A valid plaintext export target is required");
+    }
+    if (path.resolve(target) === path.resolve(this.active.target)) {
+      throw new Error("Plaintext export cannot replace the active encrypted container");
+    }
     const validated = validatePlaintextExportRequest(request);
     const content = validated.lineEndings === "native"
       ? validated.content.replace(/\n/g, this.nativeLineEnding)
       : validated.content;
-    await this.fs.writeFile(target, Buffer.from(content, "utf8"));
+    await this.publications.publishPlaintext({
+      target, content: Buffer.from(content, "utf8"),
+    });
     return validatePlaintextExportResult({ exported: true });
   }
 

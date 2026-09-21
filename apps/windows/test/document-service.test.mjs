@@ -2025,6 +2025,10 @@ test("plaintext export writes only current text with selected line endings", asy
     content: "secret", lineEndings: "lf",
   }), /Open a document/);
   await service.openDocument(target, "password words");
+  await assert.rejects(service.exportPlaintext(target, {
+    content: "secret", lineEndings: "lf",
+  }), /cannot replace the active encrypted container/);
+  assert.equal(await fs.readFile(target, "utf8"), "encrypted container and metadata");
   assert.deepEqual(await service.exportPlaintext(lfExport, {
     content: " first \nsecond\n", lineEndings: "lf",
   }), { exported: true });

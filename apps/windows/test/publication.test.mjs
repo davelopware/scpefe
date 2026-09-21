@@ -235,3 +235,46 @@ test("failed backup verification preserves a raced replacement", async (t) => {
   assert.deepEqual((await fs.readdir(directory)).filter((name) =>
     name.includes("scpefe-backup-txn")), []);
 });
+
+test("plaintext publication replaces only after a flushed same-directory candidate", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const target = path.join(directory, "export.txt");
+  await fs.writeFile(target, "previous export");
+  const calls = [];
+  const observedFs = Object.create(fs);
+  observedFs.open = async (...args) => {
+    const handle = await fs.open(...args);
+    if (String(args[0]).includes("scpefe-plaintext-txn")) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => { calls.push("flush"); return sync(); };
+    }
+    return handle;
+  };
+  observedFs.rename = async (...args) => {
+    calls.push("replace");
+    return fs.rename(...args);
+  };
+  const service = new PublicationService({ fs: observedFs, journals, capabilities });
+  assert.deepEqual(await service.publishPlaintext({
+    target, content: Buffer.from(" exact text \n", "utf8"),
+  }), { completed: true });
+  assert.deepEqual(calls, ["flush", "replace"]);
+  assert.equal(await fs.readFile(target, "utf8"), " exact text \n");
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    name.includes("scpefe-plaintext-txn")), []);
+});
+
+test("failed plaintext publication preserves the prior destination and cleans staging", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const target = path.join(directory, "export.txt");
+  await fs.writeFile(target, "keep this export");
+  const failingFs = Object.create(fs);
+  failingFs.rename = async () => { throw new Error("simulated destination failure"); };
+  const service = new PublicationService({ fs: failingFs, journals, capabilities });
+  await assert.rejects(service.publishPlaintext({
+    target, content: Buffer.from("new plaintext", "utf8"),
+  }), /simulated destination failure/);
+  assert.equal(await fs.readFile(target, "utf8"), "keep this export");
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    name.includes("scpefe-plaintext-txn")), []);
+});

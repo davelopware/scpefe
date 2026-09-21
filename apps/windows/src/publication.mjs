@@ -83,6 +83,29 @@ export class PublicationService {
     return this.capabilities;
   }
 
+  async publishPlaintext({ target, content }) {
+    if (typeof target !== "string" || target.length === 0 || target.includes("\0")
+        || !Buffer.isBuffer(content)) {
+      throw new TypeError("plaintext publication requires a valid target and bytes");
+    }
+    const transactionFile = path.join(path.dirname(target),
+      `.${path.basename(target)}.scpefe-plaintext-txn-${randomBytes(16).toString("hex")}`);
+    let handle;
+    try {
+      handle = await this.fs.open(transactionFile, "wx", 0o600);
+      await handle.writeFile(content);
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await this.fs.rename(transactionFile, target);
+      return { completed: true };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      await this.fs.unlink(transactionFile).catch(() => {});
+      throw error;
+    }
+  }
+
   async publishReplica({ target, candidate }) {
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new TypeError("backup candidate must contain container bytes");

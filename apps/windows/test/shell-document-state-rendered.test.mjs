@@ -50,6 +50,9 @@ test("mounted shell presents truthful document states, history, failures, and se
   let lockCalls = 0;
   let savedContent = null;
   let nextPublicationState = "target-published";
+  let backupAttempt = 0;
+  let exportAttempt = 0;
+  const exportRequests = [];
   const opened = { content: "first line\nsecond line", readOnly: true, canEdit: true,
     publicationState: "target-published", targetName: "safe-notes.scpefe" };
   const listen = (name, listener) => {
@@ -79,8 +82,19 @@ test("mounted shell presents truthful document states, history, failures, and se
       savedContent = content;
       return { saved: true, content, publicationState: nextPublicationState };
     },
-    backupDocument: async () => ({ backedUp: true }),
-    exportPlaintext: async () => ({ exported: true }),
+    backupDocument: async () => {
+      backupAttempt += 1;
+      if (backupAttempt === 1) return null;
+      if (backupAttempt === 2) throw new Error("backup destination unavailable");
+      return { backedUp: true };
+    },
+    exportPlaintext: async (request) => {
+      exportRequests.push(structuredClone(request));
+      exportAttempt += 1;
+      if (exportAttempt === 1) return null;
+      if (exportAttempt === 2) throw new Error("export destination unavailable");
+      return { exported: true };
+    },
     lock: async () => { lockCalls += 1;
       return { locked: true, journalSaved: true, warning: null }; },
     onLocked: (listener) => listen("locked", listener),
@@ -136,6 +150,24 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal((await menuItem("File", /Save/)).disabled, true);
   assert.equal((await menuItem("Edit", "Edit Contents")).disabled, false);
 
+  editor.focus();
+  await user.keyboard("{Control>}f{/Control}");
+  const findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  assert.equal(findDialog.getAttribute("aria-modal"), "false");
+  assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), false,
+    "modeless search leaves the document interactive");
+  const findInput = ui.getByLabelText(findDialog, "Find");
+  const replaceInput = ui.getByLabelText(findDialog, "Replace with");
+  await user.type(findInput, "line");
+  assert.equal(ui.getByRole(findDialog, "button", { name: "Replace" }).disabled, true);
+  await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
+  assert.deepEqual([editor.selectionStart, editor.selectionEnd], [6, 10]);
+  await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
+  assert.deepEqual([editor.selectionStart, editor.selectionEnd], [18, 22]);
+  await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
+  assert.deepEqual([editor.selectionStart, editor.selectionEnd], [6, 10]);
+  assert.match(ui.getByRole(findDialog, "status").textContent, /wrapping/);
+
   await command("Edit", "Edit Contents");
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
   assert.match(ui.getByRole(failure, "alert").textContent, /lease is held/);
@@ -151,11 +183,29 @@ test("mounted shell presents truthful document states, history, failures, and se
     "clean editable work cannot be saved");
 
   editor.focus();
+  await user.keyboard("{Control>}h{/Control}");
+  assert.equal(document.activeElement === replaceInput, true,
+    "Ctrl+H reuses the modeless dialog and focuses Replace with");
+  await user.type(replaceInput, "row");
+  await user.click(ui.getByRole(findDialog, "button", { name: "Replace" }));
+  assert.equal(editor.value, "first row\nsecond line");
+  await user.click(ui.getByRole(findDialog, "button", { name: "Replace all" }));
+  assert.equal(editor.value, "first row\nsecond row");
+  assert.match(ui.getByRole(findDialog, "status").textContent, /1 match replaced/);
+  editor.focus(); await user.keyboard("{Control>}z{/Control}{Control>}z{/Control}");
+  assert.equal(editor.value, opened.content);
+  await user.click(ui.getByRole(findDialog, "button", { name: "Close" }));
+  await ui.waitFor(() => assert.equal(
+    ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null));
+
+  editor.focus();
   ui.fireEvent.change(editor, { target: { value: `${opened.content}!`,
     selectionStart: opened.content.length + 1, selectionEnd: opened.content.length + 1 } });
   await ui.waitFor(() => assert.equal(statusValue("Working copy state"), "Dirty"));
   await ui.waitFor(() => assert.equal(document.title, "*safe-notes.scpefe — SCPEFE"));
   assert.equal((await menuItem("File", /Save/)).disabled, false);
+  assert.equal((await menuItem("File", /Backup/)).disabled, true,
+    "an unsealed dirty working copy is ineligible for Backup");
   assert.equal((await menuItem("Edit", /Undo/)).disabled, false);
 
   editor.focus();
@@ -172,6 +222,43 @@ test("mounted shell presents truthful document states, history, failures, and se
   await ui.waitFor(() => assert.equal(statusValue("Working copy state"), "Clean"));
   assert.equal(savedContent, `${opened.content}!`);
   assert.equal(statusValue("Publication state"), "Published");
+
+  const beforeTransfer = editor.value;
+  await command("File", /Backup/);
+  assert.equal(editor.value, beforeTransfer);
+  assert.match(ui.getByRole(document.body, "status").textContent,
+    /Backup canceled; the document and destination are unchanged/);
+  await command("File", /Backup/);
+  assert.match(ui.getByRole(document.body, "status").textContent,
+    /backup destination unavailable/);
+  assert.equal(editor.value, beforeTransfer);
+  await command("File", /Backup/);
+  assert.match(ui.getByRole(document.body, "status").textContent,
+    /Verified byte-identical backup replica created/);
+
+  await command("File", /Export Plaintext/);
+  let exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
+  assert.match(exportDialog.textContent, /Not password protected/);
+  await user.selectOptions(ui.getByLabelText(exportDialog, "Line endings"), "native");
+  await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
+  await ui.waitFor(() => assert.equal(
+    ui.queryByRole(document.body, "dialog", { name: "Export plaintext" }), null));
+  assert.equal(editor.value, beforeTransfer);
+  await command("File", /Export Plaintext/);
+  exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
+  await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
+  assert.match((await ui.findByRole(exportDialog, "alert")).textContent,
+    /export destination unavailable/);
+  assert.equal(document.activeElement?.textContent.trim(), "Export current text…");
+  assert.equal(editor.value, beforeTransfer);
+  await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
+  await ui.waitFor(() => assert.equal(
+    ui.queryByRole(document.body, "dialog", { name: "Export plaintext" }), null));
+  assert.deepEqual(exportRequests, [
+    { content: beforeTransfer, lineEndings: "native" },
+    { content: beforeTransfer, lineEndings: "native" },
+    { content: beforeTransfer, lineEndings: "native" },
+  ]);
 
   ui.fireEvent.change(editor, { target: { value: `${opened.content}!?`,
     selectionStart: opened.content.length + 2, selectionEnd: opened.content.length + 2 } });
@@ -193,6 +280,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   listeners.locked({ locked: true, journalSaved: true, warning: null });
   assert.equal(editor.value, "", "automatic lock synchronously removes mounted plaintext");
   assert.equal(document.body.textContent.includes(plaintext), false);
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
   assert.equal(statusValue("Document state"), "Locked");
   assert.equal(statusValue("Publication state"), "Pending publication");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
@@ -204,10 +292,17 @@ test("mounted shell presents truthful document states, history, failures, and se
   const reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
   await user.type(ui.getByLabelText(reopenDialog, "Password"), "correct password");
   await user.click(ui.getByRole(reopenDialog, "button", { name: "Unlock" }));
+  editor.focus(); await user.keyboard("{Control>}f{/Control}");
+  const protectedFind = await ui.findByRole(document.body, "dialog",
+    { name: "Find and replace" });
+  await user.type(ui.getByLabelText(protectedFind, "Find"), "first line");
   await command("Security", "Lock");
   assert.equal(lockCalls, 1);
   assert.equal(editor.value, "", "manual lock synchronously removes mounted plaintext");
   assert.equal(document.body.textContent.includes(opened.content), false);
+  assert.equal(document.body.textContent.includes("first line"), false,
+    "manual lock removes protected modeless search state");
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
   assert.equal(statusValue("Document state"), "Locked");
 
   mountedRoot.unmount();

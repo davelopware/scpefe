@@ -26,6 +26,14 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .editor-surface textarea:disabled { color: GrayText; background: Canvas; }
 .editor-placeholder { position: absolute; inset: 1rem auto auto 1rem; z-index: 1; margin: 0;
   color: GrayText; pointer-events: none; }
+.modeless-dialog { position: absolute; z-index: 4; top: .75rem; right: .75rem; width: min(34rem, calc(100% - 1.5rem));
+  display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(7rem, 1fr); gap: .6rem;
+  padding: .75rem; border: 1px solid #707780; border-radius: .25rem; color: CanvasText;
+  background: Canvas; box-shadow: 0 .45rem 1.5rem #0004; }
+.modeless-dialog h2 { grid-column: 1 / -1; margin: 0; font-size: 1rem; }
+.modeless-dialog .dialog-actions, .modeless-dialog .modeless-status { grid-column: 1 / -1; }
+.modeless-dialog .dialog-actions { margin-top: 0; }
+.modeless-status { min-height: 1.4em; margin: 0; color: GrayText; }
 .status-bar { min-height: 1.8rem; display: flex; gap: 1.5rem; padding: .25rem .65rem;
   border-top: 1px solid #8c939b; background: #f1f3f5; color: #17202a; white-space: nowrap; overflow: hidden; }
 .status-bar span:last-child { overflow: hidden; text-overflow: ellipsis; }
@@ -47,10 +55,14 @@ input, select, button { padding: .45rem .6rem; }
 .managed-slot { display: grid; gap: .7rem; padding: .75rem 0; border-top: 1px solid GrayText; }
 .managed-slot h4, .managed-slot p { margin: 0; }
 @media (prefers-contrast: more) {
-  .menu-bar, .status-bar, .app-dialog, .security-dialog, .menu [role="menu"] { border-color: currentColor; }
+  .menu-bar, .status-bar, .app-dialog, .security-dialog, .modeless-dialog,
+  .menu [role="menu"] { border-color: currentColor; }
   .warning { border-color: currentColor; }
 }
 @media (max-width: 35rem) {
   .status-bar { gap: .6rem; font-size: .85rem; }
   .menu [role="menu"] { min-width: 13rem; }
+  .modeless-dialog { grid-template-columns: 1fr; }
+  .modeless-dialog h2, .modeless-dialog .dialog-actions,
+  .modeless-dialog .modeless-status { grid-column: 1; }
 }
