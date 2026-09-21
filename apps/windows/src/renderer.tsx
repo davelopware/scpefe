@@ -1,5 +1,5 @@
 import React, { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
 import "./styles.css";
@@ -826,4 +826,16 @@ function App() {
   </main>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+export function mountApp(host: HTMLElement): Root {
+  const root = createRoot(host);
+  root.render(<App />);
+  return root;
+}
+
+const applicationHost = document.getElementById("root");
+if (applicationHost) {
+  const applicationRoot = mountApp(applicationHost);
+  const mountObserver = (window as unknown as Record<symbol,
+    ((root: Root) => void) | undefined>)[Symbol.for("scpefe.renderer.mount")];
+  mountObserver?.(applicationRoot);
+}

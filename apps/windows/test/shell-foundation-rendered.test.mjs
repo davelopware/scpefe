@@ -7,17 +7,48 @@ import { JSDOM } from "jsdom";
 
 test("mounted shell provides ordered accessible menus, keyboard operation, dialogs, and editor layout", async (t) => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
-    url: "https://scpefe.invalid/", pretendToBeVisual: true,
+    url: "https://scpefe.invalid/",
   });
+  const globalKeys = ["window", "document", "HTMLElement", "Node", "MutationObserver",
+    "FormData", "getComputedStyle", "requestAnimationFrame", "cancelAnimationFrame",
+    "IS_REACT_ACT_ENVIRONMENT"];
+  const priorGlobals = new Map(globalKeys.map((key) =>
+    [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  let mountedRoot;
+  let closed = false;
+  t.after(() => {
+    mountedRoot?.unmount();
+    if (!closed) dom.window.close();
+    for (const [key, descriptor] of priorGlobals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  });
+  const animationFrames = new Map();
+  let nextAnimationFrame = 0;
+  const requestTestAnimationFrame = (callback) => {
+    const token = ++nextAnimationFrame;
+    animationFrames.set(token, callback);
+    queueMicrotask(() => {
+      const pending = animationFrames.get(token);
+      if (pending) { animationFrames.delete(token); pending(performance.now()); }
+    });
+    return token;
+  };
   Object.assign(globalThis, { window: dom.window, document: dom.window.document,
     HTMLElement: dom.window.HTMLElement, Node: dom.window.Node,
     MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
-    requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
-    cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
+    requestAnimationFrame: requestTestAnimationFrame,
+    cancelAnimationFrame: (token) => animationFrames.delete(token),
     IS_REACT_ACT_ENVIRONMENT: true });
   const calls = [];
   const listeners = {};
+  let stoppedListeners = 0;
+  const listen = (name, listener) => {
+    listeners[name] = listener;
+    return () => { stoppedListeners += 1; delete listeners[name]; };
+  };
   dom.window.scpefe = {
     getProfile: async () => ({ name: "Ada", email: "ada@example.test", deviceName: "Desk" }),
     getClientSettings: async () => ({ regularSaveEnabled: false, regularSaveIntervalMs: 120000 }),
@@ -33,11 +64,14 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
       publicationState: "target-published" }), backupDocument: async () => ({ backedUp: true }),
     exportPlaintext: async () => ({ exported: true }), lock: async () => ({ locked: true,
       journalSaved: true, warning: null }),
-    onLocked: (listener) => { listeners.locked = listener; return () => {}; },
-    onJournalWarning: () => () => {}, onRegularSave: () => () => {},
-    onExternalOpenRequested: () => () => {}, onUnresolvedJournalSummary: () => () => {},
-    onSwitchRetained: () => () => {},
+    onLocked: (listener) => listen("locked", listener),
+    onJournalWarning: (listener) => listen("warning", listener),
+    onRegularSave: (listener) => listen("regular-save", listener),
+    onExternalOpenRequested: (listener) => listen("external-open", listener),
+    onUnresolvedJournalSummary: (listener) => listen("journal-summary", listener),
+    onSwitchRetained: (listener) => listen("switch-retained", listener),
   };
+  dom.window[Symbol.for("scpefe.renderer.mount")] = (root) => { mountedRoot = root; };
   const assets = await fs.readdir(new URL("../dist/assets/", import.meta.url));
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
   const stylesheet = assets.find((entry) => /^index-.*\.css$/.test(entry));
@@ -45,11 +79,11 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   style.textContent = await fs.readFile(new URL(`../dist/assets/${stylesheet}`, import.meta.url), "utf8");
   document.head.append(style);
   await import(`${pathToFileURL(path.resolve("dist/assets", script)).href}?shell-foundation`);
+  assert.ok(mountedRoot, "the production renderer reports its mounted React root");
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
   await ui.waitFor(() => assert.ok(ui.getByRole(document.body, "menubar", { name: "Application menu" })));
-  t.after(() => dom.window.close());
 
   const shell = document.querySelector(".app-shell");
   const workspace = ui.getByRole(document.body, "region", { name: "Document workspace" });
@@ -94,7 +128,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     .getAttribute("aria-expanded"), "true"));
   ui.fireEvent.keyDown(ui.getByRole(document.body, "menu", { name: "Edit" }), { key: "Escape" });
 
-  editor.focus(); await user.keyboard("{Control>}n{/Control}");
+  const shortcutSurface = ui.getByRole(document.body, "menuitem", { name: "File" });
+  shortcutSurface.focus(); await user.keyboard("{Control>}n{/Control}");
   await ui.waitFor(() => assert.deepEqual(calls, ["new"]));
   await user.keyboard("{Control>}o{/Control}");
   const dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
@@ -107,8 +142,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   await user.type(password, "correct password");
   await user.click(choose);
   await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Open document" }), null));
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-  assert.equal(document.activeElement?.getAttribute("aria-label"), "Edit");
+  await ui.waitFor(() => assert.equal(
+    document.activeElement?.getAttribute("aria-label"), "File"));
   assert.equal(editor.disabled, false); assert.equal(editor.readOnly, true);
   assert.equal(editor.value, "mounted document");
 
@@ -118,7 +153,14 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(document.activeElement, ui.getByLabelText(find, "Find"));
   await user.keyboard("{Escape}");
   await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null));
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-  assert.equal(document.activeElement?.getAttribute("aria-label"), "Document text");
+  await ui.waitFor(() => assert.equal(
+    document.activeElement?.getAttribute("aria-label"), "Document text"));
   assert.deepEqual(calls, ["new"]);
+  mountedRoot.unmount();
+  mountedRoot = null;
+  await Promise.resolve();
+  assert.equal(document.getElementById("root").childElementCount, 0);
+  assert.equal(stoppedListeners, 6);
+  assert.equal(animationFrames.size, 0);
+  dom.window.close(); closed = true;
 });
