@@ -2016,7 +2016,7 @@ test("plaintext export writes only current text with selected line endings", asy
   const nativeExport = path.join(directory, "native.txt");
   await fs.writeFile(target, "encrypted container and metadata");
   const service = new DocumentService({ fs, nativeLineEnding: "\r\n",
-    publicationCapabilities,
+    publicationCapabilities, platform: "win32",
     profilePath: path.join(directory, "profile.json"),
     native: withLease({ openDocument: () => ({ content: "original", readOnly: true,
       canEdit: false, documentId: "88".repeat(16),
@@ -2025,6 +2025,14 @@ test("plaintext export writes only current text with selected line endings", asy
     content: "secret", lineEndings: "lf",
   }), /Open a document/);
   await service.openDocument(target, "password words");
+  await assert.rejects(service.exportPlaintext(
+    path.join(directory, "DOCUMENT.SCPEFE"), {
+      content: "secret", lineEndings: "lf",
+    }), /cannot replace or alias the active encrypted container/);
+  await assert.rejects(service.exportPlaintext(target, {
+    content: "secret", lineEndings: "lf",
+  }), /cannot replace or alias the active encrypted container/);
+  assert.equal(await fs.readFile(target, "utf8"), "encrypted container and metadata");
   assert.deepEqual(await service.exportPlaintext(lfExport, {
     content: " first \nsecond\n", lineEndings: "lf",
   }), { exported: true });
