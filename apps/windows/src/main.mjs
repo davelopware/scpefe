@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, powerMonitor } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -9,6 +9,7 @@ import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { CreationTargetFlow } from "./creation-flow.mjs";
 import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
+import { SecureLockCoordinator } from "./secure-lock-coordinator.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
@@ -212,6 +213,7 @@ if (hasInstanceLock) {
 }
 
 if (hasInstanceLock) app.whenReady().then(async () => {
+  let secureLocks = null;
   const makeService = () => {
     let created;
     created = new DocumentService({
@@ -226,11 +228,9 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => {
-      if (created === service) {
-        lockedTarget = currentTarget;
-        window?.webContents.send("document:locked", result);
-        void sendJournalSummary();
-      }
+      void secureLocks?.serviceLocked(created, result).catch((error) =>
+        window?.webContents.send("document:journal-warning",
+          `Secure lock cleanup needs attention: ${error.message}`));
     },
     onJournalWarning: (warning) => {
       if (created === service) window?.webContents.send("document:journal-warning", warning);
@@ -249,6 +249,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
+  ipcMain.handle("profile:reconcile-active", () => service.reconcileProfile());
   ipcMain.handle("settings:get", () => service.loadClientSettings());
   ipcMain.handle("settings:save", (_event, settings) =>
     service.saveClientSettings(settings));
@@ -269,6 +270,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   };
   const replacements = new ReplacementCoordinator({ makeCandidate: makeService,
     authorizeCurrent: authorizeDocumentSwitch, adopt: adoptReplacement });
+  secureLocks = new SecureLockCoordinator({ getService: () => service,
+    replacements, creationFlow,
+    clearOpenTarget: () => { selectedOpenTarget = null; },
+    rememberLockedTarget: (target) => {
+      if (target) { currentTarget = target; lockedTarget = target; }
+      else if (currentTarget) lockedTarget = currentTarget;
+    },
+    emitLocked: (result) => {
+      window?.webContents.send("document:locked", result);
+      void sendJournalSummary();
+    } });
   ipcMain.handle("document:choose-create-target", async () =>
     creationFlow.chooseTarget(async () => {
       const chosen = await dialog.showSaveDialog(window, {
@@ -398,8 +410,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   registerCompactionHandler({ ipcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
   registerMigrationHandler({ ipcMain, service: liveService, dialog, window });
+  ipcMain.handle("document:change-password", (_event, request) =>
+    service.changePassword(request));
   ipcMain.handle("document:create-invitation", (_event, request) =>
     service.createInvitation(request));
+  ipcMain.handle("document:copy-invitation-passphrase", (_event, password) => {
+    if (typeof password !== "string" || password.length === 0 || password.length > 4096) {
+      throw new TypeError("invitation passphrase is invalid");
+    }
+    clipboard.writeText(password);
+    return true;
+  });
   ipcMain.handle("document:claim-invitation", async (_event, password) => {
     const opened = await replacements.claim(password);
     await sendJournalSummary();
@@ -437,10 +458,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
   ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
   ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
-  const lockActive = (reason) => {
-    if (service.active?.target) currentTarget = service.active.target;
-    return service.lock(reason);
-  };
+  const lockActive = (reason) => secureLocks.lock(reason);
   ipcMain.handle("document:lock", () => lockActive("app-lock"));
   window = new BrowserWindow({
     width: 920,

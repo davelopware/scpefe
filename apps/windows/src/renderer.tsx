@@ -30,6 +30,8 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   targetName?: string;
   canAddPasswords?: boolean; canRemovePasswords?: boolean; invitationRequired?: false;
+  recoverySlot?: boolean; slotId?: string; slotIdentityName?: string;
+  slotIdentityEmail?: string;
   headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
   managedSlots?: ManagedSlot[]; provisional?: true; migrationRequired?: true;
   migrationWarning?: string };
@@ -250,6 +252,7 @@ type LockResult = { locked: true; journalSaved: boolean; warning: string | null 
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
   saveProfile(profile: Profile): Promise<Profile>;
+  reconcileProfile(): Promise<DocumentOpened | null>;
   getClientSettings(): Promise<ClientSettings>;
   saveClientSettings(settings: ClientSettings): Promise<ClientSettings>;
   getUnresolvedJournalSummary(): Promise<JournalSummary>;
@@ -277,8 +280,12 @@ declare global { interface Window { scpefe: {
     previousHead: string; head: string } | null>;
   migrateDocument(): Promise<{ migrated: true; backupCreated: true;
     compatibilityWarning: string; opened: DocumentOpened } | null>;
+  changePassword(request: { currentPassword: string; newPassword: string;
+    newPasswordConfirmation: string }): Promise<DocumentOpened>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
-  claimInvitation(password: string): Promise<DocumentOpened>;
+  copyInvitationPassphrase(password: string): Promise<boolean>;
+  claimInvitation(request: { newPassword: string;
+    newPasswordConfirmation: string }): Promise<DocumentOpened>;
   cancelInvitationClaim(): Promise<boolean>;
   reconcileIdentity(): Promise<DocumentOpened>;
   updateSlotPermissions(request: object): Promise<DocumentOpened>;
@@ -331,9 +338,16 @@ function App() {
   const [targetName, setTargetName] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [editFailure, setEditFailure] = useState<string | null>(null);
+  const [pendingProfile, setPendingProfile] = useState<Profile | null>(null);
+  const [profileError, setProfileError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [invitationPassphrase, setInvitationPassphrase] = useState<string | null>(null);
+  const [invitationError, setInvitationError] = useState("");
+  const [claimError, setClaimError] = useState("");
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
+  const profileConfirmation = useRef<HTMLButtonElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
@@ -496,14 +510,35 @@ function App() {
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    const candidate = {
+      name: String(data.get("name")), email: String(data.get("email")),
+      deviceName: String(data.get("deviceName")),
+    };
+    if (profile && (candidate.name.trim() !== profile.name
+        || candidate.email.trim() !== profile.email)) {
+      setPendingProfile(candidate);
+      setProfileError("");
+      return;
+    }
+    await commitProfile(candidate);
+  }
+
+  async function commitProfile(candidate: Profile) {
     try {
-      setProfile(await window.scpefe.saveProfile({
-        name: String(data.get("name")), email: String(data.get("email")),
-        deviceName: String(data.get("deviceName")),
-      }));
+      const identityChanged = profile !== null
+        && (profile.name !== candidate.name || profile.email !== candidate.email);
+      const saved = await window.scpefe.saveProfile(candidate);
+      const authoritative = identityChanged ? await window.scpefe.reconcileProfile() : null;
+      setProfile(saved);
+      setPendingProfile(null);
+      setProfileError("");
+      if (authoritative) setOpened(authoritative);
       setDialog(null);
       setMessage("Local profile saved.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => profileConfirmation.current?.focus());
+    }
   }
 
   async function saveClientSettings(event: FormEvent<HTMLFormElement>) {
@@ -583,55 +618,121 @@ function App() {
 
   async function claimInvitation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const password = String(data.get("newPassword"));
+    if (password !== String(data.get("newPasswordConfirmation"))) {
+      setClaimError("Replacement passwords do not match.");
+      requestAnimationFrame(() => form.elements.namedItem(
+        "newPasswordConfirmation") instanceof HTMLElement
+        && (form.elements.namedItem("newPasswordConfirmation") as HTMLElement).focus());
+      return;
+    }
     try {
-      const result = await window.scpefe.claimInvitation(String(data.get("newPassword")));
+      setClaimError("");
+      const result = await window.scpefe.claimInvitation({ newPassword: password,
+        newPasswordConfirmation: String(data.get("newPasswordConfirmation")) });
+      form.reset();
       setInvitationStaged(false); showOpenedResult(result);
       setMessage("Invitation claimed and replacement password safely published.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setClaimError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+    }
+  }
+
+  async function cancelInvitationClaim() {
+    try {
+      if (!await window.scpefe.cancelInvitationClaim()) {
+        throw new Error("The invitation claim is no longer staged");
+      }
+      setClaimError("");
+      setInvitationStaged(false);
+      setMessage("Invitation claim canceled; the current session is unchanged.");
+    } catch (error) {
+      setClaimError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    try {
+      setPasswordError("");
+      const result = await window.scpefe.changePassword({
+        currentPassword: String(data.get("currentPassword")),
+        newPassword: String(data.get("newPassword")),
+        newPasswordConfirmation: String(data.get("newPasswordConfirmation")),
+      });
+      form.reset();
+      setOpened(result);
+      setMessage("Password changed and the updated document was published safely.");
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => {
+        const current = form.elements.namedItem("currentPassword") as HTMLElement | null;
+        current?.focus();
+      });
+    }
   }
 
   async function createInvitation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     try {
       const result = await window.scpefe.createInvitation({
         temporaryLabel: String(data.get("temporaryLabel")),
         temporaryPassword: String(data.get("temporaryPassword")) || undefined,
-        canEdit: data.get("canEdit") === "on", canAddPasswords: false,
-        canRemovePasswords: false,
+        canEdit: data.get("canEdit") === "on",
+        canAddPasswords: data.get("canAddPasswords") === "on",
+        canRemovePasswords: data.get("canRemovePasswords") === "on",
       });
-      setMessage(`Temporary invitation passphrase (shown once): ${result.temporaryPassword}`);
-      event.currentTarget.reset();
-    } catch (error) { showError(error); }
+      setInvitationError("");
+      setInvitationPassphrase(result.temporaryPassword);
+      form.reset();
+    } catch (error) {
+      setInvitationError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function reconcileIdentity() {
     try {
+      setPasswordError("");
       const result = await window.scpefe.reconcileIdentity();
       setOpened(result);
       setMessage("Password-slot identity reconciled through a sealed publication.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function updateManagedSlot(slot: ManagedSlot, canEdit: boolean,
     canAddPasswords: boolean, canRemovePasswords: boolean) {
     try {
+      setPasswordError("");
       const result = await window.scpefe.updateSlotPermissions({ slotId: slot.slotId,
         canEdit, canAddPasswords, canRemovePasswords });
       setOpened(result);
       setMessage("Slot permissions published.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function removeManagedSlot(slot: ManagedSlot) {
     try {
+      setPasswordError("");
       const result = await window.scpefe.removeSlot(slot.slotId);
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         managedSlots: current.managedSlots?.filter(
           (candidate) => candidate.slotId !== slot.slotId) } : current);
       setMessage(result.warning);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function restoreRecovery() {
@@ -673,6 +774,9 @@ function App() {
   }
 
   function showLockedResult(result: LockResult) {
+    document.querySelectorAll<HTMLInputElement>(
+      "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
       setOpened(null);
       setWorkingText("");
@@ -681,12 +785,24 @@ function App() {
       setHistoryIndex(0);
       setFindText("");
       setReplaceText("");
+      setPendingProfile(null);
+      setProfileError("");
+      setOpenError("");
+      setPendingOpenName("");
+      setPasswordError("");
+      setInvitationPassphrase(null);
+      setInvitationError("");
+      setClaimError("");
+      setInvitationStaged(false);
+      setExternalOpenRequest(null);
+      setQueuedExternalOpenRequest(null);
       setCreating(false);
       setDialog(null);
       setEditFailure(null);
       setLocked(targetNameRef.current !== null);
       setMessage(result.warning ?? "Document locked. Use Security → Unlock to continue.");
     });
+    dialogReturnFocus.current = null;
   }
 
   function edit(content: string, cursor?: Cursor) {
@@ -855,7 +971,14 @@ function App() {
     : saveState === "pending-publication" ? "Pending publication"
       : saveState === "conflict" ? "Publication conflict"
         : saveState === "provisional" ? "Provisional publication" : "Published";
-  const closeDialog = () => setDialog(null);
+  const closeDialog = () => {
+    setPendingProfile(null);
+    setProfileError("");
+    setPasswordError("");
+    setInvitationPassphrase(null);
+    setInvitationError("");
+    setDialog(null);
+  };
 
   useEffect(() => {
     document.title = targetName
@@ -899,11 +1022,22 @@ function App() {
     }} />}
     {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title={profile ? "Profile" : "Set up this client"}
-      close={profile ? closeDialog : undefined}><p>Name, email, and device name identify this client locally.</p>
-      <form onSubmit={saveProfile}><label>Name<input name="name" defaultValue={profile?.name} required autoFocus /></label>
-        <label>Email<input name="email" type="email" defaultValue={profile?.email} required /></label>
-        <label>Device name<input name="deviceName" defaultValue={profile?.deviceName} required /></label>
-        <button>Save local profile</button></form>
+      close={profile ? closeDialog : undefined}><p>Name, email, and device name identify this client locally. This profile is self-asserted and is not an authenticated account.</p>
+      {pendingProfile ? <div className="warning" role="alert">
+        <p>Changing your name or email does not silently change identities already claimed in documents. Those documents may request explicit identity reconciliation before editing.</p>
+        {profileError && <p className="dialog-error">{profileError}</p>}
+        <div className="dialog-actions"><button type="button" onClick={() => setPendingProfile(null)}>Go back</button>
+          <button ref={profileConfirmation} type="button" autoFocus
+            onClick={() => void commitProfile(pendingProfile)}>
+            Save identity change</button></div></div>
+        : <form onSubmit={saveProfile}><label>Name<input name="name" defaultValue={profile?.name} required autoFocus /></label>
+          <label>Email<input name="email" type="email" defaultValue={profile?.email} required /></label>
+          <label>Device name<input name="deviceName" defaultValue={profile?.deviceName} required /></label>
+          {profileError && <p className="dialog-error" role="alert">{profileError}</p>}
+          <div className="dialog-actions">{!profile && <button type="button"
+            onClick={() => window.close()}>Exit application</button>}
+            {profile && <button type="button" onClick={closeDialog}>Cancel</button>}
+            <button>Save local profile</button></div></form>}
       {profile && <form onSubmit={saveClientSettings}><fieldset><legend>Regular saves</legend>
         <label className="check"><input name="regularSaveEnabled" type="checkbox"
           defaultChecked={clientSettings.regularSaveEnabled} /> Enable regular provisional saves</label>
@@ -948,23 +1082,66 @@ function App() {
         <button onClick={async () => { await exportPlaintext(); closeDialog(); }}>Export current text…</button></div></FocusedDialog>}
     {dialog === "passwords" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Passwords" close={closeDialog}>
-      {!opened.readOnly && opened.canAddPasswords && <form onSubmit={createInvitation}><h3>Invite another person</h3>
-        <label>Temporary label<input name="temporaryLabel" required /></label>
-        <label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password" /></label>
-        <label className="check"><input name="canEdit" type="checkbox" /> May edit</label>
-        <button>Create invitation</button></form>}
-      <SlotAdministration opened={opened} onUpdate={updateManagedSlot}
-        onRemove={removeManagedSlot} onCompact={compact} />
-      <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></FocusedDialog>}
+      {invitationPassphrase ? <section aria-labelledby="invitation-result-title">
+        <h3 id="invitation-result-title">Invitation created</h3>
+        <p className="warning">Send this temporary passphrase through a separate secure channel. It is shown only now and cannot be recovered after Done.</p>
+        <label>One-time temporary passphrase<input readOnly autoFocus
+          value={invitationPassphrase} aria-describedby="invitation-once-warning" /></label>
+        <p id="invitation-once-warning">Copy it before continuing.</p>
+        {invitationError && <p className="dialog-error" role="alert">{invitationError}</p>}
+        <div className="dialog-actions"><button type="button" onClick={async () => {
+          try {
+            setInvitationError("");
+            await window.scpefe.copyInvitationPassphrase(invitationPassphrase);
+            setMessage("Invitation passphrase copied. Complete the secure transfer, then choose Done.");
+          } catch (error) {
+            setInvitationError(error instanceof Error ? error.message : String(error));
+          }
+        }}>Copy</button><button type="button" onClick={() => {
+          setInvitationPassphrase(null); setMessage("Invitation created.");
+        }}>Done</button></div></section> : opened.profileMismatch ? <>
+        <section className="warning" aria-labelledby="reconcile-heading">
+          <h3 id="reconcile-heading">Identity reconciliation required</h3>
+          <p>This slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client uses {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}. Password administration and editing remain blocked until you explicitly reconcile it.</p>
+          <button type="button" autoFocus onClick={reconcileIdentity}>
+            Reconcile identity and publish</button>
+        </section>
+        {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
+        <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></> : <>
+        <form onSubmit={changePassword}><h3>Change this password</h3>
+          <p>{opened.recoverySlot
+            ? "This is the recovery/master slot. Store its replacement safely offline and do not use it routinely."
+            : "Changing this password re-wraps the existing document key; it does not rotate a possibly compromised document key."}</p>
+          <label>Current password<input name="currentPassword" type="password" required autoFocus /></label>
+          <label>New password<input name="newPassword" type="password" minLength={12} required /></label>
+          <label>Confirm new password<input name="newPasswordConfirmation" type="password" minLength={12} required /></label>
+          {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
+          <button>Change password</button></form>
+        {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) < 7
+          && <form onSubmit={createInvitation}><h3>Invite another person</h3>
+            <label>Temporary label<input name="temporaryLabel" required /></label>
+            <label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password" /></label>
+            <label className="check"><input name="canEdit" type="checkbox" /> May edit</label>
+            {opened.canAddPasswords && <label className="check"><input name="canAddPasswords" type="checkbox" /> May add passwords</label>}
+            {opened.canRemovePasswords && <label className="check"><input name="canRemovePasswords" type="checkbox" /> May remove passwords</label>}
+            {invitationError && <p className="dialog-error" role="alert">{invitationError}</p>}
+            <button>Create invitation</button></form>}
+        {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
+          && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
+        <SlotAdministration opened={opened} onUpdate={updateManagedSlot}
+          onRemove={removeManagedSlot} onCompact={compact} />
+        <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></>}
+      </FocusedDialog>}
     {visibleOpenedDialog === "claim" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Claim invitation">
-      <p>Choose a private replacement password to claim this invitation with your configured identity.</p>
+      <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
       <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
-        minLength={12} required autoFocus /></label><button>Replace password and claim identity</button></form>
-      <button onClick={async () => {
-        await window.scpefe.cancelInvitationClaim(); setInvitationStaged(false);
-        setMessage("Invitation claim canceled; the current session is unchanged.");
-      }}>Cancel</button></FocusedDialog>}
+        minLength={12} required autoFocus /></label>
+        <label>Confirm new password<input name="newPasswordConfirmation" type="password"
+          minLength={12} required /></label>
+        {claimError && <p className="dialog-error" role="alert">{claimError}</p>}
+        <button>Replace password and claim identity</button></form>
+      <button onClick={() => void cancelInvitationClaim()}>Cancel</button></FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Older container">
       <div className="warning" role="alert"><p>{opened.migrationWarning}</p>
@@ -976,7 +1153,7 @@ function App() {
       <div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p>
         <p>The document remains available read-only. Editing is blocked until you explicitly reconcile the slot identity.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Lock now</button>
-        <button onClick={reconcileIdentity}>Reconcile identity and publish</button></div></FocusedDialog>}
+        <button onClick={() => setDialog("passwords")}>Open Passwords to reconcile</button></div></FocusedDialog>}
     {visibleOpenedDialog === "head" && activeDocument && opened.headMismatch && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title={opened.headMismatch.title}>
       <p>{opened.headMismatch.explanation}</p><button onClick={acceptHeadMismatch}>Accept current authenticated head</button>

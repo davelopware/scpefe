@@ -206,6 +206,71 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
     (error) => error.code === "EEXIST");
 });
 
+test("password changes authenticate the active slot and atomically retain document state",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-password-ui-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const current = Buffer.from("current encrypted container");
+    const changed = Buffer.from("changed password container");
+    await fs.writeFile(target, current);
+    const documentId = "41".repeat(16);
+    const baseRevision = "42".repeat(32);
+    const journalKey = Buffer.alloc(32, 0x43);
+    const native = withLease({
+      openDocument(bytes, password) {
+        if (bytes.equals(current) && password !== "current password words") {
+          throw new Error("wrong current password");
+        }
+        if (bytes.equals(changed) && password !== "replacement password words") {
+          throw new Error("old password no longer works");
+        }
+        return { content: "protected text", readOnly: true, canEdit: true,
+          canAddPasswords: false, canRemovePasswords: false, manuallySealed: true,
+          documentId, baseRevision, revisionGraph: [{ revisionId: baseRevision,
+            parentRevisionIds: [] }], journalKey: Buffer.from(journalKey) };
+      },
+      changePassword(bytes, currentPassword, newPassword) {
+        assert.deepEqual(bytes, current);
+        assert.equal(currentPassword, "current password words");
+        assert.equal(newPassword, "replacement password words");
+        return changed;
+      },
+    });
+    const service = new DocumentService({ native, fs,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      journalDirectory: path.join(directory, "journals"),
+      witnessDirectory: path.join(directory, "witnesses"), publicationCapabilities });
+    await service.openDocument(target, "current password words");
+    await assert.rejects(service.changePassword({
+      currentPassword: "different current password", newPassword: "replacement password words",
+    }), /does not match/);
+    assert.deepEqual(await fs.readFile(target), current);
+    let encryptedJournal;
+    let interrupted = false;
+    const write = service.journals.write.bind(service.journals);
+    service.journals.write = async (...args) => {
+      await write(...args);
+      if (!interrupted && args[2]?.publication?.stage === "replaced") {
+        interrupted = true;
+        encryptedJournal = await fs.readFile(path.join(directory, "journals",
+          `${documentId}.work-journal`));
+        throw new Error("simulated acknowledgement loss after replacement");
+      }
+    };
+    const result = await service.changePassword({
+      currentPassword: "current password words", newPassword: "replacement password words",
+    });
+    assert.equal(interrupted, true);
+    assert.equal(result.content, "protected text");
+    assert.deepEqual(await fs.readFile(target), changed);
+    assert.equal(service.active.password, "replacement password words");
+    assert.equal(encryptedJournal.includes(Buffer.from("replacement password words")), false,
+      "the recoverable publication record never stores its password as plaintext");
+    assert.equal(await service.journals.read(documentId, service.active.journalKey), null,
+      "successful publication leaves no password-bearing recovery record");
+  });
+
 test("created replacement cleanup removes exact bytes and permits retry", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-replacement-cleanup-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -627,6 +692,74 @@ test("profile mismatch stays read-only until lease-backed reconciliation", async
   assert.equal((await fs.readFile(target)).toString(), "reconciled");
 });
 
+test("profile identity changes establish authoritative mismatch and deny administration",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-profile-change-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const profilePath = await writeProfile(directory, "Ada", "Desk");
+    await fs.writeFile(target, "base");
+    const native = withLease({
+      openDocument(bytes) {
+        const reconciled = bytes.toString() === "reconciled";
+        return { content: "secret", readOnly: true, canEdit: true,
+          canAddPasswords: true, canRemovePasswords: true, recoverySlot: false,
+          slotId: "81".repeat(16), slotIdentityName: reconciled ? "Grace" : "Ada",
+          slotIdentityEmail: reconciled ? "grace@example.test" : "ada@example.test",
+          managedSlots: [], documentId: "82".repeat(16),
+          baseRevision: "83".repeat(32), journalKey: Buffer.alloc(32, 0x84) };
+      },
+      reconcileIdentity() { return Buffer.from("identity-reconciled"); },
+      saveDocument(bytes) {
+        assert.equal(bytes.toString(), "identity-reconciled");
+        return Buffer.from("reconciled");
+      },
+    });
+    const service = new DocumentService({ native, fs, profilePath,
+      publicationCapabilities });
+    await service.openDocument(target, "owner password words");
+    await service.saveProfile({ name: "Grace", email: "grace@example.test",
+      deviceName: "Desk" });
+    const authoritative = await service.reconcileProfile();
+    assert.equal(authoritative.profileMismatch.profileName, "Grace");
+    assert.equal(authoritative.canEdit, false);
+    assert.equal(service.active.profileMismatch.editingBlocked, true);
+    await assert.rejects(service.changePassword({ currentPassword: "owner password words",
+      newPassword: "replacement password words" }), /Reconcile/);
+    await assert.rejects(service.createInvitation({ temporaryLabel: "Blocked" }),
+      /Reconcile/);
+    await assert.rejects(service.updateSlotPermissions({ slotId: "85".repeat(16) }),
+      /Reconcile/);
+    await assert.rejects(service.removeSlot("85".repeat(16)), /Reconcile/);
+    const reconciled = await service.reconcileIdentity();
+    assert.equal(reconciled.profileMismatch, undefined);
+    assert.equal((await fs.readFile(target, "utf8")), "reconciled");
+  });
+
+test("profile identity changes fail before persistence while editing", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-profile-edit-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
+  await fs.writeFile(target, "base");
+  const service = new DocumentService({ fs, profilePath, publicationCapabilities,
+    native: withLease({ openDocument: () => ({ content: "secret", readOnly: true,
+      canEdit: true, recoverySlot: false, slotIdentityName: "Ada",
+      slotIdentityEmail: "ada@example.test", documentId: "91".repeat(16),
+      baseRevision: "92".repeat(32), journalKey: Buffer.alloc(32, 0x93) }) }) });
+  await service.openDocument(target, "owner password words");
+  await service.enterEditMode();
+  await service.saveProfile({ name: "Ada", email: "ada@example.test",
+    deviceName: "Portable" });
+  const deviceRefresh = await service.reconcileProfile();
+  assert.equal(deviceRefresh.readOnly, false,
+    "a device-only profile refresh preserves the active edit session");
+  assert.equal(deviceRefresh.profileMismatch, undefined);
+  await assert.rejects(service.saveProfile({ name: "Grace",
+    email: "grace@example.test", deviceName: "Portable" }), /Leave edit mode/);
+  assert.equal((await service.loadProfile()).name, "Ada");
+});
+
 test("recovery use never raises a profile mismatch", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-recovery-profile-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -1029,6 +1162,7 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
 
   assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
   assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
+  await assert.rejects(service.claimInvitation("short"), /at least 12/);
 });
 
 test("restart finishes an interrupted invitation claim with its replacement credential",

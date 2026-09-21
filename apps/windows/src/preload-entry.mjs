@@ -9,7 +9,11 @@ import { validateCreateFormRequest, validateCreationResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
-  validateUnresolvedJournalSummary, validateExternalOpenRequest } from "./contracts.mjs";
+  validateUnresolvedJournalSummary, validateExternalOpenRequest,
+  validatePasswordChangeRequest, validateInvitationCreateRequest,
+  validateInvitationResult, validateInvitationClaimRequest,
+  validateSlotPermissionsRequest,
+  validateSlotId } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -17,6 +21,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value === null ? null : validateProfile(value);
   },
   saveProfile: (profile) => ipcRenderer.invoke("profile:save", validateProfile(profile)),
+  reconcileProfile: async () => {
+    const value = await ipcRenderer.invoke("profile:reconcile-active");
+    return value === null ? null : validateOpenedDocument(value);
+  },
   getClientSettings: async () => validateClientSettings(
     await ipcRenderer.invoke("settings:get")),
   saveClientSettings: async (settings) => validateClientSettings(
@@ -74,9 +82,23 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:migrate");
     return value === null ? null : validateMigrationResult(value);
   },
-  createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
-  claimInvitation: async (password) => validateOpenedDocument(
-    await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
+  changePassword: async (request) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:change-password",
+      validatePasswordChangeRequest(request))),
+  createInvitation: async (request) => validateInvitationResult(
+    await ipcRenderer.invoke("document:create-invitation",
+      validateInvitationCreateRequest(request))),
+  copyInvitationPassphrase: async (password) => {
+    const value = await ipcRenderer.invoke("document:copy-invitation-passphrase",
+      validatePassword(password));
+    if (value !== true) throw new TypeError("host did not copy the invitation passphrase");
+    return true;
+  },
+  claimInvitation: async (request) => {
+    const validated = validateInvitationClaimRequest(request);
+    return validateOpenedDocument(await ipcRenderer.invoke(
+      "document:claim-invitation", validated.newPassword));
+  },
   cancelInvitationClaim: async () => {
     const value = await ipcRenderer.invoke("document:cancel-invitation-claim");
     if (typeof value !== "boolean") throw new TypeError("host returned invalid claim cancellation");
@@ -85,8 +107,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   reconcileIdentity: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:reconcile-identity")),
   updateSlotPermissions: async (request) => validateOpenedDocument(
-    await ipcRenderer.invoke("document:update-slot-permissions", request)),
-  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot", slotId),
+    await ipcRenderer.invoke("document:update-slot-permissions",
+      validateSlotPermissionsRequest(request))),
+  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot",
+    validateSlotId(slotId)),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

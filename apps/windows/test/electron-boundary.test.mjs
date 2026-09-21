@@ -40,6 +40,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let creationResult = { created: true, opened: editOpened,
     name: "C:\\Users\\Ada\\secret.scpefe" };
   let compactionResult = null;
+  let invitationResult = { created: true,
+    temporaryPassword: "generated secret words" };
   const invocations = [];
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
@@ -49,6 +51,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:choose-create-target") {
           return { selected: true };
         }
+        if (channel === "profile:reconcile-active") return null;
         if (channel === "document:choose-open-target") {
           return { selected: true, name: "notes.scpefe" };
         }
@@ -56,7 +59,19 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
           return { content: "secret", readOnly: true, canEdit: true,
             publicationState: "target-published", targetName: "notes.scpefe" };
         }
+        if (channel === "document:claim-invitation") {
+          return { content: "claimed", readOnly: true, canEdit: true,
+            publicationState: "target-published" };
+        }
         if (channel === "document:cancel-invitation-claim") return true;
+        if (channel === "document:change-password") {
+          return { content: "secret", readOnly: true, canEdit: true,
+            publicationState: "target-published" };
+        }
+        if (channel === "document:create-invitation") {
+          return invitationResult;
+        }
+        if (channel === "document:copy-invitation-passphrase") return true;
         if (channel === "document:create") {
           return creationResult;
         }
@@ -78,7 +93,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     },
   });
   assert.deepEqual(Object.keys(exposed), [
-    "getProfile", "saveProfile", "getClientSettings", "saveClientSettings",
+    "getProfile", "saveProfile", "reconcileProfile", "getClientSettings", "saveClientSettings",
     "getUnresolvedJournalSummary", "chooseCreateTarget", "cancelCreateTarget",
     "createDocument", "chooseOpenTarget", "cancelOpenTarget",
     "openSelectedDocument", "unlockDocument",
@@ -86,7 +101,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
     "discardPendingPublication", "backupDocument", "compactDocument", "migrateDocument",
-    "createInvitation",
+    "changePassword", "createInvitation", "copyInvitationPassphrase",
     "claimInvitation", "cancelInvitationClaim", "reconcileIdentity",
     "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
@@ -96,6 +111,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "onSwitchRetained",
   ]);
   assert.equal(await exposed.compactDocument(), null);
+  assert.equal(await exposed.reconcileProfile(), null);
+  assert.equal(invocations.at(-1).channel, "profile:reconcile-active");
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.chooseCreateTarget())),
     { selected: true });
   assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
@@ -180,6 +197,43 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:unlock", request: "correct password" });
   assert.equal(await exposed.cancelInvitationClaim(), true);
   assert.equal(invocations.at(-1).channel, "document:cancel-invitation-claim");
+  await exposed.changePassword({ currentPassword: "current password words",
+    newPassword: "replacement password words",
+    newPasswordConfirmation: "replacement password words", ignored: "private" });
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:change-password", request: {
+      currentPassword: "current password words", newPassword: "replacement password words",
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.createInvitation({
+    temporaryLabel: "Colleague", temporaryPassword: "", canEdit: true,
+    canAddPasswords: false, canRemovePasswords: false, ignored: "private",
+  }))), { created: true, temporaryPassword: "generated secret words" });
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:create-invitation", request: {
+      temporaryLabel: "Colleague", canEdit: true, canAddPasswords: false,
+      canRemovePasswords: false,
+    },
+  });
+  invitationResult = { created: true, temporaryPassword: "" };
+  await assert.rejects(exposed.createInvitation({ temporaryLabel: "Colleague",
+    canEdit: false, canAddPasswords: false, canRemovePasswords: false }),
+  /invalid invitation result/);
+  assert.equal(await exposed.copyInvitationPassphrase("generated secret words"), true);
+  assert.deepEqual(invocations.at(-1), {
+    channel: "document:copy-invitation-passphrase", request: "generated secret words" });
+  await assert.rejects(exposed.claimInvitation({ newPassword: "short",
+    newPasswordConfirmation: "short" }), /at least 12/);
+  await assert.rejects(exposed.claimInvitation({
+    newPassword: "replacement password words",
+    newPasswordConfirmation: "mismatched password words",
+  }), /do not match/);
+  assert.equal((await exposed.claimInvitation({
+    newPassword: "replacement password words",
+    newPasswordConfirmation: "replacement password words", ignored: "private",
+  })).content, "claimed");
+  assert.deepEqual(invocations.at(-1), { channel: "document:claim-invitation",
+    request: "replacement password words" });
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password typo",
