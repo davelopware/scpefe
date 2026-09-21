@@ -61,4 +61,8 @@ export class ReplacementCoordinator {
     this.invitation = null;
     return true;
   }
+
+  hasStagedCandidate(candidate) {
+    return this.invitation?.candidate === candidate;
+  }
 }

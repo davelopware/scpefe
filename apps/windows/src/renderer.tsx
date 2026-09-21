@@ -774,6 +774,9 @@ function App() {
   }
 
   function showLockedResult(result: LockResult) {
+    document.querySelectorAll<HTMLInputElement>(
+      "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
       setOpened(null);
       setWorkingText("");
@@ -784,16 +787,22 @@ function App() {
       setReplaceText("");
       setPendingProfile(null);
       setProfileError("");
+      setOpenError("");
+      setPendingOpenName("");
       setPasswordError("");
       setInvitationPassphrase(null);
       setInvitationError("");
       setClaimError("");
+      setInvitationStaged(false);
+      setExternalOpenRequest(null);
+      setQueuedExternalOpenRequest(null);
       setCreating(false);
       setDialog(null);
       setEditFailure(null);
       setLocked(targetNameRef.current !== null);
       setMessage(result.warning ?? "Document locked. Use Security → Unlock to continue.");
     });
+    dialogReturnFocus.current = null;
   }
 
   function edit(content: string, cursor?: Cursor) {
