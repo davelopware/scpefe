@@ -13,7 +13,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /contextIsolation:\s*true/);
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
-  assert.match(main, /service\.lock\(["']app-lock["']\)/);
+  assert.match(main, /lockActive\(["']app-lock["']\)/);
   assert.match(main, /requestSingleInstanceLock/);
   assert.match(main, /app\.on\(["']second-instance["']/);
   assert.match(main, /existing instance remains authoritative/);
@@ -66,8 +66,10 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "getClientSettings", "saveClientSettings",
-    "getUnresolvedJournalSummary", "chooseCreateTarget", "cancelCreateTarget",
-    "createDocument", "openDocument",
+    "getUnresolvedJournalSummary", "prepareReplacement", "chooseCreateTarget", "cancelCreateTarget",
+    "createDocument", "openDocument", "chooseOpenTarget", "cancelOpenTarget",
+    "openSelectedDocument", "unlockDocument", "closeDocument", "exitApplication",
+    "setWindowTitle",
     "openExternalDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",

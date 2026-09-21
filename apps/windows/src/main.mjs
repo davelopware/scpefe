@@ -68,7 +68,7 @@ async function acknowledgeRequest(request, status, sequence) {
     JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
 }
 
-async function prepareDocumentSwitch() {
+async function prepareDocumentSwitch(finish = true) {
   if (!service.active) return true;
   let decision = "save";
   if (needsCloseDecision(service.active)) {
@@ -121,7 +121,7 @@ async function prepareDocumentSwitch() {
       return false;
     }
   }
-  await finishDocumentSwitch(service);
+  if (finish) await finishDocumentSwitch(service);
   await sendJournalSummary();
   return true;
 }
@@ -285,6 +285,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     service.saveClientSettings(settings));
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   const creationFlow = new CreationTargetFlow();
+  let selectedOpenTarget = null;
+  let lockedTarget = null;
+  let replacementPrepared = false;
+  const lockActive = (reason) => {
+    if (service.active?.target) lockedTarget = service.active.target;
+    return service.lock(reason);
+  };
+  ipcMain.handle("document:prepare-replacement", async () => {
+    replacementPrepared = await prepareDocumentSwitch(false);
+    return replacementPrepared;
+  });
   ipcMain.handle("document:choose-create-target", async () =>
     creationFlow.chooseTarget(async () => {
       const chosen = await dialog.showSaveDialog(window, {
@@ -294,9 +305,23 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       });
       return chosen.canceled || !chosen.filePath ? null : chosen.filePath;
     }));
-  ipcMain.handle("document:cancel-create-target", () => creationFlow.cancel());
+  ipcMain.handle("document:cancel-create-target", () => {
+    replacementPrepared = false;
+    return creationFlow.cancel();
+  });
   ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
-    (target, validated) => service.createDocument(target, validated)));
+    async (target, validated) => {
+      await service.createDocument(target, validated);
+      if (!replacementPrepared && !await prepareDocumentSwitch(false)) {
+        throw new Error("The current document remains open");
+      }
+      await finishDocumentSwitch(service);
+      replacementPrepared = false;
+      await service.openDocument(target, validated.ownerPassword);
+      const editable = await service.enterEditMode();
+      lockedTarget = target;
+      return { created: true, opened: editable, name: path.basename(target) };
+    }));
   ipcMain.handle("document:open", async (_event, password) => {
     const chosen = await dialog.showOpenDialog(window, {
       title: "Open encrypted document",
@@ -310,6 +335,42 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       await sendJournalSummary();
       return opened;
     });
+  });
+  ipcMain.handle("document:choose-open-target", async () => {
+    const chosen = await dialog.showOpenDialog(window, {
+      title: "Open encrypted document",
+      filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
+      properties: ["openFile"],
+    });
+    selectedOpenTarget = chosen.canceled || chosen.filePaths.length !== 1
+      ? null : chosen.filePaths[0];
+    return selectedOpenTarget
+      ? Object.freeze({ selected: true, name: path.basename(selectedOpenTarget) }) : null;
+  });
+  ipcMain.handle("document:cancel-open-target", () => {
+    selectedOpenTarget = null;
+    replacementPrepared = false;
+  });
+  ipcMain.handle("document:open-selected", async (_event, password) => {
+    if (!selectedOpenTarget) throw new Error("Choose a document first");
+    const target = selectedOpenTarget;
+    const opened = await openRequests.run(async () => {
+      const inspected = native.openDocument(await fs.readFile(target), password);
+      inspected?.journalKey?.fill?.(0);
+      if (!replacementPrepared && !await prepareDocumentSwitch(false)) return null;
+      await finishDocumentSwitch(service);
+      replacementPrepared = false;
+      return service.openDocument(target, password);
+    });
+    if (!opened) throw new Error("The current document remains open");
+    selectedOpenTarget = null;
+    lockedTarget = target;
+    await sendJournalSummary();
+    return opened;
+  });
+  ipcMain.handle("document:unlock", async (_event, password) => {
+    if (!lockedTarget) throw new Error("No locked document is available");
+    return service.openDocument(lockedTarget, password);
   });
   ipcMain.handle("document:open-external", async (_event, request) => {
     if (!request || typeof request !== "object"
@@ -416,7 +477,33 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
   ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
   ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
-  ipcMain.handle("document:lock", () => service.lock("app-lock"));
+  ipcMain.handle("document:lock", () => {
+    return lockActive("app-lock");
+  });
+  ipcMain.handle("document:close", async () => {
+    if (!service.active) return true;
+    if (needsCloseDecision(service.active)) {
+      const choice = await dialog.showMessageBox(window, {
+        type: "warning", title: "Close document?",
+        message: "This document has work that requires a decision.",
+        detail: "Manual save preserves the work. Discard restores the last manually saved content.",
+        buttons: ["Cancel", "Manual save and close", "Discard and close"],
+        defaultId: 0, cancelId: 0, noLink: true,
+      });
+      if (!await applyCloseDecision(service,
+        ["cancel", "save", "discard"][choice.response])) return false;
+    }
+    if (service.active?.target) lockedTarget = service.active.target;
+    await lockActive("document-close");
+    lockedTarget = null;
+    return true;
+  });
+  ipcMain.handle("application:exit", () => { window.close(); return true; });
+  ipcMain.handle("window:set-title", (_event, title) => {
+    const safe = typeof title === "string" && title.length <= 260
+      && !title.includes("/") && !title.includes("\\") ? title : "SCPEFE";
+    window.setTitle(safe);
+  });
   window = new BrowserWindow({
     width: 920,
     height: 700,
@@ -455,7 +542,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       }
       if (service.active?.editMode) {
         try { await service.exitEditMode(); }
-        catch { await service.lock("app-exit"); }
+        catch { await lockActive("app-exit"); }
       }
       closingAfterRelease = true;
       window.close();
@@ -464,9 +551,9 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         `Could not finish exit: ${error.message}`);
     }).finally(() => { closeOperation = null; });
   });
-  powerMonitor.on("lock-screen", () => { void service.lock("screen-lock"); });
-  window.on("blur", () => { void service.lock("background"); });
-  window.on("minimize", () => { void service.lock("background"); });
+  powerMonitor.on("lock-screen", () => { void lockActive("screen-lock"); });
+  window.on("blur", () => { void lockActive("background"); });
+  window.on("minimize", () => { void lockActive("background"); });
   window.loadFile(path.join(here, "..", "dist", "index.html"));
   window.webContents.on("did-finish-load", () => {
     void sendJournalSummary();

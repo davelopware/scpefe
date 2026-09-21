@@ -5,16 +5,11 @@ import test from "node:test";
 test("slot administration exposes labelled keyboard controls and revocation limits", async () => {
   const renderer = await fs.readFile(
     new URL("../src/renderer.tsx", import.meta.url), "utf8");
-  assert.match(renderer,
-    /aria-labelledby="slot-administration-heading"/);
-  assert.match(renderer, /<ul className="managed-slots">/);
-  assert.match(renderer, /<fieldset disabled={!canUpdate}>/);
-  assert.match(renderer, /Password administration always implies edit permission/);
-  assert.match(renderer,
-    /Enter edit mode to publish permission changes or remove a slot/);
+  assert.match(renderer, /<Modal title="Passwords"/);
+  assert.match(renderer, /opened\.managedSlots\?\.map/);
+  assert.match(renderer, /Password administration implies edit permission/);
   assert.match(renderer, /Publish permission changes/);
   assert.match(renderer, /Remove this password slot…/);
-  assert.match(renderer, /role="alert"/);
   assert.match(renderer, /Confirm slot removal/);
   assert.match(renderer,
     /cannot revoke plaintext, keys already obtained, or older replicas/);

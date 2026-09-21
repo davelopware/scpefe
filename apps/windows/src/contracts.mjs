@@ -162,6 +162,16 @@ export function validateCreationTargetResult(value) {
   return Object.freeze({ selected: true });
 }
 
+export function validateOpenTargetResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || value.selected !== true || typeof value.name !== "string"
+      || !value.name || value.name.includes("/") || value.name.includes("\\")
+      || Object.keys(value).some((key) => !["selected", "name"].includes(key))) {
+    throw new TypeError("host returned an invalid open target result");
+  }
+  return Object.freeze({ selected: true, name: value.name });
+}
+
 export function validatePassword(value) {
   return requiredText(value, "password", 4096);
 }
@@ -469,9 +479,16 @@ export function validateLockResult(value) {
 }
 
 export function validateCreationResult(value) {
-  if (!value || typeof value !== "object" || value.created !== true
-      || Object.keys(value).length !== 1) {
+  if (!value || typeof value !== "object" || value.created !== true) {
     throw new TypeError("host returned an invalid creation result");
   }
-  return Object.freeze({ created: true });
+  if (value.opened === undefined && Object.keys(value).length === 1) {
+    return Object.freeze({ created: true });
+  }
+  if (typeof value.name !== "string" || !value.name || value.name.includes("/")
+      || value.name.includes("\\")) {
+    throw new TypeError("host returned an invalid creation result");
+  }
+  const opened = validateEditMode(value.opened);
+  return Object.freeze({ created: true, opened, name: value.name });
 }

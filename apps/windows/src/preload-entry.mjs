@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
+  validateOpenTargetResult,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
@@ -22,6 +23,8 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("settings:save", validateClientSettings(settings))),
   getUnresolvedJournalSummary: async () => validateUnresolvedJournalSummary(
     await ipcRenderer.invoke("journal:summary")),
+  prepareReplacement: async () => (await ipcRenderer.invoke(
+    "document:prepare-replacement")) === true,
   chooseCreateTarget: async () => {
     const value = await ipcRenderer.invoke("document:choose-create-target");
     return value === null ? null : validateCreationTargetResult(value);
@@ -36,6 +39,18 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:open", validatePassword(password));
     return value === null ? null : validateOpenedDocument(value);
   },
+  chooseOpenTarget: async () => {
+    const value = await ipcRenderer.invoke("document:choose-open-target");
+    return value === null ? null : validateOpenTargetResult(value);
+  },
+  cancelOpenTarget: () => ipcRenderer.invoke("document:cancel-open-target"),
+  openSelectedDocument: async (password) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:open-selected", validatePassword(password))),
+  unlockDocument: async (password) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:unlock", validatePassword(password))),
+  closeDocument: () => ipcRenderer.invoke("document:close"),
+  exitApplication: () => ipcRenderer.invoke("application:exit"),
+  setWindowTitle: (title) => ipcRenderer.invoke("window:set-title", String(title)),
   openExternalDocument: async (request) => {
     const value = await ipcRenderer.invoke("document:open-external", {
       token: validateExternalOpenRequest(request).token,
