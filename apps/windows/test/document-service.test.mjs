@@ -9,7 +9,6 @@ import { applyCloseDecision } from "../src/close-document.mjs";
 import { compactWithBackupSelection } from "../src/compaction-flow.mjs";
 import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
   DocumentService } from "../src/document-service.mjs";
-import { confirmAndMigrate } from "../src/migration-flow.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -579,15 +578,24 @@ test("migration applies uncertain-clock observation and explicit takeover rules"
   assert.equal((await fixture.service.migrateDocument()).migrated, true);
 });
 
+async function confirmedMigrationTakeover(service, beforeConfirm = () => {}) {
+  let takeoverToken;
+  await assert.rejects(service.migrateDocument(), (error) => {
+    assert.equal(error.code, "LEASE_CLOCK_UNCERTAIN");
+    takeoverToken = error.takeoverToken;
+    return true;
+  });
+  await beforeConfirm();
+  return service.migrateDocument(undefined, { takeoverToken });
+}
+
 test("confirmed migration takeover succeeds only for the presented lease", async (t) => {
   const fixture = await migrationFixture(t, "scpefe-migration-force-");
   fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
     heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
     holderName: "Remote editor", holderEmail: "remote@example.test",
     deviceName: "Future clock" };
-  const dialog = { async showMessageBox() { return { response: 1 }; } };
-  assert.equal((await confirmAndMigrate({ service: fixture.service, dialog,
-    window: {} })).migrated, true);
+  assert.equal((await confirmedMigrationTakeover(fixture.service)).migrated, true);
 });
 
 test("dialog confirmation rejects a refreshed lease before backup or migration", async (t) => {
@@ -596,19 +604,12 @@ test("dialog confirmation rejects a refreshed lease before backup or migration",
     heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
     holderName: "Remote editor", holderEmail: "remote@example.test",
     deviceName: "Future clock" };
-  let prompts = 0;
   let candidateCreated = false;
   fixture.native.migrationHook = () => { candidateCreated = true; };
-  const dialog = { async showMessageBox() {
-    prompts += 1;
-    if (prompts === 2) {
-      fixture.native.legacyLease = { ...fixture.native.legacyLease,
-        heartbeatCounter: 5, holderUtcMs: 9_000_100 };
-    }
-    return { response: 1 };
-  } };
-  await assert.rejects(confirmAndMigrate({ service: fixture.service, dialog,
-    window: {} }), (error) => error.code === "LEASE_CHANGED");
+  await assert.rejects(confirmedMigrationTakeover(fixture.service, () => {
+    fixture.native.legacyLease = { ...fixture.native.legacyLease,
+      heartbeatCounter: 5, holderUtcMs: 9_000_100 };
+  }), (error) => error.code === "LEASE_CHANGED");
   assert.equal(candidateCreated, false);
   await assert.rejects(fs.access(path.join(fixture.directory,
     "document.backup-19700101T000001Z.scpefe")), (error) => error.code === "ENOENT");
@@ -626,9 +627,7 @@ test("confirmed migration still rejects a later candidate publication race", asy
 
   const competing = Buffer.from("competing-container");
   racing.native.migrationHook = () => fsSync.writeFileSync(racing.target, competing);
-  const dialog = { async showMessageBox() { return { response: 1 }; } };
-  await assert.rejects(confirmAndMigrate({ service: racing.service, dialog,
-    window: {} }), /Publication/);
+  await assert.rejects(confirmedMigrationTakeover(racing.service), /Publication/);
   assert.ok((await fs.readFile(racing.target)).equals(competing));
 });
 

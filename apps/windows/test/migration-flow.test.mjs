@@ -1,17 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { confirmAndMigrate, migrateWithBackupSelection,
+import { migrateWithBackupSelection,
   registerMigrationHandler } from "../src/migration-flow.mjs";
 
-test("declining migration performs no write", async () => {
-  let calls = 0;
-  const result = await confirmAndMigrate({ service: { migrateDocument() { calls += 1; } },
-    dialog: { async showMessageBox() { return { response: 0 }; } }, window: {} });
-  assert.equal(result, null);
-  assert.equal(calls, 0);
-});
-
-test("migration warns about older clients and retries a failed backup elsewhere", async () => {
+test("migration retries a failed backup elsewhere", async () => {
   const calls = [];
   const service = { suggestedBackupTarget: () => "C:\\default.scpefe",
     async migrateDocument(target, options) {
@@ -23,26 +15,22 @@ test("migration warns about older clients and retries a failed backup elsewhere"
       return { migrated: true };
     } };
   const dialog = {
-    async showMessageBox(_window, options) {
-      assert.match(options.detail, /Older SCPEFE clients/);
-      assert.match(options.detail, /verified exact backup/);
-      return { response: 1 };
-    },
     async showSaveDialog() { return { canceled: false, filePath: "D:\\safe.scpefe" }; },
   };
-  assert.deepEqual(await confirmAndMigrate({ service, dialog, window: {} }),
+  assert.deepEqual(await migrateWithBackupSelection({ service, dialog, window: {} }),
     { migrated: true });
   assert.deepEqual(calls, [[undefined, { takeoverToken: undefined }],
     ["D:\\safe.scpefe", { takeoverToken: undefined }]]);
 });
 
-test("trusted migration IPC boundary delegates through confirmation", async () => {
+test("trusted migration IPC boundary validates renderer decision", async () => {
   let handler;
   registerMigrationHandler({ ipcMain: { handle(channel, value) {
     assert.equal(channel, "document:migrate"); handler = value;
   } }, service: { async migrateDocument() { return { migrated: true }; } },
-  dialog: { async showMessageBox() { return { response: 1 }; } }, window: {} });
-  assert.deepEqual(await handler(), { migrated: true });
+  dialog: {}, window: {} });
+  await assert.rejects(handler({}, {}), /migration decision is invalid/);
+  assert.deepEqual(await handler({}, { forceTakeover: false }), { migrated: true });
 });
 
 test("only backup failures offer another destination", async () => {
@@ -54,7 +42,7 @@ test("only backup failures offer another destination", async () => {
   assert.equal(prompted, false);
 });
 
-test("uncertain migration lease requires trusted explicit force confirmation", async () => {
+test("uncertain migration lease requires a staged renderer confirmation", async () => {
   const calls = [];
   const takeoverToken = Object.freeze({});
   const service = { async migrateDocument(target, options) {
@@ -68,34 +56,21 @@ test("uncertain migration lease requires trusted explicit force confirmation", a
     }
     return { migrated: true };
   } };
-  let prompts = 0;
-  const dialog = { async showMessageBox(_window, options) {
-    prompts += 1;
-    if (prompts === 1) return { response: 1 };
-    assert.match(options.message, /Remote editor/);
-    assert.match(options.detail, /confirmed that no other client is editing/);
-    return { response: 1 };
-  } };
-  assert.deepEqual(await confirmAndMigrate({ service, dialog, window: {} }),
-    { migrated: true });
+  let handler;
+  registerMigrationHandler({ ipcMain: { handle(_channel, value) { handler = value; } },
+    service, dialog: {}, window: {} });
+  assert.deepEqual(await handler({}, { forceTakeover: false }),
+    { decisionRequired: "lease-takeover", holderName: "Remote editor" });
+  assert.deepEqual(await handler({}, { forceTakeover: true }), { migrated: true });
   assert.deepEqual(calls, [[undefined, { takeoverToken: undefined }],
     [undefined, { takeoverToken }]]);
 });
 
-test("canceling uncertain-clock takeover keeps migration read-only", async () => {
-  let calls = 0;
-  const service = { async migrateDocument() {
-    calls += 1;
-    const error = new Error("future lease");
-    error.code = "LEASE_CLOCK_UNCERTAIN";
-    error.lease = { holderName: "Remote editor" };
-    throw error;
-  } };
-  let prompts = 0;
-  const dialog = { async showMessageBox() {
-    prompts += 1;
-    return { response: prompts === 1 ? 1 : 0 };
-  } };
-  assert.equal(await confirmAndMigrate({ service, dialog, window: {} }), null);
-  assert.equal(calls, 1);
+test("force migration is rejected without a staged uncertain lease", async () => {
+  let handler;
+  registerMigrationHandler({ ipcMain: { handle(_channel, value) { handler = value; } },
+    service: { async migrateDocument() { throw new Error("must not run"); } },
+    dialog: {}, window: {} });
+  await assert.rejects(handler({}, { forceTakeover: true }),
+    /No migration lease takeover/);
 });

@@ -26,6 +26,7 @@ type ManagedSlot = { slotId: string; identityName: string; identityEmail: string
   mustBeChangedKnown?: boolean; identityKnown?: boolean };
 type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
+type LeaseDecision = { decisionRequired: "lease-takeover"; holderName: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   targetName?: string;
@@ -38,7 +39,7 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
 type DialogName = "profile" | "open" | "find" | "replace" | "export"
-  | "unlock" | "passwords" | null;
+  | "unlock" | "passwords" | "compaction" | null;
 type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
   | "recovery" | "publication" | null;
 
@@ -266,7 +267,7 @@ declare global { interface Window { scpefe: {
   unlockDocument(password: string): Promise<Opened>;
   openExternalDocument(request: ExternalOpenRequest & { password: string }):
     Promise<Opened | null>;
-  enterEditMode(): Promise<DocumentOpened>;
+  enterEditMode(request?: { forceTakeover: boolean }): Promise<DocumentOpened | LeaseDecision>;
   saveDocument(content: string): Promise<{ saved: true; content: string;
     publicationState: PublicationState }>;
   reconnectPendingPublication(): Promise<{ content: string;
@@ -276,10 +277,11 @@ declare global { interface Window { scpefe: {
     publicationState: PublicationState }>;
   discardPendingPublication(): Promise<DocumentOpened>;
   backupDocument(): Promise<{ backedUp: true } | null>;
-  compactDocument(): Promise<{ compacted: true; backupCreated: true;
+  compactDocument(request: { confirmed: true }): Promise<{ compacted: true; backupCreated: true;
     previousHead: string; head: string } | null>;
-  migrateDocument(): Promise<{ migrated: true; backupCreated: true;
-    compatibilityWarning: string; opened: DocumentOpened } | null>;
+  migrateDocument(request?: { forceTakeover: boolean }): Promise<{
+    migrated: true; backupCreated: true; compatibilityWarning: string;
+    opened: DocumentOpened } | LeaseDecision | null>;
   changePassword(request: { currentPassword: string; newPassword: string;
     newPasswordConfirmation: string }): Promise<DocumentOpened>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
@@ -338,6 +340,12 @@ function App() {
   const [targetName, setTargetName] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [editFailure, setEditFailure] = useState<string | null>(null);
+  const [leaseDecision, setLeaseDecision] = useState<{
+    operation: "edit" | "migration"; holderName: string } | null>(null);
+  const [decisionError, setDecisionError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [compactionError, setCompactionError] = useState("");
+  const [resolvingConflict, setResolvingConflict] = useState(false);
   const [pendingProfile, setPendingProfile] = useState<Profile | null>(null);
   const [profileError, setProfileError] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -352,11 +360,12 @@ function App() {
   const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
   const openedDialog = openedDialogName(opened);
-  const visibleOpenedDialog = !creating && dialog === null
+  const visibleOpenedDialog = !creating && dialog === null && !resolvingConflict
+    && leaseDecision === null && saveError === ""
     ? invitationStaged ? "claim" : openedDialog : null;
-  modalBusy.current = creating || dialog !== null || openedDialog !== null
+  modalBusy.current = creating || dialog !== null || visibleOpenedDialog !== null
     || invitationStaged
-    || editFailure !== null;
+    || editFailure !== null || leaseDecision !== null || saveError !== "";
   useEffect(() => {
     window.scpefe.getProfile().then((value) => {
       setProfile(value); if (!value) setDialog("profile");
@@ -596,24 +605,58 @@ function App() {
 
   async function enterEditMode() {
     try {
-      setOpened(await window.scpefe.enterEditMode());
+      const result = await window.scpefe.enterEditMode({ forceTakeover: false });
+      if ("decisionRequired" in result) {
+        setLeaseDecision({ operation: "edit", holderName: result.holderName });
+        setDecisionError("");
+        setMessage("Editing requires a confirmed lease takeover.");
+        return;
+      }
+      setOpened(result);
       setMessage("Edit mode entered.");
     } catch (error) {
       setEditFailure(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function migrate() {
+  async function migrate(forceTakeover = false) {
     try {
-      const result = await window.scpefe.migrateDocument();
+      setDecisionError("");
+      const result = await window.scpefe.migrateDocument({ forceTakeover });
       if (!result) {
         setMessage("Migration declined. The document remains read-only; saving requires migration.");
         return;
       }
+      if ("decisionRequired" in result) {
+        setLeaseDecision({ operation: "migration", holderName: result.holderName });
+        setMessage("Migration requires a confirmed lease takeover.");
+        return;
+      }
+      setLeaseDecision(null);
       setOpened(result.opened);
       setWorkingText(result.opened.content);
       setMessage(result.compatibilityWarning);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      const value = error instanceof Error ? error.message : String(error);
+      setDecisionError(value); setMessage(`Migration needs attention: ${value}`);
+    }
+  }
+
+  async function confirmLeaseTakeover() {
+    if (!leaseDecision) return;
+    try {
+      setDecisionError("");
+      if (leaseDecision.operation === "migration") {
+        await migrate(true);
+        return;
+      }
+      const result = await window.scpefe.enterEditMode({ forceTakeover: true });
+      if ("decisionRequired" in result) throw new Error("Lease evidence is still uncertain");
+      setOpened(result); setLeaseDecision(null); setMessage("Edit mode entered after confirmed lease takeover.");
+    } catch (error) {
+      const value = error instanceof Error ? error.message : String(error);
+      setDecisionError(value); setMessage(`Lease takeover needs attention: ${value}`);
+    }
   }
 
   async function claimInvitation(event: FormEvent<HTMLFormElement>) {
@@ -799,6 +842,11 @@ function App() {
       setCreating(false);
       setDialog(null);
       setEditFailure(null);
+      setLeaseDecision(null);
+      setDecisionError("");
+      setSaveError("");
+      setCompactionError("");
+      setResolvingConflict(false);
       setLocked(targetNameRef.current !== null);
       setMessage(result.warning ?? "Document locked. Use Security → Unlock to continue.");
     });
@@ -817,6 +865,7 @@ function App() {
 
   async function save() {
     try {
+      setSaveError("");
       const result = saveState === "conflict"
         ? await window.scpefe.saveDivergenceResolution(workingText)
         : await window.scpefe.saveDocument(workingText);
@@ -829,12 +878,16 @@ function App() {
         publicationState: result.publicationState,
         provisional: undefined } : current);
       setSaveState(result.publicationState);
+      if (result.publicationState !== "conflict") setResolvingConflict(false);
       setMessage(result.publicationState === "pending-publication"
         ? "Manual save is pending publication; its exact candidate is stored locally."
         : result.publicationState === "conflict"
           ? "Manual save is local, but the target changed; divergence must be resolved."
           : "Manual save published and verified.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      const value = error instanceof Error ? error.message : String(error);
+      setSaveError(value); setMessage(`Manual save failed; changes remain recoverable: ${value}`);
+    }
   }
 
   async function beginDivergenceResolution() {
@@ -847,6 +900,7 @@ function App() {
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: draft.content, readOnly: false, canEdit: true } : current);
       setSaveState("conflict");
+      setResolvingConflict(true);
       setMessage(draft.hasConflicts
         ? "Resolve every local/current marker, then save the merge."
         : "The three-way merge is clean. Review it, then save the merge.");
@@ -867,6 +921,7 @@ function App() {
       setManualSavedText(result.content);
       setDirty(false);
       setSaveState(result.publicationState);
+      if (result.publicationState !== "conflict") setResolvingConflict(false);
       setMessage(result.publicationState === "target-published"
         ? "Pending manual save published and verified."
         : result.publicationState === "conflict"
@@ -896,10 +951,16 @@ function App() {
 
   async function compact() {
     try {
-      const result = await window.scpefe.compactDocument();
-      if (result) setMessage(
-        "Verified backup created and document history compacted.");
-    } catch (error) { showError(error); }
+      setCompactionError("");
+      const result = await window.scpefe.compactDocument({ confirmed: true });
+      if (result) {
+        setDialog("passwords");
+        setMessage("Verified backup created and document history compacted.");
+      } else setMessage("Compaction canceled; document history is unchanged.");
+    } catch (error) {
+      const value = error instanceof Error ? error.message : String(error);
+      setCompactionError(value); setMessage(`Compaction needs attention: ${value}`);
+    }
   }
 
   function moveHistory(offset: number) {
@@ -992,7 +1053,9 @@ function App() {
       {!activeDocument && <p className="editor-placeholder" role="note">
         {lockedDocument ? "Document locked. Use Security → Unlock to continue."
           : "No document. Use File → New or File → Open."}</p>}
-      <textarea ref={editor} aria-label="Document text" value={activeDocument ? workingText : ""}
+      <textarea ref={editor} aria-label="Document text"
+        value={activeDocument && visibleOpenedDialog === null && !leaseDecision && !saveError
+          ? workingText : ""}
         disabled={!activeDocument} readOnly={!activeDocument || opened.readOnly}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
@@ -1009,6 +1072,25 @@ function App() {
         <p>The document remains read-only.</p></div>
       <div className="dialog-actions"><button autoFocus onClick={() => setEditFailure(null)}>
         Continue read-only</button></div>
+    </FocusedDialog>}
+    {leaseDecision && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Confirm editing-lease takeover">
+      <div className="warning" role="alert"><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
+        <p>Force takeover only after confirming that no other client is editing this document.</p></div>
+      {decisionError && <p className="dialog-error" role="alert">{decisionError}</p>}
+      <div className="dialog-actions"><button autoFocus onClick={() => {
+        setLeaseDecision(null); setDecisionError("");
+        setMessage("Lease takeover canceled; the document remains read-only.");
+      }}>Cancel</button><button onClick={() => void confirmLeaseTakeover()}>
+        {leaseDecision.operation === "migration" ? "Force takeover and migrate" : "Force takeover"}
+      </button></div>
+    </FocusedDialog>}
+    {saveError && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Manual save failed" close={() => setSaveError("")}>
+      <p className="dialog-error" role="alert">{saveError}</p>
+      <p>The working copy and recovery journal remain available. No successful publication is being reported.</p>
+      <div className="dialog-actions"><button onClick={() => setSaveError("")}>Continue editing</button>
+        <button autoFocus onClick={() => void save()}>Retry manual save</button></div>
     </FocusedDialog>}
     {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={async () => {
       await window.scpefe.cancelCreateTarget(); setCreating(false);
@@ -1129,9 +1211,23 @@ function App() {
         {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
         <SlotAdministration opened={opened} onUpdate={updateManagedSlot}
-          onRemove={removeManagedSlot} onCompact={compact} />
+          onRemove={removeManagedSlot} onCompact={async () => {
+            setCompactionError(""); setDialog("compaction");
+          }} />
         <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></>}
       </FocusedDialog>}
+    {dialog === "compaction" && activeDocument && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title="Permanently compact document history?"
+      close={() => { setCompactionError(""); setDialog("passwords"); }}>
+      <div className="warning" role="alert"><p>Compaction irreversibly removes older embedded history from this container.</p>
+        <p>SCPEFE creates and verifies an exact backup first. Compaction cannot delete copies held by backups, sync tools, caches, or storage providers.</p></div>
+      {compactionError && <p className="dialog-error" role="alert">{compactionError}</p>}
+      <div className="dialog-actions"><button autoFocus onClick={() => {
+        setCompactionError(""); setDialog("passwords");
+        setMessage("Compaction canceled; document history is unchanged.");
+      }}>Cancel</button><button onClick={() => void compact()}>
+        Create verified backup and compact</button></div>
+    </FocusedDialog>}
     {visibleOpenedDialog === "claim" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Claim invitation">
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
@@ -1147,7 +1243,8 @@ function App() {
       <div className="warning" role="alert"><p>{opened.migrationWarning}</p>
         <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Keep read-only and close</button>
-        <button onClick={migrate}>Create verified backup and migrate…</button></div></FocusedDialog>}
+        {decisionError && <p className="dialog-error" role="alert">{decisionError}</p>}
+        <button onClick={() => void migrate()}>Create verified backup and migrate…</button></div></FocusedDialog>}
     {visibleOpenedDialog === "profile-mismatch" && activeDocument && opened.profileMismatch && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Profile mismatch">
       <div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p>

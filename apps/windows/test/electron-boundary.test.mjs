@@ -40,6 +40,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let creationResult = { created: true, opened: editOpened,
     name: "C:\\Users\\Ada\\secret.scpefe" };
   let compactionResult = null;
+  let editResult = editOpened;
+  let migrationResult = null;
   let invitationResult = { created: true,
     temporaryPassword: "generated secret words" };
   const invocations = [];
@@ -82,6 +84,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
           return { backedUp: true, target: "C:\\Users\\Ada\\backup.scpefe" };
         }
         if (channel === "document:compact") return compactionResult;
+        if (channel === "document:enter-edit-mode") return editResult;
+        if (channel === "document:migrate") return migrationResult;
         return null;
       } },
   };
@@ -110,7 +114,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "onUnresolvedJournalSummary",
     "onSwitchRetained",
   ]);
-  assert.equal(await exposed.compactDocument(), null);
+  await assert.rejects(exposed.compactDocument(), /explicitly confirmed/);
+  assert.equal(invocations.some(({ channel }) => channel === "document:compact"), false);
+  assert.equal(await exposed.compactDocument({ confirmed: true }), null);
   assert.equal(await exposed.reconcileProfile(), null);
   assert.equal(invocations.at(-1).channel, "profile:reconcile-active");
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.chooseCreateTarget())),
@@ -124,11 +130,31 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   compactionResult = { compacted: true, backupCreated: true,
     previousHead: "12".repeat(32), head: "34".repeat(32) };
-  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument())),
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument(
+    { confirmed: true }))),
     compactionResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:compact", request: { confirmed: true },
+  });
   compactionResult = { compacted: true, backupCreated: false,
     previousHead: "12".repeat(32), head: "34".repeat(32) };
-  await assert.rejects(exposed.compactDocument(), /invalid compaction result/);
+  await assert.rejects(exposed.compactDocument({ confirmed: true }),
+    /invalid compaction result/);
+  assert.equal((await exposed.enterEditMode()).readOnly, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:enter-edit-mode", request: { forceTakeover: false },
+  });
+  editResult = { decisionRequired: "lease-takeover", holderName: "Remote editor" };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.enterEditMode(
+    { forceTakeover: false }))), editResult);
+  await assert.rejects(exposed.enterEditMode({ forceTakeover: true, extra: true }),
+    /lease takeover request is invalid/);
+  migrationResult = { decisionRequired: "lease-takeover", holderName: "Future editor" };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.migrateDocument())),
+    migrationResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:migrate", request: { forceTakeover: false },
+  });
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password words",

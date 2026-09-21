@@ -36,37 +36,30 @@ test("trusted IPC confirmation gates default and alternate backup attempts",
         return { compacted: true };
       },
     };
-    const dialog = { async showMessageBox(_window, options) {
-      assert.equal(options.defaultId, 0);
-      assert.equal(options.cancelId, 0);
-      assert.match(options.message, /irreversible local history removal/);
-      assert.match(options.detail, /external copies/);
-      assert.match(options.detail, /exact backup replica/);
-      return { response: 1 };
-    }, async showSaveDialog(_window, options) {
+    const dialog = { async showSaveDialog(_window, options) {
       assert.equal(options.defaultPath,
         "C:\\docs\\notes.backup-date.scpefe");
       return { canceled: false, filePath: "D:\\safe\\notes.scpefe" };
     } };
     const invokeCompact = registeredBoundary({ service, dialog,
       window: {}, confirmation });
-    assert.deepEqual(await invokeCompact(), { compacted: true });
+    assert.deepEqual(await invokeCompact({}, { confirmed: true }), { compacted: true });
     assert.deepEqual(calls, [
       { received: confirmation, target: undefined },
       { received: confirmation, target: "D:\\safe\\notes.scpefe" },
     ]);
   });
 
-test("trusted IPC cancellation makes zero service and backup-selection calls",
+test("trusted IPC rejects missing renderer confirmation before any service call",
   async () => {
     let serviceCalls = 0;
     let saveDialogs = 0;
     const service = { async compactDocument() { serviceCalls += 1; } };
-    const dialog = { async showMessageBox() { return { response: 0 }; },
-      async showSaveDialog() { saveDialogs += 1; } };
+    const dialog = { async showSaveDialog() { saveDialogs += 1; } };
     const invokeCompact = registeredBoundary({ service, dialog,
       window: {}, confirmation });
-    assert.equal(await invokeCompact(), null);
+    assert.throws(() => invokeCompact({}, { confirmed: false }),
+      /confirmation is invalid/);
     assert.equal(serviceCalls, 0);
     assert.equal(saveDialogs, 0);
   });
@@ -78,11 +71,11 @@ test("trusted IPC confirmation makes exactly one default attempt on success",
       calls.push({ received, target });
       return { compacted: true };
     } };
-    const dialog = { async showMessageBox() { return { response: 1 }; },
-      async showSaveDialog() { throw new Error("must not select an alternate"); } };
+    const dialog = { async showSaveDialog() {
+      throw new Error("must not select an alternate"); } };
     const invokeCompact = registeredBoundary({ service, dialog,
       window: {}, confirmation });
-    assert.deepEqual(await invokeCompact(), { compacted: true });
+    assert.deepEqual(await invokeCompact({}, { confirmed: true }), { compacted: true });
     assert.deepEqual(calls, [{ received: confirmation, target: undefined }]);
   });
 

@@ -16,34 +16,30 @@ export async function migrateWithBackupSelection({ service, dialog, window,
   return service.migrateDocument(chosen.filePath, { takeoverToken });
 }
 
-/* Presents the older-client warning before any migration work starts. */
-export async function confirmAndMigrate({ service, dialog, window }) {
-  const warning = await dialog.showMessageBox(window, {
-    type: "warning", title: "Migrate older encrypted document?",
-    message: "Migration is required before this document can be edited or saved.",
-    detail: "A verified exact backup will be created first. Older SCPEFE clients may not open the migrated document.",
-    buttons: ["Keep read-only", "Create backup and migrate"],
-    defaultId: 0, cancelId: 0, noLink: true,
-  });
-  if (warning.response !== 1) return null;
-  try {
-    return await migrateWithBackupSelection({ service, dialog, window });
-  } catch (error) {
-    if (error?.code !== "LEASE_CLOCK_UNCERTAIN") throw error;
-    const takeover = await dialog.showMessageBox(window, {
-      type: "warning", title: "Editing lease time cannot be trusted",
-      message: `The editing lease held by ${error.lease?.holderName || "another editor"} appears to be from the future.`,
-      detail: "Only force takeover if you have confirmed that no other client is editing this document.",
-      buttons: ["Cancel", "Force takeover and migrate"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    if (takeover.response !== 1) return null;
-    return migrateWithBackupSelection({ service, dialog, window,
-      takeoverToken: error.takeoverToken });
-  }
-}
-
-/* Registers the trusted Electron migration boundary. */
+/* Registers a two-step migration boundary while retaining takeover authority in main. */
 export function registerMigrationHandler({ ipcMain, service, dialog, window }) {
-  ipcMain.handle("document:migrate", () => confirmAndMigrate({ service, dialog, window }));
+  let pendingTakeover = null;
+  ipcMain.handle("document:migrate", async (_event, request) => {
+    if (!request || typeof request !== "object"
+        || typeof request.forceTakeover !== "boolean"
+        || Object.keys(request).length !== 1) {
+      throw new TypeError("migration decision is invalid");
+    }
+    const takeoverToken = request.forceTakeover ? pendingTakeover : undefined;
+    if (request.forceTakeover && !takeoverToken) {
+      throw new Error("No migration lease takeover is awaiting confirmation");
+    }
+    if (!request.forceTakeover) pendingTakeover = null;
+    try {
+      const result = await migrateWithBackupSelection({ service, dialog, window,
+        takeoverToken });
+      pendingTakeover = null;
+      return result;
+    } catch (error) {
+      if (error?.code !== "LEASE_CLOCK_UNCERTAIN") throw error;
+      pendingTakeover = error.takeoverToken;
+      return Object.freeze({ decisionRequired: "lease-takeover",
+        holderName: String(error.lease?.holderName || "another editor") });
+    }
+  });
 }

@@ -372,31 +372,63 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       externalOpenInProgress = false;
     }
   });
-  ipcMain.handle("document:enter-edit-mode", async () => {
+  let pendingEditTakeover = false;
+  ipcMain.handle("document:enter-edit-mode", async (_event, request) => {
+    if (!request || typeof request !== "object"
+        || typeof request.forceTakeover !== "boolean"
+        || Object.keys(request).length !== 1) {
+      throw new TypeError("edit-mode decision is invalid");
+    }
+    if (request.forceTakeover && !pendingEditTakeover) {
+      throw new Error("No editing-lease takeover is awaiting confirmation");
+    }
     try {
-      return await service.enterEditMode();
+      const opened = await service.enterEditMode({
+        forceTakeover: request.forceTakeover,
+      });
+      pendingEditTakeover = false;
+      return opened;
     } catch (error) {
       if (error?.code !== "LEASE_CLOCK_UNCERTAIN") throw error;
-      const confirmation = await dialog.showMessageBox(window, {
-        type: "warning", title: "Force editing-lease takeover?",
-        message: "The current lease cannot be proved expired because the clocks disagree.",
-        detail: "Force takeover only after confirming the named holder is no longer editing.",
-        buttons: ["Cancel", "Force takeover"], defaultId: 0, cancelId: 0,
-        noLink: true,
-      });
-      if (confirmation.response !== 1) throw error;
-      return service.enterEditMode({ forceTakeover: true });
+      pendingEditTakeover = true;
+      return Object.freeze({ decisionRequired: "lease-takeover",
+        holderName: String(error.lease?.holderName || "another editor") });
     }
   });
-  ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
-  ipcMain.handle("document:reconnect-publication", () =>
-    service.reconnectPendingPublication());
+  ipcMain.handle("document:save", async (_event, content) => {
+    let result;
+    try { result = await service.saveDocument(content); }
+    catch (error) {
+      if (!error?.publicationPrepared || !service.active?.opened) throw error;
+      result = { saved: true, content,
+        publicationState: service.active.opened.publicationState };
+    }
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:reconnect-publication", async () => {
+    const result = await service.reconnectPendingPublication();
+    await sendJournalSummary();
+    return result;
+  });
   ipcMain.handle("document:begin-divergence-resolution", () =>
     service.beginDivergenceResolution());
-  ipcMain.handle("document:save-divergence-resolution", (_event, content) =>
-    service.saveDivergenceResolution(content));
-  ipcMain.handle("document:discard-publication", () =>
-    service.discardPendingPublication());
+  ipcMain.handle("document:save-divergence-resolution", async (_event, content) => {
+    let result;
+    try { result = await service.saveDivergenceResolution(content); }
+    catch (error) {
+      if (!error?.publicationPrepared || !service.active?.opened) throw error;
+      result = { saved: true, content,
+        publicationState: service.active.opened.publicationState };
+    }
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:discard-publication", async () => {
+    const result = await service.discardPendingPublication();
+    await sendJournalSummary();
+    return result;
+  });
   ipcMain.handle("document:backup", async () => {
     const chosen = await dialog.showSaveDialog(window, {
       title: "Create verified backup replica",
@@ -455,8 +487,16 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:update-working-copy", (_event, working) =>
     service.updateWorkingCopy(working));
   ipcMain.handle("document:activity", () => service.notifyActivity());
-  ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
-  ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
+  ipcMain.handle("document:restore-recovery", async () => {
+    const result = await service.restoreRecoveredWork();
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:discard-recovery", async () => {
+    const result = await service.discardRecoveredWork();
+    await sendJournalSummary();
+    return result;
+  });
   ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
   const lockActive = (reason) => secureLocks.lock(reason);
   ipcMain.handle("document:lock", () => lockActive("app-lock"));

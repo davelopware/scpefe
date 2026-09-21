@@ -455,6 +455,34 @@ export function validateEditMode(value) {
       ? { invitationRequired: false } : {}) });
 }
 
+export function validateLeaseDecisionResult(value) {
+  if (!value || typeof value !== "object"
+      || value.decisionRequired !== "lease-takeover"
+      || typeof value.holderName !== "string" || !value.holderName
+      || Object.keys(value).length !== 2) {
+    throw new TypeError("host returned an invalid lease decision");
+  }
+  return Object.freeze({ decisionRequired: "lease-takeover",
+    holderName: value.holderName });
+}
+
+export function validateTakeoverRequest(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.forceTakeover !== "boolean"
+      || Object.keys(value).length !== 1) {
+    throw new TypeError("lease takeover request is invalid");
+  }
+  return Object.freeze({ forceTakeover: value.forceTakeover });
+}
+
+export function validateCompactionRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || value.confirmed !== true || Object.keys(value).length !== 1) {
+    throw new TypeError("compaction must be explicitly confirmed");
+  }
+  return Object.freeze({ confirmed: true });
+}
+
 export function validateRecoveredWork(value) {
   if (!value || typeof value !== "object" || value.readOnly !== false
       || value.canEdit !== true || value.recoveredUnsaved !== true

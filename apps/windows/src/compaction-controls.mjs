@@ -8,7 +8,7 @@ export function compactionAvailable(opened) {
     && opened.canRemovePasswords === true;
 }
 
-/* Presents an accessible trigger; the trusted host performs confirmation. */
+/* Presents the accessible trigger for the renderer's focused confirmation. */
 export function CompactionControls({ onCompact }) {
   return h(React.Fragment, null,
     h("h3", null, "History compaction"),

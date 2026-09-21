@@ -6,6 +6,8 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
   validateMigrationResult,
+  validateLeaseDecisionResult, validateTakeoverRequest,
+  validateCompactionRequest,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
@@ -57,8 +59,12 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     });
     return value === null ? null : validateOpenedDocument(value);
   },
-  enterEditMode: async () => validateEditMode(
-    await ipcRenderer.invoke("document:enter-edit-mode")),
+  enterEditMode: async (request = { forceTakeover: false }) => {
+    const value = await ipcRenderer.invoke("document:enter-edit-mode",
+      validateTakeoverRequest(request));
+    return value?.decisionRequired === "lease-takeover"
+      ? validateLeaseDecisionResult(value) : validateEditMode(value);
+  },
   saveDocument: async (content) => validateSaveResult(
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
   reconnectPendingPublication: async () => validatePublicationResult(
@@ -74,13 +80,16 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:backup");
     return value === null ? null : validateBackupResult(value);
   },
-  compactDocument: async () => {
-    const value = await ipcRenderer.invoke("document:compact");
+  compactDocument: async (request) => {
+    const value = await ipcRenderer.invoke("document:compact",
+      validateCompactionRequest(request));
     return value === null ? null : validateCompactionResult(value);
   },
-  migrateDocument: async () => {
-    const value = await ipcRenderer.invoke("document:migrate");
-    return value === null ? null : validateMigrationResult(value);
+  migrateDocument: async (request = { forceTakeover: false }) => {
+    const value = await ipcRenderer.invoke("document:migrate",
+      validateTakeoverRequest(request));
+    return value === null ? null : value?.decisionRequired === "lease-takeover"
+      ? validateLeaseDecisionResult(value) : validateMigrationResult(value);
   },
   changePassword: async (request) => validateOpenedDocument(
     await ipcRenderer.invoke("document:change-password",

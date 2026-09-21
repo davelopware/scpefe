@@ -187,7 +187,9 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(statusValue("Working copy state"), "Clean");
   assert.equal(statusValue("Document state"), "Read-only");
 
-  const plaintext = editor.value;
+  const plaintext = opened.content;
+  assert.equal(editor.value, "",
+    "blocking publication decisions do not expose plaintext behind their overlay");
   listeners.locked({ locked: true, journalSaved: true, warning: null });
   assert.equal(editor.value, "", "automatic lock synchronously removes mounted plaintext");
   assert.equal(document.body.textContent.includes(plaintext), false);
