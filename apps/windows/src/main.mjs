@@ -8,11 +8,9 @@ import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { CreationTargetFlow } from "./creation-flow.mjs";
-import { createReplacement, openReplacement } from "./replacement-flow.mjs";
-import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
-  DocumentService } from "./document-service.mjs";
-import { applySwitchDecision, finishDocumentSwitch,
-  OpenRequestQueue } from "./switch-document.mjs";
+import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
+import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
+import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
   openTargetFromCommandLine, openTargetFromUrl, acknowledgementCredentials,
   acknowledgementTargetHash, createAcknowledgement, validateAcknowledgement,
@@ -71,62 +69,16 @@ async function acknowledgeRequest(request, status, sequence) {
     JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
 }
 
-async function prepareDocumentSwitch() {
+async function authorizeDocumentSwitch() {
   if (!service.active) return true;
-  let decision = "save";
-  if (needsCloseDecision(service.active)) {
-    const conflict = service.active.pendingRecord?.state === "conflict";
-    const pending = service.active.pendingPublication;
-    const choice = await dialog.showMessageBox(window, {
-      type: "warning",
-      title: "Open another document?",
-      message: conflict ? "This document has an unresolved divergence."
-        : pending ? "This document has a save pending publication."
-          : service.active.manuallySealed
-            ? "This document has unsaved changes."
-            : "This document is only provisionally saved.",
-      detail: "Save and open preserves the current work, discard and open is destructive, and cancel keeps this document open.",
-      buttons: ["Cancel", "Save and open", "Discard and open"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    decision = ["cancel", "save", "discard"][choice.response];
-  }
-  let outcome;
-  try {
-    outcome = await applySwitchDecision(service, decision);
-  } catch (error) {
-    if (error?.code !== "DOCUMENT_SWITCH_UNREADABLE_JOURNAL") throw error;
-    const confirmation = await dialog.showMessageBox(window, {
-      type: "warning", title: "Permanently discard unreadable recovery work?",
-      message: "The recovery journal for this authenticated document cannot be read.",
-      detail: "Only this document's encrypted journal will be deleted. This cannot be undone.",
-      buttons: ["Cancel", "Permanently discard journal and open"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    if (confirmation.response !== 1) return false;
-    await service.discardUnreadableJournalForSwitch(
-      DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
-    outcome = await applySwitchDecision(service, "discard");
-  }
-  if (!outcome.proceed) return false;
-  if (outcome.pendingPublication) {
-    const disclosure = await dialog.showMessageBox(window, {
-      type: "warning",
-      title: "Save is still pending publication",
-      message: "The manual save is stored locally but has not reached its target.",
-      detail: "It will remain discoverable after switching and after restart.",
-      buttons: ["Keep current document open", "Open with save pending"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    if (disclosure.response !== 1) {
-      window.webContents.send("document:switch-retained", service.active.opened);
-      await sendJournalSummary();
-      return false;
-    }
-  }
-  await finishDocumentSwitch(service);
-  await sendJournalSummary();
-  return true;
+  if (!needsCloseDecision(service.active)) return true;
+  await dialog.showMessageBox(window, {
+    type: "warning", title: "Current document needs attention",
+    message: "Resolve the current document's unsaved, recovery, conflict, or pending-publication state before replacing it.",
+    detail: "The current session and selected replacement remain unchanged.",
+    buttons: ["Keep current document open"], defaultId: 0, cancelId: 0, noLink: true,
+  });
+  return false;
 }
 
 async function drainExternalRequests() {
@@ -290,6 +242,10 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return created;
   };
   service = makeService();
+  const liveService = new Proxy({}, { get(_target, property) {
+    const value = service[property];
+    return typeof value === "function" ? value.bind(service) : value;
+  } });
   await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
@@ -299,6 +255,20 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   const creationFlow = new CreationTargetFlow();
   let selectedOpenTarget = null;
+  const adoptReplacement = (staged, target) => {
+    const previous = service;
+    service = staged.candidate;
+    staged.candidate.acceptCreatedDocument?.();
+    currentTarget = target;
+    lockedTarget = target;
+    if (previous !== service && previous.active) {
+      void previous.lock("document-replaced").catch((error) =>
+        window?.webContents.send("document:journal-warning",
+          `The replaced session cleanup needs attention: ${error.message}`));
+    }
+  };
+  const replacements = new ReplacementCoordinator({ makeCandidate: makeService,
+    authorizeCurrent: authorizeDocumentSwitch, adopt: adoptReplacement });
   ipcMain.handle("document:choose-create-target", async () =>
     creationFlow.chooseTarget(async () => {
       const chosen = await dialog.showSaveDialog(window, {
@@ -312,11 +282,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:cancel-create-target", () => creationFlow.cancel());
   ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
     async (target, validated) => {
-      const { candidate, opened } = await createReplacement({ makeCandidate: makeService,
-        target, request: validated, commitCurrent: prepareDocumentSwitch });
-      service = candidate;
-      currentTarget = target;
-      lockedTarget = target;
+      const opened = await replacements.create(target, validated);
       return { created: true, opened, name: path.basename(target) };
     }));
   ipcMain.handle("document:choose-open-target", async () => {
@@ -335,12 +301,12 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     if (!selectedOpenTarget) throw new Error("Choose a document first");
     const target = selectedOpenTarget;
     return openRequests.run(async () => {
-      const { candidate, opened } = await openReplacement({ makeCandidate: makeService,
-        target, password, commitCurrent: prepareDocumentSwitch });
-      service = candidate;
-      currentTarget = target;
-      lockedTarget = target;
+      const opened = await replacements.open(target, password);
       selectedOpenTarget = null;
+      if (opened.invitationRequired) {
+        return { readOnly: true, invitationRequired: true,
+          targetName: path.basename(target) };
+      }
       await sendJournalSummary();
       return { ...opened, targetName: path.basename(target) };
     });
@@ -348,8 +314,11 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:unlock", async (_event, password) => {
     if (!lockedTarget) throw new Error("No locked document is available");
     const target = lockedTarget;
-    const opened = await service.openDocument(target, password);
-    currentTarget = target;
+    const opened = await replacements.open(target, password);
+    if (opened.invitationRequired) {
+      return { readOnly: true, invitationRequired: true,
+        targetName: path.basename(target) };
+    }
     await sendJournalSummary();
     return { ...opened, targetName: path.basename(target) };
   });
@@ -373,18 +342,12 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       const opened = await openRequests.run(async () => {
         let replacement;
         try {
-          replacement = await openReplacement({ makeCandidate: makeService,
-            target: pending.target, password: request.password,
-            commitCurrent: prepareDocumentSwitch });
+          replacement = await replacements.open(pending.target, request.password);
         } catch (error) {
           if (error?.code === "DOCUMENT_REPLACEMENT_CANCELED") return null;
           throw error;
         }
-        const { candidate, opened: result } = replacement;
-        service = candidate;
-        currentTarget = pending.target;
-        lockedTarget = pending.target;
-        return result;
+        return replacement;
       });
       await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
       externalRequests.complete(pending.token);
@@ -432,13 +395,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     if (chosen.canceled || !chosen.filePath) return null;
     return service.backupDocument(chosen.filePath);
   });
-  registerCompactionHandler({ ipcMain, service, dialog, window,
+  registerCompactionHandler({ ipcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
-  registerMigrationHandler({ ipcMain, service, dialog, window });
+  registerMigrationHandler({ ipcMain, service: liveService, dialog, window });
   ipcMain.handle("document:create-invitation", (_event, request) =>
     service.createInvitation(request));
-  ipcMain.handle("document:claim-invitation", (_event, password) =>
-    service.claimInvitation(password));
+  ipcMain.handle("document:claim-invitation", async (_event, password) => {
+    const opened = await replacements.claim(password);
+    await sendJournalSummary();
+    return { ...opened, targetName: path.basename(currentTarget) };
+  });
+  ipcMain.handle("document:cancel-invitation-claim", () => replacements.cancelClaim());
   ipcMain.handle("document:reconcile-identity", () => service.reconcileIdentity());
   ipcMain.handle("document:update-slot-permissions", (_event, request) =>
     service.updateSlotPermissions(request));

@@ -68,6 +68,8 @@ export class DocumentService {
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
     this.active = null;
+    this.createdTarget = null;
+    this.createdBytes = null;
     this.suspendedLeases = new Map();
     this.leaseObservations = new Map();
     this.migrationTakeoverConfirmations = new WeakMap();
@@ -131,12 +133,75 @@ export class DocumentService {
       await this.#atomicWrite(target, candidate, false);
       const published = await this.fs.readFile(target);
       if (!published.equals(candidate)) throw new Error("Published container verification failed");
+      this.createdTarget = target;
+      this.createdBytes = Buffer.from(published);
       const opened = this.#validateNativeOpened(
         this.native.openDocument(published, input.ownerPassword));
       await this.witnesses.observe(target, this.#observation(opened));
       opened.journalKey.fill(0);
     });
     return { created: true };
+  }
+
+  async revalidateTargetForReplacement() {
+    const active = this.active;
+    if (!active) throw new Error("Open the replacement candidate first");
+    const current = await this.fs.readFile(active.target);
+    if (!current.equals(active.baseContainer)) {
+      const error = new Error("The selected target changed before replacement completed");
+      error.code = "DOCUMENT_REPLACEMENT_TARGET_CHANGED";
+      throw error;
+    }
+    const verified = this.#validateNativeOpened(
+      this.native.openDocument(current, active.password));
+    try {
+      if (verified.documentId !== active.documentId
+          || verified.baseRevision !== active.baseRevision) {
+        const error = new Error("The selected target changed before replacement completed");
+        error.code = "DOCUMENT_REPLACEMENT_TARGET_CHANGED";
+        throw error;
+      }
+    } finally {
+      verified.journalKey.fill(0);
+    }
+    return Object.freeze({ unchanged: true });
+  }
+
+  async abandonCreatedDocument() {
+    if (!this.createdTarget) return Object.freeze({ removed: false });
+    const target = this.createdTarget;
+    const expected = this.active?.target === target
+      ? Buffer.from(this.active.baseContainer) : Buffer.from(this.createdBytes);
+    if (this.active) {
+      try {
+        await this.lock("abandon-created-replacement");
+      } catch {
+        this.#cancelCheckpoint();
+        this.#cancelRegularSave();
+        if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
+        this.inactivityTimer = null;
+        this.leaseGeneration += 1;
+        try { await this.#stopHeartbeat(); } catch {}
+        this.active?.journalKey?.fill(0);
+        if (this.active) { this.active.password = ""; this.active.working = null; }
+        this.active = null;
+      }
+    }
+    const current = await this.fs.readFile(target);
+    if (!current.equals(expected)) {
+      throw new Error("Created target changed; refusing unsafe cleanup");
+    }
+    await this.fs.unlink(target);
+    this.createdTarget = null;
+    this.createdBytes.fill(0);
+    this.createdBytes = null;
+    return Object.freeze({ removed: true });
+  }
+
+  acceptCreatedDocument() {
+    this.createdTarget = null;
+    this.createdBytes?.fill(0);
+    this.createdBytes = null;
   }
 
   async openDocument(target, password) {

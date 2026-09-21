@@ -54,6 +54,8 @@ test("mounted shell keeps the session through picker, password, creation, and un
     let cancelOpenCalls = 0;
     let cancelCreateCalls = 0;
     let lockCalls = 0;
+    let claimCalls = 0;
+    let cancelClaimCalls = 0;
     let createPickerCalls = 0;
     const pickerResults = [
       { selected: true, name: "first.scpefe" },
@@ -104,6 +106,9 @@ test("mounted shell keeps the session through picker, password, creation, and un
             publicationState: "target-published" } };
       },
       openExternalDocument: async () => null,
+      claimInvitation: async () => { claimCalls += 1;
+        throw new Error("Invitation publication failed safely"); },
+      cancelInvitationClaim: async () => { cancelClaimCalls += 1; return true; },
       enterEditMode: async () => ({ ...replacement, readOnly: false }),
       updateWorkingCopy: async () => ({}), saveDocument: async (content) =>
         ({ saved: true, content, publicationState: "target-published" }),
@@ -167,10 +172,20 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await command("File", /Open/);
     await submitPassword("Open document", "Open", "temporary password");
     const claim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
-    assert.equal(editor.value, "", "invitation plaintext is not exposed before claim");
-    assert.equal(document.body.textContent.includes("replacement plaintext"), false);
-    await user.click(ui.getByRole(claim, "button", { name: "Cancel and lock" }));
-    await ui.waitFor(() => assert.equal(lockCalls, 1));
+    assert.equal(editor.value, "original plaintext",
+      "staged invitation leaves the original renderer session mounted");
+    await user.type(ui.getByLabelText(claim, "New password"), "replacement password");
+    await user.click(ui.getByRole(claim, "button",
+      { name: "Replace password and claim identity" }));
+    await ui.waitFor(() => assert.equal(claimCalls, 1));
+    assert.equal(editor.value, "original plaintext",
+      "claim failure leaves the original renderer session intact");
+    await user.click(ui.getByRole(claim, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(cancelClaimCalls, 1));
+    assert.equal(editor.value, "original plaintext",
+      "claim cancellation leaves the original renderer session intact");
+
+    listeners.locked({ locked: true, journalSaved: true, warning: null });
     assert.equal(editor.value, "");
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });

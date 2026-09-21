@@ -279,6 +279,7 @@ declare global { interface Window { scpefe: {
     compatibilityWarning: string; opened: DocumentOpened } | null>;
   createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
   claimInvitation(password: string): Promise<DocumentOpened>;
+  cancelInvitationClaim(): Promise<boolean>;
   reconcileIdentity(): Promise<DocumentOpened>;
   updateSlotPermissions(request: object): Promise<DocumentOpened>;
   removeSlot(slotId: string): Promise<{ removed: true; warning: string }>;
@@ -326,6 +327,7 @@ function App() {
   const [creating, setCreating] = useState(false);
   const [openError, setOpenError] = useState("");
   const [pendingOpenName, setPendingOpenName] = useState("");
+  const [invitationStaged, setInvitationStaged] = useState(false);
   const [targetName, setTargetName] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [editFailure, setEditFailure] = useState<string | null>(null);
@@ -336,8 +338,10 @@ function App() {
   const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
   const openedDialog = openedDialogName(opened);
-  const visibleOpenedDialog = !creating && dialog === null ? openedDialog : null;
+  const visibleOpenedDialog = !creating && dialog === null
+    ? invitationStaged ? "claim" : openedDialog : null;
   modalBusy.current = creating || dialog !== null || openedDialog !== null
+    || invitationStaged
     || editFailure !== null;
   useEffect(() => {
     window.scpefe.getProfile().then((value) => {
@@ -419,6 +423,16 @@ function App() {
     } else if (result && !result.invitationRequired && result.lease?.active) {
       setMessage(`Editing lease held by ${result.lease.holderName || "another editor"} (${result.lease.holderEmail}) on ${result.lease.deviceName}.`);
     }
+  }
+
+  function showReplacementResult(result: Opened) {
+    if (result.invitationRequired) {
+      setInvitationStaged(true);
+      setMessage("Claim the invitation before its document replaces the current session.");
+      return;
+    }
+    setInvitationStaged(false);
+    showOpenedResult(result);
   }
 
   const activeDocument = isDocumentOpened(opened);
@@ -514,7 +528,7 @@ function App() {
       const result = dialog === "unlock"
         ? await window.scpefe.unlockDocument(String(data.get("password")))
         : await window.scpefe.openSelectedDocument(String(data.get("password")));
-      showOpenedResult(result);
+      showReplacementResult(result);
       setPendingOpenName(""); setDialog(null);
     }
     catch (error) {
@@ -539,7 +553,7 @@ function App() {
         ...externalOpenRequest, password: String(data.get("password")),
       });
       setExternalOpenRequest(null);
-      if (result) { showOpenedResult(result); setDialog(null); }
+      if (result) { showReplacementResult(result); setDialog(null); }
       else setMessage("Open request canceled; the current document remains open.");
       setJournalSummary(await window.scpefe.getUnresolvedJournalSummary());
     } catch (error) { showError(error); }
@@ -572,7 +586,7 @@ function App() {
     const data = new FormData(event.currentTarget);
     try {
       const result = await window.scpefe.claimInvitation(String(data.get("newPassword")));
-      setOpened(result); setWorkingText(result.content);
+      setInvitationStaged(false); showOpenedResult(result);
       setMessage("Invitation claimed and replacement password safely published.");
     } catch (error) { showError(error); }
   }
@@ -947,7 +961,10 @@ function App() {
       <p>Choose a private replacement password to claim this invitation with your configured identity.</p>
       <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
         minLength={12} required autoFocus /></label><button>Replace password and claim identity</button></form>
-      <button onClick={lock}>Cancel and lock</button></FocusedDialog>}
+      <button onClick={async () => {
+        await window.scpefe.cancelInvitationClaim(); setInvitationStaged(false);
+        setMessage("Invitation claim canceled; the current session is unchanged.");
+      }}>Cancel</button></FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Older container">
       <div className="warning" role="alert"><p>{opened.migrationWarning}</p>

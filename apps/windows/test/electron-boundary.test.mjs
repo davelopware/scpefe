@@ -56,6 +56,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
           return { content: "secret", readOnly: true, canEdit: true,
             publicationState: "target-published", targetName: "notes.scpefe" };
         }
+        if (channel === "document:cancel-invitation-claim") return true;
         if (channel === "document:create") {
           return creationResult;
         }
@@ -86,7 +87,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "beginDivergenceResolution", "saveDivergenceResolution",
     "discardPendingPublication", "backupDocument", "compactDocument", "migrateDocument",
     "createInvitation",
-    "claimInvitation", "reconcileIdentity", "updateSlotPermissions", "removeSlot",
+    "claimInvitation", "cancelInvitationClaim", "reconcileIdentity",
+    "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
     "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
@@ -176,6 +178,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal((await exposed.unlockDocument("correct password")).content, "secret");
   assert.deepEqual(invocations.at(-1), {
     channel: "document:unlock", request: "correct password" });
+  assert.equal(await exposed.cancelInvitationClaim(), true);
+  assert.equal(invocations.at(-1).channel, "document:cancel-invitation-claim");
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password typo",

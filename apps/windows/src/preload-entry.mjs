@@ -77,6 +77,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
   claimInvitation: async (password) => validateOpenedDocument(
     await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
+  cancelInvitationClaim: async () => {
+    const value = await ipcRenderer.invoke("document:cancel-invitation-claim");
+    if (typeof value !== "boolean") throw new TypeError("host returned invalid claim cancellation");
+    return value;
+  },
   reconcileIdentity: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:reconcile-identity")),
   updateSlotPermissions: async (request) => validateOpenedDocument(

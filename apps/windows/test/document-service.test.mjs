@@ -206,6 +206,95 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
     (error) => error.code === "EEXIST");
 });
 
+test("created replacement cleanup removes exact bytes and permits retry", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-replacement-cleanup-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
+  const target = path.join(directory, "new.scpefe");
+  const bytes = Buffer.from("new encrypted container");
+  const native = withLease({
+    createDocument() { return Buffer.from(bytes); },
+    openDocument(value) {
+      if (!value.equals(bytes)) throw new Error("unexpected container bytes");
+      return { content: "", readOnly: true, canEdit: true,
+        documentId: "31".repeat(16), baseRevision: "32".repeat(32),
+        journalKey: Buffer.alloc(32, 0x33) };
+    },
+  });
+  const options = { native, fs, profilePath, publicationCapabilities,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    setTimer: () => ({ unref() {} }), clearTimer: () => {} };
+  const first = new DocumentService(options);
+  await first.createDocument(target, { ownerPassword: "owner password words",
+    recoveryPassword: null, content: "", understandsIrrecoverable: true,
+    storedRecoverySeparately: false });
+  await first.openDocument(target, "owner password words");
+  await first.enterEditMode();
+  assert.equal((await fs.stat(target)).isFile(), true);
+  assert.deepEqual(await first.abandonCreatedDocument(), { removed: true });
+  await assert.rejects(fs.stat(target), { code: "ENOENT" });
+
+  const retry = new DocumentService(options);
+  await retry.createDocument(target, { ownerPassword: "owner password words",
+    recoveryPassword: null, content: "", understandsIrrecoverable: true,
+    storedRecoverySeparately: false });
+  assert.equal((await fs.stat(target)).isFile(), true,
+    "create-only publication succeeds after cleanup");
+
+  const partialTarget = path.join(directory, "partial.scpefe");
+  let timerCalls = 0;
+  const partialNative = withLease({
+    createDocument() { return Buffer.from(bytes); },
+    openDocument(value) {
+      if (!value.equals(bytes)) throw new Error("unexpected container bytes");
+      return { content: "", readOnly: true, canEdit: true,
+        documentId: "51".repeat(16), baseRevision: "52".repeat(32),
+        journalKey: Buffer.alloc(32, 0x53) };
+    },
+  });
+  const partial = new DocumentService({ ...options, native: partialNative,
+    setTimer: () => {
+      timerCalls += 1;
+      if (timerCalls === 2) throw new Error("heartbeat scheduling failed");
+      return { unref() {} };
+    } });
+  await partial.createDocument(partialTarget, { ownerPassword: "owner password words",
+    recoveryPassword: null, content: "", understandsIrrecoverable: true,
+    storedRecoverySeparately: false });
+  await partial.openDocument(partialTarget, "owner password words");
+  await assert.rejects(partial.enterEditMode(), /heartbeat scheduling failed/);
+  assert.deepEqual(await partial.abandonCreatedDocument(), { removed: true });
+  await assert.rejects(fs.stat(partialTarget), { code: "ENOENT" });
+});
+
+test("replacement revalidation detects a target mutation without changing active state",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-revalidate-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "opened.scpefe");
+    const original = Buffer.from("authenticated original");
+    await fs.writeFile(target, original);
+    const native = withLease({ openDocument(value) {
+      if (!value.equals(original)) throw new Error("authentication failed");
+      return { content: "original plaintext", readOnly: true, canEdit: true,
+        documentId: "41".repeat(16), baseRevision: "42".repeat(32),
+        journalKey: Buffer.alloc(32, 0x43) };
+    } });
+    const service = new DocumentService({ native, fs,
+      profilePath: path.join(directory, "profile.json"), publicationCapabilities,
+      journalDirectory: path.join(directory, "journals"),
+      witnessDirectory: path.join(directory, "witnesses"),
+      setTimer: () => ({ unref() {} }), clearTimer: () => {} });
+    await service.openDocument(target, "owner password words");
+    const active = service.active;
+    await fs.writeFile(target, Buffer.from("raced replacement"));
+    await assert.rejects(service.revalidateTargetForReplacement(),
+      (error) => error.code === "DOCUMENT_REPLACEMENT_TARGET_CHANGED");
+    assert.equal(service.active, active);
+    assert.equal(service.active.opened.content, "original plaintext");
+  });
+
 test("validates creation acknowledgements at the service boundary", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-create-acks-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
