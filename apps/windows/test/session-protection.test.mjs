@@ -33,6 +33,46 @@ test("describes every protected domain state without treating clean sessions as 
     .activePublication, true);
 });
 
+test("clean, dirty, provisional, publication, recovery, and conflict states classify distinctly", () => {
+  const base = { dirty: false, manuallySealed: true, pendingPublication: false,
+    recovery: null, unresolvedJournal: false };
+  const cases = [
+    ["clean", base, null],
+    ["dirty", { ...base, dirty: true }, "dirty"],
+    ["provisional", { ...base, manuallySealed: false }, "provisional"],
+    ["pending publication", { ...base, pendingPublication: true,
+      pendingRecord: { state: "pending", publication: { purpose: "manual-save" } } },
+    "pendingPublication"],
+    ["recovered", { ...base, recovery: { content: "recovered" } }, "recovered"],
+    ["conflict", { ...base, pendingPublication: true,
+      pendingRecord: { state: "conflict", publication: { purpose: "manual-save" } } },
+    "conflict"],
+    ["unreadable journal", { ...base, unresolvedJournal: true,
+      unreadableJournal: true }, "unresolvedJournal"],
+    ["regular provisional", { ...base, pendingPublication: true,
+      pendingRecord: { state: "pending", publication: { purpose: "regular-save" } } },
+    "provisional"],
+  ];
+  for (const [name, active, expected] of cases) {
+    const described = describeProtection(active);
+    if (expected === null) assert.equal(described, null, name);
+    else assert.equal(described[expected], true, name);
+  }
+});
+
+test("all lifecycle operations proceed immediately for no-document and clean read-only states", async () => {
+  for (const active of [null, { editMode: false, dirty: false, manuallySealed: true }]) {
+    const service = { active, hasActivePublication: () => false };
+    let presentations = 0;
+    const policy = new SessionProtectionCoordinator({ getService: () => service,
+      present: () => { presentations += 1; } });
+    for (const operation of ["new", "open", "external-open", "close", "exit"]) {
+      assert.equal(await policy.authorize(operation), true);
+    }
+    assert.equal(presentations, 0);
+  }
+});
+
 test("all lifecycle operations use one captured-session decision and remain retryable", async () => {
   for (const operation of ["new", "open", "external-open", "close", "exit"]) {
     const current = serviceFor();
