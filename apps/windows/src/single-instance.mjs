@@ -117,6 +117,13 @@ export class OrderedOpenRequests {
     return this.active;
   }
 
+  takeForTermination() {
+    if (this.active) return this.active;
+    if (this.pending.length === 0) return null;
+    this.active = this.pending.shift();
+    return this.active;
+  }
+
   current(token) {
     return this.active?.token === token ? this.active : null;
   }

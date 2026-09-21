@@ -175,6 +175,47 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     assert.equal(editor.value, "unsaved plaintext");
   }
 
+  const mountedMatrix = [
+    ["dirty", { dirty: true, provisional: false, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false }],
+    ["provisional", { dirty: false, provisional: true, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false }],
+    ["pending publication", { dirty: false, provisional: false, pendingPublication: true,
+      recovered: false, conflict: false, unresolvedJournal: true,
+      activePublication: true }],
+    ["recovered", { dirty: false, provisional: false, pendingPublication: false,
+      recovered: true, conflict: false, unresolvedJournal: true,
+      activePublication: false }],
+    ["conflict", { dirty: false, provisional: false, pendingPublication: true,
+      recovered: false, conflict: true, unresolvedJournal: true,
+      activePublication: false }],
+  ];
+  for (const [stateName, state] of mountedMatrix) {
+    for (const [operation, trigger] of triggers) {
+      states[operation] = state;
+      await trigger();
+      dialog = await ui.findByRole(document.body, "dialog", { name: /Protect current document/ });
+      assert.equal(ui.getAllByRole(dialog, "listitem").length >= 1, true,
+        `${operation} exposes ${stateName} risk through its actual command path`);
+      await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
+      if (operation === "new") {
+        const create = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
+        await user.click(ui.getByRole(create, "button", { name: "Cancel" }));
+      } else if (operation === "open") {
+        const open = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+        await user.click(ui.getByRole(open, "button", { name: "Cancel" }));
+      }
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      assert.equal(editor.value, "unsaved plaintext",
+        `${operation} cancellation retains the prior edit session for ${stateName}`);
+    }
+  }
+
+  states.exit = { dirty: false, provisional: false, pendingPublication: true,
+    recovered: false, conflict: true, unresolvedJournal: true,
+    activePublication: false };
   await fileCommand("Exit");
   dialog = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
   const retry = ui.getByRole(dialog, "button", { name: "Retry publication and continue" });
@@ -196,7 +237,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   await ui.waitFor(() => assert.equal(
     ui.getByRole(document.body, "note").textContent.includes("No document"), true));
   assert.equal(editor.value, "");
-  assert.equal(decisions.length, 8);
+  assert.equal(decisions.length, 33);
   mountedRoot.unmount(); mountedRoot = null; await Promise.resolve();
   assert.equal(document.getElementById("root").childElementCount, 0);
   assert.equal(stopped, 8); assert.equal(frames.size, 0);

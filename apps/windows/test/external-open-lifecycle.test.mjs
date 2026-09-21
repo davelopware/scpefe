@@ -82,3 +82,35 @@ test("session lock terminally cancels an active invitation and advances FIFO", a
   assert.equal(lifecycle.invitation, null);
   assert.equal(lifecycle.current(second.token), second);
 });
+
+test("exit terminally acknowledges active password, invitation, and queued requests in FIFO", async () => {
+  const { requests, lifecycle, events } = fixture();
+  const password = requests.enqueue({ target: "password.scpefe", source: "second-instance" });
+  const invitation = requests.enqueue({ target: "invitation.scpefe", source: "open-file" });
+  const focus = requests.enqueue({ source: "second-instance" });
+  requests.take();
+  await lifecycle.terminateAll("application-exit");
+  assert.deepEqual(events, [
+    `ack:${password.token}:canceled:3`, `record:${password.token}:application-exit`,
+    `ack:${invitation.token}:canceled:3`, `record:${invitation.token}:application-exit`,
+    `ack:${focus.token}:canceled:3`, `record:${focus.token}:application-exit`,
+  ]);
+  assert.equal(requests.size, 0);
+});
+
+test("exit acknowledgement fault preserves the active request for a successful retry", async () => {
+  const requests = new OrderedOpenRequests({ randomToken: () => "request-1" });
+  requests.setReady(); const request = requests.enqueue({ target: "password.scpefe",
+    source: "second-instance" }); requests.take();
+  let attempts = 0; const events = [];
+  const lifecycle = new ExternalOpenLifecycle({ requests,
+    acknowledge: async () => { attempts += 1;
+      if (attempts === 1) throw new Error("ack store unavailable");
+      events.push("terminal"); },
+    record: async () => events.push("record"), drain: async () => events.push("drain") });
+  await assert.rejects(lifecycle.terminateAll(), /ack store unavailable/);
+  assert.equal(requests.current(request.token), request);
+  await lifecycle.terminateAll();
+  assert.deepEqual(events, ["terminal", "record"]);
+  assert.equal(requests.size, 0);
+});

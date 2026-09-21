@@ -8,7 +8,8 @@ export class ExternalOpenLifecycle {
     this.record = record;
     this.drain = drain;
     this.invitation = null;
-    this.finishing = new Set();
+    this.finishing = new Map();
+    this.terminating = false;
   }
 
   current(token) { return this.requests.current(token); }
@@ -43,19 +44,36 @@ export class ExternalOpenLifecycle {
     return true;
   }
 
+  async terminateAll(outcome = "application-exit") {
+    this.terminating = true;
+    try {
+      let request;
+      while ((request = this.requests.currentRequest
+          ?? this.requests.takeForTermination())) {
+        await this.finish(request, "canceled", outcome);
+      }
+      this.invitation = null;
+      return true;
+    } catch (error) {
+      this.terminating = false;
+      throw error;
+    }
+  }
+
   async finish(request, status, outcome) {
     if (!TERMINAL.has(status)) throw new TypeError("invalid external open outcome");
     this.#requireActive(request);
-    if (this.finishing.has(request.token)) {
-      throw new Error("The external open request is already finishing");
-    }
-    this.finishing.add(request.token);
-    try {
+    const existing = this.finishing.get(request.token);
+    if (existing) return existing;
+    const finishing = (async () => {
       await this.acknowledge(request, status, 3);
       this.requests.complete(request.token);
       try { await this.record(request, outcome); }
-      finally { void this.drain(); }
-    } finally { this.finishing.delete(request.token); }
+      finally { if (!this.terminating) void this.drain(); }
+    })();
+    this.finishing.set(request.token, finishing);
+    try { return await finishing; }
+    finally { this.finishing.delete(request.token); }
   }
 
   #requireActive(request) {

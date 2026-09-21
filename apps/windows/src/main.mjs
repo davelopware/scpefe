@@ -14,6 +14,7 @@ import { SessionProtectionCoordinator } from "./session-protection.mjs";
 import { NativeLifecycleCoordinator } from "./native-lifecycle.mjs";
 import { ExternalOpenLifecycle } from "./external-open-lifecycle.mjs";
 import { SessionGeneration } from "./session-generation.mjs";
+import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
@@ -72,7 +73,7 @@ async function acknowledgeRequest(request, status, sequence) {
     targetHash: acknowledgementTargetHash(request.target), sequence, status,
   });
   await fs.writeFile(acknowledgementPath(request.ack.id),
-    JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
+    JSON.stringify(acknowledgement), { mode: 0o600 });
 }
 
 async function drainExternalRequests() {
@@ -606,8 +607,10 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   });
   lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
     protections, lockActive, closeWindow: () => window.close(),
+    hasExternalRequests: () => externalRequests.size > 0,
+    cancelExternalRequests: () => externalLifecycle.terminateAll("application-exit"),
     report: (warning) => window?.webContents.send("document:journal-warning", warning) });
-  window.on("close", (event) => { void lifecycle.handleClose(event); });
+  registerNativeWindowClose(window, lifecycle);
   powerMonitor.on("lock-screen", () => { void lockActive("screen-lock"); });
   window.on("blur", () => { void lockActive("background"); });
   window.on("minimize", () => { void lockActive("background"); });
