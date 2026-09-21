@@ -57,8 +57,8 @@ export class ReplacementCoordinator {
   async cancelClaim() {
     if (!this.invitation) return false;
     const staged = this.invitation;
-    this.invitation = null;
     await disposeReplacement(staged);
+    this.invitation = null;
     return true;
   }
 }

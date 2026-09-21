@@ -57,7 +57,8 @@ async function realInvitationCandidate(t) {
     journalKey };
 }
 
-function invitationCandidate({ claimFails = false } = {}) {
+function invitationCandidate({ claimFails = false, cancelFailsOnce = false } = {}) {
+  let lockAttempts = 0;
   return { active: null,
     async loadClientSettings() {},
     async openDocument(target) { this.active = { target };
@@ -68,7 +69,11 @@ function invitationCandidate({ claimFails = false } = {}) {
         publicationState: "target-published" };
     },
     async revalidateTargetForReplacement() {},
-    async lock() { this.active = null; },
+    async lock() {
+      lockAttempts += 1;
+      if (cancelFailsOnce && lockAttempts === 1) throw new Error("cancel cleanup failed");
+      this.active = null;
+    },
   };
 }
 
@@ -118,6 +123,17 @@ test("real invitation claim refreshes its authenticated baseline before adoption
   assert.equal(candidate.active.targetContent, "claimed plaintext");
   assert.equal(candidate.active.journalKey.equals(fixture.journalKey), true);
   assert.equal(await fs.readFile(fixture.target, "utf8"), "claimed");
+});
+
+test("failed invitation cancellation stays staged for a recoverable retry", async () => {
+  const coordinator = new ReplacementCoordinator({
+    makeCandidate: () => invitationCandidate({ cancelFailsOnce: true }),
+    authorizeCurrent: async () => true, adopt: () => assert.fail("must not adopt"),
+  });
+  await coordinator.open("invitation.scpefe", "temporary password");
+  await assert.rejects(coordinator.cancelClaim(), /cancel cleanup failed/);
+  assert.equal(await coordinator.cancelClaim(), true);
+  assert.equal(await coordinator.cancelClaim(), false);
 });
 
 test("external mutation after a real claim prevents adoption and preserves the original",

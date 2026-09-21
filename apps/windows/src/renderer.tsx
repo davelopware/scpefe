@@ -645,7 +645,9 @@ function App() {
 
   async function cancelInvitationClaim() {
     try {
-      await window.scpefe.cancelInvitationClaim();
+      if (!await window.scpefe.cancelInvitationClaim()) {
+        throw new Error("The invitation claim is no longer staged");
+      }
       setClaimError("");
       setInvitationStaged(false);
       setMessage("Invitation claim canceled; the current session is unchanged.");
