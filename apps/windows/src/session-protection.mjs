@@ -25,22 +25,46 @@ export class SessionProtectionCoordinator {
     this.getService = getService;
     this.present = present;
     this.pending = null;
+    this.cleanOperation = null;
   }
 
-  async authorize(operation) {
+  async authorize(operation, commit = async () => {}) {
     if (!OPERATIONS.has(operation)) throw new TypeError("invalid protection operation");
+    if (typeof commit !== "function") throw new TypeError("invalid protection commit");
     const service = this.getService();
     const state = describeProtection(service.active,
       service.hasActivePublication?.() === true);
-    if (!state) return true;
-    if (this.pending) {
+    if (this.pending || this.cleanOperation) {
       const error = new Error("Another document protection decision is already in progress");
       error.code = "DOCUMENT_PROTECTION_BUSY";
       throw error;
     }
+    if (!state) {
+      const active = service.active;
+      const runExclusive = service.runLifecycleBarrier?.bind(service)
+        ?? ((operation) => operation());
+      const claimed = { state: "queued", aborted: false };
+      this.cleanOperation = claimed;
+      try {
+        await runExclusive(async () => {
+          if (claimed.aborted) throw Object.assign(
+            new Error("The document locked while the operation was waiting; nothing was abandoned"),
+            { code: "DOCUMENT_PROTECTION_LOCKED" });
+          if (this.getService() !== service || service.active !== active) {
+            throw Object.assign(new Error(
+              "The document changed while the operation was waiting; nothing was abandoned"),
+            { code: "DOCUMENT_PROTECTION_STALE" });
+          }
+          claimed.state = "commit";
+          await commit();
+        });
+        return true;
+      } finally { if (this.cleanOperation === claimed) this.cleanOperation = null; }
+    }
     const token = randomUUID();
     return new Promise((resolve, reject) => {
-      this.pending = { token, operation, service, active: service.active, resolve, reject };
+      this.pending = { token, operation, service, active: service.active,
+        state: "presented", aborted: false, commit, resolve, reject };
       try { this.present(Object.freeze({ token, operation, state })); }
       catch (error) { this.pending = null; reject(error); }
     });
@@ -53,9 +77,10 @@ export class SessionProtectionCoordinator {
       throw new TypeError("invalid protection decision");
     }
     const pending = this.pending;
-    if (!pending || pending.token !== request.token) {
+    if (!pending || pending.token !== request.token || pending.state !== "presented") {
       throw new Error("The protection decision is no longer active");
     }
+    pending.state = "in-flight";
     if (request.decision === "cancel") {
       this.pending = null;
       pending.resolve(false);
@@ -68,34 +93,55 @@ export class SessionProtectionCoordinator {
       throw error;
     }
     try {
-      if (pending.service.hasActivePublication?.() === true) {
-        await pending.service.waitForPublications();
+      const runExclusive = pending.service.runLifecycleBarrier?.bind(pending.service)
+        ?? ((operation) => operation());
+      const proceed = await runExclusive(async () => {
+        if (pending.aborted) throw Object.assign(
+          new Error("The document locked while the decision was running; nothing was abandoned"),
+          { code: "DOCUMENT_PROTECTION_LOCKED" });
         if (this.getService() !== pending.service || pending.service.active !== pending.active) {
-          this.pending = null;
-          const error = new Error(
-            "The document changed while publication completed; nothing was abandoned");
-          pending.reject(error);
-          throw error;
+          throw Object.assign(new Error(
+            "The document changed while the decision was running; nothing was abandoned"),
+          { code: "DOCUMENT_PROTECTION_STALE" });
         }
-        if (!needsCloseDecision(pending.service.active)) {
-          this.pending = null;
-          pending.resolve(true);
-          return Object.freeze({ completed: true, proceed: true });
-        }
-      }
-      const proceed = await applyCloseDecision(pending.service, request.decision);
+        const allowed = !needsCloseDecision(pending.service.active)
+          || await applyCloseDecision(pending.service, request.decision);
+        if (!allowed) return false;
+        if (pending.aborted) throw Object.assign(
+          new Error("The document locked while the decision was running; nothing was abandoned"),
+          { code: "DOCUMENT_PROTECTION_LOCKED" });
+        await pending.commit();
+        return true;
+      });
       this.pending = null;
       pending.resolve(proceed);
       return Object.freeze({ completed: true, proceed });
     } catch (error) {
-      // Keep the request active so the user can retry or cancel after a recoverable failure.
-      throw error;
+      if (pending.aborted || error?.code === "DOCUMENT_PROTECTION_LOCKED"
+          || error?.code === "DOCUMENT_PROTECTION_STALE") {
+        this.pending = null;
+        pending.reject(error);
+        throw error;
+      }
+      const retryToken = randomUUID();
+      pending.token = retryToken;
+      pending.state = "presented";
+      return Object.freeze({ completed: false, proceed: false, retryToken,
+        error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   cancelForLock() {
+    if (this.cleanOperation?.state === "queued") {
+      this.cleanOperation.aborted = true;
+      return true;
+    }
     const pending = this.pending;
     if (!pending) return false;
+    if (pending.state === "in-flight") {
+      pending.aborted = true;
+      return true;
+    }
     this.pending = null;
     const error = new Error("The document locked while the decision was open; nothing was abandoned");
     error.code = "DOCUMENT_PROTECTION_LOCKED";

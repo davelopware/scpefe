@@ -59,6 +59,13 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     });
     return value === null ? null : validateOpenedDocument(value);
   },
+  cancelExternalOpen: async (request) => {
+    const validated = validateExternalOpenRequest(request);
+    const value = await ipcRenderer.invoke("document:cancel-external-open",
+      { token: validated.token });
+    if (value !== true) throw new TypeError("host did not cancel the external open request");
+    return true;
+  },
   enterEditMode: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:enter-edit-mode",
       validateTakeoverRequest(request));
@@ -171,10 +178,13 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     }
     const value = await ipcRenderer.invoke("document:resolve-protection",
       { token: request.token, decision: request.decision });
-    if (value?.completed !== true || typeof value.proceed !== "boolean") {
+    if (!value || typeof value !== "object" || typeof value.proceed !== "boolean"
+        || (value.completed !== true && (value.completed !== false
+          || typeof value.retryToken !== "string" || typeof value.error !== "string"))) {
       throw new TypeError("host returned invalid protection result");
     }
-    return Object.freeze({ completed: true, proceed: value.proceed });
+    return Object.freeze({ completed: value.completed, proceed: value.proceed,
+      ...(value.completed === false ? { retryToken: value.retryToken, error: value.error } : {}) });
   },
   lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
   onLocked: (listener) => {

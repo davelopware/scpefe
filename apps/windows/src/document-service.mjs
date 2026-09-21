@@ -10,6 +10,7 @@ import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 import { HeadWitnessStore, compareHeadWitness } from "./head-witness.mjs";
 import { createMergeDraft, hasConflictMarkers } from "./divergence-merge.mjs";
+import { LifecycleBarrier } from "./lifecycle-barrier.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
@@ -69,6 +70,7 @@ export class DocumentService {
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
     this.publicationOperations = 0;
+    this.lifecycle = new LifecycleBarrier();
     this.active = null;
     this.createdTarget = null;
     this.createdBytes = null;
@@ -162,12 +164,12 @@ export class DocumentService {
 
   /* Reports whether a publication, migration, compaction, or lease write is queued. */
   hasActivePublication() {
-    return this.publicationOperations > 0;
+    return this.lifecycle.hasMaintenance;
   }
 
-  /* Waits for all publication and container-maintenance work already queued. */
-  async waitForPublications() {
-    await this.publicationChain;
+  /* Runs session abandonment only after earlier maintenance and before later work. */
+  runLifecycleBarrier(operation) {
+    return this.lifecycle.runExclusive(operation);
   }
 
   async createDocument(target, request) {
@@ -2368,7 +2370,11 @@ export class DocumentService {
 
   #queuePublication(operation) {
     this.publicationOperations += 1;
-    const queued = this.publicationChain.catch(() => {}).then(operation)
+    const previous = this.publicationChain.catch(() => {});
+    const queued = this.lifecycle.runMaintenance(async () => {
+      await previous;
+      return operation();
+    })
       .finally(() => { this.publicationOperations -= 1; });
     this.publicationChain = queued;
     return queued;

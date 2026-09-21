@@ -1,4 +1,4 @@
-import { completeOpenReplacement, createReplacement, disposeReplacement,
+import { createReplacement, disposeReplacement,
   stageOpenReplacement } from "./replacement-flow.mjs";
 
 /* Owns staged replacement sessions until they can atomically become authoritative. */
@@ -11,9 +11,13 @@ export class ReplacementCoordinator {
   }
 
   async create(target, request) {
-    const staged = await createReplacement({ makeCandidate: this.makeCandidate,
-      target, request, authorizeCurrent: () => this.authorizeCurrent("new") });
-    this.adopt(staged, target);
+    let staged;
+    const authorized = await this.authorizeCurrent("new", async () => {
+      staged = await createReplacement({ makeCandidate: this.makeCandidate,
+        target, request, authorizeCurrent: async () => true });
+      this.adopt(staged, target);
+    });
+    if (!authorized) throw canceledReplacement();
     return staged.opened;
   }
 
@@ -25,23 +29,29 @@ export class ReplacementCoordinator {
       this.invitation = Object.freeze({ ...staged, operation });
       return Object.freeze({ readOnly: true, invitationRequired: true });
     }
-    const completed = await completeOpenReplacement({ staged,
-      authorizeCurrent: () => this.authorizeCurrent(operation) });
-    this.adopt(completed, target);
-    return completed.opened;
+    try {
+      const authorized = await this.authorizeCurrent(operation, async () => {
+        await staged.candidate.revalidateTargetForReplacement();
+        this.adopt(staged, target);
+      });
+      if (!authorized) throw canceledReplacement();
+      return staged.opened;
+    } catch (error) {
+      await disposeReplacement(staged);
+      throw error;
+    }
   }
 
   async claim(password) {
     if (!this.invitation) throw new Error("No staged invitation is awaiting a claim");
     const staged = this.invitation;
-    if (!await this.authorizeCurrent(staged.operation)) {
-      const error = new Error("The current document remains open");
-      error.code = "DOCUMENT_REPLACEMENT_CANCELED";
-      throw error;
-    }
-    const opened = await staged.candidate.claimInvitation(password);
-    await staged.candidate.revalidateTargetForReplacement();
-    this.adopt(staged, staged.target);
+    let opened = null;
+    const authorized = await this.authorizeCurrent(staged.operation, async () => {
+      opened ??= await staged.candidate.claimInvitation(password);
+      await staged.candidate.revalidateTargetForReplacement();
+      this.adopt(staged, staged.target);
+    });
+    if (!authorized) throw canceledReplacement();
     this.invitation = null;
     return opened;
   }
@@ -57,4 +67,10 @@ export class ReplacementCoordinator {
   hasStagedCandidate(candidate) {
     return this.invitation?.candidate === candidate;
   }
+}
+
+function canceledReplacement() {
+  const error = new Error("The current document remains open");
+  error.code = "DOCUMENT_REPLACEMENT_CANCELED";
+  return error;
 }

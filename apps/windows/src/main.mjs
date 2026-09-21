@@ -12,6 +12,7 @@ import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
 import { SecureLockCoordinator } from "./secure-lock-coordinator.mjs";
 import { SessionProtectionCoordinator } from "./session-protection.mjs";
 import { NativeLifecycleCoordinator } from "./native-lifecycle.mjs";
+import { ExternalOpenLifecycle } from "./external-open-lifecycle.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
@@ -30,6 +31,7 @@ const openRequests = new OpenRequestQueue();
 const externalRequests = new OrderedOpenRequests({ randomToken: randomUUID });
 let externalDrainRunning = false;
 let externalOpenInProgress = false;
+let externalLifecycle;
 const smokeDirectory = process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_DIR || null;
 const initialOpenTarget = openTargetFromCommandLine(process.argv);
 const instanceAcknowledgement = Object.freeze({ id: randomUUID(), secret: randomUUID() });
@@ -148,7 +150,7 @@ if (!hasInstanceLock) {
           buttons: ["Close"], defaultId: 0, noLink: true,
         });
       }
-    } else if (!["focused", "opened", "canceled"].includes(acknowledgement.status)) {
+    } else if (!["focused", "opened", "canceled", "failed"].includes(acknowledgement.status)) {
       const outcomeDeadline = Date.now()
         + (smokeDirectory ? 20_000 : 300_000);
       let lastSequence = acknowledgement.sequence;
@@ -163,7 +165,7 @@ if (!hasInstanceLock) {
             acknowledgement = valid;
             lastSequence = valid.sequence;
           }
-          if (["focused", "opened", "canceled"].includes(acknowledgement.status)) {
+          if (["focused", "opened", "canceled", "failed"].includes(acknowledgement.status)) {
             break;
           }
         } catch {}
@@ -265,7 +267,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     }
   };
   const replacements = new ReplacementCoordinator({ makeCandidate: makeService,
-    authorizeCurrent: (operation) => protections.authorize(operation),
+    authorizeCurrent: (operation, commit) => protections.authorize(operation, commit),
     adopt: adoptReplacement });
   secureLocks = new SecureLockCoordinator({ getService: () => service,
     replacements, creationFlow,
@@ -306,6 +308,21 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       ? Object.freeze({ selected: true, name: path.basename(selectedOpenTarget) }) : null;
   });
   ipcMain.handle("document:cancel-open-target", () => { selectedOpenTarget = null; });
+  externalLifecycle = new ExternalOpenLifecycle({ requests: externalRequests,
+    acknowledge: acknowledgeRequest,
+    record: (pending, outcome) => smokeLog("completed", {
+      requestToken: pending.token,
+      target: pending.target ? path.basename(pending.target) : null, outcome }),
+    drain: drainExternalRequests });
+  ipcMain.handle("document:cancel-external-open", async (_event, request) => {
+    if (!request || typeof request !== "object" || Array.isArray(request)
+        || Object.keys(request).some((key) => key !== "token")
+        || typeof request.token !== "string") {
+      throw new TypeError("invalid external open cancellation");
+    }
+    return externalLifecycle.cancel(request.token,
+      { blocked: externalOpenInProgress });
+  });
   ipcMain.handle("document:open-selected", async (_event, password) => {
     if (!selectedOpenTarget) throw new Error("Choose a document first");
     const target = selectedOpenTarget;
@@ -341,11 +358,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     externalOpenInProgress = true;
     try {
       if (smokeDirectory) {
-        await acknowledgeRequest(pending, "canceled", 3);
-        externalRequests.complete(pending.token);
-        await smokeLog("completed", { requestToken: pending.token,
-          target: path.basename(pending.target), outcome: "renderer-canceled" });
-        void drainExternalRequests();
+        await externalLifecycle.finish(pending, "canceled", "renderer-canceled");
         return null;
       }
       const opened = await openRequests.run(async () => {
@@ -359,12 +372,13 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         }
         return replacement;
       });
-      await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
-      externalRequests.complete(pending.token);
-      await smokeLog("completed", { requestToken: pending.token,
-        target: path.basename(pending.target), outcome: opened ? "opened" : "canceled" });
+      if (opened?.invitationRequired) {
+        externalLifecycle.stageInvitation(pending);
+        return { ...opened, targetName: path.basename(pending.target) };
+      }
+      await externalLifecycle.finish(pending, opened ? "opened" : "canceled",
+        opened ? "opened" : "canceled");
       await sendJournalSummary();
-      void drainExternalRequests();
       return opened ? { ...opened, targetName: path.basename(pending.target) } : null;
     } finally {
       externalOpenInProgress = false;
@@ -451,11 +465,29 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return true;
   });
   ipcMain.handle("document:claim-invitation", async (_event, password) => {
-    const opened = await replacements.claim(password);
+    let opened;
+    try { opened = await replacements.claim(password); }
+    catch (error) {
+      if (externalLifecycle.invitation
+          && error?.code === "DOCUMENT_REPLACEMENT_CANCELED") {
+        await replacements.cancelClaim();
+        await externalLifecycle.finishInvitation("canceled", "claim-canceled");
+      }
+      throw error;
+    }
+    if (externalLifecycle.invitation) {
+      await externalLifecycle.finishInvitation("opened", "claim-opened");
+    }
     await sendJournalSummary();
     return { ...opened, targetName: path.basename(currentTarget) };
   });
-  ipcMain.handle("document:cancel-invitation-claim", () => replacements.cancelClaim());
+  ipcMain.handle("document:cancel-invitation-claim", async () => {
+    const canceled = await replacements.cancelClaim();
+    if (canceled && externalLifecycle.invitation) {
+      await externalLifecycle.finishInvitation("canceled", "claim-canceled");
+    }
+    return canceled;
+  });
   ipcMain.handle("document:reconcile-identity", () => service.reconcileIdentity());
   ipcMain.handle("document:update-slot-permissions", (_event, request) =>
     service.updateSlotPermissions(request));
@@ -510,23 +542,24 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   const lockActive = (reason) => {
     protections.cancelForLock();
     leaseTakeovers.clear();
-    return secureLocks.lock(reason);
+    const current = service;
+    return current.runLifecycleBarrier(() => secureLocks.lock(reason));
   };
   ipcMain.handle("document:lock", () => lockActive("app-lock"));
   ipcMain.handle("document:resolve-protection", (_event, request) =>
     protections.decide(request));
   const closeDocument = async () => {
-    if (!await protections.authorize("close")) return false;
-    if (service.active?.editMode) await service.exitEditMode();
-    if (service.active) {
-      const result = await service.lock("document-close");
-      if (!result.journalSaved) throw new Error(result.warning
-        ?? "The document could not be checkpointed before closing");
-    }
-    currentTarget = null; lockedTarget = null; selectedOpenTarget = null;
-    window.webContents.send("document:closed");
-    await sendJournalSummary();
-    return true;
+    return protections.authorize("close", async () => {
+      if (service.active?.editMode) await service.exitEditMode();
+      if (service.active) {
+        const result = await service.lock("document-close");
+        if (!result.journalSaved) throw new Error(result.warning
+          ?? "The document could not be checkpointed before closing");
+      }
+      currentTarget = null; lockedTarget = null; selectedOpenTarget = null;
+      window.webContents.send("document:closed");
+      await sendJournalSummary();
+    });
   };
   ipcMain.handle("document:close", () => closeDocument());
   let lifecycle;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { describeProtection, SessionProtectionCoordinator }
   from "../src/session-protection.mjs";
+import { LifecycleBarrier } from "../src/lifecycle-barrier.mjs";
 
 function serviceFor(state = {}) {
   const calls = [];
@@ -73,6 +74,48 @@ test("all lifecycle operations proceed immediately for no-document and clean rea
   }
 });
 
+test("clean-session operations are claimed synchronously and concurrent destruction is rejected", async () => {
+  let release; const events = [];
+  const service = { active: { editMode: false, dirty: false, manuallySealed: true },
+    hasActivePublication: () => false,
+    runLifecycleBarrier: (operation) => operation() };
+  const policy = new SessionProtectionCoordinator({ getService: () => service,
+    present: () => assert.fail("clean state must not prompt") });
+  const first = policy.authorize("open", async () => {
+    events.push("first"); await new Promise((resolve) => { release = resolve; });
+  });
+  await assert.rejects(policy.authorize("close", async () => events.push("second")),
+    /already in progress/);
+  release(); assert.equal(await first, true);
+  assert.deepEqual(events, ["first"]);
+});
+
+test("auto-lock cancels a clean replacement queued behind maintenance", async () => {
+  const barrier = new LifecycleBarrier(); let releaseMaintenance;
+  const service = { active: { editMode: false, dirty: false, manuallySealed: true },
+    hasActivePublication: () => barrier.hasMaintenance,
+    runLifecycleBarrier: (operation) => barrier.runExclusive(operation) };
+  const maintenance = barrier.runMaintenance(() => new Promise((resolve) => {
+    releaseMaintenance = resolve;
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  let committed = false;
+  const policy = new SessionProtectionCoordinator({ getService: () => service,
+    present: () => assert.fail("clean state must not prompt") });
+  // Maintenance makes this a presented decision; model its completion before authorizing clean work.
+  releaseMaintenance(); await maintenance;
+  const blocker = barrier.runMaintenance(() => new Promise((resolve) => {
+    releaseMaintenance = resolve;
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  service.hasActivePublication = () => false;
+  const replacement = policy.authorize("open", async () => { committed = true; });
+  const rejected = assert.rejects(replacement, /locked/);
+  assert.equal(policy.cancelForLock(), true);
+  releaseMaintenance(); await blocker; await rejected;
+  assert.equal(committed, false);
+});
+
 test("all lifecycle operations use one captured-session decision and remain retryable", async () => {
   for (const operation of ["new", "open", "external-open", "close", "exit"]) {
     const current = serviceFor();
@@ -102,10 +145,13 @@ test("cancel changes nothing, stale decisions fail closed, and failures can retr
   const failed = policy.authorize("exit");
   const originalSave = current.service.saveDocument;
   current.service.saveDocument = async () => { throw new Error("publication unavailable"); };
+  const firstFailure = await policy.decide({ token: request.token, decision: "save" });
+  assert.equal(firstFailure.completed, false);
+  assert.match(firstFailure.error, /publication unavailable/);
   await assert.rejects(policy.decide({ token: request.token, decision: "save" }),
-    /publication unavailable/);
+    /no longer active/);
   current.service.saveDocument = originalSave;
-  await policy.decide({ token: request.token, decision: "save" });
+  await policy.decide({ token: firstFailure.retryToken, decision: "save" });
   assert.equal(await failed, true);
 
   current.service.active.dirty = true;
@@ -132,7 +178,7 @@ test("an active publication finishes before a clean session can be abandoned", a
   const calls = [];
   const service = { active: { dirty: false, manuallySealed: true },
     hasActivePublication: () => true,
-    async waitForPublications() { calls.push("wait"); } };
+    async runLifecycleBarrier(operation) { calls.push("barrier"); return operation(); } };
   let request;
   const policy = new SessionProtectionCoordinator({ getService: () => service,
     present: (value) => { request = value; } });
@@ -140,5 +186,70 @@ test("an active publication finishes before a clean session can be abandoned", a
   assert.equal(request.state.activePublication, true);
   await policy.decide({ token: request.token, decision: "save" });
   assert.equal(await authorized, true);
-  assert.deepEqual(calls, ["wait"]);
+  assert.deepEqual(calls, ["barrier"]);
+});
+
+test("a decision token is consumed before awaiting and concurrent replay is rejected", async () => {
+  const current = serviceFor();
+  let request; let release;
+  current.service.runLifecycleBarrier = async (operation) => {
+    await new Promise((resolve) => { release = resolve; });
+    return operation();
+  };
+  const policy = new SessionProtectionCoordinator({ getService: () => current.service,
+    present: (value) => { request = value; } });
+  const authorized = policy.authorize("close");
+  const first = policy.decide({ token: request.token, decision: "save" });
+  await assert.rejects(policy.decide({ token: request.token, decision: "discard" }),
+    /no longer active/);
+  release();
+  assert.deepEqual(await first, { completed: true, proceed: true });
+  assert.equal(await authorized, true);
+  assert.deepEqual(current.calls, ["save"]);
+  await assert.rejects(policy.decide({ token: request.token, decision: "save" }),
+    /no longer active/);
+});
+
+test("auto-lock aborts an in-flight decision behind maintenance without abandoning plaintext", async () => {
+  const current = serviceFor({ recovery: { content: "recover me" } });
+  const barrier = new LifecycleBarrier(); let request; let releaseMaintenance;
+  current.service.runLifecycleBarrier = (operation) => barrier.runExclusive(operation);
+  const maintenance = barrier.runMaintenance(() => new Promise((resolve) => {
+    releaseMaintenance = resolve;
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const policy = new SessionProtectionCoordinator({ getService: () => current.service,
+    present: (value) => { request = value; } });
+  const authorized = policy.authorize("external-open", async () => {
+    current.calls.push("replace");
+  });
+  const decision = policy.decide({ token: request.token, decision: "discard" });
+  const decisionRejected = assert.rejects(decision, /locked/);
+  const authorizationRejected = assert.rejects(authorized, /locked/);
+  assert.equal(policy.cancelForLock(), true);
+  releaseMaintenance(); await maintenance;
+  await decisionRejected;
+  await authorizationRejected;
+  assert.deepEqual(current.calls, []);
+});
+
+test("a lifecycle commit excludes maintenance queued after authorization", async () => {
+  const current = serviceFor(); const barrier = new LifecycleBarrier();
+  const events = []; let request; let releaseCommit;
+  current.service.runLifecycleBarrier = (operation) => barrier.runExclusive(operation);
+  const policy = new SessionProtectionCoordinator({ getService: () => current.service,
+    present: (value) => { request = value; } });
+  const authorized = policy.authorize("open", async () => {
+    events.push("commit-start");
+    await new Promise((resolve) => { releaseCommit = resolve; });
+    events.push("commit-end");
+  });
+  const decision = policy.decide({ token: request.token, decision: "save" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const maintenance = barrier.runMaintenance(async () => { events.push("maintenance"); });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["commit-start"]);
+  releaseCommit();
+  await Promise.all([decision, authorized, maintenance]);
+  assert.deepEqual(events, ["commit-start", "commit-end", "maintenance"]);
 });

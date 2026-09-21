@@ -215,7 +215,8 @@ test("main registers file and URL lifecycle events before draining staged reques
   assert.match(main, /externalRequests\.setReady\(\)/);
   assert.match(main, /acknowledgeRequest\(request, "queued", 1\)/);
   assert.match(main, /acknowledgeRequest\(request, "presented", 2\)/);
-  assert.match(main,
-    /acknowledgeRequest\(pending, opened \? "opened" : "canceled", 3\)/);
+  assert.match(main, /externalLifecycle\.finish\(pending, opened \? "opened" : "canceled"/);
+  assert.match(main, /document:cancel-external-open/);
+  assert.match(main, /externalLifecycle\.stageInvitation\(pending\)/);
   assert.match(main, /validateAcknowledgement\(instanceAcknowledgement/);
 });

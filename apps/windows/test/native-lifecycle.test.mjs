@@ -9,8 +9,8 @@ function setup({ active, authorize = true, exitFails = false,
     hasActivePublication: () => activePublication,
     async exitEditMode() { calls.push("release");
       if (exitFails) throw new Error("lease release failed"); this.active.editMode = false; } };
-  const protections = { async authorize(operation) { calls.push(`protect:${operation}`);
-    return authorize; } };
+  const protections = { async authorize(operation, commit) { calls.push(`protect:${operation}`);
+    if (!authorize) return false; await commit(); return true; } };
   const lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
     protections, async lockActive(reason) { calls.push(`lock:${reason}`);
       service.active = null; }, closeWindow() { calls.push("close"); },

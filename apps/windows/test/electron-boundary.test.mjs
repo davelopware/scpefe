@@ -25,7 +25,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.doesNotMatch(main, /taskkill|process\.kill|child_process/);
   assert.match(main, /SessionProtectionCoordinator/);
   assert.match(main, /NativeLifecycleCoordinator/);
-  assert.match(nativeLifecycle, /protections\.authorize\(["']exit["']\)/);
+  assert.match(nativeLifecycle, /protections\.authorize\(["']exit["'],/);
   assert.match(main, /ipcMain\.handle\(["']document:close["']/);
   assert.doesNotMatch(main,
     /if \(closingAfterRelease \|\| !service\.active\?\.editMode\) return/);
@@ -111,7 +111,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "getUnresolvedJournalSummary", "chooseCreateTarget", "cancelCreateTarget",
     "createDocument", "chooseOpenTarget", "cancelOpenTarget",
     "openSelectedDocument", "unlockDocument",
-    "openExternalDocument",
+    "openExternalDocument", "cancelExternalOpen",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
     "discardPendingPublication", "backupDocument", "compactDocument", "migrateDocument",

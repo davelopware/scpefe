@@ -9,15 +9,11 @@ export class NativeLifecycleCoordinator {
     this.closeWindow = closeWindow;
     this.report = report;
     this.releasing = false;
-    this.exitAuthorized = false;
     this.operation = null;
   }
 
   async requestExit() {
-    if (!await this.protections.authorize("exit")) return false;
-    this.exitAuthorized = true;
-    this.closeWindow();
-    return true;
+    return this.protections.authorize("exit", () => this.#releaseAndClose());
   }
 
   handleClose(event) {
@@ -30,21 +26,22 @@ export class NativeLifecycleCoordinator {
     event.preventDefault();
     if (this.operation) return this.operation;
     this.operation = (async () => {
-      if (!this.exitAuthorized && !await this.protections.authorize("exit")) return false;
-      if (service !== this.getService()) {
-        throw new Error("The document changed before native close cleanup");
-      }
-      if (service.active?.editMode) {
-        try { await service.exitEditMode(); }
-        catch { await this.lockActive("app-exit"); }
-      }
-      this.releasing = true;
-      this.closeWindow();
-      return true;
+      return this.protections.authorize("exit", () => this.#releaseAndClose(service));
     })().catch((error) => {
       this.report(`Could not finish exit: ${error.message}`);
       return false;
-    }).finally(() => { this.operation = null; this.exitAuthorized = false; });
+    }).finally(() => { this.operation = null; });
     return this.operation;
+  }
+
+  async #releaseAndClose(expected = this.getService()) {
+    const service = this.getService();
+    if (service !== expected) throw new Error("The document changed before native close cleanup");
+    if (service.active?.editMode) {
+      try { await service.exitEditMode(); }
+      catch { await this.lockActive("app-exit"); }
+    }
+    this.releasing = true;
+    this.closeWindow();
   }
 }

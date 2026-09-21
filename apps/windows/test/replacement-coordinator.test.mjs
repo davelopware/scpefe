@@ -83,7 +83,7 @@ test("invitation open, failed claim, and cancellation retain the authoritative s
     let authoritative = original;
     const coordinator = new ReplacementCoordinator({
       makeCandidate: () => invitationCandidate({ claimFails: true }),
-      authorizeCurrent: async () => true,
+      authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
       adopt: (staged) => { authoritative = staged.candidate; },
     });
     assert.deepEqual(await coordinator.open("invitation.scpefe", "temporary password"),
@@ -108,7 +108,7 @@ test("real invitation claim refreshes its authenticated baseline before adoption
     return revalidate();
   };
   const coordinator = new ReplacementCoordinator({ makeCandidate: () => candidate,
-    authorizeCurrent: async () => true,
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
     adopt: (staged) => { log.push("adopt"); authoritative = staged.candidate; } });
   await coordinator.open(fixture.target, fixture.temporary);
   const opened = await coordinator.claim(fixture.replacement);
@@ -128,7 +128,8 @@ test("real invitation claim refreshes its authenticated baseline before adoption
 test("failed invitation cancellation stays staged for a recoverable retry", async () => {
   const coordinator = new ReplacementCoordinator({
     makeCandidate: () => invitationCandidate({ cancelFailsOnce: true }),
-    authorizeCurrent: async () => true, adopt: () => assert.fail("must not adopt"),
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: () => assert.fail("must not adopt"),
   });
   await coordinator.open("invitation.scpefe", "temporary password");
   await assert.rejects(coordinator.cancelClaim(), /cancel cleanup failed/);
@@ -149,7 +150,7 @@ test("external mutation after a real claim prevents adoption and preserves the o
     };
     const coordinator = new ReplacementCoordinator({
       makeCandidate: () => fixture.candidate,
-      authorizeCurrent: async () => true,
+      authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
       adopt: (staged) => { authoritative = staged.candidate; },
     });
     await coordinator.open(fixture.target, fixture.temporary);

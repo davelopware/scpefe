@@ -78,7 +78,7 @@ export function validateAcknowledgement(credentials, value, targetHash) {
   const validState = value?.sequence === 1 && value?.status === "queued"
     || value?.sequence === 2 && value?.status === "presented"
     || value?.sequence === 3
-      && ["focused", "opened", "canceled"].includes(value?.status);
+      && ["focused", "opened", "canceled", "failed"].includes(value?.status);
   if (!value || typeof value !== "object" || value.id !== credentials.id
       || typeof value.requestToken !== "string" || !UUID.test(value.requestToken)
       || value.targetHash !== targetHash

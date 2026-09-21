@@ -273,6 +273,7 @@ declare global { interface Window { scpefe: {
   unlockDocument(password: string): Promise<Opened>;
   openExternalDocument(request: ExternalOpenRequest & { password: string }):
     Promise<Opened | null>;
+  cancelExternalOpen(request: ExternalOpenRequest): Promise<boolean>;
   enterEditMode(request?: { authorization?: string }): Promise<DocumentOpened | LeaseDecision>;
   saveDocument(content: string): Promise<{ saved: true; content: string;
     publicationState: PublicationState }>;
@@ -311,7 +312,7 @@ declare global { interface Window { scpefe: {
   closeDocument(): Promise<boolean>;
   exitApplication(): Promise<boolean>;
   resolveProtection(request: { token: string; decision: "cancel" | "save" | "discard" }):
-    Promise<{ completed: true; proceed: boolean }>;
+    Promise<{ completed: boolean; proceed: boolean; retryToken?: string; error?: string }>;
   lock(): Promise<LockResult>;
   onLocked(listener: (result: LockResult) => void): () => void;
   onJournalWarning(listener: (warning: string) => void): () => void;
@@ -565,7 +566,14 @@ function App() {
     if (!protection) return;
     try {
       setProtectionError("");
-      await window.scpefe.resolveProtection({ token: protection.token, decision });
+      const result = await window.scpefe.resolveProtection(
+        { token: protection.token, decision });
+      if (!result.completed) {
+        setProtection((current) => current && result.retryToken
+          ? { ...current, token: result.retryToken } : current);
+        setProtectionError(result.error ?? "The decision failed safely; retry or cancel.");
+        return;
+      }
       setProtection(null);
       if (decision === "cancel") {
         setMessage("Action canceled; the current document remains open and usable.");
@@ -656,8 +664,13 @@ function App() {
 
   async function cancelOpen() {
     try {
-      if (dialog === "open" && !externalOpenRequest) await window.scpefe.cancelOpenTarget();
-    } catch (error) { showError(error); }
+      if (externalOpenRequest) await window.scpefe.cancelExternalOpen(externalOpenRequest);
+      else if (dialog === "open") await window.scpefe.cancelOpenTarget();
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => openPassword.current?.focus());
+      return;
+    }
     setExternalOpenRequest(null); setPendingOpenName(""); setOpenError(""); closeDialog();
   }
 
@@ -671,9 +684,13 @@ function App() {
       });
       setExternalOpenRequest(null);
       if (result) { showReplacementResult(result); setDialog(null); }
-      else setMessage("Open request canceled; the current document remains open.");
+      else { setDialog(null);
+        setMessage("Open request canceled; the current document remains open."); }
       setJournalSummary(await window.scpefe.getUnresolvedJournalSummary());
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => openPassword.current?.focus());
+    }
   }
 
   async function enterEditMode() {
@@ -827,7 +844,13 @@ function App() {
       setInvitationStaged(false); showOpenedResult(result);
       setMessage("Invitation claimed and replacement password safely published.");
     } catch (error) {
-      setClaimError(error instanceof Error ? error.message : String(error));
+      const value = error instanceof Error ? error.message : String(error);
+      if (/current document remains open/i.test(value)) {
+        setInvitationStaged(false);
+        setMessage("Invitation claim canceled; the current session remains open.");
+        return;
+      }
+      setClaimError(value);
       requestAnimationFrame(() => (form.elements.namedItem(
         "newPassword") as HTMLElement | null)?.focus());
     }
@@ -1562,7 +1585,9 @@ function App() {
         <p>Cancel keeps this document open. Save retries or seals recoverable work. Discard is permanent where policy permits it.</p>
       </div>
       {protectionError && <p className="dialog-error" role="alert">{protectionError}</p>}
-      <div className="dialog-actions"><button autoFocus
+      <div className="dialog-actions"><button ref={(node) => {
+        if (node && !protectionError) node.focus();
+      }}
         onClick={() => void decideProtection("cancel")}>Keep current document open</button>
         <button onClick={() => void decideProtection("save")}>
           {protection.state.pendingPublication ? "Retry publication and continue"
