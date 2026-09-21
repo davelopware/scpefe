@@ -167,6 +167,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
   assert.deepEqual([editor.selectionStart, editor.selectionEnd], [6, 10]);
   assert.match(ui.getByRole(findDialog, "status").textContent, /wrapping/);
+  editor.focus(); await user.keyboard("{Control>}h{/Control}");
+  assert.equal(document.activeElement === replaceInput, true,
+    "Ctrl+H focuses Replace with even when mutation is read-only");
+  assert.equal(ui.getByRole(findDialog, "button", { name: "Replace" }).disabled, true);
 
   await command("Edit", "Edit Contents");
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });

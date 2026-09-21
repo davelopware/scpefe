@@ -494,7 +494,7 @@ function App() {
       && !opened.headMismatch && !opened.profileMismatch && !opened.migrationRequired,
     undo: activeDocument && !opened.readOnly && historyIndex > 0,
     redo: activeDocument && !opened.readOnly && historyIndex < history.length - 1,
-    find: activeDocument, replace: activeDocument && !opened.readOnly,
+    find: activeDocument, replace: activeDocument,
     lock: activeDocument, unlock: lockedDocument,
     passwords: activeDocument, profile: profile !== null,
   };
@@ -1274,7 +1274,6 @@ function App() {
         <label>Find<input ref={findInput} value={findText}
           onChange={(event) => { setFindText(event.target.value); setFindStatus(""); }} /></label>
         <label>Replace with<input ref={replaceInput} value={replaceText}
-          disabled={opened.readOnly}
           onChange={(event) => setReplaceText(event.target.value)} /></label>
         <div className="dialog-actions"><button type="button" disabled={!findText}
           onClick={findNext}>Find next</button>
