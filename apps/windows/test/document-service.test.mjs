@@ -246,12 +246,27 @@ test("password changes authenticate the active slot and atomically retain docume
       currentPassword: "different current password", newPassword: "replacement password words",
     }), /does not match/);
     assert.deepEqual(await fs.readFile(target), current);
+    let encryptedJournal;
+    let interrupted = false;
+    const write = service.journals.write.bind(service.journals);
+    service.journals.write = async (...args) => {
+      await write(...args);
+      if (!interrupted && args[2]?.publication?.stage === "replaced") {
+        interrupted = true;
+        encryptedJournal = await fs.readFile(path.join(directory, "journals",
+          `${documentId}.work-journal`));
+        throw new Error("simulated acknowledgement loss after replacement");
+      }
+    };
     const result = await service.changePassword({
       currentPassword: "current password words", newPassword: "replacement password words",
     });
+    assert.equal(interrupted, true);
     assert.equal(result.content, "protected text");
     assert.deepEqual(await fs.readFile(target), changed);
     assert.equal(service.active.password, "replacement password words");
+    assert.equal(encryptedJournal.includes(Buffer.from("replacement password words")), false,
+      "the recoverable publication record never stores its password as plaintext");
     assert.equal(await service.journals.read(documentId, service.active.journalKey), null,
       "successful publication leaves no password-bearing recovery record");
   });

@@ -83,16 +83,18 @@ function validateRecord(value) {
         || (value.publication.purpose !== undefined
           && !["invitation-claim", "regular-save", "provisional-discard",
             "identity-reconciliation", "slot-administration", "compaction",
-            "format-migration"]
+            "format-migration", "password-change"]
             .includes(value.publication.purpose))
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"
             || !value.publication.reopenPassword
             || value.publication.reopenPassword.length > 4096))
-        || (value.publication.purpose === "invitation-claim"
-          && (value.publication.reopenPassword === undefined || value.text !== ""))
+        || (["invitation-claim", "password-change"].includes(
+          value.publication.purpose) && value.publication.reopenPassword === undefined)
+        || (value.publication.purpose === "invitation-claim" && value.text !== "")
         || (value.publication.reopenPassword !== undefined
-          && value.publication.purpose !== "invitation-claim")
+          && !["invitation-claim", "password-change"].includes(
+            value.publication.purpose))
         || (value.state === "unsaved"
           && value.publication.purpose !== "regular-save")) {
       throw new TypeError("invalid publication transaction");

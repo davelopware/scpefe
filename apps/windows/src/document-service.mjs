@@ -417,33 +417,49 @@ export class DocumentService {
     }
     let reopened;
     let published;
-    await this.#queuePublication(async () => {
-      const current = await this.fs.readFile(active.target);
-      const inspected = this.#validateNativeOpened(
-        this.native.openDocument(current, currentPassword));
-      try {
-        if (inspected.documentId !== active.documentId
-            || inspected.baseRevision !== active.baseRevision) {
-          throw new Error("The target changed before the password change completed");
+    try {
+      await this.#queuePublication(async () => {
+        const current = await this.fs.readFile(active.target);
+        const inspected = this.#validateNativeOpened(
+          this.native.openDocument(current, currentPassword));
+        try {
+          if (inspected.documentId !== active.documentId
+              || inspected.baseRevision !== active.baseRevision) {
+            throw new Error("The target changed before the password change completed");
+          }
+        } finally {
+          inspected.journalKey.fill(0);
         }
-      } finally {
-        inspected.journalKey.fill(0);
+        const candidate = this.native.changePassword(
+          current, currentPassword, newPassword);
+        await this.publications.publish({ documentId: active.documentId,
+          journalKey: active.journalKey, target: active.target, base: current, candidate,
+          text: active.opened.content, cursor: { start: 0, end: 0 },
+          baseRevision: active.baseRevision, purpose: "password-change",
+          reopenPassword: newPassword });
+        published = await this.fs.readFile(active.target);
+        reopened = this.#validateNativeOpened(
+          this.native.openDocument(published, newPassword));
+        if (reopened.documentId !== active.documentId
+            || reopened.baseRevision !== active.baseRevision) {
+          throw new Error("Published password change was not verified");
+        }
+      });
+    } catch (error) {
+      if (!error?.publicationPrepared) throw error;
+      try {
+        const record = await this.journals.read(active.documentId, active.journalKey);
+        if (record?.publication?.purpose !== "password-change") throw error;
+        const resumed = await this.publications.resume(
+          active.documentId, active.journalKey, record);
+        if (!resumed.completed) throw error;
+        published = await this.fs.readFile(active.target);
+        reopened = this.#validateNativeOpened(
+          this.native.openDocument(published, newPassword));
+      } catch {
+        throw error;
       }
-      const candidate = this.native.changePassword(
-        current, currentPassword, newPassword);
-      await this.publications.publish({ documentId: active.documentId,
-        journalKey: active.journalKey, target: active.target, base: current, candidate,
-        text: active.opened.content, cursor: { start: 0, end: 0 },
-        baseRevision: active.baseRevision, purpose: "password-change",
-        reopenPassword: newPassword });
-      published = await this.fs.readFile(active.target);
-      reopened = this.#validateNativeOpened(
-        this.native.openDocument(published, newPassword));
-      if (reopened.documentId !== active.documentId
-          || reopened.baseRevision !== active.baseRevision) {
-        throw new Error("Published password change was not verified");
-      }
-    });
+    }
     active.password = newPassword;
     active.journalKey.fill(0);
     const passwordChangeBlocked = active.headMismatch || active.profileMismatch

@@ -643,6 +643,17 @@ function App() {
     }
   }
 
+  async function cancelInvitationClaim() {
+    try {
+      await window.scpefe.cancelInvitationClaim();
+      setClaimError("");
+      setInvitationStaged(false);
+      setMessage("Invitation claim canceled; the current session is unchanged.");
+    } catch (error) {
+      setClaimError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function changePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -1056,9 +1067,15 @@ function App() {
         <label>One-time temporary passphrase<input readOnly autoFocus
           value={invitationPassphrase} aria-describedby="invitation-once-warning" /></label>
         <p id="invitation-once-warning">Copy it before continuing.</p>
+        {invitationError && <p className="dialog-error" role="alert">{invitationError}</p>}
         <div className="dialog-actions"><button type="button" onClick={async () => {
-          await window.scpefe.copyInvitationPassphrase(invitationPassphrase);
-          setMessage("Invitation passphrase copied. Complete the secure transfer, then choose Done.");
+          try {
+            setInvitationError("");
+            await window.scpefe.copyInvitationPassphrase(invitationPassphrase);
+            setMessage("Invitation passphrase copied. Complete the secure transfer, then choose Done.");
+          } catch (error) {
+            setInvitationError(error instanceof Error ? error.message : String(error));
+          }
         }}>Copy</button><button type="button" onClick={() => {
           setInvitationPassphrase(null); setMessage("Invitation created.");
         }}>Done</button></div></section> : <>
@@ -1100,10 +1117,7 @@ function App() {
           minLength={12} required /></label>
         {claimError && <p className="dialog-error" role="alert">{claimError}</p>}
         <button>Replace password and claim identity</button></form>
-      <button onClick={async () => {
-        await window.scpefe.cancelInvitationClaim(); setClaimError(""); setInvitationStaged(false);
-        setMessage("Invitation claim canceled; the current session is unchanged.");
-      }}>Cancel</button></FocusedDialog>}
+      <button onClick={() => void cancelInvitationClaim()}>Cancel</button></FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Older container">
       <div className="warning" role="alert"><p>{opened.migrationWarning}</p>
