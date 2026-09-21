@@ -145,10 +145,21 @@ export function validateCreateFormRequest(value) {
   if (recoveryPasswordConfirmation !== recoveryPassword) {
     throw new TypeError("recovery passwords do not match");
   }
+  if (value.content !== "") {
+    throw new TypeError("new document content must be blank");
+  }
   const validated = validateCreateRequest({ ...value, ownerPassword,
     recoveryPassword });
   return { ...validated, recoveryPassword, ownerPasswordConfirmation,
     recoveryPasswordConfirmation };
+}
+
+export function validateCreationTargetResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || value.selected !== true || Object.keys(value).length !== 1) {
+    throw new TypeError("host returned an invalid creation target result");
+  }
+  return Object.freeze({ selected: true });
 }
 
 export function validatePassword(value) {

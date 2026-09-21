@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequest,
-  validateCreationResult,
+  validateCreationResult, validateCreationTargetResult,
   validateBackupResult, validateCompactionResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
@@ -52,7 +52,7 @@ test("creation form confirms owner and optional recovery passwords", () => {
     ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "different recovery words",
     recoveryPasswordConfirmation: "different recovery words",
-    content: "hello", understandsIrrecoverable: true,
+    content: "", understandsIrrecoverable: true,
     storedRecoverySeparately: true,
   };
   assert.deepEqual(validateCreateFormRequest(request), request);
@@ -71,6 +71,8 @@ test("creation form confirms owner and optional recovery passwords", () => {
   assert.throws(() => validateCreateFormRequest({ ...request,
     recoveryPassword: "", recoveryPasswordConfirmation: "recovery only" }),
   /recovery passwords do not match/);
+  assert.throws(() => validateCreateFormRequest({ ...request,
+    content: "pre-populated plaintext" }), /content must be blank/);
 });
 
 test("accepts only validated read-only native results", () => {
@@ -115,6 +117,12 @@ test("creation results cannot expose host filesystem paths", () => {
   assert.throws(() => validateCreationResult({
     created: true, target: "C:\\Users\\Ada\\secret.scpefe",
   }));
+});
+
+test("creation target selection exposes no host filesystem path", () => {
+  assert.deepEqual(validateCreationTargetResult({ selected: true }), { selected: true });
+  assert.throws(() => validateCreationTargetResult({ selected: true,
+    target: "C:\\Users\\Ada\\secret.scpefe" }), /invalid creation target result/);
 });
 
 test("backup results expose success without a host filesystem path", () => {

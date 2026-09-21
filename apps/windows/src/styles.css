@@ -12,3 +12,11 @@ fieldset { display: grid; gap: .7rem; border: 1px solid #bac5d0; }
 .managed-slot { display: grid; gap: .7rem; padding: 1rem; border: 1px solid #bac5d0;
   border-radius: .4rem; }
 .managed-slot h4, .managed-slot p { margin: 0; }
+.dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid;
+  place-items: center; padding: 1rem; background: rgb(24 32 42 / .55); }
+.security-dialog { width: min(36rem, 100%); max-height: calc(100vh - 2rem);
+  overflow: auto; box-sizing: border-box; padding: 1.25rem; border-radius: .5rem;
+  background: white; box-shadow: 0 .8rem 2.5rem rgb(0 0 0 / .35); }
+.security-dialog h2 { margin-top: 0; }
+.dialog-error { color: #9b1c1c; font-weight: 600; }
+.dialog-actions { justify-content: flex-end; }
