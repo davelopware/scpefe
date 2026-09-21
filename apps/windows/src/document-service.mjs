@@ -447,6 +447,7 @@ export class DocumentService {
     if (!profile) throw new Error("Configure name, email, and device name first");
     const replacement = validatePassword(newPassword);
     let reopened;
+    let published;
     await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
       const candidate = this.native.claimInvitation(current, active.password,
@@ -455,17 +456,44 @@ export class DocumentService {
         journalKey: active.journalKey, target: active.target, base: current, candidate,
         text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
         purpose: "invitation-claim", reopenPassword: replacement });
-      reopened = this.#validateNativeOpened(this.native.openDocument(
-        await this.fs.readFile(active.target), replacement));
-      if (reopened.opened.invitationRequired) {
+      published = await this.fs.readFile(active.target);
+      reopened = this.#validateNativeOpened(
+        this.native.openDocument(published, replacement));
+      if (reopened.documentId !== active.documentId
+          || reopened.opened.invitationRequired) {
         throw new Error("Published invitation claim was not verified");
       }
     });
+    const migrationRequired = reopened.containerFormatVersion < 3;
     active.password = replacement;
-    active.opened = reopened.opened;
     active.journalKey.fill(0);
+    active.opened = validateOpenedDocument({ ...reopened.opened,
+      canEdit: migrationRequired ? false : reopened.opened.canEdit,
+      publicationState: "target-published",
+      ...(migrationRequired ? { migrationRequired: true } : {}),
+      ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
+    active.documentId = reopened.documentId;
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.slotCanEdit = reopened.opened.canEdit;
+    active.headMismatch = null;
+    active.profileMismatch = null;
+    active.migrationRequired = migrationRequired;
+    active.baseContainer = Buffer.from(published);
+    active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);
+    active.recovery = null;
+    active.pendingPublication = false;
+    active.pendingRecord = null;
+    active.unresolvedJournal = false;
+    active.unreadableJournal = false;
+    active.manuallySealed = reopened.manuallySealed;
+    active.editMode = false;
+    active.working = null;
+    active.dirty = false;
     reopened.journalKey.fill(0);
+    await this.witnesses.observe(active.target, active.observation);
     return active.opened;
   }
 
