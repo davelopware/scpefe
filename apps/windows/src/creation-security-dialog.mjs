@@ -1,11 +1,11 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
 
 const h = React.createElement;
 
 /* Collects and validates creation secrets after a target has been selected. */
-export function CreationSecurityDialog({ onCreate, onCancel }) {
+export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
   const [ownerPassword, setOwnerPassword] = useState("");
   const [ownerConfirmation, setOwnerConfirmation] = useState("");
   const [recoveryPassword, setRecoveryPassword] = useState("");
@@ -19,7 +19,21 @@ export function CreationSecurityDialog({ onCreate, onCancel }) {
   const ownerConfirmationRef = useRef(null);
   const recoveryConfirmationRef = useRef(null);
   const ownerRef = useRef(null);
+  const dialogRef = useRef(null);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
+
+  useEffect(() => {
+    const prior = returnFocus ?? document.activeElement;
+    const chrome = document.querySelector(".shell-chrome");
+    chrome?.setAttribute("inert", "");
+    ownerRef.current?.focus();
+    return () => {
+      chrome?.removeAttribute("inert");
+      globalThis.requestAnimationFrame?.(() => {
+        if (prior?.isConnected) prior.focus();
+      });
+    };
+  }, []);
 
   async function submit(event) {
     event.preventDefault();
@@ -65,9 +79,19 @@ export function CreationSecurityDialog({ onCreate, onCancel }) {
       if (event.key === "Escape" && !submitting) {
         event.preventDefault();
         cancel();
+      } else if (event.key === "Tab" && dialogRef.current) {
+        const controls = [...dialogRef.current.querySelectorAll(
+          "button:not(:disabled), input:not(:disabled)")];
+        if (!controls.length) return;
+        const at = controls.indexOf(document.activeElement);
+        const next = event.shiftKey
+          ? (at <= 0 ? controls.length - 1 : at - 1)
+          : (at >= controls.length - 1 ? 0 : at + 1);
+        event.preventDefault();
+        controls[next].focus();
       }
     } },
-  h("section", { className: "security-dialog", role: "dialog", "aria-modal": "true",
+  h("section", { ref: dialogRef, className: "security-dialog", role: "dialog", "aria-modal": "true",
     "aria-labelledby": "creation-security-title",
     "aria-describedby": "creation-security-warning", "aria-busy": submitting },
   h("h2", { id: "creation-security-title" }, "Secure new document"),

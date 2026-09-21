@@ -60,7 +60,8 @@ test("mounted password pairs reveal independently and retain entered secrets", a
   await user.type(recoveryConfirmation, recoverySecret);
 
   ownerToggle.focus();
-  assert.equal(dom.window.document.activeElement, ownerToggle);
+  assert.equal(dom.window.document.activeElement === ownerToggle, true,
+    "the owner visibility toggle receives focus");
   await user.keyboard("{Enter}");
   ownerToggle = ui.getByRole("button", { name: "Hide owner passwords" });
   recoveryToggle = ui.getByRole("button", { name: "Show recovery passwords" });

@@ -13,6 +13,7 @@ export type CreationFormRequest = {
 export function CreationSecurityDialog(props: {
   onCreate(request: CreationFormRequest): Promise<void>;
   onCancel(): void | Promise<void>;
+  returnFocus?: HTMLElement | null;
 }): ReactElement;
 
 export function CreateDocumentControl(props: {

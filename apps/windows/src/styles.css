@@ -1,22 +1,56 @@
-:root { font: 16px/1.45 system-ui, sans-serif; color: #18202a; background: #eef2f6; }
-body { margin: 0; } main { max-width: 760px; margin: auto; padding: 2rem; }
-section, form { display: grid; gap: .8rem; } section { background: white; padding: 1.25rem; margin: 1rem 0; border-radius: .5rem; }
-label { display: grid; gap: .25rem; } input, textarea, select, button { font: inherit; padding: .55rem; }
-textarea { min-height: 10rem; } .warning { border-left: .3rem solid #b54708; padding-left: .8rem; }
-.check { display: flex; align-items: center; } .mode { font-weight: 700; color: #245c3d; }
-.toolbar { display: flex; flex-wrap: wrap; gap: .5rem; }
-fieldset { display: grid; gap: .7rem; border: 1px solid #bac5d0; }
-.slot-administration { max-width: 760px; margin: 1rem auto 2rem; padding: 1.25rem;
-  box-sizing: border-box; background: white; border-radius: .5rem; }
-.managed-slots { display: grid; gap: 1rem; padding: 0; list-style: none; }
-.managed-slot { display: grid; gap: .7rem; padding: 1rem; border: 1px solid #bac5d0;
-  border-radius: .4rem; }
-.managed-slot h4, .managed-slot p { margin: 0; }
-.dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid;
-  place-items: center; padding: 1rem; background: rgb(24 32 42 / .55); }
-.security-dialog { width: min(36rem, 100%); max-height: calc(100vh - 2rem);
-  overflow: auto; box-sizing: border-box; padding: 1.25rem; border-radius: .5rem;
-  background: white; box-shadow: 0 .8rem 2.5rem rgb(0 0 0 / .35); }
-.security-dialog h2 { margin-top: 0; }
+:root { font: 14px/1.4 "Segoe UI", system-ui, sans-serif; color: CanvasText; background: Canvas; }
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+button, input, select, textarea { font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid Highlight; outline-offset: 1px;
+}
+.app-shell { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.shell-chrome { display: contents; }
+.menu-bar { display: flex; min-height: 2.25rem; padding: 0 .35rem; border-bottom: 1px solid #8c939b;
+  background: #f3f3f3; z-index: 5; }
+.menu { position: relative; }
+.menu > button { height: 100%; padding: .3rem .7rem; border: 0; color: #17202a; background: transparent; }
+.menu > button:hover, .menu > button[aria-expanded="true"] { background: #dce8f6; }
+.menu [role="menu"] { position: absolute; top: 100%; left: 0; min-width: 15rem; padding: .25rem;
+  background: Canvas; border: 1px solid #707780; box-shadow: 0 .35rem 1rem #0003; }
+.menu [role="menu"] button { display: flex; justify-content: space-between; width: 100%; padding: .42rem .65rem;
+  border: 0; color: CanvasText; background: Canvas; text-align: left; }
+.menu [role="menu"] button:hover:not(:disabled), .menu [role="menu"] button:focus { color: HighlightText; background: Highlight; }
+.menu [role="menu"] button:disabled { color: GrayText; }
+.menu hr { border: 0; border-top: 1px solid GrayText; margin: .25rem; }
+kbd { margin-left: 2rem; font: inherit; color: inherit; }
+.editor-surface { position: relative; min-height: 0; background: Canvas; }
+.editor-surface textarea { display: block; width: 100%; height: 100%; min-height: 0; resize: none; border: 0;
+  padding: .85rem 1rem; color: CanvasText; background: Canvas; font: 16px/1.5 Consolas, monospace; }
+.editor-surface textarea:disabled { color: GrayText; background: Canvas; }
+.editor-placeholder { position: absolute; inset: 1rem auto auto 1rem; z-index: 1; margin: 0;
+  color: GrayText; pointer-events: none; }
+.status-bar { min-height: 1.8rem; display: flex; gap: 1.5rem; padding: .25rem .65rem;
+  border-top: 1px solid #8c939b; background: #f1f3f5; color: #17202a; white-space: nowrap; overflow: hidden; }
+.status-bar span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+  padding: 1rem; background: rgb(24 32 42 / .55); }
+.app-dialog, .security-dialog { width: min(38rem, 100%); max-height: calc(100vh - 2rem); overflow: auto;
+  padding: 1.25rem; border: 1px solid #707780; border-radius: .25rem; color: CanvasText;
+  background: Canvas; box-shadow: 0 .8rem 2.5rem #0006; }
+.app-dialog h2, .security-dialog h2 { margin-top: 0; }
+.app-dialog form, .security-dialog form, .app-dialog fieldset { display: grid; gap: .75rem; }
+label { display: grid; gap: .25rem; }
+input, select, button { padding: .45rem .6rem; }
+.check { display: flex; align-items: center; gap: .4rem; }
+.dialog-actions, .toolbar { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+.warning { border-left: .3rem solid #b54708; padding-left: .8rem; }
 .dialog-error { color: #9b1c1c; font-weight: 600; }
-.dialog-actions { justify-content: flex-end; }
+.slot-administration { margin-top: 1rem; }
+.managed-slots { display: grid; gap: 1rem; padding: 0; list-style: none; }
+.managed-slot { display: grid; gap: .7rem; padding: .75rem 0; border-top: 1px solid GrayText; }
+.managed-slot h4, .managed-slot p { margin: 0; }
+@media (prefers-contrast: more) {
+  .menu-bar, .status-bar, .app-dialog, .security-dialog, .menu [role="menu"] { border-color: currentColor; }
+  .warning { border-color: currentColor; }
+}
+@media (max-width: 35rem) {
+  .status-bar { gap: .6rem; font-size: .85rem; }
+  .menu [role="menu"] { min-width: 13rem; }
+}

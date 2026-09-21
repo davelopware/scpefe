@@ -12,6 +12,10 @@ Use the standard five-role triage vocabulary. See `docs/agents/triage-labels.md`
 
 This is a single-context repository. `docs/DOMAIN_MODEL.md` is the canonical glossary. See `docs/agents/domain.md`.
 
+### Resource-safe Node tests
+
+After a Node/renderer/DOM OOM, runner stall, WSL swap or disk thrash, or when adding a production-bundle mounted harness, follow `docs/agents/resource-safety.md` before broader tests.
+
 ## C++ header documentation
 
 - Give every class, struct, enum, function, and method declared in a `.h` or `.hpp` file a succinct purpose comment.

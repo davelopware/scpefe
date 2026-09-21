@@ -38,9 +38,10 @@ test("mounted post-picker dialog is focused and has no initial-text field", (t) 
   const { ui } = mountedDialog(t);
   const dialog = ui.getByRole("dialog", { name: "Secure new document" });
   assert.equal(dialog.getAttribute("aria-modal"), "true");
-  assert.equal(dom.window.document.activeElement,
-    ui.getByLabelText("Owner password"));
-  assert.equal(ui.queryByLabelText("Initial text"), null);
+  assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
+    true, "owner password receives initial focus");
+  assert.equal(ui.queryByLabelText("Initial text") === null, true,
+    "creation dialog has no initial-text field");
   assert.match(dialog.textContent, /lost passwords cannot be recovered/i);
 });
 
@@ -56,8 +57,9 @@ test("owner mismatch stays open, retains input, focuses confirmation, and create
     assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
     assert.equal(ui.getByLabelText("Confirm owner password").value,
       "owner password typo");
-    assert.equal(dom.window.document.activeElement,
-      ui.getByLabelText("Confirm owner password"));
+    assert.equal(dom.window.document.activeElement
+      === ui.getByLabelText("Confirm owner password"), true,
+      "owner mismatch focuses its confirmation field");
   });
 
 test("optional recovery acknowledgement is conditional and matching values cross once",
@@ -67,7 +69,8 @@ test("optional recovery acknowledgement is conditional and matching values cross
       requests.push(request);
     });
     assert.equal(ui.queryByLabelText(
-      "I will store the recovery password independently."), null);
+      "I will store the recovery password independently.") === null, true,
+      "recovery acknowledgement is hidden without a recovery password");
     await enterOwner(ui, user);
     await user.type(ui.getByLabelText(
       "Independent recovery password (strongly recommended)"),
@@ -105,8 +108,9 @@ test("recovery mismatch never invokes creation and keeps both pairs recoverable"
     assert.equal(createCalls, 0);
     assert.match(ui.getByRole("alert").textContent,
       /recovery passwords do not match/);
-    assert.equal(dom.window.document.activeElement,
-      ui.getByLabelText("Confirm recovery password"));
+    assert.equal(dom.window.document.activeElement
+      === ui.getByLabelText("Confirm recovery password"), true,
+      "recovery mismatch focuses its confirmation field");
     assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
     assert.equal(ui.getByLabelText(
       "Independent recovery password (strongly recommended)").value,
@@ -123,7 +127,8 @@ test("creation failure remains inline with retained secrets and can be retried",
   await user.click(ui.getByRole("button", { name: "Create" }));
   assert.match(ui.getByRole("alert").textContent, /publication failed safely/i);
   assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
-  assert.equal(dom.window.document.activeElement, ui.getByLabelText("Owner password"));
+  assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
+    true, "creation failure returns focus to the owner password");
   await user.click(ui.getByRole("button", { name: "Create" }));
   assert.equal(createCalls, 2);
 });
@@ -163,7 +168,8 @@ test("mounted creation control runs picker first and picker cancellation opens n
     const launcher = ui.getByRole("button", { name: "Create encrypted document…" });
     await user.click(launcher);
     assert.equal(pickerCalls, 1);
-    assert.equal(ui.queryByRole("dialog"), null);
+    assert.equal(ui.queryByRole("dialog") === null, true,
+      "picker cancellation opens no dialog");
     assert.equal(createCalls, 0);
 
     selected = true;
@@ -173,6 +179,8 @@ test("mounted creation control runs picker first and picker cancellation opens n
     assert.equal(createCalls, 0);
     await user.click(ui.getByRole("button", { name: "Cancel" }));
     assert.equal(cancelCalls, 1);
-    assert.equal(ui.queryByRole("dialog"), null);
-    assert.equal(dom.window.document.activeElement, launcher);
+    assert.equal(ui.queryByRole("dialog") === null, true,
+      "dialog cancellation closes the creation dialog");
+    assert.equal(dom.window.document.activeElement === launcher, true,
+      "creation cancellation returns focus to its launcher");
   });
