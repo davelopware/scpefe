@@ -4,7 +4,6 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { LeaseTakeoverAuthorizations, runLeaseOperation } from "./lease-takeover.mjs";
@@ -12,6 +11,7 @@ import { CreationTargetFlow } from "./creation-flow.mjs";
 import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
 import { SecureLockCoordinator } from "./secure-lock-coordinator.mjs";
 import { SessionProtectionCoordinator } from "./session-protection.mjs";
+import { NativeLifecycleCoordinator } from "./native-lifecycle.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
@@ -529,13 +529,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return true;
   };
   ipcMain.handle("document:close", () => closeDocument());
-  let requestedExit = false;
-  ipcMain.handle("application:exit", async () => {
-    if (!await protections.authorize("exit")) return false;
-    requestedExit = true;
-    window.close();
-    return true;
-  });
+  let lifecycle;
+  ipcMain.handle("application:exit", () => lifecycle.requestExit());
   window = new BrowserWindow({
     width: 920,
     height: 700,
@@ -546,29 +541,10 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       preload: path.join(here, "..", "dist", "preload.cjs"),
     },
   });
-  let closingAfterRelease = false;
-  let closeOperation = null;
-  window.on("close", (event) => {
-    if (closingAfterRelease) return;
-    const active = service.active;
-    const needsUnsavedDecision = needsCloseDecision(active);
-    const hasActivePublication = service.hasActivePublication();
-    if (!active || (!active.editMode && !needsUnsavedDecision && !hasActivePublication)) return;
-    event.preventDefault();
-    if (closeOperation) return;
-    closeOperation = (async () => {
-      if (!requestedExit && !await protections.authorize("exit")) return;
-      if (service.active?.editMode) {
-        try { await service.exitEditMode(); }
-        catch { await lockActive("app-exit"); }
-      }
-      closingAfterRelease = true;
-      window.close();
-    })().catch((error) => {
-      window?.webContents.send("document:journal-warning",
-        `Could not finish exit: ${error.message}`);
-    }).finally(() => { closeOperation = null; requestedExit = false; });
-  });
+  lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
+    protections, lockActive, closeWindow: () => window.close(),
+    report: (warning) => window?.webContents.send("document:journal-warning", warning) });
+  window.on("close", (event) => { void lifecycle.handleClose(event); });
   powerMonitor.on("lock-screen", () => { void lockActive("screen-lock"); });
   window.on("blur", () => { void lockActive("background"); });
   window.on("minimize", () => { void lockActive("background"); });

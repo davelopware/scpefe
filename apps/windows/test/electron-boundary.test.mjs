@@ -5,6 +5,8 @@ import vm from "node:vm";
 
 test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   const main = await fs.readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
+  const nativeLifecycle = await fs.readFile(
+    new URL("../src/native-lifecycle.mjs", import.meta.url), "utf8");
   const config = await fs.readFile(
     new URL("../vite.preload.config.ts", import.meta.url), "utf8");
   const preload = await fs.readFile(
@@ -21,9 +23,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /existing instance remains authoritative/);
   assert.match(main, /Windows Task Manager/);
   assert.doesNotMatch(main, /taskkill|process\.kill|child_process/);
-  assert.match(main, /needsCloseDecision\(active\)/);
   assert.match(main, /SessionProtectionCoordinator/);
-  assert.match(main, /protections\.authorize\(["']exit["']\)/);
+  assert.match(main, /NativeLifecycleCoordinator/);
+  assert.match(nativeLifecycle, /protections\.authorize\(["']exit["']\)/);
   assert.match(main, /ipcMain\.handle\(["']document:close["']/);
   assert.doesNotMatch(main,
     /if \(closingAfterRelease \|\| !service\.active\?\.editMode\) return/);
