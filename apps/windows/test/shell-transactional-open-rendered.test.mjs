@@ -54,6 +54,7 @@ test("mounted shell keeps the session through picker, password, creation, and un
     let cancelOpenCalls = 0;
     let cancelCreateCalls = 0;
     let lockCalls = 0;
+    let createPickerCalls = 0;
     const pickerResults = [
       { selected: true, name: "first.scpefe" },
       null,
@@ -90,7 +91,10 @@ test("mounted shell keeps the session through picker, password, creation, and un
         if (unlockCalls === 1) throw new Error("Password did not open this document");
         return replacement;
       },
-      chooseCreateTarget: async () => ({ selected: true }),
+      chooseCreateTarget: async () => {
+        createPickerCalls += 1;
+        return createPickerCalls === 1 ? null : { selected: true };
+      },
       cancelCreateTarget: async () => { cancelCreateCalls += 1; },
       createDocument: async () => {
         createCalls += 1;
@@ -169,12 +173,24 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await ui.waitFor(() => assert.equal(lockCalls, 1));
     assert.equal(editor.value, "");
     await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    assert.equal(editor.value, "", "canceling Unlock leaves the target securely locked");
+    assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "Locked");
+    assert.equal(pickerCalls, 5, "canceling Unlock does not invoke a picker");
+    await command("Security", "Unlock");
     dialog = await submitPassword("Unlock document", "Unlock", "wrong password");
     await ui.waitFor(() => assert.ok(ui.getByRole(dialog, "alert")));
     assert.equal(editor.value, "");
     assert.equal(pickerCalls, 5, "Unlock does not invoke a picker");
     await submitPassword("Unlock document", "Unlock", "correct password");
     await ui.waitFor(() => assert.equal(editor.value, "replacement plaintext"));
+
+    await command("File", /New/);
+    assert.equal(ui.queryByRole(document.body, "dialog",
+      { name: "Secure new document" }), null, "creation picker cancellation opens no dialog");
+    assert.equal(editor.value, "replacement plaintext");
+    assert.equal(createCalls, 0);
 
     await command("File", /New/);
     let createDialog = await ui.findByRole(document.body, "dialog",
