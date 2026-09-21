@@ -68,6 +68,7 @@ export class DocumentService {
     this.leaseGeneration = 0;
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
+    this.publicationOperations = 0;
     this.active = null;
     this.createdTarget = null;
     this.createdBytes = null;
@@ -157,6 +158,16 @@ export class DocumentService {
 
   async unresolvedJournalSummary() {
     return this.journals.discoverUnresolved();
+  }
+
+  /* Reports whether a publication, migration, compaction, or lease write is queued. */
+  hasActivePublication() {
+    return this.publicationOperations > 0;
+  }
+
+  /* Waits for all publication and container-maintenance work already queued. */
+  async waitForPublications() {
+    await this.publicationChain;
   }
 
   async createDocument(target, request) {
@@ -2356,7 +2367,9 @@ export class DocumentService {
   }
 
   #queuePublication(operation) {
-    const queued = this.publicationChain.catch(() => {}).then(operation);
+    this.publicationOperations += 1;
+    const queued = this.publicationChain.catch(() => {}).then(operation)
+      .finally(() => { this.publicationOperations -= 1; });
     this.publicationChain = queued;
     return queued;
   }

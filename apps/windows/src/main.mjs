@@ -4,13 +4,14 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
+import { needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { LeaseTakeoverAuthorizations, runLeaseOperation } from "./lease-takeover.mjs";
 import { CreationTargetFlow } from "./creation-flow.mjs";
 import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
 import { SecureLockCoordinator } from "./secure-lock-coordinator.mjs";
+import { SessionProtectionCoordinator } from "./session-protection.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
@@ -69,18 +70,6 @@ async function acknowledgeRequest(request, status, sequence) {
   });
   await fs.writeFile(acknowledgementPath(request.ack.id),
     JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
-}
-
-async function authorizeDocumentSwitch() {
-  if (!service.active) return true;
-  if (!needsCloseDecision(service.active)) return true;
-  await dialog.showMessageBox(window, {
-    type: "warning", title: "Current document needs attention",
-    message: "Resolve the current document's unsaved, recovery, conflict, or pending-publication state before replacing it.",
-    detail: "The current session and selected replacement remain unchanged.",
-    buttons: ["Keep current document open"], defaultId: 0, cancelId: 0, noLink: true,
-  });
-  return false;
 }
 
 async function drainExternalRequests() {
@@ -260,6 +249,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   const creationFlow = new CreationTargetFlow();
   let selectedOpenTarget = null;
+  const protections = new SessionProtectionCoordinator({ getService: () => service,
+    present: (request) => window.webContents.send("document:protection-requested", request) });
   const adoptReplacement = (staged, target) => {
     leaseTakeovers.clear();
     const previous = service;
@@ -274,7 +265,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     }
   };
   const replacements = new ReplacementCoordinator({ makeCandidate: makeService,
-    authorizeCurrent: authorizeDocumentSwitch, adopt: adoptReplacement });
+    authorizeCurrent: (operation) => protections.authorize(operation),
+    adopt: adoptReplacement });
   secureLocks = new SecureLockCoordinator({ getService: () => service,
     replacements, creationFlow,
     clearOpenTarget: () => { selectedOpenTarget = null; },
@@ -359,7 +351,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       const opened = await openRequests.run(async () => {
         let replacement;
         try {
-          replacement = await replacements.open(pending.target, request.password);
+          replacement = await replacements.open(
+            pending.target, request.password, "external-open");
         } catch (error) {
           if (error?.code === "DOCUMENT_REPLACEMENT_CANCELED") return null;
           throw error;
@@ -515,10 +508,34 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return leaseTakeovers.cancel(authorization, service);
   });
   const lockActive = (reason) => {
+    protections.cancelForLock();
     leaseTakeovers.clear();
     return secureLocks.lock(reason);
   };
   ipcMain.handle("document:lock", () => lockActive("app-lock"));
+  ipcMain.handle("document:resolve-protection", (_event, request) =>
+    protections.decide(request));
+  const closeDocument = async () => {
+    if (!await protections.authorize("close")) return false;
+    if (service.active?.editMode) await service.exitEditMode();
+    if (service.active) {
+      const result = await service.lock("document-close");
+      if (!result.journalSaved) throw new Error(result.warning
+        ?? "The document could not be checkpointed before closing");
+    }
+    currentTarget = null; lockedTarget = null; selectedOpenTarget = null;
+    window.webContents.send("document:closed");
+    await sendJournalSummary();
+    return true;
+  };
+  ipcMain.handle("document:close", () => closeDocument());
+  let requestedExit = false;
+  ipcMain.handle("application:exit", async () => {
+    if (!await protections.authorize("exit")) return false;
+    requestedExit = true;
+    window.close();
+    return true;
+  });
   window = new BrowserWindow({
     width: 920,
     height: 700,
@@ -534,27 +551,13 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   window.on("close", (event) => {
     if (closingAfterRelease) return;
     const active = service.active;
-    const regularSavePending = active?.pendingRecord?.publication?.purpose
-      === "regular-save";
     const needsUnsavedDecision = needsCloseDecision(active);
-    if (!active || (!active.editMode && !needsUnsavedDecision)) return;
+    const hasActivePublication = service.hasActivePublication();
+    if (!active || (!active.editMode && !needsUnsavedDecision && !hasActivePublication)) return;
     event.preventDefault();
     if (closeOperation) return;
     closeOperation = (async () => {
-      if (needsUnsavedDecision) {
-        const choice = await dialog.showMessageBox(window, {
-          type: "warning", title: "Unsaved changes",
-          message: service.active.manuallySealed && !regularSavePending
-            ? "This document has unsaved changes."
-            : "This document is only provisionally saved.",
-          detail: "Manual save seals the changes. Discard restores the last manually saved content.",
-          buttons: ["Cancel", "Manual save and exit", "Discard and exit"],
-          defaultId: 0, cancelId: 0, noLink: true,
-        });
-        const proceed = await applyCloseDecision(service,
-          ["cancel", "save", "discard"][choice.response]);
-        if (!proceed) return;
-      }
+      if (!requestedExit && !await protections.authorize("exit")) return;
       if (service.active?.editMode) {
         try { await service.exitEditMode(); }
         catch { await lockActive("app-exit"); }
@@ -564,7 +567,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     })().catch((error) => {
       window?.webContents.send("document:journal-warning",
         `Could not finish exit: ${error.message}`);
-    }).finally(() => { closeOperation = null; });
+    }).finally(() => { closeOperation = null; requestedExit = false; });
   });
   powerMonitor.on("lock-screen", () => { void lockActive("screen-lock"); });
   window.on("blur", () => { void lockActive("background"); });

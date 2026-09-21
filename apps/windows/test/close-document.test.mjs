@@ -53,3 +53,18 @@ test("regular-save pending close revalidates before manual sealing", async () =>
   await assert.rejects(applyCloseDecision(service, "save"), /Resolve the saved divergence/);
   assert.deepEqual(calls, ["reconnect"]);
 });
+
+test("a reconnected manual save is already sealed and is not published twice", async () => {
+  const calls = [];
+  const service = { active: { editMode: false, dirty: false, manuallySealed: true,
+    recovery: null, pendingPublication: true, pendingRecord: {
+      publication: { purpose: "manual-save" },
+    } },
+  async reconnectPendingPublication() { calls.push("reconnect");
+    this.active.pendingPublication = false;
+    return { publicationState: "target-published" }; },
+  async enterEditMode() { calls.push("edit"); },
+  async saveDocument() { calls.push("save"); } };
+  assert.equal(await applyCloseDecision(service, "save"), true);
+  assert.deepEqual(calls, ["reconnect"]);
+});

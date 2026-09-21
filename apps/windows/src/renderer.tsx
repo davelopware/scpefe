@@ -18,6 +18,10 @@ type SaveState = "unsaved" | "provisional" | PublicationState;
 type ClientSettings = { regularSaveEnabled: boolean; regularSaveIntervalMs: number };
 type JournalSummary = { total: number; pendingPublications: number };
 type ExternalOpenRequest = { token: string };
+type ProtectionOperation = "new" | "open" | "external-open" | "close" | "exit";
+type ProtectionRequest = { token: string; operation: ProtectionOperation; state: {
+  dirty: boolean; provisional: boolean; pendingPublication: boolean; recovered: boolean;
+  conflict: boolean; unresolvedJournal: boolean; activePublication: boolean } };
 type ProfileMismatch = { slotName: string; slotEmail: string;
   profileName: string; profileEmail: string; editingBlocked: true };
 type ManagedSlot = { slotId: string; identityName: string; identityEmail: string;
@@ -304,6 +308,10 @@ declare global { interface Window { scpefe: {
   cancelLeaseTakeover(authorization: string): Promise<boolean>;
   discardRecoveredWork(): Promise<DocumentOpened>;
   acceptHeadMismatch(): Promise<DocumentOpened>;
+  closeDocument(): Promise<boolean>;
+  exitApplication(): Promise<boolean>;
+  resolveProtection(request: { token: string; decision: "cancel" | "save" | "discard" }):
+    Promise<{ completed: true; proceed: boolean }>;
   lock(): Promise<LockResult>;
   onLocked(listener: (result: LockResult) => void): () => void;
   onJournalWarning(listener: (warning: string) => void): () => void;
@@ -312,6 +320,8 @@ declare global { interface Window { scpefe: {
   onExternalOpenRequested(listener: (request: ExternalOpenRequest) => void): () => void;
   onUnresolvedJournalSummary(listener: (summary: JournalSummary) => void): () => void;
   onSwitchRetained(listener: (opened: DocumentOpened) => void): () => void;
+  onProtectionRequested?(listener: (request: ProtectionRequest) => void): () => void;
+  onDocumentClosed?(listener: () => void): () => void;
 }; } }
 
 function App() {
@@ -360,6 +370,8 @@ function App() {
   const [invitationPassphrase, setInvitationPassphrase] = useState<string | null>(null);
   const [invitationError, setInvitationError] = useState("");
   const [claimError, setClaimError] = useState("");
+  const [protection, setProtection] = useState<ProtectionRequest | null>(null);
+  const [protectionError, setProtectionError] = useState("");
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
@@ -378,7 +390,7 @@ function App() {
   const visibleOpenedDialog = !creating && dialog === null && !resolvingConflict
     && leaseDecision === null && saveError === ""
     ? invitationStaged ? "claim" : openedDialog : null;
-  modalBusy.current = creating || dialog !== null || visibleOpenedDialog !== null
+  modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
     || invitationStaged
     || editFailure !== null || leaseDecision !== null || saveError !== "";
   useEffect(() => {
@@ -414,13 +426,22 @@ function App() {
       showOpenedResult(result);
       setMessage("The current document remains open with its manual save pending publication.");
     });
+    const stopProtection = window.scpefe.onProtectionRequested?.((request) => {
+      dialogReturnFocus.current = document.activeElement as HTMLElement | null;
+      setProtectionError(""); setProtection(request);
+    }) ?? (() => {});
+    const stopClosed = window.scpefe.onDocumentClosed?.(() => {
+      showLockedResult({ locked: true, journalSaved: true,
+        warning: "Document closed. Use File → New or File → Open." });
+      targetNameRef.current = null; setTargetName(null); setLocked(false);
+    }) ?? (() => {});
     const activity = () => { void window.scpefe.activity(); };
     window.addEventListener("keydown", activity);
     window.addEventListener("pointerdown", activity);
     return () => {
       stopLocked(); stopWarning(); stopRegularSave(); stopExternalOpen();
       stopJournalSummary();
-      stopSwitchRetained();
+      stopSwitchRetained(); stopProtection(); stopClosed();
       window.removeEventListener("keydown", activity);
       window.removeEventListener("pointerdown", activity);
     };
@@ -488,7 +509,7 @@ function App() {
     backup: activeDocument && !dirty && saveState === "target-published"
       && !opened.provisional && !opened.recovery && !opened.headMismatch
       && !opened.profileMismatch && !opened.migrationRequired,
-    export: activeDocument, close: false, exit: true,
+    export: activeDocument, close: activeDocument || lockedDocument, exit: true,
     edit: activeDocument && opened.readOnly && opened.canEdit
       && opened.publicationState === "target-published" && !opened.recovery
       && !opened.headMismatch && !opened.profileMismatch && !opened.migrationRequired,
@@ -530,7 +551,28 @@ function App() {
     else if (command === "unlock") {
       setOpenError(""); setDialog("unlock");
     }
-    else if (command === "exit") window.close();
+    else if (command === "close") {
+      try { await window.scpefe.closeDocument(); }
+      catch (error) { showError(error); }
+    }
+    else if (command === "exit") {
+      try { await window.scpefe.exitApplication(); }
+      catch (error) { showError(error); }
+    }
+  }
+
+  async function decideProtection(decision: "cancel" | "save" | "discard") {
+    if (!protection) return;
+    try {
+      setProtectionError("");
+      await window.scpefe.resolveProtection({ token: protection.token, decision });
+      setProtection(null);
+      if (decision === "cancel") {
+        setMessage("Action canceled; the current document remains open and usable.");
+      }
+    } catch (error) {
+      setProtectionError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   useEffect(() => {
@@ -989,6 +1031,8 @@ function App() {
       setOpenedDialogError("");
       setSaveError("");
       setCompactionError("");
+      setProtection(null);
+      setProtectionError("");
       setResolvingConflict(false);
       setLocked(targetNameRef.current !== null);
       setMessage(result.warning ?? "Document locked. Use Security → Unlock to continue.");
@@ -1295,7 +1339,7 @@ function App() {
       <span aria-label="Publication state">{publication}</span>
       <span>{journalSummary.total > 0 ? `${journalSummary.total} recovery item${journalSummary.total === 1 ? "" : "s"} need attention. ` : ""}{message}</span>
     </footer></div>
-    {editFailure && <FocusedDialog returnFocus={dialogReturnFocus.current}
+    {!protection && <>{editFailure && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Editing unavailable" close={() => setEditFailure(null)}>
       <div className="warning" role="alert"><p>{editFailure}</p>
         <p>The document remains read-only.</p></div>
@@ -1497,6 +1541,35 @@ function App() {
         <div className="dialog-actions"><button onClick={discardPublication}>Discard pending save</button>
           <button ref={publicationRetryAction}
             onClick={reconnectPublication}>Retry publication</button></div></FocusedDialog>}
+    </>}
+    {protection && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title={protection.operation === "new" ? "Protect current document before New"
+        : protection.operation === "open" || protection.operation === "external-open"
+          ? "Protect current document before Open"
+          : protection.operation === "close" ? "Protect current document before Close"
+          : "Protect current document before Exit"}>
+      <div className="warning" role="alert">
+        <p>The current session has work or publication state that must not be silently lost.</p>
+        <ul>
+          {protection.state.dirty && <li>Unsaved working-copy changes</li>}
+          {protection.state.provisional && <li>Provisional revision not manually sealed</li>}
+          {protection.state.pendingPublication && <li>Pending publication</li>}
+          {protection.state.recovered && <li>Recovered unsaved work</li>}
+          {protection.state.conflict && <li>Unresolved publication conflict</li>}
+          {protection.state.unresolvedJournal && <li>Unresolved recovery journal</li>}
+          {protection.state.activePublication && <li>Publication or container maintenance in progress</li>}
+        </ul>
+        <p>Cancel keeps this document open. Save retries or seals recoverable work. Discard is permanent where policy permits it.</p>
+      </div>
+      {protectionError && <p className="dialog-error" role="alert">{protectionError}</p>}
+      <div className="dialog-actions"><button autoFocus
+        onClick={() => void decideProtection("cancel")}>Keep current document open</button>
+        <button onClick={() => void decideProtection("save")}>
+          {protection.state.pendingPublication ? "Retry publication and continue"
+            : "Manual save and continue"}</button>
+        <button onClick={() => void decideProtection("discard")}>Discard and continue</button>
+      </div>
+    </FocusedDialog>}
   </main>;
 }
 

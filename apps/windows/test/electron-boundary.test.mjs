@@ -22,9 +22,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /Windows Task Manager/);
   assert.doesNotMatch(main, /taskkill|process\.kill|child_process/);
   assert.match(main, /needsCloseDecision\(active\)/);
-  assert.match(main, /applyCloseDecision\(service/);
-  assert.match(main, /Manual save and exit/);
-  assert.match(main, /Discard and exit/);
+  assert.match(main, /SessionProtectionCoordinator/);
+  assert.match(main, /protections\.authorize\(["']exit["']\)/);
+  assert.match(main, /ipcMain\.handle\(["']document:close["']/);
   assert.doesNotMatch(main,
     /if \(closingAfterRelease \|\| !service\.active\?\.editMode\) return/);
   assert.match(main, /dist["'],\s*["']preload\.cjs/);
@@ -118,10 +118,11 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "cancelLeaseTakeover", "discardRecoveredWork",
-    "acceptHeadMismatch", "lock", "onLocked",
+    "acceptHeadMismatch", "closeDocument", "exitApplication", "resolveProtection",
+    "lock", "onLocked",
     "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
     "onUnresolvedJournalSummary",
-    "onSwitchRetained",
+    "onSwitchRetained", "onProtectionRequested", "onDocumentClosed",
   ]);
   await assert.rejects(exposed.compactDocument(), /explicitly confirmed/);
   assert.equal(invocations.some(({ channel }) => channel === "document:compact"), false);

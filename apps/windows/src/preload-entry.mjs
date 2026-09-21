@@ -150,6 +150,32 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:discard-recovery")),
   acceptHeadMismatch: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:accept-head-mismatch")),
+  closeDocument: async () => {
+    const value = await ipcRenderer.invoke("document:close");
+    if (typeof value !== "boolean") throw new TypeError("host returned invalid close result");
+    return value;
+  },
+  exitApplication: async () => {
+    const value = await ipcRenderer.invoke("application:exit");
+    if (typeof value !== "boolean") throw new TypeError("host returned invalid exit result");
+    return value;
+  },
+  resolveProtection: async (request) => {
+    if (!request || typeof request !== "object" || Array.isArray(request)
+        || Object.keys(request).some((key) => !["token", "decision"].includes(key))
+        || typeof request.token !== "string"
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+          .test(request.token)
+        || !["cancel", "save", "discard"].includes(request.decision)) {
+      throw new TypeError("invalid protection decision");
+    }
+    const value = await ipcRenderer.invoke("document:resolve-protection",
+      { token: request.token, decision: request.decision });
+    if (value?.completed !== true || typeof value.proceed !== "boolean") {
+      throw new TypeError("host returned invalid protection result");
+    }
+    return Object.freeze({ completed: true, proceed: value.proceed });
+  },
   lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
   onLocked: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
@@ -201,5 +227,31 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const handler = (_event, value) => listener(validateOpenedDocument(value));
     ipcRenderer.on("document:switch-retained", handler);
     return () => ipcRenderer.removeListener("document:switch-retained", handler);
+  },
+  onProtectionRequested: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = (_event, value) => {
+      const operations = ["new", "open", "external-open", "close", "exit"];
+      const stateKeys = ["dirty", "provisional", "pendingPublication", "recovered",
+        "conflict", "unresolvedJournal", "activePublication"];
+      if (!value || typeof value !== "object" || typeof value.token !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+            .test(value.token)
+          || !operations.includes(value.operation) || !value.state
+          || stateKeys.some((key) => typeof value.state[key] !== "boolean")) {
+        throw new TypeError("host sent invalid protection request");
+      }
+      listener(Object.freeze({ token: value.token, operation: value.operation,
+        state: Object.freeze(Object.fromEntries(stateKeys.map((key) =>
+          [key, value.state[key]]))) }));
+    };
+    ipcRenderer.on("document:protection-requested", handler);
+    return () => ipcRenderer.removeListener("document:protection-requested", handler);
+  },
+  onDocumentClosed: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = () => listener();
+    ipcRenderer.on("document:closed", handler);
+    return () => ipcRenderer.removeListener("document:closed", handler);
   },
 }));

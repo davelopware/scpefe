@@ -12,10 +12,13 @@ export async function applyCloseDecision(service, decision) {
   if (decision === "cancel") return false;
   if (decision === "save") {
     if (service.active.pendingPublication) {
+      const regularSave = service.active.pendingRecord?.publication?.purpose
+        === "regular-save";
       const resumed = await service.reconnectPendingPublication();
       if (resumed.publicationState !== "target-published") {
         throw new Error("Resolve the saved divergence in the app before exiting");
       }
+      if (!regularSave) return true;
     }
     if (service.active.recovery) await service.restoreRecoveredWork();
     else if (!service.active.editMode) await service.enterEditMode();
