@@ -308,7 +308,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       if (!await prepareDocumentSwitch()) return null;
       const opened = await service.openDocument(chosen.filePaths[0], password);
       await sendJournalSummary();
-      return opened;
+      return opened ? { ...opened, targetName: path.basename(chosen.filePaths[0]) } : null;
     });
   });
   ipcMain.handle("document:open-external", async (_event, request) => {
@@ -338,7 +338,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         target: path.basename(pending.target), outcome: opened ? "opened" : "canceled" });
       await sendJournalSummary();
       void drainExternalRequests();
-      return opened;
+      return opened ? { ...opened, targetName: path.basename(pending.target) } : null;
     } finally {
       externalOpenInProgress = false;
     }

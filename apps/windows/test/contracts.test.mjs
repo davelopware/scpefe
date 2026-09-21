@@ -77,9 +77,15 @@ test("creation form confirms owner and optional recovery passwords", () => {
 
 test("accepts only validated read-only native results", () => {
   assert.deepEqual(validateOpenedDocument({ content: "secret", readOnly: true,
-    canEdit: true }), { content: "secret", readOnly: true, canEdit: true,
+    canEdit: true, targetName: "notes.scpefe" }), {
+    content: "secret", readOnly: true, canEdit: true, targetName: "notes.scpefe",
     publicationState: "target-published" });
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: false }));
+  for (const targetName of ["C:\\Users\\Ada\\secret.scpefe", "../secret.scpefe",
+    "folder/secret.scpefe", "bad\nname.scpefe"]) {
+    assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: true,
+      canEdit: true, targetName }), /invalid target filename/);
+  }
 });
 
 test("permits only the invitation claim surface before password replacement", () => {
