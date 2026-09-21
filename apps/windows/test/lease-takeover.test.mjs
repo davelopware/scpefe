@@ -80,3 +80,31 @@ test("changed lease evidence is re-observed and yields a fresh one-shot decision
   await assert.rejects(runLeaseOperation({ authorizations, operation: "edit", service,
     authorization: refreshed.authorization, perform }), /No matching lease takeover/);
 });
+
+test("post-confirmation faults consume authority and fresh retry cannot replay it", async () => {
+  const nativeTokens = [Object.freeze({ sequence: 1 }), Object.freeze({ sequence: 2 })];
+  let idIndex = 0;
+  let observation = 0;
+  const service = { cancelLeaseTakeover() { return true; } };
+  const authorizations = new LeaseTakeoverAuthorizations({
+    createId: () => ids[idIndex++],
+  });
+  const stage = async () => runLeaseOperation({ authorizations, operation: "recovery",
+    service, perform: async () => { throw uncertain(nativeTokens[observation++]); } });
+  const first = await stage();
+  await assert.rejects(runLeaseOperation({ authorizations, operation: "recovery", service,
+    authorization: first.authorization,
+    perform: async () => { throw new Error("post-confirmation journal fault"); } }),
+  /post-confirmation journal fault/);
+  await assert.rejects(runLeaseOperation({ authorizations, operation: "recovery", service,
+    authorization: first.authorization, perform: async () => ({ restored: true }) }),
+  /No matching lease takeover/);
+
+  const fresh = await stage();
+  assert.notEqual(fresh.authorization, first.authorization);
+  assert.deepEqual(await runLeaseOperation({ authorizations, operation: "recovery", service,
+    authorization: fresh.authorization,
+    perform: async (token) => {
+      assert.equal(token, nativeTokens[1]); return { restored: true };
+    } }), { restored: true });
+});

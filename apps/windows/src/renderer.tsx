@@ -361,6 +361,10 @@ function App() {
   const findInput = useRef<HTMLInputElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
   const profileConfirmation = useRef<HTMLButtonElement>(null);
+  const editRetryAction = useRef<HTMLButtonElement>(null);
+  const recoveryRestoreAction = useRef<HTMLButtonElement>(null);
+  const publicationRetryAction = useRef<HTMLButtonElement>(null);
+  const migrationRetryAction = useRef<HTMLButtonElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
@@ -627,12 +631,36 @@ function App() {
     }
   }
 
+  function leaveConsumedTakeover(operation: LeaseOperation, value: string) {
+    setLeaseDecision(null);
+    setDecisionError("");
+    if (operation === "edit") {
+      setEditFailure(value);
+      setMessage(`Editing needs attention: ${value}`);
+      requestAnimationFrame(() => editRetryAction.current?.focus());
+      return;
+    }
+    setOpenedDialogError(value);
+    setMessage(`${operation === "migration" ? "Migration"
+      : operation === "recovery" ? "Recovery restore"
+      : "Divergence resolution"} needs attention: ${value}`);
+    requestAnimationFrame(() => {
+      if (operation === "migration") migrationRetryAction.current?.focus();
+      else if (operation === "recovery") recoveryRestoreAction.current?.focus();
+      else publicationRetryAction.current?.focus();
+    });
+  }
+
   async function migrate(request: { authorization?: string } = {}) {
     try {
       setDecisionError("");
+      setOpenedDialogError("");
       const result = await window.scpefe.migrateDocument(request);
       if (!result) {
+        setLeaseDecision(null);
+        setOpenedDialogError("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
         setMessage("Migration declined. The document remains read-only; saving requires migration.");
+        requestAnimationFrame(() => migrationRetryAction.current?.focus());
         return;
       }
       if ("decisionRequired" in result) {
@@ -646,7 +674,12 @@ function App() {
       setMessage(result.compatibilityWarning);
     } catch (error) {
       const value = error instanceof Error ? error.message : String(error);
-      setDecisionError(value); setMessage(`Migration needs attention: ${value}`);
+      if (request.authorization !== undefined) leaveConsumedTakeover("migration", value);
+      else {
+        setOpenedDialogError(value);
+        setMessage(`Migration needs attention: ${value}`);
+        requestAnimationFrame(() => migrationRetryAction.current?.focus());
+      }
     }
   }
 
@@ -693,7 +726,7 @@ function App() {
       setMessage("Edit mode entered after confirmed lease takeover.");
     } catch (error) {
       const value = error instanceof Error ? error.message : String(error);
-      setDecisionError(value); setMessage(`Lease takeover needs attention: ${value}`);
+      leaveConsumedTakeover(leaseDecision.operation, value);
     }
   }
 
@@ -701,9 +734,11 @@ function App() {
     if (!leaseDecision) return;
     try {
       setDecisionError("");
-      await window.scpefe.cancelLeaseTakeover(leaseDecision.authorization);
+      const revoked = await window.scpefe.cancelLeaseTakeover(leaseDecision.authorization);
       setLeaseDecision(null);
-      setMessage("Lease takeover canceled; the document session is unchanged.");
+      setMessage(revoked
+        ? "Lease takeover canceled; the document session is unchanged."
+        : "Lease takeover was already inactive; the document session is unchanged.");
     } catch (error) {
       const value = error instanceof Error ? error.message : String(error);
       setDecisionError(value);
@@ -1183,8 +1218,10 @@ function App() {
       title="Editing unavailable" close={() => setEditFailure(null)}>
       <div className="warning" role="alert"><p>{editFailure}</p>
         <p>The document remains read-only.</p></div>
-      <div className="dialog-actions"><button autoFocus onClick={() => setEditFailure(null)}>
-        Continue read-only</button></div>
+      <div className="dialog-actions"><button onClick={() => setEditFailure(null)}>
+        Continue read-only</button><button ref={editRetryAction} autoFocus onClick={() => {
+          setEditFailure(null); void enterEditMode();
+        }}>Retry editing</button></div>
     </FocusedDialog>}
     {leaseDecision && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title="Confirm editing-lease takeover">
@@ -1351,12 +1388,14 @@ function App() {
         <button>Replace password and claim identity</button></form>
       <button onClick={() => void cancelInvitationClaim()}>Cancel</button></FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
-      returnFocus={dialogReturnFocus.current} title="Older container">
+      returnFocus={dialogReturnFocus.current} title="Older container"
+      initialFocus={openedDialogError ? migrationRetryAction : undefined}>
       <div className="warning" role="alert"><p>{opened.migrationWarning}</p>
         <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Keep read-only and close</button>
-        {decisionError && <p className="dialog-error" role="alert">{decisionError}</p>}
-        <button onClick={() => void migrate()}>Create verified backup and migrate…</button></div></FocusedDialog>}
+        {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
+        <button ref={migrationRetryAction} onClick={() => void migrate()}>
+          Create verified backup and migrate…</button></div></FocusedDialog>}
     {visibleOpenedDialog === "profile-mismatch" && activeDocument && opened.profileMismatch && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Profile mismatch">
       <div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p>
@@ -1370,18 +1409,22 @@ function App() {
       <button onClick={acceptHeadMismatch}>Accept current authenticated head</button>
     </FocusedDialog>}
     {visibleOpenedDialog === "recovery" && activeDocument && opened.recovery && <FocusedDialog
-      returnFocus={dialogReturnFocus.current} title="Recovered work">
+      returnFocus={dialogReturnFocus.current} title="Recovered work"
+      initialFocus={openedDialogError ? recoveryRestoreAction : undefined}>
       <p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p>
       {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
       <div className="dialog-actions"><button onClick={discardRecovery}>Discard recovered work</button>
-        <button disabled={!opened.canEdit} onClick={restoreRecovery}>Restore unsaved work</button></div></FocusedDialog>}
+        <button ref={recoveryRestoreAction} disabled={!opened.canEdit}
+          onClick={restoreRecovery}>Restore unsaved work</button></div></FocusedDialog>}
     {visibleOpenedDialog === "publication" && activeDocument
       && <FocusedDialog returnFocus={dialogReturnFocus.current}
+        initialFocus={openedDialogError ? publicationRetryAction : undefined}
         title={opened.publicationState === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
         <p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
         {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
         <div className="dialog-actions"><button onClick={discardPublication}>Discard pending save</button>
-          <button onClick={reconnectPublication}>Retry publication</button></div></FocusedDialog>}
+          <button ref={publicationRetryAction}
+            onClick={reconnectPublication}>Retry publication</button></div></FocusedDialog>}
   </main>;
 }
 

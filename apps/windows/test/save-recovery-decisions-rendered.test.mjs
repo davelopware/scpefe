@@ -61,6 +61,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     let divergenceAttempts = 0;
     let divergenceSaveAttempts = 0;
     let headAccepts = 0;
+    let cancelAttempts = 0;
     const calls = [];
     const listen = (name, listener) => {
       listeners[name] = listener;
@@ -87,9 +88,17 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
             authorization: "123e4567-e89b-42d3-a456-426614174000" };
         }
         if (authorization && editAttempts === 3) {
+          throw new Error("lease publication flush failed");
+        }
+        if (!authorization && editAttempts === 4) {
+          return { decisionRequired: "lease-takeover", operation: "edit",
+            holderName: "Fresh remote editor",
+            authorization: "623e4567-e89b-42d3-a456-426614174000" };
+        }
+        if (authorization && editAttempts === 5) {
           return { decisionRequired: "lease-takeover", operation: "edit",
             holderName: "Updated remote editor",
-            authorization: "523e4567-e89b-42d3-a456-426614174000" };
+            authorization: "723e4567-e89b-42d3-a456-426614174000" };
         }
         return { ...base, readOnly: false };
       },
@@ -98,7 +107,10 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         if (recoveryRestores === 1) throw new Error("recovery journal read failed");
         if (!authorization) return { decisionRequired: "lease-takeover",
           operation: "recovery", holderName: "Recovery lease holder",
-          authorization: "323e4567-e89b-42d3-a456-426614174000" };
+          authorization: recoveryRestores < 5
+            ? "323e4567-e89b-42d3-a456-426614174000"
+            : "823e4567-e89b-42d3-a456-426614174000" };
+        if (recoveryRestores === 4) throw new Error("recovery lease write failed");
         return { ...base, content: "recovered private text",
           readOnly: false, recoveredUnsaved: true, cursor: { start: 3, end: 3 } };
       },
@@ -126,7 +138,10 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         if (divergenceAttempts === 1) throw new Error("merge ancestor unavailable");
         if (!authorization) return { decisionRequired: "lease-takeover",
           operation: "divergence", holderName: "Divergence lease holder",
-          authorization: "423e4567-e89b-42d3-a456-426614174000" };
+          authorization: divergenceAttempts < 5
+            ? "423e4567-e89b-42d3-a456-426614174000"
+            : "923e4567-e89b-42d3-a456-426614174000" };
+        if (divergenceAttempts === 4) throw new Error("merge lease publication failed");
         return { content: "merged exact text", hasConflicts: false,
           ancestorRevision: "11".repeat(32), localRevision: "22".repeat(32),
           currentRevision: "33".repeat(32) };
@@ -158,14 +173,21 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         if (!authorization) {
           return { decisionRequired: "lease-takeover", operation: "migration",
             holderName: "Future clock holder",
-            authorization: "223e4567-e89b-42d3-a456-426614174000" };
+            authorization: migrationAttempts < 4
+              ? "223e4567-e89b-42d3-a456-426614174000"
+              : migrationAttempts < 6
+                ? "a23e4567-e89b-42d3-a456-426614174000"
+                : "b23e4567-e89b-42d3-a456-426614174000" };
         }
+        if (migrationAttempts === 3) return null;
+        if (migrationAttempts === 5) throw new Error("alternate backup verification failed");
         return { migrated: true, backupCreated: true,
           compatibilityWarning: "Migration published after a verified backup.",
           opened: { ...base, content: "legacy private text", readOnly: false } };
       },
       cancelLeaseTakeover: async (authorization) => {
-        calls.push(["cancel-takeover", authorization]); return true;
+        calls.push(["cancel-takeover", authorization]); cancelAttempts += 1;
+        return cancelAttempts !== 1;
       },
       changePassword: async () => base, createInvitation: async () => ({ created: true,
         temporaryPassword: "temporary words" }), copyInvitationPassphrase: async () => true,
@@ -231,8 +253,17 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     assert.match(ui.getByRole(dialog, "alert").textContent, /Recovery lease holder/);
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    assert.match(ui.getByRole(document.body, "status").textContent, /already inactive/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
     await user.click(ui.getByRole(dialog, "button", { name: "Restore unsaved work" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
+    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
+    assert.ok(await ui.findByText(dialog, /recovery lease write failed/));
+    action = ui.getByRole(dialog, "button", { name: "Restore unsaved work" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
+    await user.click(action);
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Confirm editing-lease takeover" });
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
@@ -287,6 +318,15 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await command("Edit", "Edit Contents");
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Confirm editing-lease takeover" });
+    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
+    assert.match(ui.getByRole(dialog, "alert").textContent, /lease publication flush failed/);
+    action = ui.getByRole(dialog, "button", { name: "Retry editing" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
+    await user.click(action);
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
+    assert.match(dialog.textContent, /Fresh remote editor/);
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
     assert.ok(await ui.findByText(dialog, /The lease changed/));
     assert.match(dialog.textContent, /Updated remote editor/);
@@ -348,6 +388,15 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Divergence needs resolution" });
     await user.click(ui.getByRole(dialog, "button", { name: "Retry publication" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
+    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Divergence needs resolution" });
+    assert.ok(await ui.findByText(dialog, /merge lease publication failed/));
+    action = ui.getByRole(dialog, "button", { name: "Retry publication" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
+    await user.click(action);
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Confirm editing-lease takeover" });
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
@@ -422,10 +471,27 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Confirm editing-lease takeover" });
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    assert.ok(await ui.findByText(dialog, /Migration was canceled before publication/));
+    action = ui.getByRole(dialog, "button", { name: "Create verified backup and migrate…" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
+    await user.click(action);
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
+    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    assert.ok(await ui.findByText(dialog, /alternate backup verification failed/));
+    action = ui.getByRole(dialog, "button", { name: "Create verified backup and migrate…" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
+    await user.click(action);
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
+    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
     await ui.waitFor(() => assert.equal(status("Document state"), "Edit mode"));
     assert.equal(editor.value, "legacy private text");
     assert.deepEqual(calls.filter(([name]) => name === "migrate"), [
       ["migrate", false], ["migrate", false], ["migrate", true],
+      ["migrate", false], ["migrate", true], ["migrate", false], ["migrate", true],
     ]);
     assert.deepEqual(calls.filter(([name]) => name === "cancel-takeover").map((call) => call[1]), [
       "323e4567-e89b-42d3-a456-426614174000",

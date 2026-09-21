@@ -66,6 +66,7 @@ test("uncertain migration lease requires a staged renderer confirmation", async 
   const calls = [];
   const takeoverToken = Object.freeze({});
   const service = { cancelLeaseTakeover() { return true; },
+    suggestedBackupTarget() { return "C:\\fallback.scpefe"; },
     async migrateDocument(target, options) {
     calls.push([target, options]);
     if (options.takeoverToken !== takeoverToken) {
@@ -95,4 +96,42 @@ test("migration authorization is one-shot and rejected without staged evidence",
       async migrateDocument() { throw new Error("must not run"); } },
     dialog: {}, window: {} });
   await assert.rejects(handler({}, { authorization }), /No matching lease takeover/);
+});
+
+test("backup picker cancellation consumes takeover and fresh retry stages new evidence", async () => {
+  const ids = ["123e4567-e89b-42d3-a456-426614174000",
+    "223e4567-e89b-42d3-a456-426614174000"];
+  const tokens = [Object.freeze({ sequence: 1 }), Object.freeze({ sequence: 2 })];
+  let idIndex = 0;
+  let observation = 0;
+  const service = { cancelLeaseTakeover() { return true; },
+    suggestedBackupTarget() { return "C:\\fallback.scpefe"; },
+    async migrateDocument(_target, { takeoverToken }) {
+      if (takeoverToken) {
+        const error = new Error("backup failed");
+        error.code = "MIGRATION_BACKUP_FAILED";
+        error.takeoverToken = Object.freeze({ continuation: true });
+        throw error;
+      }
+      const error = new Error("future lease");
+      error.code = "LEASE_CLOCK_UNCERTAIN";
+      error.lease = { holderName: `Remote editor ${observation + 1}` };
+      error.takeoverToken = tokens[observation++];
+      throw error;
+    } };
+  const authorizations = new LeaseTakeoverAuthorizations({
+    createId: () => ids[idIndex++],
+  });
+  let handler;
+  registerMigrationHandler({ ipcMain: { handle(_channel, value) { handler = value; } },
+    getService: () => service, service, authorizations, validateAuthorization,
+    dialog: { async showSaveDialog() { return { canceled: true }; } }, window: {} });
+  const first = await handler({}, {});
+  assert.equal(first.authorization, ids[0]);
+  assert.equal(await handler({}, { authorization: first.authorization }), null);
+  await assert.rejects(handler({}, { authorization: first.authorization }),
+    /No matching lease takeover/);
+  const fresh = await handler({}, {});
+  assert.equal(fresh.authorization, ids[1]);
+  assert.notEqual(fresh.authorization, first.authorization);
 });
