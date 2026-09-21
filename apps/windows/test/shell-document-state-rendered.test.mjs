@@ -53,6 +53,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   let backupAttempt = 0;
   let exportAttempt = 0;
   const exportRequests = [];
+  const workingCopyUpdates = [];
   const opened = { content: "first line\nsecond line", readOnly: true, canEdit: true,
     publicationState: "target-published", targetName: "safe-notes.scpefe" };
   const listen = (name, listener) => {
@@ -77,7 +78,9 @@ test("mounted shell presents truthful document states, history, failures, and se
       if (editAttempts === 1) throw new Error("Editing lease is held by another session.");
       return { ...opened, readOnly: false };
     },
-    updateWorkingCopy: async () => ({}),
+    updateWorkingCopy: async (working) => {
+      workingCopyUpdates.push(structuredClone(working)); return {};
+    },
     saveDocument: async (content) => {
       savedContent = content;
       return { saved: true, content, publicationState: nextPublicationState };
@@ -195,8 +198,24 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(editor.value, "first row\nsecond line");
   await user.click(ui.getByRole(findDialog, "button", { name: "Replace all" }));
   assert.equal(editor.value, "first row\nsecond row");
+  assert.deepEqual([editor.selectionStart, editor.selectionEnd],
+    [editor.value.length, editor.value.length],
+    "Replace all leaves the cursor at the end of the result");
+  assert.deepEqual(workingCopyUpdates.at(-1), {
+    content: "first row\nsecond row", cursor: { start: 20, end: 20 },
+  }, "the end cursor crosses the working-copy boundary");
   assert.match(ui.getByRole(findDialog, "status").textContent, /1 match replaced/);
-  editor.focus(); await user.keyboard("{Control>}z{/Control}{Control>}z{/Control}");
+  editor.focus(); await user.keyboard("{Control>}z{/Control}");
+  assert.equal(editor.value, "first row\nsecond line");
+  assert.deepEqual(workingCopyUpdates.at(-1), {
+    content: "first row\nsecond line", cursor: { start: 21, end: 21 },
+  });
+  await user.keyboard("{Control>}y{/Control}");
+  assert.equal(editor.value, "first row\nsecond row");
+  assert.deepEqual(workingCopyUpdates.at(-1), {
+    content: "first row\nsecond row", cursor: { start: 20, end: 20 },
+  });
+  await user.keyboard("{Control>}z{/Control}{Control>}z{/Control}");
   assert.equal(editor.value, opened.content);
   await user.click(ui.getByRole(findDialog, "button", { name: "Close" }));
   await ui.waitFor(() => assert.equal(

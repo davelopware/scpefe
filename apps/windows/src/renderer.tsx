@@ -1185,7 +1185,7 @@ function App() {
       setFindStatus("Text not found."); setMessage("Text not found."); return;
     }
     const content = workingText.split(findText).join(replaceText);
-    const cursor = Math.min(editor.current?.selectionEnd ?? 0, content.length);
+    const cursor = content.length;
     edit(content, { start: cursor, end: cursor });
     const status = `${matches} match${matches === 1 ? "" : "es"} replaced.`;
     setFindStatus(status); setMessage(status);

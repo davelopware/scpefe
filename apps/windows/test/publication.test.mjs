@@ -239,6 +239,8 @@ test("failed backup verification preserves a raced replacement", async (t) => {
 test("plaintext publication replaces only after a flushed same-directory candidate", async (t) => {
   const { directory, journals } = await fixture(t);
   const target = path.join(directory, "export.txt");
+  const protectedTarget = path.join(directory, "document.scpefe");
+  await fs.writeFile(protectedTarget, "encrypted container");
   await fs.writeFile(target, "previous export");
   const calls = [];
   const observedFs = Object.create(fs);
@@ -256,7 +258,7 @@ test("plaintext publication replaces only after a flushed same-directory candida
   };
   const service = new PublicationService({ fs: observedFs, journals, capabilities });
   assert.deepEqual(await service.publishPlaintext({
-    target, content: Buffer.from(" exact text \n", "utf8"),
+    target, protectedTarget, content: Buffer.from(" exact text \n", "utf8"),
   }), { completed: true });
   assert.deepEqual(calls, ["flush", "replace"]);
   assert.equal(await fs.readFile(target, "utf8"), " exact text \n");
@@ -267,14 +269,77 @@ test("plaintext publication replaces only after a flushed same-directory candida
 test("failed plaintext publication preserves the prior destination and cleans staging", async (t) => {
   const { directory, journals } = await fixture(t);
   const target = path.join(directory, "export.txt");
+  const protectedTarget = path.join(directory, "document.scpefe");
+  await fs.writeFile(protectedTarget, "encrypted container");
   await fs.writeFile(target, "keep this export");
   const failingFs = Object.create(fs);
   failingFs.rename = async () => { throw new Error("simulated destination failure"); };
   const service = new PublicationService({ fs: failingFs, journals, capabilities });
   await assert.rejects(service.publishPlaintext({
-    target, content: Buffer.from("new plaintext", "utf8"),
+    target, protectedTarget, content: Buffer.from("new plaintext", "utf8"),
   }), /simulated destination failure/);
   assert.equal(await fs.readFile(target, "utf8"), "keep this export");
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    name.includes("scpefe-plaintext-txn")), []);
+});
+
+test("plaintext publication rejects Windows-equivalent and filesystem aliases", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const protectedTarget = path.join(directory, "Document.SCPEFE");
+  const original = Buffer.from("encrypted active container");
+  await fs.writeFile(protectedTarget, original);
+  const windows = new PublicationService({ fs, journals, capabilities, platform: "win32" });
+  await assert.rejects(windows.publishPlaintext({
+    target: path.join(directory, "document.scpefe"), protectedTarget,
+    content: Buffer.from("plaintext"),
+  }), /cannot replace or alias/);
+
+  const service = new PublicationService({ fs, journals, capabilities });
+  for (const [kind, createAlias] of [
+    ["symbolic", (alias) => fs.symlink(protectedTarget, alias)],
+    ["hard-link", (alias) => fs.link(protectedTarget, alias)],
+  ]) {
+    const alias = path.join(directory, `${kind}.txt`);
+    await createAlias(alias);
+    await assert.rejects(service.publishPlaintext({
+      target: alias, protectedTarget, content: Buffer.from("plaintext"),
+    }), /cannot replace or alias/);
+    await fs.unlink(alias);
+  }
+  assert.deepEqual(await fs.readFile(protectedTarget), original);
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    name.includes("scpefe-plaintext-txn")), []);
+});
+
+test("plaintext publication revalidates a swapped destination before replacement", async (t) => {
+  const { directory, journals } = await fixture(t);
+  const protectedTarget = path.join(directory, "document.scpefe");
+  const target = path.join(directory, "export.txt");
+  const original = Buffer.from("encrypted active container");
+  await fs.writeFile(protectedTarget, original);
+  await fs.writeFile(target, "prior export");
+  let swapped = false;
+  const racedFs = Object.create(fs);
+  racedFs.open = async (...args) => {
+    const handle = await fs.open(...args);
+    if (String(args[0]).includes("scpefe-plaintext-txn")) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        await sync();
+        await fs.unlink(target);
+        await fs.link(protectedTarget, target);
+        swapped = true;
+      };
+    }
+    return handle;
+  };
+  const service = new PublicationService({ fs: racedFs, journals, capabilities });
+  await assert.rejects(service.publishPlaintext({
+    target, protectedTarget, content: Buffer.from("new plaintext"),
+  }), /cannot replace or alias/);
+  assert.equal(swapped, true);
+  assert.deepEqual(await fs.readFile(protectedTarget), original);
+  assert.deepEqual(await fs.readFile(target), original);
   assert.deepEqual((await fs.readdir(directory)).filter((name) =>
     name.includes("scpefe-plaintext-txn")), []);
 });

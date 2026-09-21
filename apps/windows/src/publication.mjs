@@ -59,6 +59,16 @@ function validateCapabilities(value) {
     replacementGuarantee: value.replacementGuarantee });
 }
 
+function missingPath(error) {
+  return error?.code === "ENOENT" || error?.code === "ENOTDIR";
+}
+
+function fileIdentity(stat) {
+  if (!stat || stat.dev === undefined || stat.ino === undefined) return null;
+  if (String(stat.dev) === "0" && String(stat.ino) === "0") return null;
+  return `${String(stat.dev)}:${String(stat.ino)}`;
+}
+
 function publicationError(error) {
   if (error && typeof error === "object") {
     error.publicationPrepared = true;
@@ -72,22 +82,60 @@ function publicationError(error) {
 
 /* Tracks and completes crash-safe candidate-container publication. */
 export class PublicationService {
-  constructor({ fs, journals, capabilities, now = () => Date.now() }) {
+  constructor({ fs, journals, capabilities, now = () => Date.now(),
+    platform = process.platform }) {
     this.fs = fs;
     this.journals = journals;
     this.now = now;
     this.capabilities = validateCapabilities(capabilities);
+    this.caseInsensitivePaths = platform === "win32";
   }
 
   replacementCapabilities() {
     return this.capabilities;
   }
 
-  async publishPlaintext({ target, content }) {
-    if (typeof target !== "string" || target.length === 0 || target.includes("\0")
-        || !Buffer.isBuffer(content)) {
-      throw new TypeError("plaintext publication requires a valid target and bytes");
+  #comparablePath(value) {
+    const resolved = path.resolve(value);
+    return this.caseInsensitivePaths ? resolved.toLocaleLowerCase("en-US") : resolved;
+  }
+
+  async #pathIdentity(value) {
+    const lexical = this.#comparablePath(value);
+    let canonical;
+    let stat;
+    try {
+      canonical = this.#comparablePath(await this.fs.realpath(value));
+      stat = await this.fs.stat(value);
+    } catch (error) {
+      if (!missingPath(error)) throw error;
+      const directory = path.dirname(value);
+      canonical = this.#comparablePath(path.join(
+        await this.fs.realpath(directory), path.basename(value)));
+      stat = null;
     }
+    return { lexical, canonical, file: fileIdentity(stat) };
+  }
+
+  async #assertDistinctPlaintextTarget(target, protectedTarget) {
+    const [candidate, protectedFile] = await Promise.all([
+      this.#pathIdentity(target), this.#pathIdentity(protectedTarget),
+    ]);
+    if (candidate.lexical === protectedFile.lexical
+        || candidate.canonical === protectedFile.canonical
+        || (candidate.file !== null && candidate.file === protectedFile.file)) {
+      throw new Error("Plaintext export cannot replace or alias the active encrypted container");
+    }
+  }
+
+  async publishPlaintext({ target, content, protectedTarget }) {
+    if (typeof target !== "string" || target.length === 0 || target.includes("\0")
+        || typeof protectedTarget !== "string" || protectedTarget.length === 0
+        || protectedTarget.includes("\0") || !Buffer.isBuffer(content)) {
+      throw new TypeError(
+        "plaintext publication requires valid destination, protected target, and bytes");
+    }
+    await this.#assertDistinctPlaintextTarget(target, protectedTarget);
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-plaintext-txn-${randomBytes(16).toString("hex")}`);
     let handle;
@@ -97,6 +145,7 @@ export class PublicationService {
       await handle.sync();
       await handle.close();
       handle = null;
+      await this.#assertDistinctPlaintextTarget(target, protectedTarget);
       await this.fs.rename(transactionFile, target);
       return { completed: true };
     } catch (error) {

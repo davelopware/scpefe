@@ -29,6 +29,7 @@ function targetUnavailable(error) {
 export class DocumentService {
   constructor({ native, fs, profilePath, settingsPath, journalDirectory,
     publicationCapabilities, witnessDirectory,
+    platform = process.platform,
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
     inactivityMs = 120_000, now = () => Date.now(),
@@ -43,7 +44,7 @@ export class DocumentService {
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
     this.publications = new PublicationService({ fs, journals: this.journals,
-      capabilities: publicationCapabilities, now });
+      capabilities: publicationCapabilities, now, platform });
     this.witnesses = new HeadWitnessStore({ fs,
       directory: witnessDirectory ?? path.join(path.dirname(profilePath), "head-witnesses") });
     this.checkpointIdleMs = checkpointIdleMs;
@@ -1414,15 +1415,13 @@ export class DocumentService {
     if (typeof target !== "string" || target.length === 0 || target.includes("\0")) {
       throw new TypeError("A valid plaintext export target is required");
     }
-    if (path.resolve(target) === path.resolve(this.active.target)) {
-      throw new Error("Plaintext export cannot replace the active encrypted container");
-    }
     const validated = validatePlaintextExportRequest(request);
     const content = validated.lineEndings === "native"
       ? validated.content.replace(/\n/g, this.nativeLineEnding)
       : validated.content;
     await this.publications.publishPlaintext({
-      target, content: Buffer.from(content, "utf8"),
+      target, protectedTarget: this.active.target,
+      content: Buffer.from(content, "utf8"),
     });
     return validatePlaintextExportResult({ exported: true });
   }
