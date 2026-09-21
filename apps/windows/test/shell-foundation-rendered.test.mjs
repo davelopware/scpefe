@@ -58,6 +58,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     cancelCreateTarget: async () => {}, createDocument: async () => null,
     openDocument: async () => { calls.push("open"); return { content: "mounted document",
       readOnly: true, canEdit: true, publicationState: "target-published",
+      targetName: "notes.scpefe",
       recovery: { content: "recovered document", state: "unsaved", updateTime: 1,
         cursor: { start: 0, end: 0 } } }; },
     openExternalDocument: async () => null, enterEditMode: async () => ({ content: "mounted document",
@@ -138,7 +139,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   await user.click(ui.getByRole(document.body, "menuitem", { name: "Security" }));
   const securityMenu = ui.getByRole(document.body, "menu", { name: "Security" });
   assert.deepEqual(ui.getAllByRole(securityMenu, "menuitem").map((item) => item.textContent),
-    ["Lock", "Passwords…", "Profile…"]);
+    ["Lock", "Unlock", "Passwords…", "Profile…"]);
   assert.equal(ui.getAllByRole(securityMenu, "separator").length, 1);
   ui.fireEvent.keyDown(securityMenu, { key: "Escape" });
 

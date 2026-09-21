@@ -1,4 +1,5 @@
 import React, { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
@@ -27,11 +28,13 @@ type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
+  targetName?: string;
   canAddPasswords?: boolean; canRemovePasswords?: boolean; invitationRequired?: false;
   headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
   managedSlots?: ManagedSlot[]; provisional?: true; migrationRequired?: true;
   migrationWarning?: string };
-type Opened = DocumentOpened | { readOnly: true; invitationRequired: true };
+type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
+  targetName?: string };
 type DialogName = "profile" | "open" | "find" | "replace" | "export"
   | "passwords" | null;
 type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
@@ -61,7 +64,8 @@ const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> 
   ["Edit", [["edit", "Edit Contents"], null, ["undo", "Undo", "Ctrl+Z"],
     ["redo", "Redo", "Ctrl+Y"], null, ["find", "Find…", "Ctrl+F"],
     ["replace", "Replace…", "Ctrl+H"]]],
-  ["Security", [["lock", "Lock"], null, ["passwords", "Passwords…"],
+  ["Security", [["lock", "Lock"], ["unlock", "Unlock"], null,
+    ["passwords", "Passwords…"],
     ["profile", "Profile…"]]],
 ];
 
@@ -299,6 +303,8 @@ function App() {
   const [opened, setOpened] = useState<Opened | null>(null);
   const [message, setMessage] = useState("");
   const [workingText, setWorkingText] = useState("");
+  const [manualSavedText, setManualSavedText] = useState("");
+  const [dirty, setDirty] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("target-published");
   const [history, setHistory] = useState<string[]>([""]);
   const [historyIndex, setHistoryIndex] = useState(0);
@@ -314,14 +320,19 @@ function App() {
     useState<ExternalOpenRequest | null>(null);
   const [dialog, setDialog] = useState<DialogName>(null);
   const [creating, setCreating] = useState(false);
+  const [targetName, setTargetName] = useState<string | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [editFailure, setEditFailure] = useState<string | null>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
+  const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
   const openedDialog = openedDialogName(opened);
   const visibleOpenedDialog = !creating && dialog === null ? openedDialog : null;
-  modalBusy.current = creating || dialog !== null || openedDialog !== null;
+  modalBusy.current = creating || dialog !== null || openedDialog !== null
+    || editFailure !== null;
   useEffect(() => {
     window.scpefe.getProfile().then((value) => {
       setProfile(value); if (!value) setDialog("profile");
@@ -331,12 +342,7 @@ function App() {
   }, []);
   const showError = (error: unknown) => setMessage(error instanceof Error ? error.message : String(error));
   useEffect(() => {
-    const stopLocked = window.scpefe.onLocked((result) => {
-      setOpened(null);
-      setWorkingText("");
-      setSaveState("target-published");
-      setMessage(result.warning ?? "Document locked. Enter its password to unlock again.");
-    });
+    const stopLocked = window.scpefe.onLocked(showLockedResult);
     const stopWarning = window.scpefe.onJournalWarning(setMessage);
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
       setSaveState("provisional");
@@ -384,7 +390,16 @@ function App() {
   function showOpenedResult(result: Opened | null) {
     setOpened(result);
     const content = result && !result.invitationRequired ? result.content : "";
+    if (result) {
+      setLocked(false);
+      if (result.targetName) {
+        targetNameRef.current = result.targetName;
+        setTargetName(result.targetName);
+      }
+    }
     setWorkingText(content);
+    setManualSavedText(content);
+    setDirty(Boolean(result && !result.invitationRequired && result.provisional));
     setSaveState(result && !result.invitationRequired && result.provisional ? "provisional"
       : result && !result.invitationRequired && result.recovery ? "unsaved"
       : result && !result.invitationRequired
@@ -401,15 +416,19 @@ function App() {
   }
 
   const activeDocument = isDocumentOpened(opened);
+  const lockedDocument = locked && targetName !== null;
   const enabled: Record<string, boolean> = {
-    new: profile !== null, open: profile !== null, save: activeDocument && !opened.readOnly,
+    new: profile !== null, open: profile !== null,
+    save: activeDocument && !opened.readOnly && dirty,
     backup: activeDocument, export: activeDocument, close: false, exit: true,
     edit: activeDocument && opened.readOnly && opened.canEdit
-      && opened.publicationState === "target-published",
+      && opened.publicationState === "target-published" && !opened.recovery
+      && !opened.headMismatch && !opened.profileMismatch && !opened.migrationRequired,
     undo: activeDocument && !opened.readOnly && historyIndex > 0,
     redo: activeDocument && !opened.readOnly && historyIndex < history.length - 1,
     find: activeDocument, replace: activeDocument && !opened.readOnly,
-    lock: activeDocument, passwords: activeDocument, profile: profile !== null,
+    lock: activeDocument, unlock: lockedDocument,
+    passwords: activeDocument, profile: profile !== null,
   };
 
   async function runCommand(command: string, returnFocus?: HTMLElement | null) {
@@ -427,12 +446,16 @@ function App() {
     else if (command === "undo") moveHistory(-1);
     else if (command === "redo") moveHistory(1);
     else if (command === "lock") await lock();
+    else if (command === "unlock") {
+      setMessage("Unlock is available for the retained target.");
+    }
     else if (command === "exit") window.close();
   }
 
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
-      if ((!event.ctrlKey && !event.metaKey) || event.altKey || modalBusy.current) return;
+      if (event.defaultPrevented || (!event.ctrlKey && !event.metaKey)
+        || event.altKey || modalBusy.current) return;
       const commands: Record<string, string> = { n: "new", o: "open", s: "save",
         w: "close", z: "undo", y: "redo", f: "find", h: "replace" };
       const command = commands[event.key.toLowerCase()];
@@ -500,7 +523,9 @@ function App() {
     try {
       setOpened(await window.scpefe.enterEditMode());
       setMessage("Edit mode entered.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      setEditFailure(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function migrate() {
@@ -576,6 +601,7 @@ function App() {
       setWorkingText(result.content);
       setHistory([result.content]);
       setHistoryIndex(0);
+      setDirty(true);
       setSaveState("unsaved");
       setMessage("Recovered work restored as unsaved changes.");
     } catch (error) { showError(error); }
@@ -586,6 +612,8 @@ function App() {
       const result = await window.scpefe.discardRecoveredWork();
       setOpened(result);
       setWorkingText(result.content);
+      setManualSavedText(result.content);
+      setDirty(false);
       setSaveState("target-published");
       setMessage("Recovered work discarded.");
     } catch (error) { showError(error); }
@@ -600,11 +628,30 @@ function App() {
   }
 
   async function lock() {
-    try { await window.scpefe.lock(); } catch (error) { showError(error); }
+    try { showLockedResult(await window.scpefe.lock()); }
+    catch (error) { showError(error); }
+  }
+
+  function showLockedResult(result: LockResult) {
+    flushSync(() => {
+      setOpened(null);
+      setWorkingText("");
+      setManualSavedText("");
+      setHistory([""]);
+      setHistoryIndex(0);
+      setFindText("");
+      setReplaceText("");
+      setCreating(false);
+      setDialog(null);
+      setEditFailure(null);
+      setLocked(targetNameRef.current !== null);
+      setMessage(result.warning ?? "Document locked. Use Security → Unlock to continue.");
+    });
   }
 
   function edit(content: string, cursor?: Cursor) {
     setWorkingText(content);
+    setDirty(content !== manualSavedText);
     setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
     setHistory((current) => [...current.slice(0, historyIndex + 1), content]);
     setHistoryIndex((current) => current + 1);
@@ -618,6 +665,8 @@ function App() {
         ? await window.scpefe.saveDivergenceResolution(workingText)
         : await window.scpefe.saveDocument(workingText);
       setWorkingText(result.content);
+      setManualSavedText(result.content);
+      setDirty(false);
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: result.content,
         readOnly: result.publicationState !== "target-published",
@@ -636,6 +685,7 @@ function App() {
     try {
       const draft = await window.scpefe.beginDivergenceResolution();
       setWorkingText(draft.content);
+      setDirty(true);
       setHistory([draft.content]);
       setHistoryIndex(0);
       setOpened((current) => isDocumentOpened(current) ? { ...current,
@@ -658,6 +708,8 @@ function App() {
         content: result.content, readOnly: true,
         publicationState: result.publicationState } : current);
       setWorkingText(result.content);
+      setManualSavedText(result.content);
+      setDirty(false);
       setSaveState(result.publicationState);
       setMessage(result.publicationState === "target-published"
         ? "Pending manual save published and verified."
@@ -672,6 +724,8 @@ function App() {
       const result = await window.scpefe.discardPendingPublication();
       setOpened(result);
       setWorkingText(result.content);
+      setManualSavedText(result.content);
+      setDirty(false);
       setSaveState("target-published");
       setMessage("Pending manual save explicitly discarded.");
     } catch (error) { showError(error); }
@@ -698,6 +752,7 @@ function App() {
     const content = history[next];
     setHistoryIndex(next);
     setWorkingText(content);
+    setDirty(content !== manualSavedText);
     void window.scpefe.updateWorkingCopy({ content,
       cursor: { start: content.length, end: content.length } }).catch(showError);
   }
@@ -734,7 +789,9 @@ function App() {
   function editorKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && event.key.toLowerCase() === "f") {
-      event.preventDefault(); findInput.current?.focus();
+      event.preventDefault();
+      dialogReturnFocus.current = editor.current;
+      setDialog("find");
     } else if (modifier && event.key.toLowerCase() === "z") {
       event.preventDefault(); moveHistory(event.shiftKey ? 1 : -1);
     } else if (modifier && event.key.toLowerCase() === "y") {
@@ -751,28 +808,45 @@ function App() {
     } catch (error) { showError(error); }
   }
 
-  const state = opened?.invitationRequired ? "Invitation" : !activeDocument
-    ? "No document" : opened.readOnly ? "Read-only" : "Edit mode";
-  const persistence = !activeDocument ? "—" : saveState === "unsaved" ? "Unsaved edits"
-    : saveState === "provisional" ? "Provisional · still unsaved"
-      : saveState === "pending-publication" ? "Pending publication"
-        : saveState === "conflict" ? "Conflict" : "Published";
+  const state = opened?.invitationRequired ? "Invitation" : lockedDocument ? "Locked"
+    : !activeDocument ? "No document" : opened.readOnly ? "Read-only" : "Edit mode";
+  const cleanliness = !activeDocument && !lockedDocument ? "—" : dirty ? "Dirty" : "Clean";
+  const publication = !activeDocument && !lockedDocument ? "—"
+    : saveState === "pending-publication" ? "Pending publication"
+      : saveState === "conflict" ? "Publication conflict"
+        : saveState === "provisional" ? "Provisional publication" : "Published";
   const closeDialog = () => setDialog(null);
+
+  useEffect(() => {
+    document.title = targetName
+      ? `${dirty ? "*" : ""}${targetName} — SCPEFE` : "SCPEFE";
+  }, [targetName, dirty]);
 
   return <main className="app-shell"><div className="shell-chrome">
     <MenuBar enabled={enabled} run={(command, returnFocus) =>
       void runCommand(command, returnFocus)} />
     <section className="editor-surface" aria-label="Document workspace">
-      {!activeDocument && <p className="editor-placeholder">No document. Use File → New or File → Open.</p>}
+      {!activeDocument && <p className="editor-placeholder" role="note">
+        {lockedDocument ? "Document locked. Use Security → Unlock to continue."
+          : "No document. Use File → New or File → Open."}</p>}
       <textarea ref={editor} aria-label="Document text" value={activeDocument ? workingText : ""}
         disabled={!activeDocument} readOnly={!activeDocument || opened.readOnly}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
     </section>
     <footer className="status-bar" role="status" aria-live="polite" aria-atomic="true">
-      <span>{state}</span><span>{persistence}</span>
+      <span aria-label="Document state">{state}</span>
+      <span aria-label="Working copy state">{cleanliness}</span>
+      <span aria-label="Publication state">{publication}</span>
       <span>{journalSummary.total > 0 ? `${journalSummary.total} recovery item${journalSummary.total === 1 ? "" : "s"} need attention. ` : ""}{message}</span>
     </footer></div>
+    {editFailure && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Editing unavailable" close={() => setEditFailure(null)}>
+      <div className="warning" role="alert"><p>{editFailure}</p>
+        <p>The document remains read-only.</p></div>
+      <div className="dialog-actions"><button autoFocus onClick={() => setEditFailure(null)}>
+        Continue read-only</button></div>
+    </FocusedDialog>}
     {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={async () => {
       await window.scpefe.cancelCreateTarget(); setCreating(false);
     }} onCreate={async (request: object) => {

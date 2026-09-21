@@ -166,6 +166,15 @@ export function validatePassword(value) {
   return requiredText(value, "password", 4096);
 }
 
+function validateTargetName(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0 || value.length > 255
+      || value === "." || value === ".." || /[\\/\0-\x1f\x7f]/.test(value)) {
+    throw new TypeError("host returned an invalid target filename");
+  }
+  return value;
+}
+
 export function validateOpenedDocument(value) {
   if (!value || typeof value !== "object" || value.readOnly !== true
       || typeof value.content !== "string" || typeof value.canEdit !== "boolean") {
@@ -179,11 +188,13 @@ export function validateOpenedDocument(value) {
     throw new TypeError("native bridge returned invalid slot permissions");
   }
   const invitationRequired = value.mustBeChanged === true;
+  const targetName = validateTargetName(value.targetName);
   if (invitationRequired) {
     if (value.content !== "" || value.canEdit || value.canAddPasswords) {
       throw new TypeError("invitation content was exposed before claim");
     }
-    return Object.freeze({ readOnly: true, invitationRequired: true });
+    return Object.freeze({ readOnly: true, invitationRequired: true,
+      ...(targetName ? { targetName } : {}) });
   }
   let recovery;
   let lease;
@@ -290,6 +301,7 @@ export function validateOpenedDocument(value) {
   });
   return Object.freeze({ content: value.content, readOnly: true,
     canEdit: migrationRequired ? false : value.canEdit, publicationState,
+    ...(targetName ? { targetName } : {}),
     ...(migrationRequired ? { migrationRequired: true,
       migrationWarning: "Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first." } : {}),
     ...(provisional ? { provisional: true } : {}),
