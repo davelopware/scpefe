@@ -454,7 +454,8 @@ function App() {
 
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
-      if ((!event.ctrlKey && !event.metaKey) || event.altKey || modalBusy.current) return;
+      if (event.defaultPrevented || (!event.ctrlKey && !event.metaKey)
+        || event.altKey || modalBusy.current) return;
       const commands: Record<string, string> = { n: "new", o: "open", s: "save",
         w: "close", z: "undo", y: "redo", f: "find", h: "replace" };
       const command = commands[event.key.toLowerCase()];
@@ -788,7 +789,9 @@ function App() {
   function editorKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && event.key.toLowerCase() === "f") {
-      event.preventDefault(); findInput.current?.focus();
+      event.preventDefault();
+      dialogReturnFocus.current = editor.current;
+      setDialog("find");
     } else if (modifier && event.key.toLowerCase() === "z") {
       event.preventDefault(); moveHistory(event.shiftKey ? 1 : -1);
     } else if (modifier && event.key.toLowerCase() === "y") {
