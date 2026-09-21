@@ -64,7 +64,11 @@ test("mounted shell presents truthful document states, history, failures, and se
     saveProfile: async (value) => value, saveClientSettings: async (value) => value,
     activity: async () => ({}), chooseCreateTarget: async () => null,
     cancelCreateTarget: async () => {}, createDocument: async () => null,
-    openDocument: async () => ({ ...opened }), openExternalDocument: async () => null,
+    chooseOpenTarget: async () => ({ selected: true, name: "safe-notes.scpefe" }),
+    cancelOpenTarget: async () => {},
+    openSelectedDocument: async () => ({ ...opened }),
+    unlockDocument: async () => ({ ...opened }),
+    openExternalDocument: async () => null,
     enterEditMode: async () => {
       editAttempts += 1;
       if (editAttempts === 1) throw new Error("Editing lease is held by another session.");
@@ -121,7 +125,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   await command("File", /Open/);
   const openDialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.type(ui.getByLabelText(openDialog, "Password"), "correct password");
-  await user.click(ui.getByRole(openDialog, "button", { name: "Choose document…" }));
+  await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
   assert.equal(statusValue("Working copy state"), "Clean");
   assert.equal(statusValue("Publication state"), "Published");
@@ -194,10 +198,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal((await menuItem("Security", "Lock")).disabled, true);
   assert.equal((await menuItem("Security", "Unlock")).disabled, false);
 
-  await command("File", /Open/);
-  const reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+  await command("Security", "Unlock");
+  const reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
   await user.type(ui.getByLabelText(reopenDialog, "Password"), "correct password");
-  await user.click(ui.getByRole(reopenDialog, "button", { name: "Choose document…" }));
+  await user.click(ui.getByRole(reopenDialog, "button", { name: "Unlock" }));
   await command("Security", "Lock");
   assert.equal(lockCalls, 1);
   assert.equal(editor.value, "", "manual lock synchronously removes mounted plaintext");

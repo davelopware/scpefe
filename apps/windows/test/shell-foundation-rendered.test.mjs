@@ -56,7 +56,9 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     saveProfile: async (value) => value, saveClientSettings: async (value) => value,
     activity: async () => ({}), chooseCreateTarget: async () => { calls.push("new"); return null; },
     cancelCreateTarget: async () => {}, createDocument: async () => null,
-    openDocument: async () => { calls.push("open"); return { content: "mounted document",
+    chooseOpenTarget: async () => ({ selected: true, name: "notes.scpefe" }),
+    cancelOpenTarget: async () => {}, unlockDocument: async () => null,
+    openSelectedDocument: async () => { calls.push("open"); return { content: "mounted document",
       readOnly: true, canEdit: true, publicationState: "target-published",
       targetName: "notes.scpefe",
       recovery: { content: "recovered document", state: "unsaved", updateTime: 1,
@@ -197,7 +199,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   const password = ui.getByLabelText(dialog, "Password");
   assert.equal(document.activeElement === password, true,
     "the open password receives initial focus");
-  const choose = ui.getByRole(dialog, "button", { name: "Choose document…" });
+  const choose = ui.getByRole(dialog, "button", { name: "Open" });
   choose.focus(); await user.keyboard("{Tab}");
   assert.equal(document.activeElement === password, true,
     "Tab wraps from the final action to the password field");

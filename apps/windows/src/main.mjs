@@ -8,10 +8,9 @@ import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { CreationTargetFlow } from "./creation-flow.mjs";
-import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
-  DocumentService } from "./document-service.mjs";
-import { applySwitchDecision, finishDocumentSwitch,
-  OpenRequestQueue } from "./switch-document.mjs";
+import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
+import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
+import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
   openTargetFromCommandLine, openTargetFromUrl, acknowledgementCredentials,
   acknowledgementTargetHash, createAcknowledgement, validateAcknowledgement,
@@ -22,6 +21,8 @@ const require = createRequire(import.meta.url);
 const native = require(path.join(here, "..", "native", "scpefe_electron_native.node"));
 let window;
 let service;
+let currentTarget = null;
+let lockedTarget = null;
 const openRequests = new OpenRequestQueue();
 const externalRequests = new OrderedOpenRequests({ randomToken: randomUUID });
 let externalDrainRunning = false;
@@ -68,62 +69,16 @@ async function acknowledgeRequest(request, status, sequence) {
     JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
 }
 
-async function prepareDocumentSwitch() {
+async function authorizeDocumentSwitch() {
   if (!service.active) return true;
-  let decision = "save";
-  if (needsCloseDecision(service.active)) {
-    const conflict = service.active.pendingRecord?.state === "conflict";
-    const pending = service.active.pendingPublication;
-    const choice = await dialog.showMessageBox(window, {
-      type: "warning",
-      title: "Open another document?",
-      message: conflict ? "This document has an unresolved divergence."
-        : pending ? "This document has a save pending publication."
-          : service.active.manuallySealed
-            ? "This document has unsaved changes."
-            : "This document is only provisionally saved.",
-      detail: "Save and open preserves the current work, discard and open is destructive, and cancel keeps this document open.",
-      buttons: ["Cancel", "Save and open", "Discard and open"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    decision = ["cancel", "save", "discard"][choice.response];
-  }
-  let outcome;
-  try {
-    outcome = await applySwitchDecision(service, decision);
-  } catch (error) {
-    if (error?.code !== "DOCUMENT_SWITCH_UNREADABLE_JOURNAL") throw error;
-    const confirmation = await dialog.showMessageBox(window, {
-      type: "warning", title: "Permanently discard unreadable recovery work?",
-      message: "The recovery journal for this authenticated document cannot be read.",
-      detail: "Only this document's encrypted journal will be deleted. This cannot be undone.",
-      buttons: ["Cancel", "Permanently discard journal and open"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    if (confirmation.response !== 1) return false;
-    await service.discardUnreadableJournalForSwitch(
-      DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
-    outcome = await applySwitchDecision(service, "discard");
-  }
-  if (!outcome.proceed) return false;
-  if (outcome.pendingPublication) {
-    const disclosure = await dialog.showMessageBox(window, {
-      type: "warning",
-      title: "Save is still pending publication",
-      message: "The manual save is stored locally but has not reached its target.",
-      detail: "It will remain discoverable after switching and after restart.",
-      buttons: ["Keep current document open", "Open with save pending"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    if (disclosure.response !== 1) {
-      window.webContents.send("document:switch-retained", service.active.opened);
-      await sendJournalSummary();
-      return false;
-    }
-  }
-  await finishDocumentSwitch(service);
-  await sendJournalSummary();
-  return true;
+  if (!needsCloseDecision(service.active)) return true;
+  await dialog.showMessageBox(window, {
+    type: "warning", title: "Current document needs attention",
+    message: "Resolve the current document's unsaved, recovery, conflict, or pending-publication state before replacing it.",
+    detail: "The current session and selected replacement remain unchanged.",
+    buttons: ["Keep current document open"], defaultId: 0, cancelId: 0, noLink: true,
+  });
+  return false;
 }
 
 async function drainExternalRequests() {
@@ -257,7 +212,9 @@ if (hasInstanceLock) {
 }
 
 if (hasInstanceLock) app.whenReady().then(async () => {
-  service = new DocumentService({
+  const makeService = () => {
+    let created;
+    created = new DocumentService({
     native,
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
@@ -269,14 +226,26 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => {
-      window?.webContents.send("document:locked", result);
-      void sendJournalSummary();
+      if (created === service) {
+        lockedTarget = currentTarget;
+        window?.webContents.send("document:locked", result);
+        void sendJournalSummary();
+      }
     },
-    onJournalWarning: (warning) =>
-      window?.webContents.send("document:journal-warning", warning),
-    onRegularSave: (result) =>
-      window?.webContents.send("document:regular-saved", result),
-  });
+    onJournalWarning: (warning) => {
+      if (created === service) window?.webContents.send("document:journal-warning", warning);
+    },
+    onRegularSave: (result) => {
+      if (created === service) window?.webContents.send("document:regular-saved", result);
+    },
+    });
+    return created;
+  };
+  service = makeService();
+  const liveService = new Proxy({}, { get(_target, property) {
+    const value = service[property];
+    return typeof value === "function" ? value.bind(service) : value;
+  } });
   await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
@@ -285,10 +254,26 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     service.saveClientSettings(settings));
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   const creationFlow = new CreationTargetFlow();
+  let selectedOpenTarget = null;
+  const adoptReplacement = (staged, target) => {
+    const previous = service;
+    service = staged.candidate;
+    staged.candidate.acceptCreatedDocument?.();
+    currentTarget = target;
+    lockedTarget = target;
+    if (previous !== service && previous.active) {
+      void previous.lock("document-replaced").catch((error) =>
+        window?.webContents.send("document:journal-warning",
+          `The replaced session cleanup needs attention: ${error.message}`));
+    }
+  };
+  const replacements = new ReplacementCoordinator({ makeCandidate: makeService,
+    authorizeCurrent: authorizeDocumentSwitch, adopt: adoptReplacement });
   ipcMain.handle("document:choose-create-target", async () =>
     creationFlow.chooseTarget(async () => {
       const chosen = await dialog.showSaveDialog(window, {
         title: "Create encrypted document",
+        defaultPath: "Untitled.scpefe",
         filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
         properties: ["createDirectory", "showOverwriteConfirmation"],
       });
@@ -296,20 +281,46 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     }));
   ipcMain.handle("document:cancel-create-target", () => creationFlow.cancel());
   ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
-    (target, validated) => service.createDocument(target, validated)));
-  ipcMain.handle("document:open", async (_event, password) => {
+    async (target, validated) => {
+      const opened = await replacements.create(target, validated);
+      return { created: true, opened, name: path.basename(target) };
+    }));
+  ipcMain.handle("document:choose-open-target", async () => {
     const chosen = await dialog.showOpenDialog(window, {
       title: "Open encrypted document",
       filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
       properties: ["openFile"],
     });
-    if (chosen.canceled || chosen.filePaths.length !== 1) return null;
+    selectedOpenTarget = chosen.canceled || chosen.filePaths.length !== 1
+      ? null : chosen.filePaths[0];
+    return selectedOpenTarget
+      ? Object.freeze({ selected: true, name: path.basename(selectedOpenTarget) }) : null;
+  });
+  ipcMain.handle("document:cancel-open-target", () => { selectedOpenTarget = null; });
+  ipcMain.handle("document:open-selected", async (_event, password) => {
+    if (!selectedOpenTarget) throw new Error("Choose a document first");
+    const target = selectedOpenTarget;
     return openRequests.run(async () => {
-      if (!await prepareDocumentSwitch()) return null;
-      const opened = await service.openDocument(chosen.filePaths[0], password);
+      const opened = await replacements.open(target, password);
+      selectedOpenTarget = null;
+      if (opened.invitationRequired) {
+        return { readOnly: true, invitationRequired: true,
+          targetName: path.basename(target) };
+      }
       await sendJournalSummary();
-      return opened ? { ...opened, targetName: path.basename(chosen.filePaths[0]) } : null;
+      return { ...opened, targetName: path.basename(target) };
     });
+  });
+  ipcMain.handle("document:unlock", async (_event, password) => {
+    if (!lockedTarget) throw new Error("No locked document is available");
+    const target = lockedTarget;
+    const opened = await replacements.open(target, password);
+    if (opened.invitationRequired) {
+      return { readOnly: true, invitationRequired: true,
+        targetName: path.basename(target) };
+    }
+    await sendJournalSummary();
+    return { ...opened, targetName: path.basename(target) };
   });
   ipcMain.handle("document:open-external", async (_event, request) => {
     if (!request || typeof request !== "object"
@@ -329,8 +340,14 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         return null;
       }
       const opened = await openRequests.run(async () => {
-        if (!await prepareDocumentSwitch()) return null;
-        return service.openDocument(pending.target, request.password);
+        let replacement;
+        try {
+          replacement = await replacements.open(pending.target, request.password);
+        } catch (error) {
+          if (error?.code === "DOCUMENT_REPLACEMENT_CANCELED") return null;
+          throw error;
+        }
+        return replacement;
       });
       await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
       externalRequests.complete(pending.token);
@@ -378,13 +395,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     if (chosen.canceled || !chosen.filePath) return null;
     return service.backupDocument(chosen.filePath);
   });
-  registerCompactionHandler({ ipcMain, service, dialog, window,
+  registerCompactionHandler({ ipcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
-  registerMigrationHandler({ ipcMain, service, dialog, window });
+  registerMigrationHandler({ ipcMain, service: liveService, dialog, window });
   ipcMain.handle("document:create-invitation", (_event, request) =>
     service.createInvitation(request));
-  ipcMain.handle("document:claim-invitation", (_event, password) =>
-    service.claimInvitation(password));
+  ipcMain.handle("document:claim-invitation", async (_event, password) => {
+    const opened = await replacements.claim(password);
+    await sendJournalSummary();
+    return { ...opened, targetName: path.basename(currentTarget) };
+  });
+  ipcMain.handle("document:cancel-invitation-claim", () => replacements.cancelClaim());
   ipcMain.handle("document:reconcile-identity", () => service.reconcileIdentity());
   ipcMain.handle("document:update-slot-permissions", (_event, request) =>
     service.updateSlotPermissions(request));
@@ -416,7 +437,11 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
   ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
   ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
-  ipcMain.handle("document:lock", () => service.lock("app-lock"));
+  const lockActive = (reason) => {
+    if (service.active?.target) currentTarget = service.active.target;
+    return service.lock(reason);
+  };
+  ipcMain.handle("document:lock", () => lockActive("app-lock"));
   window = new BrowserWindow({
     width: 920,
     height: 700,
@@ -455,7 +480,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       }
       if (service.active?.editMode) {
         try { await service.exitEditMode(); }
-        catch { await service.lock("app-exit"); }
+        catch { await lockActive("app-exit"); }
       }
       closingAfterRelease = true;
       window.close();
@@ -464,9 +489,9 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         `Could not finish exit: ${error.message}`);
     }).finally(() => { closeOperation = null; });
   });
-  powerMonitor.on("lock-screen", () => { void service.lock("screen-lock"); });
-  window.on("blur", () => { void service.lock("background"); });
-  window.on("minimize", () => { void service.lock("background"); });
+  powerMonitor.on("lock-screen", () => { void lockActive("screen-lock"); });
+  window.on("blur", () => { void lockActive("background"); });
+  window.on("minimize", () => { void lockActive("background"); });
   window.loadFile(path.join(here, "..", "dist", "index.html"));
   window.webContents.on("did-finish-load", () => {
     void sendJournalSummary();

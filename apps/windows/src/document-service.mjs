@@ -68,6 +68,8 @@ export class DocumentService {
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
     this.active = null;
+    this.createdTarget = null;
+    this.createdBytes = null;
     this.suspendedLeases = new Map();
     this.leaseObservations = new Map();
     this.migrationTakeoverConfirmations = new WeakMap();
@@ -131,12 +133,75 @@ export class DocumentService {
       await this.#atomicWrite(target, candidate, false);
       const published = await this.fs.readFile(target);
       if (!published.equals(candidate)) throw new Error("Published container verification failed");
+      this.createdTarget = target;
+      this.createdBytes = Buffer.from(published);
       const opened = this.#validateNativeOpened(
         this.native.openDocument(published, input.ownerPassword));
       await this.witnesses.observe(target, this.#observation(opened));
       opened.journalKey.fill(0);
     });
     return { created: true };
+  }
+
+  async revalidateTargetForReplacement() {
+    const active = this.active;
+    if (!active) throw new Error("Open the replacement candidate first");
+    const current = await this.fs.readFile(active.target);
+    if (!current.equals(active.baseContainer)) {
+      const error = new Error("The selected target changed before replacement completed");
+      error.code = "DOCUMENT_REPLACEMENT_TARGET_CHANGED";
+      throw error;
+    }
+    const verified = this.#validateNativeOpened(
+      this.native.openDocument(current, active.password));
+    try {
+      if (verified.documentId !== active.documentId
+          || verified.baseRevision !== active.baseRevision) {
+        const error = new Error("The selected target changed before replacement completed");
+        error.code = "DOCUMENT_REPLACEMENT_TARGET_CHANGED";
+        throw error;
+      }
+    } finally {
+      verified.journalKey.fill(0);
+    }
+    return Object.freeze({ unchanged: true });
+  }
+
+  async abandonCreatedDocument() {
+    if (!this.createdTarget) return Object.freeze({ removed: false });
+    const target = this.createdTarget;
+    const expected = this.active?.target === target
+      ? Buffer.from(this.active.baseContainer) : Buffer.from(this.createdBytes);
+    if (this.active) {
+      try {
+        await this.lock("abandon-created-replacement");
+      } catch {
+        this.#cancelCheckpoint();
+        this.#cancelRegularSave();
+        if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
+        this.inactivityTimer = null;
+        this.leaseGeneration += 1;
+        try { await this.#stopHeartbeat(); } catch {}
+        this.active?.journalKey?.fill(0);
+        if (this.active) { this.active.password = ""; this.active.working = null; }
+        this.active = null;
+      }
+    }
+    const current = await this.fs.readFile(target);
+    if (!current.equals(expected)) {
+      throw new Error("Created target changed; refusing unsafe cleanup");
+    }
+    await this.fs.unlink(target);
+    this.createdTarget = null;
+    this.createdBytes.fill(0);
+    this.createdBytes = null;
+    return Object.freeze({ removed: true });
+  }
+
+  acceptCreatedDocument() {
+    this.createdTarget = null;
+    this.createdBytes?.fill(0);
+    this.createdBytes = null;
   }
 
   async openDocument(target, password) {
@@ -382,6 +447,7 @@ export class DocumentService {
     if (!profile) throw new Error("Configure name, email, and device name first");
     const replacement = validatePassword(newPassword);
     let reopened;
+    let published;
     await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
       const candidate = this.native.claimInvitation(current, active.password,
@@ -390,17 +456,44 @@ export class DocumentService {
         journalKey: active.journalKey, target: active.target, base: current, candidate,
         text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
         purpose: "invitation-claim", reopenPassword: replacement });
-      reopened = this.#validateNativeOpened(this.native.openDocument(
-        await this.fs.readFile(active.target), replacement));
-      if (reopened.opened.invitationRequired) {
+      published = await this.fs.readFile(active.target);
+      reopened = this.#validateNativeOpened(
+        this.native.openDocument(published, replacement));
+      if (reopened.documentId !== active.documentId
+          || reopened.opened.invitationRequired) {
         throw new Error("Published invitation claim was not verified");
       }
     });
+    const migrationRequired = reopened.containerFormatVersion < 3;
     active.password = replacement;
-    active.opened = reopened.opened;
     active.journalKey.fill(0);
+    active.opened = validateOpenedDocument({ ...reopened.opened,
+      canEdit: migrationRequired ? false : reopened.opened.canEdit,
+      publicationState: "target-published",
+      ...(migrationRequired ? { migrationRequired: true } : {}),
+      ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
+    active.documentId = reopened.documentId;
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.slotCanEdit = reopened.opened.canEdit;
+    active.headMismatch = null;
+    active.profileMismatch = null;
+    active.migrationRequired = migrationRequired;
+    active.baseContainer = Buffer.from(published);
+    active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);
+    active.recovery = null;
+    active.pendingPublication = false;
+    active.pendingRecord = null;
+    active.unresolvedJournal = false;
+    active.unreadableJournal = false;
+    active.manuallySealed = reopened.manuallySealed;
+    active.editMode = false;
+    active.working = null;
+    active.dirty = false;
     reopened.journalKey.fill(0);
+    await this.witnesses.observe(active.target, active.observation);
     return active.opened;
   }
 
