@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequest,
   validateCreationResult, validateCreationTargetResult,
+  validateOpenTargetResult,
   validateBackupResult, validateCompactionResult,
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
@@ -118,10 +119,13 @@ test("canonicalizes working-copy cursor offsets with pasted text", () => {
   { content: "a\nb", cursor: { start: 2, end: 3 } });
 });
 
-test("creation results cannot expose host filesystem paths", () => {
-  assert.deepEqual(validateCreationResult({ created: true }), { created: true });
+test("creation results expose only a safe name and validated blank edit session", () => {
+  const opened = { content: "", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
+  assert.deepEqual(validateCreationResult({ created: true, opened,
+    name: "new.scpefe" }), { created: true, opened, name: "new.scpefe" });
   assert.throws(() => validateCreationResult({
-    created: true, target: "C:\\Users\\Ada\\secret.scpefe",
+    created: true, opened, name: "C:\\Users\\Ada\\secret.scpefe",
   }));
 });
 
@@ -129,6 +133,13 @@ test("creation target selection exposes no host filesystem path", () => {
   assert.deepEqual(validateCreationTargetResult({ selected: true }), { selected: true });
   assert.throws(() => validateCreationTargetResult({ selected: true,
     target: "C:\\Users\\Ada\\secret.scpefe" }), /invalid creation target result/);
+});
+
+test("open target selection exposes only a safe display name", () => {
+  assert.deepEqual(validateOpenTargetResult({ selected: true,
+    name: "notes.scpefe" }), { selected: true, name: "notes.scpefe" });
+  assert.throws(() => validateOpenTargetResult({ selected: true,
+    name: "C:\\private\\notes.scpefe" }), /invalid open target result/);
 });
 
 test("backup results expose success without a host filesystem path", () => {

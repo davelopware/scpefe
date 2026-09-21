@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
+  validateOpenTargetResult,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
@@ -32,10 +33,15 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
       "document:create", validateCreateFormRequest(request));
     return value === null ? null : validateCreationResult(value);
   },
-  openDocument: async (password) => {
-    const value = await ipcRenderer.invoke("document:open", validatePassword(password));
-    return value === null ? null : validateOpenedDocument(value);
+  chooseOpenTarget: async () => {
+    const value = await ipcRenderer.invoke("document:choose-open-target");
+    return value === null ? null : validateOpenTargetResult(value);
   },
+  cancelOpenTarget: () => ipcRenderer.invoke("document:cancel-open-target"),
+  openSelectedDocument: async (password) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:open-selected", validatePassword(password))),
+  unlockDocument: async (password) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:unlock", validatePassword(password))),
   openExternalDocument: async (request) => {
     const value = await ipcRenderer.invoke("document:open-external", {
       token: validateExternalOpenRequest(request).token,

@@ -13,7 +13,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /contextIsolation:\s*true/);
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
-  assert.match(main, /service\.lock\(["']app-lock["']\)/);
+  assert.match(main, /lockActive\(["']app-lock["']\)/);
+  assert.match(main, /defaultPath:\s*["']Untitled\.scpefe["']/);
+  assert.match(main, /extensions:\s*\[["']scpefe["']\]/);
   assert.match(main, /requestSingleInstanceLock/);
   assert.match(main, /app\.on\(["']second-instance["']/);
   assert.match(main, /existing instance remains authoritative/);
@@ -33,7 +35,10 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(preload, /require\(["']electron["']\)/);
 
   let exposed;
-  let creationResult = { created: true, target: "C:\\Users\\Ada\\secret.scpefe" };
+  const editOpened = { content: "", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
+  let creationResult = { created: true, opened: editOpened,
+    name: "C:\\Users\\Ada\\secret.scpefe" };
   let compactionResult = null;
   const invocations = [];
   const electron = {
@@ -43,6 +48,13 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         invocations.push({ channel, request });
         if (channel === "document:choose-create-target") {
           return { selected: true };
+        }
+        if (channel === "document:choose-open-target") {
+          return { selected: true, name: "notes.scpefe" };
+        }
+        if (channel === "document:open-selected" || channel === "document:unlock") {
+          return { content: "secret", readOnly: true, canEdit: true,
+            publicationState: "target-published", targetName: "notes.scpefe" };
         }
         if (channel === "document:create") {
           return creationResult;
@@ -67,7 +79,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "getClientSettings", "saveClientSettings",
     "getUnresolvedJournalSummary", "chooseCreateTarget", "cancelCreateTarget",
-    "createDocument", "openDocument",
+    "createDocument", "chooseOpenTarget", "cancelOpenTarget",
+    "openSelectedDocument", "unlockDocument",
     "openExternalDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
@@ -118,7 +131,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       storedRecoverySeparately: false,
     },
   });
-  creationResult = { created: true };
+  creationResult = { created: true, opened: editOpened, name: "new.scpefe" };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password words",
@@ -127,7 +140,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     content: "",
     understandsIrrecoverable: true,
     storedRecoverySeparately: true,
-  }))), { created: true });
+  }))), { created: true, opened: editOpened, name: "new.scpefe" });
   assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
     channel: "document:create",
     request: {
@@ -151,6 +164,18 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   }), /recovery password storage must be acknowledged/);
   assert.equal(invocations.filter(({ channel }) =>
     channel === "document:create").length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.chooseOpenTarget())),
+    { selected: true, name: "notes.scpefe" });
+  assert.equal(invocations.at(-1).channel, "document:choose-open-target");
+  await exposed.cancelOpenTarget();
+  assert.equal(invocations.at(-1).channel, "document:cancel-open-target");
+  assert.equal((await exposed.openSelectedDocument("correct password")).content,
+    "secret");
+  assert.deepEqual(invocations.at(-1), {
+    channel: "document:open-selected", request: "correct password" });
+  assert.equal((await exposed.unlockDocument("correct password")).content, "secret");
+  assert.deepEqual(invocations.at(-1), {
+    channel: "document:unlock", request: "correct password" });
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password typo",

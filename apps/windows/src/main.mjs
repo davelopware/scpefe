@@ -22,6 +22,8 @@ const require = createRequire(import.meta.url);
 const native = require(path.join(here, "..", "native", "scpefe_electron_native.node"));
 let window;
 let service;
+let currentTarget = null;
+let lockedTarget = null;
 const openRequests = new OpenRequestQueue();
 const externalRequests = new OrderedOpenRequests({ randomToken: randomUUID });
 let externalDrainRunning = false;
@@ -257,7 +259,9 @@ if (hasInstanceLock) {
 }
 
 if (hasInstanceLock) app.whenReady().then(async () => {
-  service = new DocumentService({
+  const makeService = () => {
+    let created;
+    created = new DocumentService({
     native,
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
@@ -269,14 +273,22 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => {
-      window?.webContents.send("document:locked", result);
-      void sendJournalSummary();
+      if (created === service) {
+        lockedTarget = currentTarget;
+        window?.webContents.send("document:locked", result);
+        void sendJournalSummary();
+      }
     },
-    onJournalWarning: (warning) =>
-      window?.webContents.send("document:journal-warning", warning),
-    onRegularSave: (result) =>
-      window?.webContents.send("document:regular-saved", result),
-  });
+    onJournalWarning: (warning) => {
+      if (created === service) window?.webContents.send("document:journal-warning", warning);
+    },
+    onRegularSave: (result) => {
+      if (created === service) window?.webContents.send("document:regular-saved", result);
+    },
+    });
+    return created;
+  };
+  service = makeService();
   await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
@@ -285,10 +297,12 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     service.saveClientSettings(settings));
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   const creationFlow = new CreationTargetFlow();
+  let selectedOpenTarget = null;
   ipcMain.handle("document:choose-create-target", async () =>
     creationFlow.chooseTarget(async () => {
       const chosen = await dialog.showSaveDialog(window, {
         title: "Create encrypted document",
+        defaultPath: "Untitled.scpefe",
         filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
         properties: ["createDirectory", "showOverwriteConfirmation"],
       });
@@ -296,20 +310,59 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     }));
   ipcMain.handle("document:cancel-create-target", () => creationFlow.cancel());
   ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
-    (target, validated) => service.createDocument(target, validated)));
-  ipcMain.handle("document:open", async (_event, password) => {
+    async (target, validated) => {
+      const candidate = makeService();
+      await candidate.loadClientSettings();
+      await candidate.createDocument(target, validated);
+      await candidate.openDocument(target, validated.ownerPassword);
+      const opened = await candidate.enterEditMode();
+      if (!await prepareDocumentSwitch()) {
+        await candidate.lock("replacement-canceled");
+        throw new Error("The current document remains open");
+      }
+      service = candidate;
+      currentTarget = target;
+      lockedTarget = target;
+      return { created: true, opened, name: path.basename(target) };
+    }));
+  ipcMain.handle("document:choose-open-target", async () => {
     const chosen = await dialog.showOpenDialog(window, {
       title: "Open encrypted document",
       filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
       properties: ["openFile"],
     });
-    if (chosen.canceled || chosen.filePaths.length !== 1) return null;
+    selectedOpenTarget = chosen.canceled || chosen.filePaths.length !== 1
+      ? null : chosen.filePaths[0];
+    return selectedOpenTarget
+      ? Object.freeze({ selected: true, name: path.basename(selectedOpenTarget) }) : null;
+  });
+  ipcMain.handle("document:cancel-open-target", () => { selectedOpenTarget = null; });
+  ipcMain.handle("document:open-selected", async (_event, password) => {
+    if (!selectedOpenTarget) throw new Error("Choose a document first");
+    const target = selectedOpenTarget;
     return openRequests.run(async () => {
-      if (!await prepareDocumentSwitch()) return null;
-      const opened = await service.openDocument(chosen.filePaths[0], password);
+      const candidate = makeService();
+      await candidate.loadClientSettings();
+      const opened = await candidate.openDocument(target, password);
+      if (!await prepareDocumentSwitch()) {
+        await candidate.lock("replacement-canceled");
+        throw new Error("The current document remains open");
+      }
+      service = candidate;
+      currentTarget = target;
+      lockedTarget = target;
+      selectedOpenTarget = null;
       await sendJournalSummary();
-      return opened ? { ...opened, targetName: path.basename(chosen.filePaths[0]) } : null;
+      return { ...opened, targetName: path.basename(target) };
     });
+  });
+  ipcMain.handle("document:unlock", async (_event, password) => {
+    if (!lockedTarget) throw new Error("No locked document is available");
+    const target = lockedTarget;
+    const opened = await service.openDocument(target, password);
+    currentTarget = target;
+    await sendJournalSummary();
+    return { ...opened, targetName: path.basename(target) };
   });
   ipcMain.handle("document:open-external", async (_event, request) => {
     if (!request || typeof request !== "object"
@@ -329,8 +382,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         return null;
       }
       const opened = await openRequests.run(async () => {
-        if (!await prepareDocumentSwitch()) return null;
-        return service.openDocument(pending.target, request.password);
+        const candidate = makeService();
+        await candidate.loadClientSettings();
+        const result = await candidate.openDocument(pending.target, request.password);
+        if (!await prepareDocumentSwitch()) {
+          await candidate.lock("replacement-canceled");
+          return null;
+        }
+        service = candidate;
+        currentTarget = pending.target;
+        lockedTarget = pending.target;
+        return result;
       });
       await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
       externalRequests.complete(pending.token);
@@ -416,7 +478,11 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
   ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
   ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
-  ipcMain.handle("document:lock", () => service.lock("app-lock"));
+  const lockActive = (reason) => {
+    if (service.active?.target) currentTarget = service.active.target;
+    return service.lock(reason);
+  };
+  ipcMain.handle("document:lock", () => lockActive("app-lock"));
   window = new BrowserWindow({
     width: 920,
     height: 700,
@@ -455,7 +521,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       }
       if (service.active?.editMode) {
         try { await service.exitEditMode(); }
-        catch { await service.lock("app-exit"); }
+        catch { await lockActive("app-exit"); }
       }
       closingAfterRelease = true;
       window.close();
@@ -464,9 +530,9 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         `Could not finish exit: ${error.message}`);
     }).finally(() => { closeOperation = null; });
   });
-  powerMonitor.on("lock-screen", () => { void service.lock("screen-lock"); });
-  window.on("blur", () => { void service.lock("background"); });
-  window.on("minimize", () => { void service.lock("background"); });
+  powerMonitor.on("lock-screen", () => { void lockActive("screen-lock"); });
+  window.on("blur", () => { void lockActive("background"); });
+  window.on("minimize", () => { void lockActive("background"); });
   window.loadFile(path.join(here, "..", "dist", "index.html"));
   window.webContents.on("did-finish-load", () => {
     void sendJournalSummary();

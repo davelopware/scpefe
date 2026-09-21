@@ -36,7 +36,7 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
 type DialogName = "profile" | "open" | "find" | "replace" | "export"
-  | "passwords" | null;
+  | "unlock" | "passwords" | null;
 type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
   | "recovery" | "publication" | null;
 
@@ -255,8 +255,12 @@ declare global { interface Window { scpefe: {
   getUnresolvedJournalSummary(): Promise<JournalSummary>;
   chooseCreateTarget(): Promise<{ selected: true } | null>;
   cancelCreateTarget(): Promise<void>;
-  createDocument(request: object): Promise<{ created: true } | null>;
-  openDocument(password: string): Promise<Opened | null>;
+  createDocument(request: object): Promise<{ created: true; opened: DocumentOpened;
+    name: string } | null>;
+  chooseOpenTarget(): Promise<{ selected: true; name: string } | null>;
+  cancelOpenTarget(): Promise<void>;
+  openSelectedDocument(password: string): Promise<Opened>;
+  unlockDocument(password: string): Promise<Opened>;
   openExternalDocument(request: ExternalOpenRequest & { password: string }):
     Promise<Opened | null>;
   enterEditMode(): Promise<DocumentOpened>;
@@ -320,6 +324,8 @@ function App() {
     useState<ExternalOpenRequest | null>(null);
   const [dialog, setDialog] = useState<DialogName>(null);
   const [creating, setCreating] = useState(false);
+  const [openError, setOpenError] = useState("");
+  const [pendingOpenName, setPendingOpenName] = useState("");
   const [targetName, setTargetName] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [editFailure, setEditFailure] = useState<string | null>(null);
@@ -437,7 +443,14 @@ function App() {
     if (command === "new") {
       try { if (await window.scpefe.chooseCreateTarget()) setCreating(true); }
       catch (error) { showError(error); }
-    } else if (command === "open" || command === "find" || command === "replace"
+    } else if (command === "open") {
+      try {
+        const selected = await window.scpefe.chooseOpenTarget();
+        if (selected) {
+          setPendingOpenName(selected.name); setOpenError(""); setDialog("open");
+        }
+      } catch (error) { showError(error); }
+    } else if (command === "find" || command === "replace"
       || command === "export" || command === "passwords" || command === "profile") {
       setDialog(command as DialogName);
     } else if (command === "save") await save();
@@ -447,7 +460,7 @@ function App() {
     else if (command === "redo") moveHistory(1);
     else if (command === "lock") await lock();
     else if (command === "unlock") {
-      setMessage("Unlock is available for the retained target.");
+      setOpenError(""); setDialog("unlock");
     }
     else if (command === "exit") window.close();
   }
@@ -497,11 +510,24 @@ function App() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      const result = await window.scpefe.openDocument(String(data.get("password")));
+      setOpenError("");
+      const result = dialog === "unlock"
+        ? await window.scpefe.unlockDocument(String(data.get("password")))
+        : await window.scpefe.openSelectedDocument(String(data.get("password")));
       showOpenedResult(result);
-      if (result) setDialog(null);
+      setPendingOpenName(""); setDialog(null);
     }
-    catch (error) { showError(error); }
+    catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
+      requestAnimationFrame(() => openPassword.current?.focus());
+    }
+  }
+
+  async function cancelOpen() {
+    try {
+      if (dialog === "open" && !externalOpenRequest) await window.scpefe.cancelOpenTarget();
+    } catch (error) { showError(error); }
+    setExternalOpenRequest(null); setPendingOpenName(""); setOpenError(""); closeDialog();
   }
 
   async function openExternal(event: FormEvent<HTMLFormElement>) {
@@ -851,7 +877,11 @@ function App() {
       await window.scpefe.cancelCreateTarget(); setCreating(false);
     }} onCreate={async (request: object) => {
       const result = await window.scpefe.createDocument(request);
-      if (result) { setCreating(false); setMessage("Encrypted blank document published successfully."); }
+      if (result) {
+        showOpenedResult({ ...result.opened, targetName: result.name });
+        setCreating(false); setMessage("Encrypted blank document published successfully.");
+        requestAnimationFrame(() => editor.current?.focus());
+      }
     }} />}
     {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title={profile ? "Profile" : "Set up this client"}
@@ -868,14 +898,21 @@ function App() {
         <small>Regular saves update the target but remain unsaved until you manually save.</small></fieldset>
         <div className="dialog-actions"><button type="button" onClick={closeDialog}>Close</button>
           <button>Save client settings</button></div></form>}</FocusedDialog>}
-    {dialog === "open" && <FocusedDialog returnFocus={dialogReturnFocus.current}
-      title={externalOpenRequest ? "Open requested document" : "Open document"}
-      close={() => { setExternalOpenRequest(null); closeDialog(); }} initialFocus={openPassword}>
+    {(dialog === "open" || dialog === "unlock") && <FocusedDialog
+      returnFocus={dialogReturnFocus.current}
+      title={dialog === "unlock" ? "Unlock document"
+        : externalOpenRequest ? "Open requested document" : "Open document"}
+      close={() => { void cancelOpen(); }} initialFocus={openPassword}>
+      {pendingOpenName && <p>Selected target: <strong>{pendingOpenName}</strong></p>}
       <form onSubmit={externalOpenRequest ? openExternal : open}><label>Password
-        <input ref={openPassword} name="password" type="password" required /></label>
+        <input ref={openPassword} name="password" type="password" required
+          aria-describedby={openError ? "open-password-error" : undefined} /></label>
+        {openError && <p id="open-password-error" className="dialog-error" role="alert">
+          {openError}</p>}
         <div className="dialog-actions"><button type="button" onClick={() => {
-          setExternalOpenRequest(null); closeDialog();
-        }}>Cancel</button><button>Choose document…</button></div></form></FocusedDialog>}
+          void cancelOpen();
+        }}>Cancel</button><button>{dialog === "unlock" ? "Unlock" : "Open"}</button>
+        </div></form></FocusedDialog>}
     {(dialog === "find" || dialog === "replace") && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Find and replace"
       close={closeDialog} initialFocus={findInput}>
