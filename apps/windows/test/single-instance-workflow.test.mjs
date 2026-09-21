@@ -199,13 +199,13 @@ test("a pending publication locks without touching its unavailable target", asyn
   assert.deepEqual(calls, ["lock:open-another"]);
 });
 
-test("renderer makes external requests and unresolved journals accessible alerts", async () => {
+test("renderer makes external requests and unresolved journals accessible", async () => {
   const renderer = await fs.readFile(
     new URL("../src/renderer.tsx", import.meta.url), "utf8");
-  assert.match(renderer, /aria-labelledby="unresolved-journals-heading"/);
-  assert.match(renderer, /Recovery work needs attention/);
-  assert.match(renderer, /aria-labelledby="external-open-heading"/);
-  assert.match(renderer, /Document password/);
+  assert.match(renderer, /role="status" aria-live="polite" aria-atomic="true"/);
+  assert.match(renderer, /recovery item/);
+  assert.match(renderer, /Open requested document/);
+  assert.match(renderer, /externalOpenRequest \? openExternal : open/);
 });
 
 test("main registers file and URL lifecycle events before draining staged requests", async () => {
