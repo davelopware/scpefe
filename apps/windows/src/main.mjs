@@ -8,6 +8,7 @@ import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { CreationTargetFlow } from "./creation-flow.mjs";
+import { createReplacement, openReplacement } from "./replacement-flow.mjs";
 import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
   DocumentService } from "./document-service.mjs";
 import { applySwitchDecision, finishDocumentSwitch,
@@ -311,15 +312,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:cancel-create-target", () => creationFlow.cancel());
   ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
     async (target, validated) => {
-      const candidate = makeService();
-      await candidate.loadClientSettings();
-      await candidate.createDocument(target, validated);
-      await candidate.openDocument(target, validated.ownerPassword);
-      const opened = await candidate.enterEditMode();
-      if (!await prepareDocumentSwitch()) {
-        await candidate.lock("replacement-canceled");
-        throw new Error("The current document remains open");
-      }
+      const { candidate, opened } = await createReplacement({ makeCandidate: makeService,
+        target, request: validated, commitCurrent: prepareDocumentSwitch });
       service = candidate;
       currentTarget = target;
       lockedTarget = target;
@@ -341,13 +335,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     if (!selectedOpenTarget) throw new Error("Choose a document first");
     const target = selectedOpenTarget;
     return openRequests.run(async () => {
-      const candidate = makeService();
-      await candidate.loadClientSettings();
-      const opened = await candidate.openDocument(target, password);
-      if (!await prepareDocumentSwitch()) {
-        await candidate.lock("replacement-canceled");
-        throw new Error("The current document remains open");
-      }
+      const { candidate, opened } = await openReplacement({ makeCandidate: makeService,
+        target, password, commitCurrent: prepareDocumentSwitch });
       service = candidate;
       currentTarget = target;
       lockedTarget = target;
@@ -382,13 +371,16 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         return null;
       }
       const opened = await openRequests.run(async () => {
-        const candidate = makeService();
-        await candidate.loadClientSettings();
-        const result = await candidate.openDocument(pending.target, request.password);
-        if (!await prepareDocumentSwitch()) {
-          await candidate.lock("replacement-canceled");
-          return null;
+        let replacement;
+        try {
+          replacement = await openReplacement({ makeCandidate: makeService,
+            target: pending.target, password: request.password,
+            commitCurrent: prepareDocumentSwitch });
+        } catch (error) {
+          if (error?.code === "DOCUMENT_REPLACEMENT_CANCELED") return null;
+          throw error;
         }
+        const { candidate, opened: result } = replacement;
         service = candidate;
         currentTarget = pending.target;
         lockedTarget = pending.target;
