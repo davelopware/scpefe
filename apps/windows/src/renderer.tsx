@@ -26,7 +26,9 @@ type ManagedSlot = { slotId: string; identityName: string; identityEmail: string
   mustBeChangedKnown?: boolean; identityKnown?: boolean };
 type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
-type LeaseDecision = { decisionRequired: "lease-takeover"; holderName: string };
+type LeaseOperation = "edit" | "recovery" | "divergence" | "migration";
+type LeaseDecision = { decisionRequired: "lease-takeover"; operation: LeaseOperation;
+  holderName: string; authorization: string };
 type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   targetName?: string;
@@ -267,19 +269,20 @@ declare global { interface Window { scpefe: {
   unlockDocument(password: string): Promise<Opened>;
   openExternalDocument(request: ExternalOpenRequest & { password: string }):
     Promise<Opened | null>;
-  enterEditMode(request?: { forceTakeover: boolean }): Promise<DocumentOpened | LeaseDecision>;
+  enterEditMode(request?: { authorization?: string }): Promise<DocumentOpened | LeaseDecision>;
   saveDocument(content: string): Promise<{ saved: true; content: string;
     publicationState: PublicationState }>;
   reconnectPendingPublication(): Promise<{ content: string;
     publicationState: PublicationState }>;
-  beginDivergenceResolution(): Promise<MergeDraft>;
+  beginDivergenceResolution(request?: { authorization?: string }):
+    Promise<MergeDraft | LeaseDecision>;
   saveDivergenceResolution(content: string): Promise<{ saved: true; content: string;
     publicationState: PublicationState }>;
   discardPendingPublication(): Promise<DocumentOpened>;
   backupDocument(): Promise<{ backedUp: true } | null>;
   compactDocument(request: { confirmed: true }): Promise<{ compacted: true; backupCreated: true;
     previousHead: string; head: string } | null>;
-  migrateDocument(request?: { forceTakeover: boolean }): Promise<{
+  migrateDocument(request?: { authorization?: string }): Promise<{
     migrated: true; backupCreated: true; compatibilityWarning: string;
     opened: DocumentOpened } | LeaseDecision | null>;
   changePassword(request: { currentPassword: string; newPassword: string;
@@ -296,7 +299,9 @@ declare global { interface Window { scpefe: {
     Promise<{ exported: true } | null>;
   updateWorkingCopy(value: { content: string; cursor: Cursor }): Promise<object>;
   activity(): Promise<object>;
-  restoreRecoveredWork(): Promise<DocumentOpened & { recoveredUnsaved: true; cursor: Cursor }>;
+  restoreRecoveredWork(request?: { authorization?: string }):
+    Promise<(DocumentOpened & { recoveredUnsaved: true; cursor: Cursor }) | LeaseDecision>;
+  cancelLeaseTakeover(authorization: string): Promise<boolean>;
   discardRecoveredWork(): Promise<DocumentOpened>;
   acceptHeadMismatch(): Promise<DocumentOpened>;
   lock(): Promise<LockResult>;
@@ -340,9 +345,9 @@ function App() {
   const [targetName, setTargetName] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [editFailure, setEditFailure] = useState<string | null>(null);
-  const [leaseDecision, setLeaseDecision] = useState<{
-    operation: "edit" | "migration"; holderName: string } | null>(null);
+  const [leaseDecision, setLeaseDecision] = useState<LeaseDecision | null>(null);
   const [decisionError, setDecisionError] = useState("");
+  const [openedDialogError, setOpenedDialogError] = useState("");
   const [saveError, setSaveError] = useState("");
   const [compactionError, setCompactionError] = useState("");
   const [resolvingConflict, setResolvingConflict] = useState(false);
@@ -422,6 +427,9 @@ function App() {
 
   function showOpenedResult(result: Opened | null) {
     setOpened(result);
+    setLeaseDecision(null);
+    setDecisionError("");
+    setOpenedDialogError("");
     const content = result && !result.invitationRequired ? result.content : "";
     if (result) {
       setLocked(false);
@@ -605,9 +613,9 @@ function App() {
 
   async function enterEditMode() {
     try {
-      const result = await window.scpefe.enterEditMode({ forceTakeover: false });
+      const result = await window.scpefe.enterEditMode();
       if ("decisionRequired" in result) {
-        setLeaseDecision({ operation: "edit", holderName: result.holderName });
+        setLeaseDecision(result);
         setDecisionError("");
         setMessage("Editing requires a confirmed lease takeover.");
         return;
@@ -619,16 +627,16 @@ function App() {
     }
   }
 
-  async function migrate(forceTakeover = false) {
+  async function migrate(request: { authorization?: string } = {}) {
     try {
       setDecisionError("");
-      const result = await window.scpefe.migrateDocument({ forceTakeover });
+      const result = await window.scpefe.migrateDocument(request);
       if (!result) {
         setMessage("Migration declined. The document remains read-only; saving requires migration.");
         return;
       }
       if ("decisionRequired" in result) {
-        setLeaseDecision({ operation: "migration", holderName: result.holderName });
+        setLeaseDecision(result);
         setMessage("Migration requires a confirmed lease takeover.");
         return;
       }
@@ -647,15 +655,59 @@ function App() {
     try {
       setDecisionError("");
       if (leaseDecision.operation === "migration") {
-        await migrate(true);
+        await migrate({ authorization: leaseDecision.authorization });
         return;
       }
-      const result = await window.scpefe.enterEditMode({ forceTakeover: true });
-      if ("decisionRequired" in result) throw new Error("Lease evidence is still uncertain");
-      setOpened(result); setLeaseDecision(null); setMessage("Edit mode entered after confirmed lease takeover.");
+      if (leaseDecision.operation === "recovery") {
+        const result = await window.scpefe.restoreRecoveredWork(
+          { authorization: leaseDecision.authorization });
+        if ("decisionRequired" in result) {
+          setLeaseDecision(result);
+          setDecisionError("The lease changed. Review the current holder before trying again.");
+          return;
+        }
+        applyRecoveredWork(result);
+        setLeaseDecision(null);
+        return;
+      }
+      if (leaseDecision.operation === "divergence") {
+        const result = await window.scpefe.beginDivergenceResolution(
+          { authorization: leaseDecision.authorization });
+        if ("decisionRequired" in result) {
+          setLeaseDecision(result);
+          setDecisionError("The lease changed. Review the current holder before trying again.");
+          return;
+        }
+        applyDivergenceDraft(result);
+        setLeaseDecision(null);
+        return;
+      }
+      const result = await window.scpefe.enterEditMode(
+        { authorization: leaseDecision.authorization });
+      if ("decisionRequired" in result) {
+        setLeaseDecision(result);
+        setDecisionError("The lease changed. Review the current holder before trying again.");
+        return;
+      }
+      setOpened(result); setLeaseDecision(null);
+      setMessage("Edit mode entered after confirmed lease takeover.");
     } catch (error) {
       const value = error instanceof Error ? error.message : String(error);
       setDecisionError(value); setMessage(`Lease takeover needs attention: ${value}`);
+    }
+  }
+
+  async function cancelLeaseDecision() {
+    if (!leaseDecision) return;
+    try {
+      setDecisionError("");
+      await window.scpefe.cancelLeaseTakeover(leaseDecision.authorization);
+      setLeaseDecision(null);
+      setMessage("Lease takeover canceled; the document session is unchanged.");
+    } catch (error) {
+      const value = error instanceof Error ? error.message : String(error);
+      setDecisionError(value);
+      setMessage(`Lease takeover cancellation needs attention: ${value}`);
     }
   }
 
@@ -778,21 +830,48 @@ function App() {
     }
   }
 
+  function applyRecoveredWork(result: DocumentOpened & {
+    recoveredUnsaved: true; cursor: Cursor }) {
+    setOpened(result);
+    setWorkingText(result.content);
+    setHistory([result.content]);
+    setHistoryIndex(0);
+    setDirty(true);
+    setSaveState("unsaved");
+    setOpenedDialogError("");
+    setMessage("Recovered work restored as unsaved changes.");
+  }
+
+  function openedActionFailure(error: unknown, action: HTMLElement | null, prefix: string) {
+    const value = error instanceof Error ? error.message : String(error);
+    setOpenedDialogError(value);
+    setMessage(`${prefix}: ${value}`);
+    requestAnimationFrame(() => action?.focus());
+  }
+
   async function restoreRecovery() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
     try {
+      setOpenedDialogError("");
       const result = await window.scpefe.restoreRecoveredWork();
-      setOpened(result);
-      setWorkingText(result.content);
-      setHistory([result.content]);
-      setHistoryIndex(0);
-      setDirty(true);
-      setSaveState("unsaved");
-      setMessage("Recovered work restored as unsaved changes.");
-    } catch (error) { showError(error); }
+      if ("decisionRequired" in result) {
+        setLeaseDecision(result);
+        setDecisionError("");
+        setMessage("Restoring recovered work requires a confirmed lease takeover.");
+        return;
+      }
+      applyRecoveredWork(result);
+    } catch (error) {
+      openedActionFailure(error, action, "Recovery restore needs attention");
+    }
   }
 
   async function discardRecovery() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
     try {
+      setOpenedDialogError("");
       const result = await window.scpefe.discardRecoveredWork();
       setOpened(result);
       setWorkingText(result.content);
@@ -800,15 +879,22 @@ function App() {
       setDirty(false);
       setSaveState("target-published");
       setMessage("Recovered work discarded.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      openedActionFailure(error, action, "Recovery discard needs attention");
+    }
   }
 
   async function acceptHeadMismatch() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
     try {
+      setOpenedDialogError("");
       const result = await window.scpefe.acceptHeadMismatch();
       setOpened(result);
       setMessage("Current authenticated head accepted. Editing may now be enabled.");
-    } catch (error) { setMessage((error as Error).message); }
+    } catch (error) {
+      openedActionFailure(error, action, "Authenticated-head acceptance needs attention");
+    }
   }
 
   async function lock() {
@@ -844,6 +930,7 @@ function App() {
       setEditFailure(null);
       setLeaseDecision(null);
       setDecisionError("");
+      setOpenedDialogError("");
       setSaveError("");
       setCompactionError("");
       setResolvingConflict(false);
@@ -890,25 +977,44 @@ function App() {
     }
   }
 
+  function applyDivergenceDraft(draft: MergeDraft) {
+    setWorkingText(draft.content);
+    setDirty(true);
+    setHistory([draft.content]);
+    setHistoryIndex(0);
+    setOpened((current) => isDocumentOpened(current) ? { ...current,
+      content: draft.content, readOnly: false, canEdit: true } : current);
+    setSaveState("conflict");
+    setResolvingConflict(true);
+    setOpenedDialogError("");
+    setMessage(draft.hasConflicts
+      ? "Resolve every local/current marker, then save the merge."
+      : "The three-way merge is clean. Review it, then save the merge.");
+  }
+
   async function beginDivergenceResolution() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
     try {
+      setOpenedDialogError("");
       const draft = await window.scpefe.beginDivergenceResolution();
-      setWorkingText(draft.content);
-      setDirty(true);
-      setHistory([draft.content]);
-      setHistoryIndex(0);
-      setOpened((current) => isDocumentOpened(current) ? { ...current,
-        content: draft.content, readOnly: false, canEdit: true } : current);
-      setSaveState("conflict");
-      setResolvingConflict(true);
-      setMessage(draft.hasConflicts
-        ? "Resolve every local/current marker, then save the merge."
-        : "The three-way merge is clean. Review it, then save the merge.");
-    } catch (error) { showError(error); }
+      if ("decisionRequired" in draft) {
+        setLeaseDecision(draft);
+        setDecisionError("");
+        setMessage("Divergence resolution requires a confirmed lease takeover.");
+        return;
+      }
+      applyDivergenceDraft(draft);
+    } catch (error) {
+      openedActionFailure(error, action, "Divergence resolution needs attention");
+    }
   }
 
   async function reconnectPublication() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
     try {
+      setOpenedDialogError("");
       if (isDocumentOpened(opened) && opened.publicationState === "conflict") {
         await beginDivergenceResolution();
         return;
@@ -927,11 +1033,16 @@ function App() {
         : result.publicationState === "conflict"
           ? "The target changed; divergence must be resolved without overwriting it."
           : "The target is still unavailable; publication remains pending.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      openedActionFailure(error, action, "Publication retry needs attention");
+    }
   }
 
   async function discardPublication() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
     try {
+      setOpenedDialogError("");
       const result = await window.scpefe.discardPendingPublication();
       setOpened(result);
       setWorkingText(result.content);
@@ -939,7 +1050,9 @@ function App() {
       setDirty(false);
       setSaveState("target-published");
       setMessage("Pending manual save explicitly discarded.");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      openedActionFailure(error, action, "Publication discard needs attention");
+    }
   }
 
   async function backup() {
@@ -1078,10 +1191,9 @@ function App() {
       <div className="warning" role="alert"><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
         <p>Force takeover only after confirming that no other client is editing this document.</p></div>
       {decisionError && <p className="dialog-error" role="alert">{decisionError}</p>}
-      <div className="dialog-actions"><button autoFocus onClick={() => {
-        setLeaseDecision(null); setDecisionError("");
-        setMessage("Lease takeover canceled; the document remains read-only.");
-      }}>Cancel</button><button onClick={() => void confirmLeaseTakeover()}>
+      <div className="dialog-actions"><button autoFocus
+        onClick={() => void cancelLeaseDecision()}>Cancel</button>
+        <button onClick={() => void confirmLeaseTakeover()}>
         {leaseDecision.operation === "migration" ? "Force takeover and migrate" : "Force takeover"}
       </button></div>
     </FocusedDialog>}
@@ -1253,17 +1365,21 @@ function App() {
         <button onClick={() => setDialog("passwords")}>Open Passwords to reconcile</button></div></FocusedDialog>}
     {visibleOpenedDialog === "head" && activeDocument && opened.headMismatch && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title={opened.headMismatch.title}>
-      <p>{opened.headMismatch.explanation}</p><button onClick={acceptHeadMismatch}>Accept current authenticated head</button>
+      <p>{opened.headMismatch.explanation}</p>
+      {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
+      <button onClick={acceptHeadMismatch}>Accept current authenticated head</button>
     </FocusedDialog>}
     {visibleOpenedDialog === "recovery" && activeDocument && opened.recovery && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Recovered work">
       <p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p>
+      {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
       <div className="dialog-actions"><button onClick={discardRecovery}>Discard recovered work</button>
         <button disabled={!opened.canEdit} onClick={restoreRecovery}>Restore unsaved work</button></div></FocusedDialog>}
     {visibleOpenedDialog === "publication" && activeDocument
       && <FocusedDialog returnFocus={dialogReturnFocus.current}
         title={opened.publicationState === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
         <p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
+        {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
         <div className="dialog-actions"><button onClick={discardPublication}>Discard pending save</button>
           <button onClick={reconnectPublication}>Retry publication</button></div></FocusedDialog>}
   </main>;

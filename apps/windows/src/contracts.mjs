@@ -458,21 +458,35 @@ export function validateEditMode(value) {
 export function validateLeaseDecisionResult(value) {
   if (!value || typeof value !== "object"
       || value.decisionRequired !== "lease-takeover"
+      || !["edit", "recovery", "divergence", "migration"].includes(value.operation)
       || typeof value.holderName !== "string" || !value.holderName
-      || Object.keys(value).length !== 2) {
+      || typeof value.authorization !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(value.authorization)
+      || Object.keys(value).length !== 4) {
     throw new TypeError("host returned an invalid lease decision");
   }
   return Object.freeze({ decisionRequired: "lease-takeover",
-    holderName: value.holderName });
+    operation: value.operation, holderName: value.holderName,
+    authorization: value.authorization });
 }
 
 export function validateTakeoverRequest(value = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)
-      || typeof value.forceTakeover !== "boolean"
-      || Object.keys(value).length !== 1) {
+      || Object.keys(value).some((key) => key !== "authorization")
+      || (value.authorization !== undefined
+        && (typeof value.authorization !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+            .test(value.authorization)))) {
     throw new TypeError("lease takeover request is invalid");
   }
-  return Object.freeze({ forceTakeover: value.forceTakeover });
+  return Object.freeze(value.authorization === undefined
+    ? {} : { authorization: value.authorization });
+}
+
+export function validateTakeoverCancellation(value) {
+  const validated = validateTakeoverRequest({ authorization: value });
+  return validated.authorization;
 }
 
 export function validateCompactionRequest(value) {

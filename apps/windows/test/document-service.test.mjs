@@ -1451,14 +1451,26 @@ test("checkpoints continuously typed work and recovers it as unsaved", async (t)
   assert.doesNotMatch(encrypted, /recovered secret|document\.scpefe/);
   await service.exitEditMode();
 
+  leasedNative.updateLease(Buffer.from("container"), "password words", {
+    active: true, sessionId: "3a".repeat(16), heartbeatCounter: 7,
+    holderUtcMs: 9_000_000, durationMs: 600_000, holderName: "Remote editor",
+    holderEmail: "remote@example.test", deviceName: "Future clock" });
+
   const restarted = new DocumentService({ native: leasedNative, fs,
     publicationCapabilities,
-    profilePath: path.join(directory, "profile.json") });
+    profilePath: path.join(directory, "profile.json"),
+    utcNow: () => 1_000, monotonicNow: () => 10 });
   const opened = await restarted.openDocument(target, "password words");
   assert.deepEqual(opened.recovery, { content: "recovered secret",
     cursor: { start: 3, end: 8 }, state: "unsaved", updateTime: 29_000 });
   await assert.rejects(restarted.enterEditMode(), /Restore or discard/);
-  const restored = await restarted.restoreRecoveredWork();
+  let recoveryTakeover;
+  await assert.rejects(restarted.restoreRecoveredWork(), (error) => {
+    recoveryTakeover = error.takeoverToken;
+    return error.code === "LEASE_CLOCK_UNCERTAIN" && Boolean(recoveryTakeover);
+  });
+  const restored = await restarted.restoreRecoveredWork(
+    { takeoverToken: recoveryTakeover });
   assert.equal(restored.content, "recovered secret");
   assert.equal(restored.recoveredUnsaved, true);
   await restarted.lock();
@@ -2103,8 +2115,57 @@ test("uncertain clocks require observation or explicit forced confirmation", asy
     profilePath: await writeProfile(directory, "Katherine", "Confirmed"),
     utcNow: () => 500, monotonicNow: () => 20 });
   await forced.openDocument(target, "password words");
-  await forced.enterEditMode({ forceTakeover: true });
+  let takeover;
+  await assert.rejects(forced.enterEditMode(), (error) => {
+    takeover = error.takeoverToken;
+    return error.code === "LEASE_CLOCK_UNCERTAIN" && Boolean(takeover);
+  });
+  await forced.enterEditMode({ takeoverToken: takeover });
   assert.equal(native.currentLease().holderName, "Katherine");
+});
+
+test("lease takeover tokens reject cancellation, replay, and changed lease evidence", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-token-race-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+    canEdit: true, documentId: "ce".repeat(16), baseRevision: "df".repeat(32),
+    journalKey: Buffer.alloc(32, 15) }) });
+  const holder = new DocumentService({ native, fs, publicationCapabilities,
+    profilePath: await writeProfile(directory, "Ada", "Future"),
+    utcNow: () => 9_000_000, monotonicNow: () => 0 });
+  await holder.openDocument(target, "password words");
+  await holder.enterEditMode();
+  const observer = new DocumentService({ native, fs, publicationCapabilities,
+    profilePath: await writeProfile(directory, "Grace", "Desk"),
+    utcNow: () => 1_000, monotonicNow: () => 10 });
+  await observer.openDocument(target, "password words");
+
+  let canceled;
+  await assert.rejects(observer.enterEditMode(), (error) => {
+    canceled = error.takeoverToken; return error.code === "LEASE_CLOCK_UNCERTAIN";
+  });
+  assert.equal(observer.cancelLeaseTakeover(canceled), true);
+  await assert.rejects(observer.enterEditMode({ takeoverToken: canceled }),
+    (error) => error.code === "LEASE_CHANGED");
+
+  let raced;
+  await assert.rejects(observer.enterEditMode(), (error) => {
+    raced = error.takeoverToken; return error.code === "LEASE_CLOCK_UNCERTAIN";
+  });
+  const changedLease = { ...native.currentLease(), heartbeatCounter: 2 };
+  native.updateLease(Buffer.from("container"), "password words", changedLease);
+  await assert.rejects(observer.enterEditMode({ takeoverToken: raced }),
+    (error) => error.code === "LEASE_CHANGED");
+
+  let accepted;
+  await assert.rejects(observer.enterEditMode(), (error) => {
+    accepted = error.takeoverToken; return error.code === "LEASE_CLOCK_UNCERTAIN";
+  });
+  await observer.enterEditMode({ takeoverToken: accepted });
+  await assert.rejects(observer.enterEditMode({ takeoverToken: accepted }),
+    (error) => error.code === "LEASE_CHANGED");
 });
 
 test("serializes a delayed heartbeat ahead of save without overwriting it", async (t) => {
@@ -2342,7 +2403,18 @@ test("resolves an overlapping divergence only after markers are removed", async 
   const fixture = await divergentService(directory);
   const opened = await fixture.service.openDocument(fixture.target, "password words");
   assert.equal(opened.publicationState, "conflict");
-  const draft = await fixture.service.beginDivergenceResolution();
+  fixture.options.native.updateLease(Buffer.from("ignored"), "password words", {
+    active: true, sessionId: "4b".repeat(16), heartbeatCounter: 3,
+    holderUtcMs: Date.now() + 9_000_000, durationMs: 600_000,
+    holderName: "Remote editor", holderEmail: "remote@example.test",
+    deviceName: "Future clock" });
+  let divergenceTakeover;
+  await assert.rejects(fixture.service.beginDivergenceResolution(), (error) => {
+    divergenceTakeover = error.takeoverToken;
+    return error.code === "LEASE_CLOCK_UNCERTAIN" && Boolean(divergenceTakeover);
+  });
+  const draft = await fixture.service.beginDivergenceResolution(
+    { takeoverToken: divergenceTakeover });
   assert.equal(draft.ancestorRevision, fixture.ancestor);
   assert.equal(draft.localRevision, fixture.local);
   assert.equal(draft.currentRevision, fixture.current);

@@ -6,7 +6,7 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
   validateMigrationResult,
-  validateLeaseDecisionResult, validateTakeoverRequest,
+  validateLeaseDecisionResult, validateTakeoverRequest, validateTakeoverCancellation,
   validateCompactionRequest,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
@@ -59,7 +59,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     });
     return value === null ? null : validateOpenedDocument(value);
   },
-  enterEditMode: async (request = { forceTakeover: false }) => {
+  enterEditMode: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:enter-edit-mode",
       validateTakeoverRequest(request));
     return value?.decisionRequired === "lease-takeover"
@@ -69,8 +69,12 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
   reconnectPendingPublication: async () => validatePublicationResult(
     await ipcRenderer.invoke("document:reconnect-publication")),
-  beginDivergenceResolution: async () => validateMergeDraft(
-    await ipcRenderer.invoke("document:begin-divergence-resolution")),
+  beginDivergenceResolution: async (request = {}) => {
+    const value = await ipcRenderer.invoke("document:begin-divergence-resolution",
+      validateTakeoverRequest(request));
+    return value?.decisionRequired === "lease-takeover"
+      ? validateLeaseDecisionResult(value) : validateMergeDraft(value);
+  },
   saveDivergenceResolution: async (content) => validateSaveResult(
     await ipcRenderer.invoke("document:save-divergence-resolution",
       canonicalizeDocumentText(content))),
@@ -85,7 +89,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
       validateCompactionRequest(request));
     return value === null ? null : validateCompactionResult(value);
   },
-  migrateDocument: async (request = { forceTakeover: false }) => {
+  migrateDocument: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:migrate",
       validateTakeoverRequest(request));
     return value === null ? null : value?.decisionRequired === "lease-takeover"
@@ -128,8 +132,20 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   updateWorkingCopy: (working) => ipcRenderer.invoke(
     "document:update-working-copy", validateWorkingCopy(working)),
   activity: () => ipcRenderer.invoke("document:activity"),
-  restoreRecoveredWork: async () => validateRecoveredWork(
-    await ipcRenderer.invoke("document:restore-recovery")),
+  restoreRecoveredWork: async (request = {}) => {
+    const value = await ipcRenderer.invoke("document:restore-recovery",
+      validateTakeoverRequest(request));
+    return value?.decisionRequired === "lease-takeover"
+      ? validateLeaseDecisionResult(value) : validateRecoveredWork(value);
+  },
+  cancelLeaseTakeover: async (authorization) => {
+    const value = await ipcRenderer.invoke("document:cancel-lease-takeover",
+      validateTakeoverCancellation(authorization));
+    if (typeof value !== "boolean") {
+      throw new TypeError("host returned invalid lease takeover cancellation");
+    }
+    return value;
+  },
   discardRecoveredWork: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:discard-recovery")),
   acceptHeadMismatch: async () => validateOpenedDocument(

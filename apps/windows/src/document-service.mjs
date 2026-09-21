@@ -72,7 +72,7 @@ export class DocumentService {
     this.createdBytes = null;
     this.suspendedLeases = new Map();
     this.leaseObservations = new Map();
-    this.migrationTakeoverConfirmations = new WeakMap();
+    this.leaseTakeoverConfirmations = new WeakMap();
   }
 
   async loadProfile() {
@@ -407,7 +407,7 @@ export class DocumentService {
     return opened;
   }
 
-  async enterEditMode({ forceTakeover = false } = {}) {
+  async enterEditMode({ takeoverToken } = {}) {
     if (!this.active) throw new Error("Open a document first");
     if (this.active.pendingPublication) {
       throw new Error("Resolve the interrupted publication before editing");
@@ -427,7 +427,7 @@ export class DocumentService {
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
-    await this.#acquireLease(forceTakeover);
+    await this.#acquireLease({ takeoverToken, issueTakeoverToken: true });
     this.active.editMode = true;
     this.active.working = { content: this.active.opened.content,
       cursor: { start: 0, end: 0 } };
@@ -642,7 +642,7 @@ export class DocumentService {
     }
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
-    await this.#acquireLease(false);
+    await this.#acquireLease();
     active.editMode = true;
     active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
     let published;
@@ -770,7 +770,7 @@ export class DocumentService {
     return this.publications.replacementCapabilities();
   }
 
-  async restoreRecoveredWork() {
+  async restoreRecoveredWork({ takeoverToken } = {}) {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
     if (this.active.pendingPublication) {
       throw new Error("Resolve the interrupted publication before editing");
@@ -781,7 +781,7 @@ export class DocumentService {
     if (!this.active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
-    await this.#acquireLease(false);
+    await this.#acquireLease({ takeoverToken, issueTakeoverToken: true });
     this.active.editMode = true;
     this.active.working = { content: this.active.recovery.text,
       cursor: { ...this.active.recovery.cursor } };
@@ -887,7 +887,7 @@ export class DocumentService {
       content: active.pendingRecord.text });
   }
 
-  async beginDivergenceResolution() {
+  async beginDivergenceResolution({ takeoverToken } = {}) {
     const active = this.active;
     if (!active?.pendingPublication || active.pendingRecord?.state !== "conflict") {
       throw new Error("No divergent pending publication is available");
@@ -896,7 +896,7 @@ export class DocumentService {
       throw new Error("The active password slot does not permit editing");
     }
     this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
-    await this.#acquireLease(false);
+    await this.#acquireLease({ takeoverToken, issueTakeoverToken: true });
     active.editMode = true;
     try {
       const currentBytes = await this.fs.readFile(active.target);
@@ -1599,6 +1599,10 @@ export class DocumentService {
               "The required pre-migration backup could not be created and verified");
             error.code = "MIGRATION_BACKUP_FAILED";
             error.cause = cause;
+            if (takeoverToken !== undefined) {
+              error.takeoverToken = this.#issueLeaseTakeoverToken(
+                active, before.lease, before.documentId);
+            }
             throw error;
           }
           if (!(await this.fs.readFile(active.target)).equals(current)) {
@@ -1736,7 +1740,7 @@ export class DocumentService {
       containerFormatVersion, historyEventType, historyEventDetail };
   }
 
-  async #acquireLease(forceTakeover) {
+  async #acquireLease({ takeoverToken, issueTakeoverToken = false } = {}) {
     const active = this.active;
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
@@ -1745,7 +1749,8 @@ export class DocumentService {
       const latest = this.#validateNativeOpened(
         this.native.openDocument(bytes, active.password));
       const lease = latest.lease;
-      const acquisition = this.#leaseAcquisition(active, lease, { forceTakeover });
+      const acquisition = this.#leaseAcquisition(active, lease,
+        { takeoverToken, issueTakeoverToken });
       const nextLease = {
         active: true, sessionId: acquisition.sessionId.toString("hex"),
         heartbeatCounter: acquisition.heartbeatCounter,
@@ -1763,7 +1768,7 @@ export class DocumentService {
     this.#scheduleHeartbeat(this.leaseGeneration);
   }
 
-  #leaseAcquisition(active, lease, { forceTakeover = false,
+  #leaseAcquisition(active, lease, {
     takeoverToken, issueTakeoverToken = false,
     observedDocumentId = active.documentId } = {}) {
     let confirmedTakeover = false;
@@ -1771,9 +1776,13 @@ export class DocumentService {
       // Object identity is the capability; a renderer-created lookalike cannot authorize.
       const validToken = takeoverToken !== null
         && (typeof takeoverToken === "object" || typeof takeoverToken === "function")
-        ? this.migrationTakeoverConfirmations.get(takeoverToken) : undefined;
+        ? this.leaseTakeoverConfirmations.get(takeoverToken) : undefined;
+      if (validToken) this.leaseTakeoverConfirmations.delete(takeoverToken);
       if (!validToken || validToken.documentId !== active.documentId
           || validToken.documentId !== observedDocumentId
+          || validToken.active !== active
+          || validToken.target !== active.target
+          || validToken.baseRevision !== active.baseRevision
           || validToken.lease !== this.#leaseFingerprint(lease)) {
         const error = new Error("Editing lease changed after takeover confirmation");
         error.code = "LEASE_CHANGED";
@@ -1799,15 +1808,13 @@ export class DocumentService {
       const firstSeen = this.leaseObservations.get(key) ?? this.monotonicNow();
       this.leaseObservations.set(key, firstSeen);
       const observedStale = this.monotonicNow() - firstSeen >= lease.durationMs;
-      if (!reliableExpiry && !observedStale && !forceTakeover && !confirmedTakeover) {
+      if (!reliableExpiry && !observedStale && !confirmedTakeover) {
         const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
         error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
         error.lease = lease;
         if (error.code === "LEASE_CLOCK_UNCERTAIN" && issueTakeoverToken) {
-          const token = Object.freeze({});
-          this.migrationTakeoverConfirmations.set(token, {
-            documentId: active.documentId, lease: this.#leaseFingerprint(lease) });
-          error.takeoverToken = token;
+          error.takeoverToken = this.#issueLeaseTakeoverToken(
+            active, lease, observedDocumentId);
         }
         throw error;
       }
@@ -1820,6 +1827,22 @@ export class DocumentService {
     return JSON.stringify([lease.active, lease.sessionId, lease.heartbeatCounter,
       lease.holderUtcMs, lease.durationMs, lease.holderName, lease.holderEmail,
       lease.deviceName]);
+  }
+
+  #issueLeaseTakeoverToken(active, lease, observedDocumentId = active.documentId) {
+    const token = Object.freeze({});
+    this.leaseTakeoverConfirmations.set(token, {
+      active, documentId: observedDocumentId, target: active.target,
+      baseRevision: active.baseRevision, lease: this.#leaseFingerprint(lease) });
+    return token;
+  }
+
+  cancelLeaseTakeover(takeoverToken) {
+    if (takeoverToken === null
+        || (typeof takeoverToken !== "object" && typeof takeoverToken !== "function")) {
+      return false;
+    }
+    return this.leaseTakeoverConfirmations.delete(takeoverToken);
   }
 
   #scheduleHeartbeat(generation) {
@@ -2104,7 +2127,7 @@ export class DocumentService {
       throw new Error("Resolve the head mismatch before discarding provisional work");
     }
     if (!active.editMode) {
-      await this.#acquireLease(false);
+      await this.#acquireLease();
       active.editMode = true;
     }
     try {
