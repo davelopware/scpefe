@@ -97,6 +97,7 @@ function MenuBar({ enabled, run }: { enabled: Record<string, boolean>;
             event.preventDefault();
             const offset = event.key === "ArrowRight" ? 1 : menuDefinitions.length - 1;
             const next = menuDefinitions[(menuIndex + offset) % menuDefinitions.length][0];
+            if (open !== null) { setOpen(next); focusFirst(next); }
             triggers.current[next]?.focus();
           }
         }}><u>{name[0]}</u>{name.slice(1)}</button>

@@ -113,7 +113,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     assert.equal(window.innerWidth, width); assert.equal(window.innerHeight, height);
     assert.equal(getComputedStyle(shell).height, "100%");
     assert.equal(getComputedStyle(editor).height, "100%");
-    assert.equal(document.querySelector(".app-shell"), shell);
+    assert.equal(document.querySelector(".app-shell") === shell, true,
+      "resize preserves the mounted shell node");
   }
 
   await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
@@ -125,7 +126,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(ui.getByRole(file, "menuitem", { name: /Save/ }).disabled, true);
   assert.equal(ui.getByRole(file, "menuitem", { name: /Close/ }).disabled, true);
   ui.fireEvent.keyDown(file, { key: "Escape" });
-  assert.equal(document.activeElement, ui.getByRole(document.body, "menuitem", { name: "File" }));
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "File",
+    "Escape returns focus to the File trigger");
 
   await user.click(ui.getByRole(document.body, "menuitem", { name: "Edit" }));
   const editMenu = ui.getByRole(document.body, "menu", { name: "Edit" });
@@ -149,7 +151,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(document.activeElement?.getAttribute("name"), "name");
   await user.keyboard("{Control>}n{/Control}{Control>}o{/Control}{Control>}f{/Control}{Alt>}f{/Alt}");
   assert.deepEqual(calls, []);
-  assert.equal(ui.queryByRole(document.body, "menu"), null);
+  assert.equal(ui.queryByRole(document.body, "menu") === null, true,
+    "modal shortcuts open no menu");
   await user.keyboard("{Escape}");
   await ui.waitFor(() => assert.equal(
     document.activeElement?.getAttribute("aria-label"), "Security"));
@@ -158,7 +161,16 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.ok(await ui.findByRole(document.body, "menu", { name: "Edit" }));
   ui.fireEvent.keyDown(ui.getByRole(document.body, "menu", { name: "Edit" }), { key: "Escape" });
   await user.keyboard("{Alt>}f{/Alt}");
-  const keyboardFileMenu = await ui.findByRole(document.body, "menu", { name: "File" });
+  await ui.findByRole(document.body, "menu", { name: "File" });
+  await ui.waitFor(() => assert.match(document.activeElement?.textContent ?? "", /^New/));
+  await user.keyboard("{ArrowRight}");
+  const keyboardEditMenu = await ui.findByRole(document.body, "menu", { name: "Edit" });
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "Edit",
+    "ArrowRight leaves focus on Edit when all its commands are disabled");
+  assert.equal(ui.getAllByRole(keyboardEditMenu, "menuitem")
+    .every((item) => item.disabled), true, "Edit commands are disabled without a document");
+  await user.keyboard("{ArrowLeft}");
+  await ui.findByRole(document.body, "menu", { name: "File" });
   await ui.waitFor(() => assert.match(document.activeElement?.textContent ?? "", /^New/));
   await user.keyboard("{ArrowDown}");
   assert.match(document.activeElement?.textContent ?? "", /^Open/);
@@ -169,7 +181,9 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   await user.keyboard(" ");
   let dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.keyboard("{Escape}");
-  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+  await ui.waitFor(() => assert.equal(
+    ui.queryByRole(document.body, "dialog") === null, true,
+    "Escape closes the open dialog"));
   await ui.waitFor(() => assert.equal(
     document.activeElement?.getAttribute("aria-label"), "File"));
 
@@ -180,19 +194,24 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), true);
   const password = ui.getByLabelText(dialog, "Password");
-  assert.equal(document.activeElement, password);
+  assert.equal(document.activeElement === password, true,
+    "the open password receives initial focus");
   const choose = ui.getByRole(dialog, "button", { name: "Choose document…" });
   choose.focus(); await user.keyboard("{Tab}");
-  assert.equal(document.activeElement, password);
+  assert.equal(document.activeElement === password, true,
+    "Tab wraps from the final action to the password field");
   await user.type(password, "correct password");
   await user.click(choose);
   const recoveryDialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
   assert.equal(ui.getAllByRole(document.body, "dialog").length, 1);
   await user.keyboard("{Control>}n{/Control}{Control>}o{/Control}{Alt>}f{/Alt}");
   assert.deepEqual(calls, ["new", "open"]);
-  assert.equal(ui.queryByRole(document.body, "menu"), null);
+  assert.equal(ui.queryByRole(document.body, "menu") === null, true,
+    "recovery modal shortcuts open no menu");
   await user.click(ui.getByRole(recoveryDialog, "button", { name: "Discard recovered work" }));
-  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+  await ui.waitFor(() => assert.equal(
+    ui.queryByRole(document.body, "dialog") === null, true,
+    "discard closes the recovery dialog"));
   await ui.waitFor(() => assert.equal(
     document.activeElement?.getAttribute("aria-label"), "File"));
   assert.equal(editor.disabled, false); assert.equal(editor.readOnly, true);
@@ -218,9 +237,11 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   ui.fireEvent.keyDown(openedEditMenu, { key: "Escape" });
   editor.focus(); await user.keyboard("{Control>}f{/Control}");
   const find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
-  assert.equal(document.activeElement, ui.getByLabelText(find, "Find"));
+  assert.equal(document.activeElement === ui.getByLabelText(find, "Find"), true,
+    "the Find field receives initial focus");
   await user.keyboard("{Escape}");
-  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null));
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog",
+    { name: "Find and replace" }) === null, true, "Escape closes Find and replace"));
   await ui.waitFor(() => assert.equal(
     document.activeElement?.getAttribute("aria-label"), "Document text"));
   assert.deepEqual(calls, ["new", "open"]);
