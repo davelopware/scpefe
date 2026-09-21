@@ -16,6 +16,8 @@ Use this workflow only after a Node, renderer, or DOM test OOM; a runner stall; 
 
 2. For mounted React/JSDOM harnesses, retain the created React root and explicitly unmount it. Close every JSDOM window, invoke registered listener disposers, cancel timers or animation frames, and restore or delete globals installed by the test. Add assertions for these cleanup outcomes where practical.
 
+   Keep failure output bounded: compare scalar DOM properties such as text, value, role, name, or an identity boolean. Do not pass whole JSDOM nodes, windows, React roots, or other cyclic object graphs to equality assertions because a mismatch can exhaust memory while the test runner formats the diff.
+
 3. Record the command verdict, elapsed time, maximum RSS, and swap count. Stop the run and preserve evidence when memory grows continuously into the 1–2 GiB range or swap approaches exhaustion; diagnose before another execution.
 
 4. After the isolated test is bounded and green, run the complete applicable Node or desktop suite serially under the same memory and swap limits. Both the isolated test and serial suite must pass within their limits before proceeding to broader, unrelated gates. Keep the suspect test and affected suite bounded for the remainder of the run.

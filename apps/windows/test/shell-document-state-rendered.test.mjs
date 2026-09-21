@@ -139,7 +139,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   await command("Edit", "Edit Contents");
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
   assert.match(ui.getByRole(failure, "alert").textContent, /lease is held/);
-  assert.equal(document.activeElement?.textContent.trim(), "Continue read-only");
+  assert.equal(document.activeElement?.textContent.trim(), "Retry editing");
   assert.equal(editor.readOnly, true);
   assert.equal(statusValue("Document state"), "Read-only");
   await user.click(ui.getByRole(failure, "button", { name: "Continue read-only" }));
@@ -187,7 +187,9 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(statusValue("Working copy state"), "Clean");
   assert.equal(statusValue("Document state"), "Read-only");
 
-  const plaintext = editor.value;
+  const plaintext = opened.content;
+  assert.equal(editor.value, "",
+    "blocking publication decisions do not expose plaintext behind their overlay");
   listeners.locked({ locked: true, journalSaved: true, warning: null });
   assert.equal(editor.value, "", "automatic lock synchronously removes mounted plaintext");
   assert.equal(document.body.textContent.includes(plaintext), false);

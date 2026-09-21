@@ -16,25 +16,14 @@ export async function compactWithBackupSelection({ service, dialog, window,
   return service.compactDocument(confirmation, chosen.filePath);
 }
 
-/* Confirms irreversible removal in the trusted host before any service call. */
-export async function confirmAndCompact({ service, dialog, window, confirmation }) {
-  const warning = await dialog.showMessageBox(window, {
-    type: "warning",
-    title: "Permanently compact document history?",
-    message: "Compaction causes irreversible local history removal from this container.",
-    detail: "It cannot delete historical copies retained by storage providers, sync tools, caches, backups, or other external copies. SCPEFE must create and verify an exact backup replica before compaction.",
-    buttons: ["Cancel", "Create backup and compact"],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-  });
-  if (warning.response !== 1) return null;
-  return compactWithBackupSelection({ service, dialog, window, confirmation });
-}
-
-/* Registers the trusted Electron compaction boundary. */
+/* Registers the trusted Electron compaction boundary after renderer confirmation. */
 export function registerCompactionHandler({ ipcMain, service, dialog, window,
   confirmation }) {
-  ipcMain.handle("document:compact", () => confirmAndCompact({ service, dialog,
-    window, confirmation }));
+  ipcMain.handle("document:compact", (_event, request) => {
+    if (!request || typeof request !== "object" || request.confirmed !== true
+        || Object.keys(request).length !== 1) {
+      throw new TypeError("compaction confirmation is invalid");
+    }
+    return compactWithBackupSelection({ service, dialog, window, confirmation });
+  });
 }

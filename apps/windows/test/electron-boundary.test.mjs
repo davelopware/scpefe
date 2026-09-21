@@ -40,6 +40,13 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let creationResult = { created: true, opened: editOpened,
     name: "C:\\Users\\Ada\\secret.scpefe" };
   let compactionResult = null;
+  let editResult = editOpened;
+  let recoveryResult = { content: "recovered", readOnly: false, canEdit: true,
+    recoveredUnsaved: true, cursor: { start: 0, end: 0 } };
+  let divergenceResult = { content: "merge", hasConflicts: false,
+    ancestorRevision: "11".repeat(32), localRevision: "22".repeat(32),
+    currentRevision: "33".repeat(32) };
+  let migrationResult = null;
   let invitationResult = { created: true,
     temporaryPassword: "generated secret words" };
   const invocations = [];
@@ -82,6 +89,11 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
           return { backedUp: true, target: "C:\\Users\\Ada\\backup.scpefe" };
         }
         if (channel === "document:compact") return compactionResult;
+        if (channel === "document:enter-edit-mode") return editResult;
+        if (channel === "document:restore-recovery") return recoveryResult;
+        if (channel === "document:begin-divergence-resolution") return divergenceResult;
+        if (channel === "document:cancel-lease-takeover") return true;
+        if (channel === "document:migrate") return migrationResult;
         return null;
       } },
   };
@@ -105,12 +117,15 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "claimInvitation", "cancelInvitationClaim", "reconcileIdentity",
     "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
-    "restoreRecoveredWork", "discardRecoveredWork", "acceptHeadMismatch", "lock", "onLocked",
+    "restoreRecoveredWork", "cancelLeaseTakeover", "discardRecoveredWork",
+    "acceptHeadMismatch", "lock", "onLocked",
     "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
     "onUnresolvedJournalSummary",
     "onSwitchRetained",
   ]);
-  assert.equal(await exposed.compactDocument(), null);
+  await assert.rejects(exposed.compactDocument(), /explicitly confirmed/);
+  assert.equal(invocations.some(({ channel }) => channel === "document:compact"), false);
+  assert.equal(await exposed.compactDocument({ confirmed: true }), null);
   assert.equal(await exposed.reconcileProfile(), null);
   assert.equal(invocations.at(-1).channel, "profile:reconcile-active");
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.chooseCreateTarget())),
@@ -124,11 +139,53 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   compactionResult = { compacted: true, backupCreated: true,
     previousHead: "12".repeat(32), head: "34".repeat(32) };
-  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument())),
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument(
+    { confirmed: true }))),
     compactionResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:compact", request: { confirmed: true },
+  });
   compactionResult = { compacted: true, backupCreated: false,
     previousHead: "12".repeat(32), head: "34".repeat(32) };
-  await assert.rejects(exposed.compactDocument(), /invalid compaction result/);
+  await assert.rejects(exposed.compactDocument({ confirmed: true }),
+    /invalid compaction result/);
+  assert.equal((await exposed.enterEditMode()).readOnly, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:enter-edit-mode", request: {},
+  });
+  const authorization = "123e4567-e89b-42d3-a456-426614174000";
+  editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Remote editor", authorization };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.enterEditMode())), editResult);
+  await assert.rejects(exposed.enterEditMode({ authorization, extra: true }),
+    /lease takeover request is invalid/);
+  recoveryResult = { decisionRequired: "lease-takeover", operation: "recovery",
+    holderName: "Recovery editor", authorization };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.restoreRecoveredWork(
+    { authorization }))), recoveryResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:restore-recovery", request: { authorization },
+  });
+  divergenceResult = { decisionRequired: "lease-takeover", operation: "divergence",
+    holderName: "Merge editor", authorization };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.beginDivergenceResolution())),
+    divergenceResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:begin-divergence-resolution", request: {},
+  });
+  assert.equal(await exposed.cancelLeaseTakeover(authorization), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:cancel-lease-takeover", request: authorization,
+  });
+  await assert.rejects(exposed.cancelLeaseTakeover("not-an-authorization"),
+    /lease takeover request is invalid/);
+  migrationResult = { decisionRequired: "lease-takeover", operation: "migration",
+    holderName: "Future editor", authorization };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.migrateDocument())),
+    migrationResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:migrate", request: {},
+  });
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password words",

@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
+import { LeaseTakeoverAuthorizations, runLeaseOperation } from "./lease-takeover.mjs";
 import { CreationTargetFlow } from "./creation-flow.mjs";
 import { ReplacementCoordinator } from "./replacement-coordinator.mjs";
 import { SecureLockCoordinator } from "./secure-lock-coordinator.mjs";
@@ -214,6 +215,7 @@ if (hasInstanceLock) {
 
 if (hasInstanceLock) app.whenReady().then(async () => {
   let secureLocks = null;
+  let leaseTakeovers = null;
   const makeService = () => {
     let created;
     created = new DocumentService({
@@ -228,6 +230,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => {
+      leaseTakeovers?.clear();
       void secureLocks?.serviceLocked(created, result).catch((error) =>
         window?.webContents.send("document:journal-warning",
           `Secure lock cleanup needs attention: ${error.message}`));
@@ -242,6 +245,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return created;
   };
   service = makeService();
+  leaseTakeovers = new LeaseTakeoverAuthorizations();
   const liveService = new Proxy({}, { get(_target, property) {
     const value = service[property];
     return typeof value === "function" ? value.bind(service) : value;
@@ -257,6 +261,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   const creationFlow = new CreationTargetFlow();
   let selectedOpenTarget = null;
   const adoptReplacement = (staged, target) => {
+    leaseTakeovers.clear();
     const previous = service;
     service = staged.candidate;
     staged.candidate.acceptCreatedDocument?.();
@@ -372,31 +377,61 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       externalOpenInProgress = false;
     }
   });
-  ipcMain.handle("document:enter-edit-mode", async () => {
-    try {
-      return await service.enterEditMode();
-    } catch (error) {
-      if (error?.code !== "LEASE_CLOCK_UNCERTAIN") throw error;
-      const confirmation = await dialog.showMessageBox(window, {
-        type: "warning", title: "Force editing-lease takeover?",
-        message: "The current lease cannot be proved expired because the clocks disagree.",
-        detail: "Force takeover only after confirming the named holder is no longer editing.",
-        buttons: ["Cancel", "Force takeover"], defaultId: 0, cancelId: 0,
-        noLink: true,
-      });
-      if (confirmation.response !== 1) throw error;
-      return service.enterEditMode({ forceTakeover: true });
+  const leaseRequestAuthorization = (request) => {
+    if (!request || typeof request !== "object" || Array.isArray(request)
+        || Object.keys(request).some((key) => key !== "authorization")
+        || (request.authorization !== undefined
+          && (typeof request.authorization !== "string"
+            || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+              .test(request.authorization)))) {
+      throw new TypeError("lease takeover decision is invalid");
     }
+    return request.authorization;
+  };
+  ipcMain.handle("document:enter-edit-mode", async (_event, request) => {
+    const current = service;
+    return runLeaseOperation({ authorizations: leaseTakeovers, operation: "edit",
+      service: current, authorization: leaseRequestAuthorization(request),
+      perform: (takeoverToken) => current.enterEditMode({ takeoverToken }) });
   });
-  ipcMain.handle("document:save", (_event, content) => service.saveDocument(content));
-  ipcMain.handle("document:reconnect-publication", () =>
-    service.reconnectPendingPublication());
-  ipcMain.handle("document:begin-divergence-resolution", () =>
-    service.beginDivergenceResolution());
-  ipcMain.handle("document:save-divergence-resolution", (_event, content) =>
-    service.saveDivergenceResolution(content));
-  ipcMain.handle("document:discard-publication", () =>
-    service.discardPendingPublication());
+  ipcMain.handle("document:save", async (_event, content) => {
+    let result;
+    try { result = await service.saveDocument(content); }
+    catch (error) {
+      if (!error?.publicationPrepared || !service.active?.opened) throw error;
+      result = { saved: true, content,
+        publicationState: service.active.opened.publicationState };
+    }
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:reconnect-publication", async () => {
+    const result = await service.reconnectPendingPublication();
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:begin-divergence-resolution", (_event, request) => {
+    const current = service;
+    return runLeaseOperation({ authorizations: leaseTakeovers, operation: "divergence",
+      service: current, authorization: leaseRequestAuthorization(request),
+      perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken }) });
+  });
+  ipcMain.handle("document:save-divergence-resolution", async (_event, content) => {
+    let result;
+    try { result = await service.saveDivergenceResolution(content); }
+    catch (error) {
+      if (!error?.publicationPrepared || !service.active?.opened) throw error;
+      result = { saved: true, content,
+        publicationState: service.active.opened.publicationState };
+    }
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:discard-publication", async () => {
+    const result = await service.discardPendingPublication();
+    await sendJournalSummary();
+    return result;
+  });
   ipcMain.handle("document:backup", async () => {
     const chosen = await dialog.showSaveDialog(window, {
       title: "Create verified backup replica",
@@ -409,7 +444,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   });
   registerCompactionHandler({ ipcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
-  registerMigrationHandler({ ipcMain, service: liveService, dialog, window });
+  registerMigrationHandler({ ipcMain, getService: () => service, dialog, window,
+    authorizations: leaseTakeovers, validateAuthorization: leaseRequestAuthorization });
   ipcMain.handle("document:change-password", (_event, request) =>
     service.changePassword(request));
   ipcMain.handle("document:create-invitation", (_event, request) =>
@@ -455,10 +491,33 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:update-working-copy", (_event, working) =>
     service.updateWorkingCopy(working));
   ipcMain.handle("document:activity", () => service.notifyActivity());
-  ipcMain.handle("document:restore-recovery", () => service.restoreRecoveredWork());
-  ipcMain.handle("document:discard-recovery", () => service.discardRecoveredWork());
+  ipcMain.handle("document:restore-recovery", async (_event, request) => {
+    const current = service;
+    const result = await runLeaseOperation({ authorizations: leaseTakeovers,
+      operation: "recovery", service: current,
+      authorization: leaseRequestAuthorization(request),
+      perform: (takeoverToken) => current.restoreRecoveredWork({ takeoverToken }) });
+    await sendJournalSummary();
+    return result;
+  });
+  ipcMain.handle("document:discard-recovery", async () => {
+    const result = await service.discardRecoveredWork();
+    await sendJournalSummary();
+    return result;
+  });
   ipcMain.handle("document:accept-head-mismatch", () => service.acceptHeadMismatch());
-  const lockActive = (reason) => secureLocks.lock(reason);
+  ipcMain.handle("document:cancel-lease-takeover", (_event, authorization) => {
+    if (typeof authorization !== "string"
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+          .test(authorization)) {
+      throw new TypeError("lease takeover authorization is invalid");
+    }
+    return leaseTakeovers.cancel(authorization, service);
+  });
+  const lockActive = (reason) => {
+    leaseTakeovers.clear();
+    return secureLocks.lock(reason);
+  };
   ipcMain.handle("document:lock", () => lockActive("app-lock"));
   window = new BrowserWindow({
     width: 920,

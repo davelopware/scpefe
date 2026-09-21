@@ -261,8 +261,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Save identity change" }));
     await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent,
       /Leave edit mode/));
-    assert.equal(document.activeElement,
-      ui.getByRole(dialog, "button", { name: "Save identity change" }),
+    assert.equal(document.activeElement ===
+      ui.getByRole(dialog, "button", { name: "Save identity change" }), true,
       "failed identity save focuses its retry action");
     await user.click(ui.getByRole(dialog, "button", { name: "Go back" }));
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));

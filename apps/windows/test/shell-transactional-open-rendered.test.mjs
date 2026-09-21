@@ -164,7 +164,7 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent,
       /did not open/));
     assert.equal(editor.value, "original plaintext");
-    assert.equal(document.activeElement, ui.getByLabelText(dialog, "Password"));
+    assert.equal(document.activeElement === ui.getByLabelText(dialog, "Password"), true);
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(cancelOpenCalls, 1);
     assert.equal(editor.value, "original plaintext");
@@ -176,24 +176,25 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await command("File", /Open/);
     await submitPassword("Open document", "Open", "temporary password");
     const claim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
-    assert.equal(editor.value, "original plaintext",
-      "staged invitation leaves the original renderer session mounted");
+    assert.equal(editor.value, "",
+      "staged invitation retains but does not expose the original plaintext behind the dialog");
+    assert.equal(document.body.textContent.includes("original plaintext"), false);
     await user.type(ui.getByLabelText(claim, "New password"), "replacement password");
     await user.type(ui.getByLabelText(claim, "Confirm new password"),
       "mismatched password");
     await user.click(ui.getByRole(claim, "button",
       { name: "Replace password and claim identity" }));
     assert.equal(claimCalls, 0, "mismatched replacement never reaches the host");
-    assert.equal(document.activeElement,
-      ui.getByLabelText(claim, "Confirm new password"));
+    assert.equal(document.activeElement ===
+      ui.getByLabelText(claim, "Confirm new password"), true);
     await user.clear(ui.getByLabelText(claim, "Confirm new password"));
     await user.type(ui.getByLabelText(claim, "Confirm new password"),
       "replacement password");
     await user.click(ui.getByRole(claim, "button",
       { name: "Replace password and claim identity" }));
     await ui.waitFor(() => assert.equal(claimCalls, 1));
-    assert.equal(editor.value, "original plaintext",
-      "claim failure leaves the original renderer session intact");
+    assert.equal(editor.value, "",
+      "claim failure retains the original session without exposing plaintext");
     await user.click(ui.getByRole(claim, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(cancelClaimCalls, 1));
     assert.equal(editor.value, "original plaintext",

@@ -455,6 +455,48 @@ export function validateEditMode(value) {
       ? { invitationRequired: false } : {}) });
 }
 
+export function validateLeaseDecisionResult(value) {
+  if (!value || typeof value !== "object"
+      || value.decisionRequired !== "lease-takeover"
+      || !["edit", "recovery", "divergence", "migration"].includes(value.operation)
+      || typeof value.holderName !== "string" || !value.holderName
+      || typeof value.authorization !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(value.authorization)
+      || Object.keys(value).length !== 4) {
+    throw new TypeError("host returned an invalid lease decision");
+  }
+  return Object.freeze({ decisionRequired: "lease-takeover",
+    operation: value.operation, holderName: value.holderName,
+    authorization: value.authorization });
+}
+
+export function validateTakeoverRequest(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).some((key) => key !== "authorization")
+      || (value.authorization !== undefined
+        && (typeof value.authorization !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+            .test(value.authorization)))) {
+    throw new TypeError("lease takeover request is invalid");
+  }
+  return Object.freeze(value.authorization === undefined
+    ? {} : { authorization: value.authorization });
+}
+
+export function validateTakeoverCancellation(value) {
+  const validated = validateTakeoverRequest({ authorization: value });
+  return validated.authorization;
+}
+
+export function validateCompactionRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || value.confirmed !== true || Object.keys(value).length !== 1) {
+    throw new TypeError("compaction must be explicitly confirmed");
+  }
+  return Object.freeze({ confirmed: true });
+}
+
 export function validateRecoveredWork(value) {
   if (!value || typeof value !== "object" || value.readOnly !== false
       || value.canEdit !== true || value.recoveredUnsaved !== true
