@@ -39,6 +39,7 @@ function Modal({ title, children, close, focus }: { title: string; children: Rea
     const chrome = document.querySelector<HTMLElement>(".shell-chrome"); modalDepth += 1; chrome?.setAttribute("inert", "");
     (focus?.current ?? host.current?.querySelector<HTMLElement>("button, input, select"))?.focus();
     return () => { modalDepth -= 1; if (modalDepth === 0) chrome?.removeAttribute("inert"); requestAnimationFrame(() => {
+      if (modalDepth !== 0 || document.querySelector('[aria-modal="true"]')) return;
       if (prior?.isConnected) prior.focus();
       else document.querySelector<HTMLElement>('[role="menubar"] [role="menuitem"]')?.focus();
     }); };
@@ -118,10 +119,13 @@ export function App() {
   const [find, setFind] = useState(""); const [replacement, setReplacement] = useState("");
   const [lineEndings, setLineEndings] = useState("lf"); const [temporary, setTemporary] = useState("");
   const [external, setExternal] = useState<object | null>(null);
+  const [queuedExternal, setQueuedExternal] = useState<object | null>(null);
   const [pendingProfile, setPendingProfile] = useState<{ profile: Profile; settings: Settings } | null>(null);
   const editor = useRef<HTMLTextAreaElement>(null); const password = useRef<HTMLInputElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
+  const modalBusy = useRef(false);
   const active = isOpened(opened); const locked = !opened && Boolean(lockedName); const dirty = active && (logicallyDirty || text !== saved);
+  modalBusy.current = creating || dialog !== null;
   const fail = (value: unknown) => setError(value instanceof Error ? value.message : String(value));
   function present(result: Opened, target = name) {
     setOpened(result); setName(target); setLockedName(""); setError("");
@@ -136,24 +140,31 @@ export function App() {
   useEffect(() => { void window.scpefe.getClientSettings().then(setSettings).catch(fail); }, []);
   useEffect(() => {
     const stops = [window.scpefe.onLocked((result) => { setLockedName(name); setOpened(null); setText(""); setSaved(""); setDialog(null); setMessage(result.warning ?? "Document locked."); }),
-      window.scpefe.onJournalWarning(fail), window.scpefe.onRegularSave(() => { setLogicallyDirty(true); setMessage("Regular save published provisionally; changes remain unsaved until manual save."); }),
-      window.scpefe.onExternalOpenRequested((request) => { setExternal(request); setPendingName(String((request as { name?: string }).name ?? "document.scpefe")); setDialog("open"); }),
+      window.scpefe.onJournalWarning(fail), window.scpefe.onRegularSave((value) => { const result = value as { content: string; provisional: true };
+        setText(result.content); setLogicallyDirty(true); setPublication("target-published");
+        setOpened((old) => isOpened(old) ? { ...old, content: result.content, provisional: true, readOnly: true, publicationState: "target-published" } : old);
+        setMessage("Regular save published provisionally; changes remain unsaved until manual save."); setDialog("publication"); }),
+      window.scpefe.onExternalOpenRequested((request) => { if (modalBusy.current) { setQueuedExternal(request); setMessage("An external open request is waiting for the current dialog."); return; }
+        setExternal(request); setPendingName(String((request as { name?: string }).name ?? "document.scpefe")); setDialog("open"); }),
       window.scpefe.onUnresolvedJournalSummary((summary) => { if (summary.total) setMessage(`${summary.total} recovery item${summary.total === 1 ? "" : "s"} need attention.`); }),
       window.scpefe.onSwitchRetained((result) => present(result))];
     const activity = () => { void window.scpefe.activity(); }; addEventListener("keydown", activity); addEventListener("pointerdown", activity);
     return () => { stops.forEach((stop) => stop()); removeEventListener("keydown", activity); removeEventListener("pointerdown", activity); };
   }, [name]);
+  useEffect(() => { if (!creating && dialog === null && queuedExternal) { setExternal(queuedExternal);
+    setPendingName(String((queuedExternal as { name?: string }).name ?? "document.scpefe")); setQueuedExternal(null); setDialog("open"); } }, [creating, dialog, queuedExternal]);
   useEffect(() => { const title = active || locked ? `${dirty ? "*" : ""}${name || lockedName} — SCPEFE` : "SCPEFE";
     document.title = title; void window.scpefe.setWindowTitle(title); }, [active, locked, dirty, name, lockedName]);
 
-  function modify(value: string) { setText(value); setLogicallyDirty(true); setHistory((old) => [...old.slice(0, historyAt + 1), value]); setHistoryAt((at) => at + 1);
+  function modify(value: string) { setText(value); setHistory((old) => [...old.slice(0, historyAt + 1), value]); setHistoryAt((at) => at + 1);
     void window.scpefe.updateWorkingCopy({ content: value, cursor: { start: value.length, end: value.length } }).catch(fail); }
   function move(offset: number) { const next = historyAt + offset; if (next >= 0 && next < history.length) { const value = history[next]; setHistoryAt(next); setText(value);
     void window.scpefe.updateWorkingCopy({ content: value, cursor: { start: value.length, end: value.length } }).catch(fail); } }
   async function saveDocument() { try { const result = publication === "conflict" ? await window.scpefe.saveDivergenceResolution(text) : await window.scpefe.saveDocument(text);
     setText(result.content); setSaved(result.content); setLogicallyDirty(false); setPublication(result.publicationState); setOpened((old) => isOpened(old) ? { ...old, content: result.content,
-      readOnly: result.publicationState !== "target-published", publicationState: result.publicationState } : old);
+      provisional: undefined, readOnly: result.publicationState !== "target-published", publicationState: result.publicationState } : old);
     setMessage(result.publicationState === "target-published" ? "Manual save published and verified." : result.publicationState === "conflict" ? "Divergence needs resolution." : "Manual save pending publication.");
+    if (result.publicationState !== "target-published") setDialog("publication");
   } catch (value) { fail(value); } }
   async function chooseOpen() { try { const chosen = await window.scpefe.chooseOpenTarget(); if (chosen) { setPendingName(chosen.name); setDialog("open"); } } catch (value) { fail(value); } }
   async function submitPassword(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setError(""); const entered = String(new FormData(event.currentTarget).get("password"));
@@ -234,7 +245,7 @@ export function App() {
       text={opened.provisional ? "These changes remain logically unsaved until a manual save." : publication === "conflict" ? "The target changed. Resolve the preserved local and current versions before editing continues." : "The manual save is stored locally but has not reached its target."}
       first={opened.provisional ? "Enter edit mode and manually save" : publication === "conflict" ? "Begin conflict resolution" : "Retry publication"} second={opened.provisional ? "Discard provisional changes" : "Discard pending save"}
       one={async () => { if (opened.provisional) { const editable = await window.scpefe.enterEditMode(); setOpened(editable); const value = await window.scpefe.saveDocument(opened.content); setText(value.content); setSaved(value.content); setLogicallyDirty(false); setPublication(value.publicationState); setDialog(null); }
-        else if (publication === "conflict") { const draft = await window.scpefe.beginDivergenceResolution(); setText(draft.content); setPublication("conflict"); setOpened({ ...opened, content: draft.content, readOnly: false }); setDialog(null); }
+        else if (publication === "conflict") { const draft = await window.scpefe.beginDivergenceResolution(); setText(draft.content); setLogicallyDirty(true); setPublication("conflict"); setOpened({ ...opened, content: draft.content, readOnly: false }); setDialog(null); }
         else { const value = await window.scpefe.reconnectPendingPublication(); setText(value.content); setSaved(value.content); setPublication(value.publicationState); if (value.publicationState === "target-published") setDialog(null); } }}
       two={async () => present(opened.provisional ? await window.scpefe.discardRecoveredWork() : await window.scpefe.discardPendingPublication())} />}
   </main>;
@@ -264,6 +275,7 @@ function Decision({ title, text, first, second, one, two }: { title: string; tex
 function Passwords({ opened, close, result, update }: { opened: Extract<Opened, { canEdit: boolean }>; close(): void; result(value: string): void; update(value: Extract<Opened, { canEdit: boolean }>): void }) {
   const [removing, setRemoving] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState("");
+  const [passwordNotice, setPasswordNotice] = useState("");
   const [slots, setSlots] = useState(opened.managedSlots ?? []);
   return <Modal title="Passwords" close={close}><p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent.</p>{opened.canAddPasswords && !opened.readOnly && <form onSubmit={async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget);
     try { const value = await window.scpefe.createInvitation({ temporaryLabel: String(data.get("label")), temporaryPassword: String(data.get("password")) || undefined,
@@ -275,16 +287,16 @@ function Passwords({ opened, close, result, update }: { opened: Extract<Opened, 
       <form onSubmit={async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget); try { const changed = await window.scpefe.updateSlotPermissions({ slotId: slot.slotId,
         canEdit: data.get("edit") === "on", canAddPasswords: data.get("add") === "on", canRemovePasswords: data.get("remove") === "on" }); update(changed); setSlots(changed.managedSlots ?? []); }
         catch (value) { setPasswordError(value instanceof Error ? value.message : String(value)); } }}>
-        <fieldset disabled={opened.readOnly || !opened.canAddPasswords}><legend>Permissions for {slot.identityName}</legend>
+        <fieldset disabled={opened.readOnly || !opened.canAddPasswords || !opened.canRemovePasswords}><legend>Permissions for {slot.identityName}</legend>
           <label className="check"><input name="edit" type="checkbox" defaultChecked={slot.canEdit} /> May edit</label>
           <label className="check"><input name="add" type="checkbox" defaultChecked={slot.canAddPasswords} /> May add passwords</label><label className="check"><input name="remove" type="checkbox" defaultChecked={slot.canRemovePasswords} /> May remove passwords</label>
           <small>Password administration implies edit permission.</small><button>Publish permission changes</button></fieldset></form>
       {opened.canRemovePasswords && !opened.readOnly && removing !== slot.slotId && <button onClick={() => setRemoving(slot.slotId)}>Remove this password slot…</button>}
       {removing === slot.slotId && <div className="warning" role="alert"><p>Removal cannot revoke plaintext, keys already obtained, or older replicas.</p>
-        <button onClick={async () => { try { await window.scpefe.removeSlot(slot.slotId); setSlots((values) => values.filter((value) => value.slotId !== slot.slotId)); setRemoving(null); } catch (value) { setPasswordError(value instanceof Error ? value.message : String(value)); } }}>Confirm slot removal</button><button onClick={() => setRemoving(null)}>Cancel</button></div>}
+        <button onClick={async () => { try { const removal = await window.scpefe.removeSlot(slot.slotId); setSlots((values) => values.filter((value) => value.slotId !== slot.slotId)); setPasswordNotice(removal.warning); setRemoving(null); } catch (value) { setPasswordError(value instanceof Error ? value.message : String(value)); } }}>Confirm slot removal</button><button onClick={() => setRemoving(null)}>Cancel</button></div>}
     </section>)}
     {compactionAvailable(opened) && <CompactionControls onCompact={async () => { await window.scpefe.compactDocument(); }} />}
-    {passwordError && <p role="alert" className="dialog-error">{passwordError}</p>}<div className="dialog-actions"><button onClick={close}>Close</button></div></Modal>;
+    {passwordError && <p role="alert" className="dialog-error">{passwordError}</p>}{passwordNotice && <p role="status">{passwordNotice}</p>}<div className="dialog-actions"><button onClick={close}>Close</button></div></Modal>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

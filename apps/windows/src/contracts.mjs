@@ -2,6 +2,7 @@ const MAX_TEXT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
 const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
 const MAX_REGULAR_SAVE_INTERVAL_MS = 86_400_000;
+const SLOT_ID = /^[0-9a-f]{32}$/;
 
 function hasUnpairedSurrogate(value) {
   for (let index = 0; index < value.length; index += 1) {
@@ -349,6 +350,30 @@ export function validateEditMode(value) {
     ...(value.managedSlots !== undefined ? { managedSlots: value.managedSlots } : {}),
     ...(value.invitationRequired !== undefined
       ? { invitationRequired: false } : {}) });
+}
+
+export function validateSlotPermissionsRequest(value) {
+  if (!value || typeof value !== "object" || !SLOT_ID.test(value.slotId)
+      || typeof value.canEdit !== "boolean"
+      || typeof value.canAddPasswords !== "boolean"
+      || typeof value.canRemovePasswords !== "boolean"
+      || Object.keys(value).length !== 4) {
+    throw new TypeError("slot permission request is invalid");
+  }
+  if ((value.canAddPasswords || value.canRemovePasswords) && !value.canEdit) {
+    throw new TypeError("password administration implies edit permission");
+  }
+  return Object.freeze({ slotId: value.slotId, canEdit: value.canEdit,
+    canAddPasswords: value.canAddPasswords,
+    canRemovePasswords: value.canRemovePasswords });
+}
+
+export function validateSlotRemovalResult(value) {
+  if (!value || typeof value !== "object" || value.removed !== true
+      || typeof value.warning !== "string" || Object.keys(value).length !== 2) {
+    throw new TypeError("host returned an invalid slot removal result");
+  }
+  return Object.freeze({ removed: true, warning: value.warning });
 }
 
 export function validateRecoveredWork(value) {

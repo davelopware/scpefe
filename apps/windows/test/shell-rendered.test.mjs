@@ -12,7 +12,9 @@ async function mount(t, overrides = {}) {
   Object.assign(globalThis, { window: dom.window, document: dom.window.document,
     HTMLElement: dom.window.HTMLElement, Node: dom.window.Node,
     MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData,
-    requestAnimationFrame: (callback) => callback(), IS_REACT_ACT_ENVIRONMENT: true });
+    requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+    cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
+    IS_REACT_ACT_ENVIRONMENT: true });
   globalThis.addEventListener = dom.window.addEventListener.bind(dom.window);
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
   const listeners = {};
@@ -35,7 +37,7 @@ async function mount(t, overrides = {}) {
     exitApplication: async () => true, lock: async () => ({ locked: true, warning: null }),
     getUnresolvedJournalSummary: async () => ({ total: 0 }),
     onLocked: (fn) => { listeners.locked = fn; return () => {}; },
-    onJournalWarning: () => () => {}, onRegularSave: () => () => {},
+    onJournalWarning: () => () => {}, onRegularSave: (fn) => { listeners.regularSave = fn; return () => {}; },
     onExternalOpenRequested: (fn) => { listeners.external = fn; return () => {}; }, onUnresolvedJournalSummary: () => () => {},
     onSwitchRetained: () => () => {}, ...overrides,
   };
@@ -139,7 +141,7 @@ test("Alt access works from the editor and menu arrows focus enabled commands", 
   await ui.waitFor(() => assert.equal(document.activeElement.textContent, "NewCtrl+N"));
   ui.fireEvent.keyDown(document.activeElement, { key: "ArrowRight" });
   await ui.waitFor(() => assert.equal(ui.getByRole(document.body, "menuitem", { name: "Edit" }).getAttribute("aria-expanded"), "true"));
-  assert.match(document.activeElement.textContent, /Edit Contents/);
+  await ui.waitFor(() => assert.match(document.activeElement.textContent, /Edit Contents/));
   ui.fireEvent.keyDown(document.activeElement, { key: "Escape" });
   assert.equal(document.activeElement, ui.getByRole(document.body, "menuitem", { name: "Edit" }));
 });
@@ -331,4 +333,146 @@ test("Backup, Export, Close, and Exit remain menu-driven", async (t) => {
   await menuCommand(ui, "File", /^Close/);
   await menuCommand(ui, "File", /^Exit$/);
   assert.deepEqual(calls, ["backup", "export", "close", "exit"]);
+});
+
+test("manual Save-produced pending publication is immediately actionable", async (t) => {
+  const ui = await mount(t, { saveDocument: async (content) => ({ content,
+    publicationState: "pending-publication" }), reconnectPendingPublication: async () => ({
+    content: "secret text changed", publicationState: "target-published" }) });
+  await openThroughDialog(ui); await menuCommand(ui, "Edit", "Edit Contents");
+  const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
+  ui.fireEvent.change(editor, { target: { value: "secret text changed" } });
+  ui.fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+  const decision = await ui.findByRole(document.body, "dialog", { name: "Manual save pending publication" });
+  assert.match(document.body.textContent, /Pending publication · action required/);
+  assert.equal(editor.readOnly, true);
+  await ui.user.click(ui.getByRole(decision, "button", { name: "Retry publication" }));
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Manual save pending publication" }), null));
+  assert.match(document.body.textContent, /Clean · Published/);
+});
+
+test("conflict resolution draft is dirty and saveable before another edit", async (t) => {
+  const ui = await mount(t, { openSelectedDocument: async () => ({ content: "base", readOnly: true,
+    canEdit: true, publicationState: "conflict" }), beginDivergenceResolution: async () => ({
+    content: "accepted merge", hasConflicts: false }), saveDivergenceResolution: async (content) => ({
+    content, publicationState: "target-published" }) });
+  await openThroughDialog(ui);
+  await ui.user.click(ui.getByRole(document.body, "button", { name: "Begin conflict resolution" }));
+  await ui.waitFor(() => assert.match(document.body.textContent, /Dirty · Conflict/));
+  await ui.user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
+  const save = ui.getByRole(ui.getByRole(document.body, "menu", { name: "File" }), "menuitem", { name: /Save/ });
+  assert.equal(save.disabled, false); await ui.user.click(save);
+  await ui.waitFor(() => assert.match(document.body.textContent, /Clean · Published/));
+});
+
+test("regular save result becomes provisional and requires a manual-save decision", async (t) => {
+  const ui = await mount(t);
+  await openThroughDialog(ui); await menuCommand(ui, "Edit", "Edit Contents");
+  ui.listeners.regularSave({ published: true, provisional: true, content: "regular checkpoint" });
+  const decision = await ui.findByRole(document.body, "dialog", { name: "Provisional save needs attention" });
+  assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text", hidden: true }).value, "regular checkpoint");
+  assert.match(document.body.textContent, /Dirty · Provisional · manual save required/);
+  assert.ok(ui.getByRole(decision, "button", { name: "Enter edit mode and manually save" }));
+});
+
+test("Undo to saved content clears dirty state and Redo restores it", async (t) => {
+  const ui = await mount(t); await openThroughDialog(ui); await menuCommand(ui, "Edit", "Edit Contents");
+  const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
+  ui.fireEvent.change(editor, { target: { value: "changed once" } });
+  await ui.waitFor(() => assert.match(document.title, /^\*/));
+  ui.fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+  await ui.waitFor(() => assert.equal(editor.value, "secret text"));
+  assert.doesNotMatch(document.title, /^\*/); assert.match(document.body.textContent, /Clean · Published/);
+  ui.fireEvent.keyDown(window, { key: "y", ctrlKey: true });
+  await ui.waitFor(() => assert.equal(editor.value, "changed once"));
+  assert.match(document.title, /^\*/); assert.match(document.body.textContent, /Dirty · Published/);
+});
+
+test("Find next, Replace, and Replace all operate on the mounted editor", async (t) => {
+  const ui = await mount(t, { openSelectedDocument: async () => ({ content: "one two one", readOnly: true,
+    canEdit: true, publicationState: "target-published" }), enterEditMode: async () => ({ content: "one two one",
+    readOnly: false, canEdit: true, publicationState: "target-published" }) });
+  await openThroughDialog(ui); await menuCommand(ui, "Edit", "Edit Contents");
+  ui.fireEvent.keyDown(window, { key: "h", ctrlKey: true });
+  const dialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  await ui.user.type(ui.getByLabelText(dialog, "Find"), "one");
+  await ui.user.type(ui.getByLabelText(dialog, "Replace with"), "ONE");
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Find next" }));
+  const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
+  assert.equal(editor.selectionStart, 0); assert.equal(editor.selectionEnd, 3);
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Replace" }));
+  assert.equal(editor.value, "ONE two one");
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Replace all" }));
+  assert.equal(editor.value, "ONE two ONE");
+});
+
+test("New cancellation, creation retry, and success preserve then replace the session", async (t) => {
+  let attempts = 0; let cancels = 0;
+  const ui = await mount(t, { chooseCreateTarget: async () => ({ selected: true }),
+    cancelCreateTarget: async () => { cancels += 1; }, createDocument: async () => {
+      attempts += 1; if (attempts === 1) throw new Error("creation target changed");
+      return { created: true, name: "blank.scpefe", opened: { content: "", readOnly: false,
+        canEdit: true, publicationState: "target-published" } };
+    } });
+  await openThroughDialog(ui); await menuCommand(ui, "File", /^New/);
+  let dialog = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog", { name: "Secure new document" }), null));
+  assert.equal(cancels, 1); assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "secret text");
+  await menuCommand(ui, "File", /^New/); dialog = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
+  await ui.user.type(ui.getByLabelText(dialog, "Owner password"), "owner password words");
+  await ui.user.type(ui.getByLabelText(dialog, "Confirm owner password"), "owner password words");
+  await ui.user.click(ui.getByLabelText(dialog, "I understand that lost passwords cannot be recovered."));
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Create" }));
+  await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent, /target changed/));
+  assert.equal(ui.getByLabelText(dialog, "Owner password").value, "owner password words");
+  assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text", hidden: true }).value, "secret text");
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Create" }));
+  await ui.waitFor(() => assert.equal(document.title, "blank.scpefe — SCPEFE"));
+  assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "");
+  assert.match(document.body.textContent, /Clean · Published/);
+});
+
+test("external open waits behind a creation dialog and chained modal focus stays inside", async (t) => {
+  const ui = await mount(t, { chooseCreateTarget: async () => ({ selected: true }) });
+  await menuCommand(ui, "File", /^New/);
+  const creation = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
+  ui.listeners.external({ token: "queued", name: "queued.scpefe" });
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  assert.equal(ui.getAllByRole(document.body, "dialog").length, 1);
+  assert.equal(ui.queryByLabelText(document.body, "Document password"), null);
+  await ui.user.click(ui.getByRole(creation, "button", { name: "Cancel" }));
+  const incoming = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  assert.equal(incoming.contains(document.activeElement), true);
+  assert.equal(document.activeElement, ui.getByLabelText(incoming, "Document password"));
+});
+
+test("password administration needs full authority and consumes update and removal results", async (t) => {
+  const slot = { slotId: "ab".repeat(16), identityName: "Grace", identityEmail: "grace@example.test",
+    canEdit: true, canAddPasswords: false, canRemovePasswords: false, mustBeChanged: false };
+  let updated = false; let removed = false;
+  const ui = await mount(t, { openSelectedDocument: async () => ({ content: "admin", readOnly: false, canEdit: true,
+    canAddPasswords: true, canRemovePasswords: true, publicationState: "target-published", managedSlots: [slot] }),
+    updateSlotPermissions: async () => { updated = true; return { content: "admin", readOnly: false, canEdit: true,
+      canAddPasswords: true, canRemovePasswords: true, publicationState: "target-published",
+      managedSlots: [{ ...slot, canEdit: false }] }; }, removeSlot: async () => { removed = true; return {
+      removed: true, warning: "Removal cannot revoke older replicas." }; } });
+  await openThroughDialog(ui); await menuCommand(ui, "Security", /Passwords/);
+  const dialog = ui.getByRole(document.body, "dialog", { name: "Passwords" });
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Publish permission changes" }));
+  await ui.waitFor(() => assert.equal(updated, true));
+  await ui.user.click(ui.getByRole(dialog, "button", { name: /Remove this password slot/ }));
+  await ui.user.click(ui.getByRole(dialog, "button", { name: "Confirm slot removal" }));
+  await ui.waitFor(() => assert.equal(removed, true)); assert.match(dialog.textContent, /cannot revoke older replicas/);
+});
+
+test("permission controls remain disabled unless both administration permissions are present", async (t) => {
+  const ui = await mount(t, { openSelectedDocument: async () => ({ content: "admin", readOnly: false, canEdit: true,
+    canAddPasswords: true, canRemovePasswords: false, publicationState: "target-published", managedSlots: [{
+      slotId: "ab".repeat(16), identityName: "Grace", identityEmail: "grace@example.test", canEdit: true,
+      canAddPasswords: false, canRemovePasswords: false, mustBeChanged: false }] }) });
+  await openThroughDialog(ui); await menuCommand(ui, "Security", /Passwords/);
+  const publish = ui.getByRole(document.body, "button", { name: "Publish permission changes" });
+  assert.equal(publish.disabled, true);
 });

@@ -35,6 +35,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let exposed;
   let creationResult = { created: true, target: "C:\\Users\\Ada\\secret.scpefe" };
   let compactionResult = null;
+  let permissionResult = { content: "editable", readOnly: false, canEdit: true,
+    publicationState: "target-published", canAddPasswords: true,
+    canRemovePasswords: true, managedSlots: [] };
   const invocations = [];
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
@@ -54,6 +57,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
           return { backedUp: true, target: "C:\\Users\\Ada\\backup.scpefe" };
         }
         if (channel === "document:compact") return compactionResult;
+        if (channel === "document:update-slot-permissions") return permissionResult;
+        if (channel === "document:remove-slot") return { removed: true,
+          warning: "Removal cannot revoke older replicas." };
         return null;
       } },
   };
@@ -96,6 +102,25 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     previousHead: "12".repeat(32), head: "34".repeat(32) };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument())),
     compactionResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.updateSlotPermissions({
+    slotId: "ab".repeat(16), canEdit: true, canAddPasswords: false,
+    canRemovePasswords: false,
+  }))), permissionResult);
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:update-slot-permissions",
+    request: { slotId: "ab".repeat(16), canEdit: true, canAddPasswords: false,
+      canRemovePasswords: false },
+  });
+  await assert.rejects(exposed.updateSlotPermissions({ slotId: "slot-1" }),
+    /slot permission request is invalid/);
+  permissionResult = { ...permissionResult, readOnly: true };
+  await assert.rejects(exposed.updateSlotPermissions({
+    slotId: "ab".repeat(16), canEdit: true, canAddPasswords: false,
+    canRemovePasswords: false,
+  }), /did not enter edit mode/);
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.removeSlot("ab".repeat(16)))), {
+    removed: true, warning: "Removal cannot revoke older replicas.",
+  });
   compactionResult = { compacted: true, backupCreated: false,
     previousHead: "12".repeat(32), head: "34".repeat(32) };
   await assert.rejects(exposed.compactDocument(), /invalid compaction result/);

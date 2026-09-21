@@ -9,7 +9,8 @@ import { validateCreateFormRequest, validateCreationResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
-  validateUnresolvedJournalSummary, validateExternalOpenRequest } from "./contracts.mjs";
+  validateUnresolvedJournalSummary, validateExternalOpenRequest,
+  validateSlotPermissionsRequest, validateSlotRemovalResult } from "./contracts.mjs";
 
 function hostBoolean(value, label) {
   if (typeof value !== "boolean") throw new TypeError(`host returned invalid ${label}`);
@@ -103,9 +104,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
   reconcileIdentity: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:reconcile-identity")),
-  updateSlotPermissions: async (request) => validateOpenedDocument(
-    await ipcRenderer.invoke("document:update-slot-permissions", request)),
-  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot", slotId),
+  updateSlotPermissions: async (request) => validateEditMode(
+    await ipcRenderer.invoke("document:update-slot-permissions",
+      validateSlotPermissionsRequest(request))),
+  removeSlot: async (slotId) => validateSlotRemovalResult(
+    await ipcRenderer.invoke("document:remove-slot", slotId)),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

@@ -28,6 +28,7 @@ export function CreationSecurityDialog({ onCreate, onCancel }) {
     return () => {
       chrome?.removeAttribute("inert");
       globalThis.requestAnimationFrame?.(() => {
+        if (document.querySelector('[aria-modal="true"]')) return;
         if (prior?.isConnected) prior.focus();
         else document.querySelector('[role="menubar"] [role="menuitem"]')?.focus();
       });
