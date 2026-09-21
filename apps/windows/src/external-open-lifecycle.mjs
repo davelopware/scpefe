@@ -8,6 +8,7 @@ export class ExternalOpenLifecycle {
     this.record = record;
     this.drain = drain;
     this.invitation = null;
+    this.finishing = new Set();
   }
 
   current(token) { return this.requests.current(token); }
@@ -34,13 +35,27 @@ export class ExternalOpenLifecycle {
     this.invitation = null;
   }
 
+  async cancelForLock() {
+    const request = this.requests.currentRequest;
+    if (!request) return false;
+    await this.finish(request, "canceled", "session-locked");
+    if (this.invitation === request) this.invitation = null;
+    return true;
+  }
+
   async finish(request, status, outcome) {
     if (!TERMINAL.has(status)) throw new TypeError("invalid external open outcome");
     this.#requireActive(request);
-    await this.acknowledge(request, status, 3);
-    this.requests.complete(request.token);
-    try { await this.record(request, outcome); }
-    finally { void this.drain(); }
+    if (this.finishing.has(request.token)) {
+      throw new Error("The external open request is already finishing");
+    }
+    this.finishing.add(request.token);
+    try {
+      await this.acknowledge(request, status, 3);
+      this.requests.complete(request.token);
+      try { await this.record(request, outcome); }
+      finally { void this.drain(); }
+    } finally { this.finishing.delete(request.token); }
   }
 
   #requireActive(request) {

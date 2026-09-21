@@ -44,6 +44,8 @@ export class SecureLockCoordinator {
     this.emitLocked(result);
   }
 
+  isLocking(service) { return service === this.lockingService; }
+
   #rememberTarget(service) {
     this.rememberLockedTarget(service.active?.target ?? null);
   }

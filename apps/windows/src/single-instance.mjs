@@ -121,6 +121,8 @@ export class OrderedOpenRequests {
     return this.active?.token === token ? this.active : null;
   }
 
+  get currentRequest() { return this.active; }
+
   complete(token) {
     if (!this.current(token)) throw new TypeError("external open request is not active");
     const completed = this.active;

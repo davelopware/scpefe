@@ -3,6 +3,7 @@ import test from "node:test";
 import { describeProtection, SessionProtectionCoordinator }
   from "../src/session-protection.mjs";
 import { LifecycleBarrier } from "../src/lifecycle-barrier.mjs";
+import { SessionGeneration } from "../src/session-generation.mjs";
 
 function serviceFor(state = {}) {
   const calls = [];
@@ -252,4 +253,40 @@ test("a lifecycle commit excludes maintenance queued after authorization", async
   releaseCommit();
   await Promise.all([decision, authorized, maintenance]);
   assert.deepEqual(events, ["commit-start", "commit-end", "maintenance"]);
+});
+
+test("generation invalidation during a non-cancellable commit never authorizes its result", async () => {
+  const current = serviceFor(); const generation = new SessionGeneration();
+  let request; let releaseCommit; let commitFinished = false;
+  const policy = new SessionProtectionCoordinator({ getService: () => current.service,
+    generation, present: (value) => { request = value; } });
+  const authorized = policy.authorize("open", async () => {
+    await new Promise((resolve) => { releaseCommit = resolve; });
+    commitFinished = true;
+  });
+  const decision = policy.decide({ token: request.token, decision: "save" });
+  const decisionRejected = assert.rejects(decision, /session locked/);
+  const authorizationRejected = assert.rejects(authorized, /session locked/);
+  await new Promise((resolve) => setImmediate(resolve));
+  generation.invalidate(); policy.cancelForLock(); releaseCommit();
+  await decisionRejected; await authorizationRejected;
+  assert.equal(commitFinished, true, "backend completion is fenced rather than reported as authorized");
+});
+
+test("null and clean originals fence late replacement results and remain reusable", async () => {
+  for (const active of [null, { editMode: false, dirty: false, manuallySealed: true }]) {
+    const generation = new SessionGeneration(); let release; let committed = 0;
+    const service = { active, hasActivePublication: () => false,
+      runLifecycleBarrier: (operation) => operation() };
+    const policy = new SessionProtectionCoordinator({ getService: () => service,
+      generation, present: () => assert.fail("clean state must not prompt") });
+    const first = policy.authorize("open", async () => {
+      await new Promise((resolve) => { release = resolve; }); committed += 1;
+    });
+    const rejected = assert.rejects(first, /session locked/);
+    generation.invalidate(); policy.cancelForLock(); release(); await rejected;
+    assert.equal(committed, 1);
+    assert.equal(await policy.authorize("open", async () => { committed += 1; }), true);
+    assert.equal(committed, 2);
+  }
 });

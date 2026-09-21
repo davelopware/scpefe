@@ -68,3 +68,17 @@ test("renderer cancellation rejects stale, concurrent, and invitation request ID
   await lifecycle.finishInvitation("failed", "claim-failed");
   assert.equal(events[0], `ack:${request.token}:failed:3`);
 });
+
+test("session lock terminally cancels an active invitation and advances FIFO", async () => {
+  const { requests, lifecycle, events } = fixture();
+  const first = requests.enqueue({ target: "invitation.scpefe", source: "second-instance" });
+  const second = requests.enqueue({ target: "next.scpefe", source: "open-file" });
+  requests.take(); lifecycle.stageInvitation(first);
+  assert.equal(await lifecycle.cancelForLock(), true);
+  assert.deepEqual(events, [
+    `ack:${first.token}:canceled:3`, `record:${first.token}:session-locked`,
+    "drain", `present:${second.token}`,
+  ]);
+  assert.equal(lifecycle.invitation, null);
+  assert.equal(lifecycle.current(second.token), second);
+});

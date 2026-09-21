@@ -13,6 +13,7 @@ import { SecureLockCoordinator } from "./secure-lock-coordinator.mjs";
 import { SessionProtectionCoordinator } from "./session-protection.mjs";
 import { NativeLifecycleCoordinator } from "./native-lifecycle.mjs";
 import { ExternalOpenLifecycle } from "./external-open-lifecycle.mjs";
+import { SessionGeneration } from "./session-generation.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { openTargetFromAdditionalData,
@@ -75,7 +76,8 @@ async function acknowledgeRequest(request, status, sequence) {
 }
 
 async function drainExternalRequests() {
-  if (externalDrainRunning || !service || !window || window.isDestroyed()) return;
+  if (externalDrainRunning || externalOpenInProgress
+      || !service || !window || window.isDestroyed()) return;
   const request = externalRequests.take();
   if (!request) return;
   externalDrainRunning = true;
@@ -207,6 +209,20 @@ if (hasInstanceLock) {
 if (hasInstanceLock) app.whenReady().then(async () => {
   let secureLocks = null;
   let leaseTakeovers = null;
+  let protections = null;
+  let replacements = null;
+  let lifecycleLockInProgress = false;
+  const sessionGeneration = new SessionGeneration();
+  const invalidateAndClearRenderer = () => {
+    sessionGeneration.invalidate();
+    protections?.cancelForLock();
+    leaseTakeovers?.clear();
+    window?.webContents.send("document:locked",
+      { locked: true, journalSaved: false, warning: null });
+    void externalLifecycle?.cancelForLock().catch((error) =>
+      window?.webContents.send("document:journal-warning",
+        `External open cancellation needs attention: ${error.message}`));
+  };
   const makeService = () => {
     let created;
     created = new DocumentService({
@@ -221,7 +237,10 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => {
-      leaseTakeovers?.clear();
+      if (!lifecycleLockInProgress && !secureLocks?.isLocking(created)
+          && (created === service || replacements?.hasStagedCandidate(created))) {
+        invalidateAndClearRenderer();
+      }
       void secureLocks?.serviceLocked(created, result).catch((error) =>
         window?.webContents.send("document:journal-warning",
           `Secure lock cleanup needs attention: ${error.message}`));
@@ -251,7 +270,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
   const creationFlow = new CreationTargetFlow();
   let selectedOpenTarget = null;
-  const protections = new SessionProtectionCoordinator({ getService: () => service,
+  protections = new SessionProtectionCoordinator({ getService: () => service,
+    generation: sessionGeneration,
     present: (request) => window.webContents.send("document:protection-requested", request) });
   const adoptReplacement = (staged, target) => {
     leaseTakeovers.clear();
@@ -266,9 +286,9 @@ if (hasInstanceLock) app.whenReady().then(async () => {
           `The replaced session cleanup needs attention: ${error.message}`));
     }
   };
-  const replacements = new ReplacementCoordinator({ makeCandidate: makeService,
+  replacements = new ReplacementCoordinator({ makeCandidate: makeService,
     authorizeCurrent: (operation, commit) => protections.authorize(operation, commit),
-    adopt: adoptReplacement });
+    adopt: adoptReplacement, generation: sessionGeneration });
   secureLocks = new SecureLockCoordinator({ getService: () => service,
     replacements, creationFlow,
     clearOpenTarget: () => { selectedOpenTarget = null; },
@@ -382,6 +402,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       return opened ? { ...opened, targetName: path.basename(pending.target) } : null;
     } finally {
       externalOpenInProgress = false;
+      void drainExternalRequests();
     }
   });
   const leaseRequestAuthorization = (request) => {
@@ -540,8 +561,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return leaseTakeovers.cancel(authorization, service);
   });
   const lockActive = (reason) => {
-    protections.cancelForLock();
-    leaseTakeovers.clear();
+    invalidateAndClearRenderer();
     const current = service;
     return current.runLifecycleBarrier(() => secureLocks.lock(reason));
   };
@@ -549,17 +569,27 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("document:resolve-protection", (_event, request) =>
     protections.decide(request));
   const closeDocument = async () => {
-    return protections.authorize("close", async () => {
+    const closed = await protections.authorize("close", async () => {
       if (service.active?.editMode) await service.exitEditMode();
       if (service.active) {
-        const result = await service.lock("document-close");
+        lifecycleLockInProgress = true;
+        let result;
+        try { result = await service.lock("document-close"); }
+        finally { lifecycleLockInProgress = false; }
         if (!result.journalSaved) throw new Error(result.warning
           ?? "The document could not be checkpointed before closing");
       }
       currentTarget = null; lockedTarget = null; selectedOpenTarget = null;
+    });
+    if (closed) {
+      sessionGeneration.invalidate();
+      void externalLifecycle?.cancelForLock().catch((error) =>
+        window?.webContents.send("document:journal-warning",
+          `External open cancellation needs attention: ${error.message}`));
       window.webContents.send("document:closed");
       await sendJournalSummary();
-    });
+    }
+    return closed;
   };
   ipcMain.handle("document:close", () => closeDocument());
   let lifecycle;

@@ -21,9 +21,10 @@ export function describeProtection(active, activePublication = false) {
 
 /* Coordinates one accessible protection decision against the exact captured session. */
 export class SessionProtectionCoordinator {
-  constructor({ getService, present }) {
+  constructor({ getService, present, generation = null }) {
     this.getService = getService;
     this.present = present;
+    this.generation = generation;
     this.pending = null;
     this.cleanOperation = null;
   }
@@ -32,6 +33,7 @@ export class SessionProtectionCoordinator {
     if (!OPERATIONS.has(operation)) throw new TypeError("invalid protection operation");
     if (typeof commit !== "function") throw new TypeError("invalid protection commit");
     const service = this.getService();
+    const generation = this.generation?.capture();
     const state = describeProtection(service.active,
       service.hasActivePublication?.() === true);
     if (this.pending || this.cleanOperation) {
@@ -55,8 +57,10 @@ export class SessionProtectionCoordinator {
               "The document changed while the operation was waiting; nothing was abandoned"),
             { code: "DOCUMENT_PROTECTION_STALE" });
           }
+          this.#assertGeneration(generation);
           claimed.state = "commit";
           await commit();
+          this.#assertGeneration(generation);
         });
         return true;
       } finally { if (this.cleanOperation === claimed) this.cleanOperation = null; }
@@ -64,7 +68,7 @@ export class SessionProtectionCoordinator {
     const token = randomUUID();
     return new Promise((resolve, reject) => {
       this.pending = { token, operation, service, active: service.active,
-        state: "presented", aborted: false, commit, resolve, reject };
+        generation, state: "presented", aborted: false, commit, resolve, reject };
       try { this.present(Object.freeze({ token, operation, state })); }
       catch (error) { this.pending = null; reject(error); }
     });
@@ -99,6 +103,7 @@ export class SessionProtectionCoordinator {
         if (pending.aborted) throw Object.assign(
           new Error("The document locked while the decision was running; nothing was abandoned"),
           { code: "DOCUMENT_PROTECTION_LOCKED" });
+        this.#assertGeneration(pending.generation);
         if (this.getService() !== pending.service || pending.service.active !== pending.active) {
           throw Object.assign(new Error(
             "The document changed while the decision was running; nothing was abandoned"),
@@ -110,7 +115,12 @@ export class SessionProtectionCoordinator {
         if (pending.aborted) throw Object.assign(
           new Error("The document locked while the decision was running; nothing was abandoned"),
           { code: "DOCUMENT_PROTECTION_LOCKED" });
+        this.#assertGeneration(pending.generation);
         await pending.commit();
+        this.#assertGeneration(pending.generation);
+        if (pending.aborted) throw Object.assign(
+          new Error("The document locked while the decision was running; nothing was abandoned"),
+          { code: "DOCUMENT_PROTECTION_LOCKED" });
         return true;
       });
       this.pending = null;
@@ -118,6 +128,7 @@ export class SessionProtectionCoordinator {
       return Object.freeze({ completed: true, proceed });
     } catch (error) {
       if (pending.aborted || error?.code === "DOCUMENT_PROTECTION_LOCKED"
+          || error?.code === "DOCUMENT_SESSION_INVALIDATED"
           || error?.code === "DOCUMENT_PROTECTION_STALE") {
         this.pending = null;
         pending.reject(error);
@@ -147,5 +158,9 @@ export class SessionProtectionCoordinator {
     error.code = "DOCUMENT_PROTECTION_LOCKED";
     pending.reject(error);
     return true;
+  }
+
+  #assertGeneration(captured) {
+    if (captured !== undefined) this.generation?.assertCurrent(captured);
   }
 }
