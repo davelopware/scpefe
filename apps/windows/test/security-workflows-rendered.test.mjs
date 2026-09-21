@@ -195,6 +195,10 @@ test("mounted security dialogs gate profile, filter administration, and clear on
 
     const invitationForm = ui.getByRole(dialog, "heading",
       { name: "Invite another person" }).closest("form");
+    assert.equal(ui.getByLabelText(invitationForm, "May edit").checked, false);
+    assert.equal(ui.getByLabelText(invitationForm, "May add passwords").checked, false);
+    assert.equal(ui.getByLabelText(invitationForm, "May remove passwords").checked, false,
+      "new invitations begin with least-privilege permission defaults");
     await user.type(ui.getByLabelText(invitationForm, "Temporary label"), "New colleague");
     await user.click(ui.getByLabelText(invitationForm, "May edit"));
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
@@ -262,6 +266,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       "failed identity save focuses its retry action");
     await user.click(ui.getByRole(dialog, "button", { name: "Go back" }));
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    assert.equal(profile.name, "Ada", "canceling a failed later profile edit retains the profile");
     await command("Security", "Lock");
     openResult = readOnly;
     await command("Security", "Unlock");
@@ -331,4 +336,24 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.match(dialog.textContent, /This is the recovery\/master slot/);
     assert.equal(ui.queryByRole(dialog, "heading",
       { name: "Identity reconciliation required" }), null);
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+
+    await command("Security", "Lock");
+    openResult = { ...readOnly, readOnly: true, canEdit: false,
+      migrationRequired: true,
+      migrationWarning: "This older container requires a verified backup before migration." };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "older container password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    const migration = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    assert.match(ui.getByRole(migration, "alert").textContent,
+      /verified backup before migration/);
+    assert.ok(ui.getByRole(migration, "button",
+      { name: "Create verified backup and migrate…" }));
+    await user.click(ui.getByRole(migration, "button", { name: "Keep read-only and close" }));
+    await ui.waitFor(() => assert.equal(
+      ui.getByLabelText(document.body, "Document state").textContent, "Locked"));
+    assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "",
+      "declining migration immediately removes the older document plaintext");
   });
