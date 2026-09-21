@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { validateCreateRequest, validateCreationResult, validatePassword,
+import { validateCreateFormRequest, validateCreationResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("journal:summary")),
   createDocument: async (request) => {
     const value = await ipcRenderer.invoke(
-      "document:create", validateCreateRequest(request));
+      "document:create", validateCreateFormRequest(request));
     return value === null ? null : validateCreationResult(value);
   },
   openDocument: async (password) => {

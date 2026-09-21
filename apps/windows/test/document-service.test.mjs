@@ -180,6 +180,7 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
   assert.deepEqual(service.publicationCapabilities(), publicationCapabilities);
   const target = path.join(directory, "document.scpefe");
   const request = { ownerPassword: "owner password words", recoveryPassword: "",
+    ownerPasswordConfirmation: "owner password words", recoveryPasswordConfirmation: "",
     content: "hello", understandsIrrecoverable: true,
     storedRecoverySeparately: false };
   await assert.rejects(service.createDocument(target, request), /Configure/);
@@ -189,6 +190,8 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
   assert.equal(calls.length, 1);
   assert.equal(calls[0].understandsIrrecoverable, true);
   assert.equal(calls[0].storedRecoverySeparately, false);
+  assert.equal("ownerPasswordConfirmation" in calls[0], false);
+  assert.equal("recoveryPasswordConfirmation" in calls[0], false);
   assert.deepEqual(await service.openDocument(target, "owner password words"),
     { content: "hello", readOnly: true, canEdit: true,
       publicationState: "target-published" });
@@ -216,7 +219,9 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
       documentId: "11".repeat(16), baseRevision: "22".repeat(32),
       journalKey: Buffer.alloc(32, 3) }) } });
   const request = { ownerPassword: "owner password words",
+    ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "different recovery words", content: "hello",
+    recoveryPasswordConfirmation: "different recovery words",
     understandsIrrecoverable: true, storedRecoverySeparately: true };
 
   await assert.rejects(service.createDocument(path.join(directory, "missing.scpefe"),
