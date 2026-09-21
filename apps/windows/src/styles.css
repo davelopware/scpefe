@@ -3,6 +3,7 @@
 button, input, select, textarea { font: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid Highlight; outline-offset: 1px; }
 .app-shell { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.shell-chrome { display: contents; }
 .menu-bar { display: flex; min-height: 2.25rem; padding: 0 .35rem; border-bottom: 1px solid #b9c0c8; background: #f3f3f3; z-index: 5; }
 .menu { position: relative; } .menu > button { height: 100%; padding: .3rem .7rem; border: 0; background: transparent; }
 .menu > button:hover, .menu > button[aria-expanded="true"] { background: #dce8f6; }
@@ -18,7 +19,7 @@ kbd { margin-left: 2rem; font: inherit; color: #4b5560; }
 .status-bar { min-height: 1.8rem; display: flex; gap: 1.5rem; padding: .25rem .65rem; border-top: 1px solid #c4c9cf; background: #f1f3f5; white-space: nowrap; overflow: hidden; }
 .status-bar span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .global-error { position: fixed; right: 1rem; bottom: 2.5rem; max-width: 34rem; padding: .7rem 1rem; color: #8b1111; background: #fff1f1; border: 1px solid #d88888; z-index: 8; }
-.dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 1rem; background: rgb(24 32 42 / .45); }
+.dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 1rem; background: #eef2f6; }
 .app-dialog, .security-dialog { width: min(38rem, 100%); max-height: calc(100vh - 2rem); overflow: auto; padding: 1.25rem; border-radius: .25rem; background: white; box-shadow: 0 .8rem 2.5rem #0006; }
 .app-dialog h2, .security-dialog h2 { margin-top: 0; } .app-dialog form, .security-dialog form { display: grid; gap: .75rem; }
 .modeless-dialog { position: fixed; z-index: 9; top: 3rem; right: 1rem; width: min(30rem, calc(100% - 2rem)); padding: 1rem; background: white; border: 1px solid #9da5ae; box-shadow: 0 .5rem 1.5rem #0004; }

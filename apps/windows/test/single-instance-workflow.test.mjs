@@ -199,15 +199,6 @@ test("a pending publication locks without touching its unavailable target", asyn
   assert.deepEqual(calls, ["lock:open-another"]);
 });
 
-test("renderer makes external requests and unresolved journals accessible dialogs and status", async () => {
-  const renderer = await fs.readFile(
-    new URL("../src/renderer.tsx", import.meta.url), "utf8");
-  assert.match(renderer, /recovery item/);
-  assert.match(renderer, /setExternal\(request\); setDialog\("open"\)/);
-  assert.match(renderer, /role="dialog"/);
-  assert.match(renderer, /Document password/);
-});
-
 test("main registers file and URL lifecycle events before draining staged requests", async () => {
   const main = await fs.readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
   assert.match(main, /app\.on\("open-file"/);

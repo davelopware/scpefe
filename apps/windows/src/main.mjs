@@ -68,26 +68,27 @@ async function acknowledgeRequest(request, status, sequence) {
     JSON.stringify(acknowledgement), { mode: 0o600 }).catch(() => {});
 }
 
-async function prepareDocumentSwitch(finish = true) {
-  if (!service.active) return true;
+async function authorizeDocumentSwitch() {
+  if (!service.active || !needsCloseDecision(service.active)) return "save";
   let decision = "save";
-  if (needsCloseDecision(service.active)) {
-    const conflict = service.active.pendingRecord?.state === "conflict";
-    const pending = service.active.pendingPublication;
-    const choice = await dialog.showMessageBox(window, {
-      type: "warning",
-      title: "Open another document?",
-      message: conflict ? "This document has an unresolved divergence."
-        : pending ? "This document has a save pending publication."
-          : service.active.manuallySealed
-            ? "This document has unsaved changes."
-            : "This document is only provisionally saved.",
-      detail: "Save and open preserves the current work, discard and open is destructive, and cancel keeps this document open.",
-      buttons: ["Cancel", "Save and open", "Discard and open"],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    decision = ["cancel", "save", "discard"][choice.response];
-  }
+  const conflict = service.active.pendingRecord?.state === "conflict";
+  const pending = service.active.pendingPublication;
+  const choice = await dialog.showMessageBox(window, {
+    type: "warning", title: "Open another document?",
+    message: conflict ? "This document has an unresolved divergence."
+      : pending ? "This document has a save pending publication."
+        : service.active.manuallySealed ? "This document has unsaved changes."
+          : "This document is only provisionally saved.",
+    detail: "The current session remains open until its replacement succeeds.",
+    buttons: ["Cancel", "Save and open", "Discard and open"],
+    defaultId: 0, cancelId: 0, noLink: true,
+  });
+  decision = ["cancel", "save", "discard"][choice.response];
+  return decision === "cancel" ? null : decision;
+}
+
+async function commitDocumentSwitch(decision) {
+  if (!service.active) return true;
   let outcome;
   try {
     outcome = await applySwitchDecision(service, decision);
@@ -121,7 +122,7 @@ async function prepareDocumentSwitch(finish = true) {
       return false;
     }
   }
-  if (finish) await finishDocumentSwitch(service);
+  await finishDocumentSwitch(service);
   await sendJournalSummary();
   return true;
 }
@@ -147,6 +148,7 @@ async function drainExternalRequests() {
     process.env.SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS || 400);
   window.webContents.send("document:external-open-requested", {
     token: request.token,
+    name: path.basename(request.target),
     ...(smokeDirectory ? { smokeCompleteAfterMs } : {}),
   });
   await acknowledgeRequest(request, "presented", 2);
@@ -257,7 +259,9 @@ if (hasInstanceLock) {
 }
 
 if (hasInstanceLock) app.whenReady().then(async () => {
-  service = new DocumentService({
+  const makeService = () => {
+    let created;
+    created = new DocumentService({
     native,
     fs,
     profilePath: path.join(app.getPath("userData"), "profile.json"),
@@ -269,14 +273,21 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
     onLocked: (result) => {
-      window?.webContents.send("document:locked", result);
-      void sendJournalSummary();
+      if (created === service) {
+        window?.webContents.send("document:locked", result);
+        void sendJournalSummary();
+      }
     },
-    onJournalWarning: (warning) =>
-      window?.webContents.send("document:journal-warning", warning),
-    onRegularSave: (result) =>
-      window?.webContents.send("document:regular-saved", result),
-  });
+    onJournalWarning: (warning) => {
+      if (created === service) window?.webContents.send("document:journal-warning", warning);
+    },
+    onRegularSave: (result) => {
+      if (created === service) window?.webContents.send("document:regular-saved", result);
+    },
+    });
+    return created;
+  };
+  service = makeService();
   await service.loadClientSettings();
   ipcMain.handle("profile:get", () => service.loadProfile());
   ipcMain.handle("profile:save", (_event, profile) => service.saveProfile(profile));
@@ -287,14 +298,14 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   const creationFlow = new CreationTargetFlow();
   let selectedOpenTarget = null;
   let lockedTarget = null;
-  let replacementPrepared = false;
+  let replacementDecision = null;
   const lockActive = (reason) => {
     if (service.active?.target) lockedTarget = service.active.target;
     return service.lock(reason);
   };
   ipcMain.handle("document:prepare-replacement", async () => {
-    replacementPrepared = await prepareDocumentSwitch(false);
-    return replacementPrepared;
+    replacementDecision = await authorizeDocumentSwitch();
+    return replacementDecision !== null;
   });
   ipcMain.handle("document:choose-create-target", async () =>
     creationFlow.chooseTarget(async () => {
@@ -306,19 +317,23 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       return chosen.canceled || !chosen.filePath ? null : chosen.filePath;
     }));
   ipcMain.handle("document:cancel-create-target", () => {
-    replacementPrepared = false;
+    replacementDecision = null;
     return creationFlow.cancel();
   });
   ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
     async (target, validated) => {
       await service.createDocument(target, validated);
-      if (!replacementPrepared && !await prepareDocumentSwitch(false)) {
+      const candidate = makeService();
+      await candidate.loadClientSettings();
+      await candidate.openDocument(target, validated.ownerPassword);
+      const editable = await candidate.enterEditMode();
+      const decision = replacementDecision ?? await authorizeDocumentSwitch();
+      if (decision === null || !await commitDocumentSwitch(decision)) {
+        await candidate.lock("replacement-canceled");
         throw new Error("The current document remains open");
       }
-      await finishDocumentSwitch(service);
-      replacementPrepared = false;
-      await service.openDocument(target, validated.ownerPassword);
-      const editable = await service.enterEditMode();
+      service = candidate;
+      replacementDecision = null;
       lockedTarget = target;
       return { created: true, opened: editable, name: path.basename(target) };
     }));
@@ -330,8 +345,15 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     });
     if (chosen.canceled || chosen.filePaths.length !== 1) return null;
     return openRequests.run(async () => {
-      if (!await prepareDocumentSwitch()) return null;
-      const opened = await service.openDocument(chosen.filePaths[0], password);
+      const candidate = makeService();
+      await candidate.loadClientSettings();
+      const opened = await candidate.openDocument(chosen.filePaths[0], password);
+      const decision = await authorizeDocumentSwitch();
+      if (decision === null || !await commitDocumentSwitch(decision)) {
+        await candidate.lock("replacement-canceled");
+        return null;
+      }
+      service = candidate;
       await sendJournalSummary();
       return opened;
     });
@@ -349,18 +371,23 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   });
   ipcMain.handle("document:cancel-open-target", () => {
     selectedOpenTarget = null;
-    replacementPrepared = false;
+    replacementDecision = null;
   });
   ipcMain.handle("document:open-selected", async (_event, password) => {
     if (!selectedOpenTarget) throw new Error("Choose a document first");
     const target = selectedOpenTarget;
     const opened = await openRequests.run(async () => {
-      const inspected = native.openDocument(await fs.readFile(target), password);
-      inspected?.journalKey?.fill?.(0);
-      if (!replacementPrepared && !await prepareDocumentSwitch(false)) return null;
-      await finishDocumentSwitch(service);
-      replacementPrepared = false;
-      return service.openDocument(target, password);
+      const candidate = makeService();
+      await candidate.loadClientSettings();
+      const result = await candidate.openDocument(target, password);
+      const decision = replacementDecision ?? await authorizeDocumentSwitch();
+      if (decision === null || !await commitDocumentSwitch(decision)) {
+        await candidate.lock("replacement-canceled");
+        return null;
+      }
+      service = candidate;
+      replacementDecision = null;
+      return result;
     });
     if (!opened) throw new Error("The current document remains open");
     selectedOpenTarget = null;
@@ -390,8 +417,16 @@ if (hasInstanceLock) app.whenReady().then(async () => {
         return null;
       }
       const opened = await openRequests.run(async () => {
-        if (!await prepareDocumentSwitch()) return null;
-        return service.openDocument(pending.target, request.password);
+        const candidate = makeService();
+        await candidate.loadClientSettings();
+        const result = await candidate.openDocument(pending.target, request.password);
+        const decision = await authorizeDocumentSwitch();
+        if (decision === null || !await commitDocumentSwitch(decision)) {
+          await candidate.lock("replacement-canceled");
+          return null;
+        }
+        service = candidate;
+        return result;
       });
       await acknowledgeRequest(pending, opened ? "opened" : "canceled", 3);
       externalRequests.complete(pending.token);

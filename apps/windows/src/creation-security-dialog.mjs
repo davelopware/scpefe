@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
 
@@ -19,7 +19,20 @@ export function CreationSecurityDialog({ onCreate, onCancel }) {
   const ownerConfirmationRef = useRef(null);
   const recoveryConfirmationRef = useRef(null);
   const ownerRef = useRef(null);
+  const dialogRef = useRef(null);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
+  useEffect(() => {
+    const prior = document.activeElement;
+    const chrome = document.querySelector(".shell-chrome");
+    chrome?.setAttribute("inert", "");
+    return () => {
+      chrome?.removeAttribute("inert");
+      globalThis.requestAnimationFrame?.(() => {
+        if (prior?.isConnected) prior.focus();
+        else document.querySelector('[role="menubar"] [role="menuitem"]')?.focus();
+      });
+    };
+  }, []);
 
   async function submit(event) {
     event.preventDefault();
@@ -66,8 +79,20 @@ export function CreationSecurityDialog({ onCreate, onCancel }) {
         event.preventDefault();
         cancel();
       }
+      if (event.key === "Tab" && dialogRef.current) {
+        const items = [...dialogRef.current.querySelectorAll(
+          "button:not(:disabled), input:not(:disabled)")];
+        if (items.length) {
+          const at = items.indexOf(document.activeElement);
+          const next = event.shiftKey
+            ? (at <= 0 ? items.length - 1 : at - 1)
+            : (at === items.length - 1 ? 0 : at + 1);
+          event.preventDefault();
+          items[next].focus();
+        }
+      }
     } },
-  h("section", { className: "security-dialog", role: "dialog", "aria-modal": "true",
+  h("section", { ref: dialogRef, className: "security-dialog", role: "dialog", "aria-modal": "true",
     "aria-labelledby": "creation-security-title",
     "aria-describedby": "creation-security-warning", "aria-busy": submitting },
   h("h2", { id: "creation-security-title" }, "Secure new document"),

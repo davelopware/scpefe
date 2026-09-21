@@ -11,6 +11,19 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
   validateUnresolvedJournalSummary, validateExternalOpenRequest } from "./contracts.mjs";
 
+function hostBoolean(value, label) {
+  if (typeof value !== "boolean") throw new TypeError(`host returned invalid ${label}`);
+  return value;
+}
+
+function safeWindowTitle(value) {
+  if (typeof value !== "string" || !value || value.length > 260
+      || value.includes("/") || value.includes("\\")) {
+    throw new TypeError("window title must contain only a safe display name");
+  }
+  return value;
+}
+
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
     const value = await ipcRenderer.invoke("profile:get");
@@ -23,8 +36,8 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("settings:save", validateClientSettings(settings))),
   getUnresolvedJournalSummary: async () => validateUnresolvedJournalSummary(
     await ipcRenderer.invoke("journal:summary")),
-  prepareReplacement: async () => (await ipcRenderer.invoke(
-    "document:prepare-replacement")) === true,
+  prepareReplacement: async () => hostBoolean(await ipcRenderer.invoke(
+    "document:prepare-replacement"), "replacement decision"),
   chooseCreateTarget: async () => {
     const value = await ipcRenderer.invoke("document:choose-create-target");
     return value === null ? null : validateCreationTargetResult(value);
@@ -48,9 +61,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:open-selected", validatePassword(password))),
   unlockDocument: async (password) => validateOpenedDocument(
     await ipcRenderer.invoke("document:unlock", validatePassword(password))),
-  closeDocument: () => ipcRenderer.invoke("document:close"),
-  exitApplication: () => ipcRenderer.invoke("application:exit"),
-  setWindowTitle: (title) => ipcRenderer.invoke("window:set-title", String(title)),
+  closeDocument: async () => hostBoolean(await ipcRenderer.invoke("document:close"),
+    "close result"),
+  exitApplication: async () => hostBoolean(await ipcRenderer.invoke("application:exit"),
+    "exit result"),
+  setWindowTitle: (title) => ipcRenderer.invoke("window:set-title", safeWindowTitle(title)),
   openExternalDocument: async (request) => {
     const value = await ipcRenderer.invoke("document:open-external", {
       token: validateExternalOpenRequest(request).token,
