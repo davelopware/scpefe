@@ -41,6 +41,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     ipcRenderer: { on: () => {}, removeListener: () => {},
       invoke: async (channel, request) => {
         invocations.push({ channel, request });
+        if (channel === "document:choose-create-target") {
+          return { selected: true };
+        }
         if (channel === "document:create") {
           return creationResult;
         }
@@ -63,7 +66,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "getClientSettings", "saveClientSettings",
-    "getUnresolvedJournalSummary", "createDocument", "openDocument",
+    "getUnresolvedJournalSummary", "chooseCreateTarget", "cancelCreateTarget",
+    "createDocument", "openDocument",
     "openExternalDocument",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
@@ -77,6 +81,15 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "onSwitchRetained",
   ]);
   assert.equal(await exposed.compactDocument(), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.chooseCreateTarget())),
+    { selected: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:choose-create-target",
+  });
+  await exposed.cancelCreateTarget();
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
+    channel: "document:cancel-create-target",
+  });
   compactionResult = { compacted: true, backupCreated: true,
     previousHead: "12".repeat(32), head: "34".repeat(32) };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument())),
@@ -89,7 +102,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "",
     recoveryPasswordConfirmation: "",
-    content: "hello",
+    content: "",
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /invalid creation result/);
@@ -100,7 +113,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       ownerPasswordConfirmation: "owner password words",
       recoveryPassword: "",
       recoveryPasswordConfirmation: "",
-      content: "hello",
+      content: "",
       understandsIrrecoverable: true,
       storedRecoverySeparately: false,
     },
@@ -111,7 +124,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "different recovery words",
     recoveryPasswordConfirmation: "different recovery words",
-    content: "hello",
+    content: "",
     understandsIrrecoverable: true,
     storedRecoverySeparately: true,
   }))), { created: true });
@@ -122,7 +135,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       ownerPasswordConfirmation: "owner password words",
       recoveryPassword: "different recovery words",
       recoveryPasswordConfirmation: "different recovery words",
-      content: "hello",
+      content: "",
       understandsIrrecoverable: true,
       storedRecoverySeparately: true,
     },
@@ -132,7 +145,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     ownerPasswordConfirmation: "owner password words",
     recoveryPassword: "different recovery words",
     recoveryPasswordConfirmation: "different recovery words",
-    content: "hello",
+    content: "",
     understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /recovery password storage must be acknowledged/);
@@ -142,7 +155,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password typo",
     recoveryPassword: "", recoveryPasswordConfirmation: "",
-    content: "hello", understandsIrrecoverable: true,
+    content: "", understandsIrrecoverable: true,
     storedRecoverySeparately: false,
   }), /owner passwords do not match/);
   assert.equal(invocations.filter(({ channel }) =>

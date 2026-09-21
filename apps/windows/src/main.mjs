@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { applyCloseDecision, needsCloseDecision } from "./close-document.mjs";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
-import { createDocumentWithTarget } from "./creation-flow.mjs";
+import { CreationTargetFlow } from "./creation-flow.mjs";
 import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
   DocumentService } from "./document-service.mjs";
 import { applySwitchDecision, finishDocumentSwitch,
@@ -284,16 +284,19 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle("settings:save", (_event, settings) =>
     service.saveClientSettings(settings));
   ipcMain.handle("journal:summary", () => service.unresolvedJournalSummary());
-  ipcMain.handle("document:create", async (_event, request) => {
-    return createDocumentWithTarget(request, async () => {
+  const creationFlow = new CreationTargetFlow();
+  ipcMain.handle("document:choose-create-target", async () =>
+    creationFlow.chooseTarget(async () => {
       const chosen = await dialog.showSaveDialog(window, {
         title: "Create encrypted document",
         filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
         properties: ["createDirectory", "showOverwriteConfirmation"],
       });
       return chosen.canceled || !chosen.filePath ? null : chosen.filePath;
-    }, (target, validated) => service.createDocument(target, validated));
-  });
+    }));
+  ipcMain.handle("document:cancel-create-target", () => creationFlow.cancel());
+  ipcMain.handle("document:create", (_event, request) => creationFlow.create(request,
+    (target, validated) => service.createDocument(target, validated)));
   ipcMain.handle("document:open", async (_event, password) => {
     const chosen = await dialog.showOpenDialog(window, {
       title: "Open encrypted document",

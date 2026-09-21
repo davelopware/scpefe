@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { validateCreateFormRequest, validateCreationResult, validatePassword,
+import { validateCreateFormRequest, validateCreationResult,
+  validateCreationTargetResult, validatePassword,
   validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
@@ -21,6 +22,11 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("settings:save", validateClientSettings(settings))),
   getUnresolvedJournalSummary: async () => validateUnresolvedJournalSummary(
     await ipcRenderer.invoke("journal:summary")),
+  chooseCreateTarget: async () => {
+    const value = await ipcRenderer.invoke("document:choose-create-target");
+    return value === null ? null : validateCreationTargetResult(value);
+  },
+  cancelCreateTarget: () => ipcRenderer.invoke("document:cancel-create-target"),
   createDocument: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:create", validateCreateFormRequest(request));
