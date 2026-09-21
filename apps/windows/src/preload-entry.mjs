@@ -9,7 +9,10 @@ import { validateCreateFormRequest, validateCreationResult,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
-  validateUnresolvedJournalSummary, validateExternalOpenRequest } from "./contracts.mjs";
+  validateUnresolvedJournalSummary, validateExternalOpenRequest,
+  validatePasswordChangeRequest, validateInvitationCreateRequest,
+  validateInvitationResult, validateSlotPermissionsRequest,
+  validateSlotId } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -74,7 +77,18 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:migrate");
     return value === null ? null : validateMigrationResult(value);
   },
-  createInvitation: (request) => ipcRenderer.invoke("document:create-invitation", request),
+  changePassword: async (request) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:change-password",
+      validatePasswordChangeRequest(request))),
+  createInvitation: async (request) => validateInvitationResult(
+    await ipcRenderer.invoke("document:create-invitation",
+      validateInvitationCreateRequest(request))),
+  copyInvitationPassphrase: async (password) => {
+    const value = await ipcRenderer.invoke("document:copy-invitation-passphrase",
+      validatePassword(password));
+    if (value !== true) throw new TypeError("host did not copy the invitation passphrase");
+    return true;
+  },
   claimInvitation: async (password) => validateOpenedDocument(
     await ipcRenderer.invoke("document:claim-invitation", validatePassword(password))),
   cancelInvitationClaim: async () => {
@@ -85,8 +99,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   reconcileIdentity: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:reconcile-identity")),
   updateSlotPermissions: async (request) => validateOpenedDocument(
-    await ipcRenderer.invoke("document:update-slot-permissions", request)),
-  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot", slotId),
+    await ipcRenderer.invoke("document:update-slot-permissions",
+      validateSlotPermissionsRequest(request))),
+  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot",
+    validateSlotId(slotId)),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));

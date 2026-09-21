@@ -206,6 +206,56 @@ test("requires a profile, publishes once, verifies, and reopens read-only", asyn
     (error) => error.code === "EEXIST");
 });
 
+test("password changes authenticate the active slot and atomically retain document state",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-password-ui-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const current = Buffer.from("current encrypted container");
+    const changed = Buffer.from("changed password container");
+    await fs.writeFile(target, current);
+    const documentId = "41".repeat(16);
+    const baseRevision = "42".repeat(32);
+    const journalKey = Buffer.alloc(32, 0x43);
+    const native = withLease({
+      openDocument(bytes, password) {
+        if (bytes.equals(current) && password !== "current password words") {
+          throw new Error("wrong current password");
+        }
+        if (bytes.equals(changed) && password !== "replacement password words") {
+          throw new Error("old password no longer works");
+        }
+        return { content: "protected text", readOnly: true, canEdit: true,
+          canAddPasswords: false, canRemovePasswords: false, manuallySealed: true,
+          documentId, baseRevision, revisionGraph: [{ revisionId: baseRevision,
+            parentRevisionIds: [] }], journalKey: Buffer.from(journalKey) };
+      },
+      changePassword(bytes, currentPassword, newPassword) {
+        assert.deepEqual(bytes, current);
+        assert.equal(currentPassword, "current password words");
+        assert.equal(newPassword, "replacement password words");
+        return changed;
+      },
+    });
+    const service = new DocumentService({ native, fs,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      journalDirectory: path.join(directory, "journals"),
+      witnessDirectory: path.join(directory, "witnesses"), publicationCapabilities });
+    await service.openDocument(target, "current password words");
+    await assert.rejects(service.changePassword({
+      currentPassword: "different current password", newPassword: "replacement password words",
+    }), /does not match/);
+    assert.deepEqual(await fs.readFile(target), current);
+    const result = await service.changePassword({
+      currentPassword: "current password words", newPassword: "replacement password words",
+    });
+    assert.equal(result.content, "protected text");
+    assert.deepEqual(await fs.readFile(target), changed);
+    assert.equal(service.active.password, "replacement password words");
+    assert.equal(await service.journals.read(documentId, service.active.journalKey), null,
+      "successful publication leaves no password-bearing recovery record");
+  });
+
 test("created replacement cleanup removes exact bytes and permits retry", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-replacement-cleanup-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

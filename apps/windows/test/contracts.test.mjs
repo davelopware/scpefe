@@ -7,13 +7,42 @@ import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequ
   validateOpenedDocument, validatePlaintextExportRequest,
   validatePlaintextExportResult, validateProfile,
   validateWorkingCopy, validateMergeDraft, validateExternalOpenRequest,
-  validateUnresolvedJournalSummary } from "../src/contracts.mjs";
+  validateUnresolvedJournalSummary, validatePasswordChangeRequest,
+  validateInvitationCreateRequest, validateInvitationResult,
+  validateSlotPermissionsRequest, validateSlotId } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
     name: " Ada ", email: "ada@example.test", deviceName: "Desk PC",
   }), { name: "Ada", email: "ada@example.test", deviceName: "Desk PC" });
   assert.throws(() => validateProfile({ name: "Ada", email: "", deviceName: "PC" }));
+});
+
+test("password administration requests are narrow and enforce confirmations", () => {
+  assert.deepEqual(validatePasswordChangeRequest({ currentPassword: "old password words",
+    newPassword: "new password words", newPasswordConfirmation: "new password words",
+    ignored: "not forwarded" }), { currentPassword: "old password words",
+    newPassword: "new password words" });
+  assert.throws(() => validatePasswordChangeRequest({ currentPassword: "old password words",
+    newPassword: "new password words", newPasswordConfirmation: "typo password words" }),
+  /do not match/);
+  assert.deepEqual(validateInvitationCreateRequest({ temporaryLabel: "Colleague",
+    temporaryPassword: "", canEdit: true, canAddPasswords: true,
+    canRemovePasswords: false, ignored: "not forwarded" }), {
+    temporaryLabel: "Colleague", canEdit: true, canAddPasswords: true,
+    canRemovePasswords: false,
+  });
+  assert.throws(() => validateInvitationCreateRequest({ temporaryLabel: "Colleague",
+    canEdit: false, canAddPasswords: true, canRemovePasswords: false }),
+  /implies edit/);
+  assert.deepEqual(validateInvitationResult({ created: true,
+    temporaryPassword: "one time secret" }), { created: true,
+    temporaryPassword: "one time secret" });
+  const slotId = "ab".repeat(16);
+  assert.equal(validateSlotId(slotId), slotId);
+  assert.deepEqual(validateSlotPermissionsRequest({ slotId, canEdit: true,
+    canAddPasswords: false, canRemovePasswords: true }), { slotId, canEdit: true,
+    canAddPasswords: false, canRemovePasswords: true });
 });
 
 test("requires irrecoverability and independent recovery acknowledgements", () => {

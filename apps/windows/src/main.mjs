@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, powerMonitor } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -398,8 +398,17 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   registerCompactionHandler({ ipcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
   registerMigrationHandler({ ipcMain, service: liveService, dialog, window });
+  ipcMain.handle("document:change-password", (_event, request) =>
+    service.changePassword(request));
   ipcMain.handle("document:create-invitation", (_event, request) =>
     service.createInvitation(request));
+  ipcMain.handle("document:copy-invitation-passphrase", (_event, password) => {
+    if (typeof password !== "string" || password.length === 0 || password.length > 4096) {
+      throw new TypeError("invitation passphrase is invalid");
+    }
+    clipboard.writeText(password);
+    return true;
+  });
   ipcMain.handle("document:claim-invitation", async (_event, password) => {
     const opened = await replacements.claim(password);
     await sendJournalSummary();

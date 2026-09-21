@@ -178,6 +178,84 @@ export function validatePassword(value) {
   return requiredText(value, "password", 4096);
 }
 
+export function validatePasswordChangeRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("password change request must be an object");
+  }
+  const currentPassword = validatePassword(value.currentPassword);
+  const newPassword = validatePassword(value.newPassword);
+  const newPasswordConfirmation = validatePassword(value.newPasswordConfirmation);
+  if (newPassword.length < 12) {
+    throw new TypeError("new password must contain at least 12 characters");
+  }
+  if (newPassword !== newPasswordConfirmation) {
+    throw new TypeError("new passwords do not match");
+  }
+  if (newPassword === currentPassword) {
+    throw new TypeError("new password must differ from the current password");
+  }
+  return Object.freeze({ currentPassword, newPassword });
+}
+
+export function validateInvitationCreateRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("invitation request must be an object");
+  }
+  const temporaryLabel = requiredText(value.temporaryLabel, "temporary label");
+  const temporaryPassword = value.temporaryPassword === undefined
+    || value.temporaryPassword === "" ? undefined
+    : validatePassword(value.temporaryPassword);
+  if (temporaryPassword !== undefined && temporaryPassword.length < 12) {
+    throw new TypeError("temporary password must contain at least 12 characters");
+  }
+  for (const permission of ["canEdit", "canAddPasswords", "canRemovePasswords"]) {
+    if (typeof value[permission] !== "boolean") {
+      throw new TypeError(`${permission} must be a boolean`);
+    }
+  }
+  if ((value.canAddPasswords || value.canRemovePasswords) && !value.canEdit) {
+    throw new TypeError("password administration implies edit permission");
+  }
+  return Object.freeze({ temporaryLabel,
+    ...(temporaryPassword === undefined ? {} : { temporaryPassword }),
+    canEdit: value.canEdit, canAddPasswords: value.canAddPasswords,
+    canRemovePasswords: value.canRemovePasswords });
+}
+
+export function validateInvitationResult(value) {
+  if (!value || typeof value !== "object" || value.created !== true
+      || typeof value.temporaryPassword !== "string"
+      || Object.keys(value).some((key) => !["created", "temporaryPassword"].includes(key))) {
+    throw new TypeError("host returned an invalid invitation result");
+  }
+  return Object.freeze({ created: true, temporaryPassword: value.temporaryPassword });
+}
+
+export function validateSlotPermissionsRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.slotId !== "string" || !/^[0-9a-f]{32}$/.test(value.slotId)) {
+    throw new TypeError("slot permission request is invalid");
+  }
+  for (const permission of ["canEdit", "canAddPasswords", "canRemovePasswords"]) {
+    if (typeof value[permission] !== "boolean") {
+      throw new TypeError(`${permission} must be a boolean`);
+    }
+  }
+  if ((value.canAddPasswords || value.canRemovePasswords) && !value.canEdit) {
+    throw new TypeError("password administration implies edit permission");
+  }
+  return Object.freeze({ slotId: value.slotId, canEdit: value.canEdit,
+    canAddPasswords: value.canAddPasswords,
+    canRemovePasswords: value.canRemovePasswords });
+}
+
+export function validateSlotId(value) {
+  if (typeof value !== "string" || !/^[0-9a-f]{32}$/.test(value)) {
+    throw new TypeError("slot ID is invalid");
+  }
+  return value;
+}
+
 function validateTargetName(value) {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.length === 0 || value.length > 255

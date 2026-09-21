@@ -395,6 +395,76 @@ export class DocumentService {
     return validateEditMode({ ...this.active.opened, readOnly: false });
   }
 
+  async changePassword(request) {
+    const active = this.active;
+    if (!active || active.opened.invitationRequired) {
+      throw new Error("Open and claim a document first");
+    }
+    if (active.dirty || active.recovery || active.pendingPublication
+        || active.unresolvedJournal) {
+      throw new Error("Resolve or discard document changes before changing a password");
+    }
+    const currentPassword = validatePassword(request?.currentPassword);
+    const newPassword = validatePassword(request?.newPassword);
+    if (currentPassword !== active.password) {
+      throw new Error("Current password does not match the active password slot");
+    }
+    if (newPassword.length < 12) {
+      throw new TypeError("new password must contain at least 12 characters");
+    }
+    if (newPassword === currentPassword) {
+      throw new TypeError("new password must differ from the current password");
+    }
+    let reopened;
+    let published;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.openDocument(current, currentPassword));
+      try {
+        if (inspected.documentId !== active.documentId
+            || inspected.baseRevision !== active.baseRevision) {
+          throw new Error("The target changed before the password change completed");
+        }
+      } finally {
+        inspected.journalKey.fill(0);
+      }
+      const candidate = this.native.changePassword(
+        current, currentPassword, newPassword);
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current, candidate,
+        text: active.opened.content, cursor: { start: 0, end: 0 },
+        baseRevision: active.baseRevision, purpose: "password-change",
+        reopenPassword: newPassword });
+      published = await this.fs.readFile(active.target);
+      reopened = this.#validateNativeOpened(
+        this.native.openDocument(published, newPassword));
+      if (reopened.documentId !== active.documentId
+          || reopened.baseRevision !== active.baseRevision) {
+        throw new Error("Published password change was not verified");
+      }
+    });
+    active.password = newPassword;
+    active.journalKey.fill(0);
+    const passwordChangeBlocked = active.headMismatch || active.profileMismatch
+      || active.migrationRequired;
+    const reopenedView = validateOpenedDocument({ ...reopened.opened,
+      canEdit: passwordChangeBlocked ? false : reopened.opened.canEdit,
+      publicationState: "target-published",
+      ...(active.profileMismatch ? { profileMismatch: active.profileMismatch } : {}),
+      ...(active.headMismatch ? { headMismatch: active.headMismatch } : {}),
+      ...(active.migrationRequired ? { migrationRequired: true } : {}),
+      ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
+    active.opened = active.editMode
+      ? validateEditMode({ ...reopenedView, readOnly: false }) : reopenedView;
+    active.baseContainer = Buffer.from(published);
+    active.journalKey = Buffer.from(reopened.journalKey);
+    active.observation = this.#observation(reopened);
+    reopened.journalKey.fill(0);
+    await this.witnesses.observe(active.target, active.observation);
+    return active.opened;
+  }
+
   async createInvitation(request) {
     const active = this.active;
     if (!active?.editMode || !active.opened.canAddPasswords) {

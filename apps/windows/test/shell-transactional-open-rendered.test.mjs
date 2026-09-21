@@ -175,6 +175,8 @@ test("mounted shell keeps the session through picker, password, creation, and un
     assert.equal(editor.value, "original plaintext",
       "staged invitation leaves the original renderer session mounted");
     await user.type(ui.getByLabelText(claim, "New password"), "replacement password");
+    await user.type(ui.getByLabelText(claim, "Confirm new password"),
+      "replacement password");
     await user.click(ui.getByRole(claim, "button",
       { name: "Replace password and claim identity" }));
     await ui.waitFor(() => assert.equal(claimCalls, 1));
