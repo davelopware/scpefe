@@ -479,7 +479,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     await user.click(ui.getByRole(pending, "button", { name: "Retry publication" }));
-    await ui.findByText(pending, /injected publication target unavailable/i);
+    await ui.findByText(pending, /pending publication could not be completed/i);
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
@@ -545,13 +545,15 @@ export async function runMountedLock(t, origin) {
       if (outcome === "retry") {
         await user.click(ui.getByRole(protection, "button",
           { name: "Retry publication and continue" }));
-        await ui.findByText(protection, /Resolve the saved divergence/);
+        await ui.findByText(protection,
+          /document protection choice could not be completed/i);
         assert.equal(host.service.active.opened.publicationState, "conflict");
         assert.equal(fakeWindow.closed, 0); return;
       }
       if (outcome === "discard") {
         await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
-        await ui.findByText(protection, /cannot be discarded safely/);
+        await ui.findByText(protection,
+          /document protection choice could not be completed/i);
         assert.equal(fakeWindow.closed, 0);
         assert.equal(host.service.active.opened.publicationState, "conflict");
         assert.equal(await fs.readFile(target, "utf8"), "saved:remote divergent branch"); return;
@@ -610,7 +612,8 @@ export async function runMountedLock(t, origin) {
         : "Manual save and continue";
       await user.click(ui.getByRole(protection, "button", { name: decision }));
       if (outcome === "save-retry") {
-        await ui.findByText(protection, /injected publication target unavailable/);
+        await ui.findByText(protection,
+          /document protection choice could not be completed/i);
         assert.equal(fakeWindow.closed, 0);
         protection = ui.getByRole(document.body, "dialog", { name: /before Exit/ });
         await user.click(ui.getByRole(protection, "button", { name: decision }));
@@ -1183,7 +1186,8 @@ export async function runMountedLock(t, origin) {
       const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
       const discard = ui.getByRole(protection, "button", { name: "Discard and continue" });
       await user.click(discard);
-      await ui.findByText(protection, /injected publication target unavailable/i);
+      await ui.findByText(protection,
+        /document protection choice could not be completed/i);
       assert.equal(document.activeElement, discard);
       assert.equal(host.service.active.opened.publicationState, "pending-publication");
       assert.equal(fakeWindow.closed, 0);
