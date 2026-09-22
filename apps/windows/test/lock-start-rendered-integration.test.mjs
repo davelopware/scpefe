@@ -16,7 +16,8 @@ const capabilities = Object.freeze({ sameFilesystemTransaction: true,
 
 export async function runMountedLock(t, origin) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  t.after(() => fs.rm(directory,
+    { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }));
   const target = path.join(directory, "document.scpefe");
   const otherTarget = path.join(directory, "other.scpefe");
   const newTarget = path.join(directory, "new-document.scpefe");
@@ -102,6 +103,7 @@ export async function runMountedLock(t, origin) {
     show() {} focus() {} isMinimized() { return false; }
   }
   const fakeWindow = new FakeWindow(); let createPickerCalls = 0;
+  let restartCandidateHash = null;
   if (origin.startsWith("s7-")) {
     const crashed = new DocumentService(serviceOptions());
     await crashed.openDocument(target, "password words");
@@ -123,6 +125,17 @@ export async function runMountedLock(t, origin) {
     assert.equal(diverged.active.opened.publicationState, "pending-publication");
     publicationUnavailable = false;
     await fs.writeFile(target, "saved:remote divergent branch");
+  }
+  if (origin === "pp-restart") {
+    const interrupted = new DocumentService(serviceOptions());
+    await interrupted.openDocument(target, "password words");
+    await interrupted.enterEditMode();
+    interrupted.updateWorkingCopy({ content: "restart pending plaintext",
+      cursor: { start: 25, end: 25 } });
+    publicationUnavailable = true;
+    await assert.rejects(interrupted.saveDocument("restart pending plaintext"), (error) =>
+      error.publicationPrepared === true);
+    restartCandidateHash = interrupted.active.pendingRecord.publication.candidateHash;
   }
   const host = await new DocumentLifecycleHost({
     ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
@@ -293,6 +306,20 @@ export async function runMountedLock(t, origin) {
   await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Read-only"));
+  if (origin === "pp-restart") {
+    const pending = await ui.findByRole(document.body, "dialog",
+      { name: "Manual save pending publication" });
+    assert.equal(editor.value, "");
+    assert.equal(host.service.active.opened.content, "restart pending plaintext");
+    assert.equal(host.service.active.opened.publicationState, "pending-publication");
+    assert.equal(host.service.active.pendingRecord.publication.candidateHash,
+      restartCandidateHash);
+    await user.click(ui.getByRole(pending, "button", { name: "Retry publication" }));
+    assert.equal(host.service.active.pendingRecord.publication.candidateHash,
+      restartCandidateHash);
+    assert.equal(host.service.active.opened.publicationState, "pending-publication");
+    return;
+  }
   if (origin.startsWith("s7-") || origin.startsWith("s8-")) {
     const divergent = origin.startsWith("s8-");
     if (divergent) {
@@ -529,7 +556,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(service.hasActivePublication(), false);
     return;
   }
-  if (origin.startsWith("s6-")) {
+  if (origin.startsWith("s6-") || origin.startsWith("pp-")) {
     publicationUnavailable = true;
     await command("File", /^Save/);
     const pending = await ui.findByRole(document.body, "dialog",
@@ -538,6 +565,53 @@ export async function runMountedLock(t, origin) {
       "the pending publication decision retains but does not expose plaintext behind its overlay");
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
     assert.equal(host.service.active.opened.content, "mounted secret plaintext");
+    if (origin === "pp-window-cancel") {
+      const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      await fakeWindow.lastClose; assert.equal(fakeWindow.closed, 0);
+      assert.ok(await ui.findByRole(document.body, "dialog",
+        { name: "Manual save pending publication" }));
+      return;
+    }
+    if (origin === "pp-retry") {
+      const retry = ui.getByRole(pending, "button", { name: "Retry publication" });
+      await user.click(retry);
+      assert.ok(document.body.contains(pending));
+      assert.equal(host.service.active.opened.publicationState, "pending-publication");
+      publicationUnavailable = false; await user.click(retry);
+      await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
+      assert.equal(host.service.active.opened.publicationState, "target-published");
+      assert.equal(await fs.readFile(target, "utf8"), "saved:mounted secret plaintext");
+      return;
+    }
+    if (origin === "pp-discard-refused") {
+      const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      const discard = ui.getByRole(protection, "button", { name: "Discard and continue" });
+      await user.click(discard);
+      await ui.findByText(protection, /injected publication target unavailable/i);
+      assert.equal(document.activeElement, discard);
+      assert.equal(host.service.active.opened.publicationState, "pending-publication");
+      assert.equal(fakeWindow.closed, 0);
+      return;
+    }
+    if (origin === "pp-fifo") {
+      await host.setReady(); const request = host.enqueueExternal({ target: otherTarget,
+        source: "second-instance" });
+      await ui.waitFor(() => assert.deepEqual(acks.map(({ status }) => status),
+        ["queued", "presented"]));
+      assert.equal(host.externalRequests.current(request.token)?.token, request.token);
+      publicationUnavailable = false;
+      await user.click(ui.getByRole(pending, "button", { name: "Retry publication" }));
+      const external = await ui.findByRole(document.body, "dialog",
+        { name: "Open requested document" });
+      await user.click(ui.getByRole(external, "button", { name: "Cancel" }));
+      await ui.waitFor(() => assert.deepEqual(acks.map(({ status }) => status),
+        ["queued", "presented", "canceled"]));
+      return;
+    }
     const entry = origin.slice(3);
     if (entry === "external") {
       await host.setReady(); const request = host.enqueueExternal({ target,
@@ -744,6 +818,11 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin === "pp-window-cancel") return "PP-W pending publication window close Cancel retains";
+  if (origin === "pp-retry") return "PP-W pending publication Retry unavailable then Retry success";
+  if (origin === "pp-discard-refused") return "PP-W pending publication Discard refused while unavailable";
+  if (origin === "pp-fifo") return "PP-X pending publication queues external request until resolution releases FIFO";
+  if (origin === "pp-restart") return "PP restart preserves exact pending candidate and status";
   if (origin.startsWith("prr-") || origin.startsWith("prc-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-");
