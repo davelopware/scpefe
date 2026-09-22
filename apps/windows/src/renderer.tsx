@@ -375,6 +375,7 @@ function App() {
   const [protection, setProtection] = useState<ProtectionRequest | null>(null);
   const [protectionError, setProtectionError] = useState("");
   const editor = useRef<HTMLTextAreaElement>(null);
+  const replacementFocusPending = useRef(false);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const findReturnFocus = useRef<HTMLElement | null>(null);
@@ -506,8 +507,18 @@ function App() {
     showOpenedResult(result);
   }
 
+  function focusEditorAfterDialog() {
+    replacementFocusPending.current = true;
+  }
+
   const activeDocument = isDocumentOpened(opened);
   const lockedDocument = locked && targetName !== null;
+  useEffect(() => {
+    if (!replacementFocusPending.current || creating || dialog !== null
+        || visibleOpenedDialog !== null || protection !== null || !activeDocument) return;
+    replacementFocusPending.current = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => editor.current?.focus()));
+  }, [activeDocument, creating, dialog, protection, visibleOpenedDialog]);
   const enabled: Record<string, boolean> = {
     new: profile !== null, open: profile !== null,
     save: activeDocument && !opened.readOnly && dirty,
@@ -659,6 +670,9 @@ function App() {
         : await window.scpefe.openSelectedDocument(String(data.get("password")));
       showReplacementResult(result);
       setPendingOpenName(""); setDialog(null);
+      if (!result.invitationRequired && openedDialogName(result) === null) {
+        focusEditorAfterDialog();
+      }
     }
     catch (error) {
       setOpenError(error instanceof Error ? error.message : String(error));
@@ -687,7 +701,12 @@ function App() {
         ...externalOpenRequest, password: String(data.get("password")),
       });
       setExternalOpenRequest(null);
-      if (result) { showReplacementResult(result); setDialog(null); }
+      if (result) {
+        showReplacementResult(result); setDialog(null);
+        if (!result.invitationRequired && openedDialogName(result) === null) {
+          focusEditorAfterDialog();
+        }
+      }
       else { setDialog(null);
         setMessage("Open request canceled; the current document remains open."); }
       setJournalSummary(await window.scpefe.getUnresolvedJournalSummary());
@@ -1400,7 +1419,7 @@ function App() {
       if (result) {
         showOpenedResult({ ...result.opened, targetName: result.name });
         setCreating(false); setMessage("Encrypted blank document published successfully.");
-        requestAnimationFrame(() => editor.current?.focus());
+        focusEditorAfterDialog();
       }
     }} />}
     {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}

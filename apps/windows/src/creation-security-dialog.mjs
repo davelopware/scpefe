@@ -20,6 +20,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
   const recoveryConfirmationRef = useRef(null);
   const ownerRef = useRef(null);
   const dialogRef = useRef(null);
+  const completedRef = useRef(false);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
 
   useEffect(() => {
@@ -28,6 +29,10 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     chrome?.setAttribute("inert", "");
     ownerRef.current?.focus();
     return () => {
+      if (completedRef.current) {
+        chrome?.removeAttribute("inert");
+        return;
+      }
       globalThis.requestAnimationFrame?.(() => {
         if (document.querySelector('[aria-modal="true"]')) return;
         chrome?.removeAttribute("inert");
@@ -62,6 +67,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     setSubmitting(true);
     try {
       await onCreate(request);
+      completedRef.current = true;
     } catch (submissionError) {
       setError(submissionError instanceof Error
         ? submissionError.message : String(submissionError));

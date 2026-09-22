@@ -45,8 +45,14 @@ export async function runMountedLock(t, origin) {
   let holdNewLink = false; let releaseNewLink; let newLinkStarted;
   const newLinkEntered = new Promise((resolve) => { newLinkStarted = resolve; });
   let holdOtherReadAt = 0; let otherReadCount = 0; let releaseOtherRead; let otherReadStarted;
+  let postAuthorizationFaultTarget = null;
+  let postAuthorizationFaultArmed = false;
   const otherReadEntered = new Promise((resolve) => { otherReadStarted = resolve; });
   const serviceFs = { ...fs, async readFile(file, ...args) {
+    if (postAuthorizationFaultArmed && file === postAuthorizationFaultTarget) {
+      postAuthorizationFaultArmed = false;
+      return Buffer.from("post-authorization-revalidation-fault");
+    }
     if (file === otherTarget && holdOtherReadAt > 0
         && ++otherReadCount === holdOtherReadAt) {
       otherReadStarted();
@@ -79,7 +85,11 @@ export async function runMountedLock(t, origin) {
       await new Promise((resolve) => { releaseMaintenance = resolve; });
       holdMaintenance = false;
     }
-    return fs.rename(source, destination);
+    const renamed = await fs.rename(source, destination);
+    if (destination === target && postAuthorizationFaultTarget) {
+      postAuthorizationFaultArmed = true;
+    }
+    return renamed;
   }, async unlink(file) {
     if (holdDiscard && file.startsWith(path.join(directory, "journals"))) {
       discardStarted();
@@ -231,6 +241,7 @@ export async function runMountedLock(t, origin) {
     ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
     window: fakeWindow, picker: { chooseCreateTarget: async () => {
       createPickerCalls += 1; return origin.startsWith("new")
+        || /^s[0-3]-new$/.test(origin)
         || origin.startsWith("s5-") || origin.startsWith("s9-")
         || origin.startsWith("dr-new-") || origin.startsWith("prr-new-")
         || origin.startsWith("al-new-")
@@ -238,11 +249,13 @@ export async function runMountedLock(t, origin) {
         || (origin.startsWith("rn-") && origin !== "rn-picker-cancel")
         ? newTarget : null;
     },
-      chooseOpenTarget: async () => origin === "s0-open" ? null
-        : origin.startsWith("ro-") || origin.startsWith("rx-")
+      chooseOpenTarget: async () => origin.startsWith("ro-") || origin.startsWith("rx-")
           || origin.startsWith("als-open-")
           ? (openPickerCalls++ === 0 ? target
             : origin === "ro-picker-cancel" ? null : otherTarget)
+        : origin === "s0-open" ? otherTarget
+          : /^(s[1-3]|s9)-open$/.test(origin)
+            ? (openPickerCalls++ === 0 ? target : otherTarget)
         : (origin.startsWith("dr-open-") || origin.startsWith("prr-open-"))
           && createPickerCalls++ > 0 ? otherTarget : target },
     serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
@@ -297,6 +310,13 @@ export async function runMountedLock(t, origin) {
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
+  const waitScalar = async (predicate, label, attempts = 100) => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`Timed out waiting for ${label}`);
+  };
   await ui.waitFor(() => assert.ok(ui.getByRole(document.body, "menubar")));
   await ui.waitFor(() => assert.ok(
     ipcListeners.get("document:external-open-requested")?.size));
@@ -326,8 +346,56 @@ export async function runMountedLock(t, origin) {
       await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
     }
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
-      "Document state").textContent, expectedState));
+    await waitScalar(() => ui.getByLabelText(document.body,
+      "Document state").textContent === expectedState, `${entry} state ${expectedState}`);
+  };
+  const driveSuccessfulReplacement = async (entry) => {
+    const priorService = host.service;
+    let request = null;
+    if (entry === "new") {
+      await command("File", /New/);
+      await waitScalar(() => ui.queryByRole(document.body, "dialog",
+        { name: "Secure new document" }) !== null, "New security dialog");
+      const creation = ui.getByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+        "owner password words");
+      await user.click(ui.getByLabelText(creation,
+        "I understand that lost passwords cannot be recovered."));
+      await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    } else {
+      if (entry === "open") await command("File", /Open/);
+      else {
+        await host.setReady();
+        request = host.enqueueExternal({ target: otherTarget, source: "second-instance" });
+      }
+      const dialogName = entry === "open" ? "Open document" : "Open requested document";
+      await waitScalar(() => ui.queryByRole(document.body, "dialog",
+        { name: dialogName }) !== null, `${entry} password dialog`);
+      const opened = ui.getByRole(document.body, "dialog", { name: dialogName });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    }
+    const expectedState = entry === "new" ? "Edit mode" : "Read-only";
+    await waitScalar(() => host.service !== priorService,
+      `${entry} candidate adoption as the authoritative service`);
+    await waitScalar(() => ui.getByLabelText(document.body,
+      "Document state").textContent === expectedState, `${entry} state ${expectedState}`);
+    assert.notEqual(host.service, priorService, "the staged service became authoritative");
+    assert.equal(priorService.active, null, "the replaced service released its lease and secrets");
+    assert.equal(host.currentTarget, entry === "new" ? newTarget : otherTarget);
+    const titlePattern = new RegExp(entry === "new"
+      ? "new-document\\.scpefe" : "other\\.scpefe");
+    await waitScalar(() => titlePattern.test(document.title), `${entry} safe document title`);
+    assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
+    await waitScalar(() => document.activeElement === editor,
+      "successful replacement focus on the document editor");
+    if (request) {
+      await waitScalar(() => host.externalRequests.current(request.token) === null,
+        "external request terminal acknowledgement");
+      assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "opened"]);
+    }
   };
   const driveProtectedCancel = async (entry) => {
     if (entry === "new") {
@@ -381,20 +449,8 @@ export async function runMountedLock(t, origin) {
   }
   if (origin.startsWith("s0-")) {
     const entry = origin.slice(3);
-    if (entry === "new") {
-      await command("File", /New/); assert.equal(createPickerCalls, 1);
-      assert.equal(ui.queryByRole(document.body, "dialog"), null);
-    } else if (entry === "open") {
-      await command("File", /Open/); assert.equal(ui.queryByRole(document.body, "dialog"), null);
-    } else if (entry === "external") {
-      await host.setReady(); const request = host.enqueueExternal({ target,
-        source: "second-instance" });
-      const dialog = await ui.findByRole(document.body, "dialog",
-        { name: "Open requested document" });
-      await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
-      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-      assert.equal(host.externalRequests.current(request.token), null);
-      assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "canceled"]);
+    if (["new", "open", "external"].includes(entry)) {
+      await driveSuccessfulReplacement(entry); return;
     } else if (entry === "close") {
       await command("File", /Close/);
       assert.equal(ui.queryByRole(document.body, "dialog"), null);
@@ -423,9 +479,13 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     await user.click(ui.getByRole(pending, "button", { name: "Retry publication" }));
+    await ui.findByText(pending, /injected publication target unavailable/i);
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
+    assert.equal(document.activeElement,
+      ui.getByRole(pending, "button", { name: "Retry publication" }));
+    await new Promise((resolve) => setImmediate(resolve));
     return;
   }
   if (origin.startsWith("s7-") || origin.startsWith("rw-")
@@ -449,7 +509,22 @@ export async function runMountedLock(t, origin) {
         await ui.waitFor(() => assert.equal(
           host.externalRequests.current(request.token)?.token, request.token));
         assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
-        assert.equal(host.service.active.opened.publicationState, "conflict"); return;
+        assert.equal(host.service.active.opened.publicationState, "conflict");
+        await user.click(ui.getByRole(recovery, "button", { name: "Retry publication" }));
+        await waitScalar(() => editor.value.includes("local unpublished branch"),
+          "conflict resolution merge draft");
+        await user.clear(editor); await user.type(editor, "resolved queued conflict");
+        await user.keyboard("{Control>}s{/Control}");
+        await waitScalar(() => ui.getByLabelText(document.body,
+          "Publication state").textContent === "Published", "resolved conflict publication");
+        const external = await ui.findByRole(document.body, "dialog",
+          { name: "Open requested document" });
+        await user.type(ui.getByLabelText(external, "Password"), "password words");
+        await user.click(ui.getByRole(external, "button", { name: "Open" }));
+        await waitScalar(() => host.externalRequests.current(request.token) === null,
+          "resolved conflict external request completion");
+        assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "opened"]);
+        assert.equal(host.currentTarget, otherTarget); return;
       }
       if (outcome === "restart") {
         assert.equal(host.service.active.pendingRecord.state, "conflict");
@@ -505,7 +580,16 @@ export async function runMountedLock(t, origin) {
         await ui.waitFor(() => assert.equal(
           host.externalRequests.current(request.token)?.token, request.token));
         assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
-        assert.ok(document.body.contains(recovery)); return;
+        assert.ok(document.body.contains(recovery));
+        await user.click(ui.getByRole(recovery, "button", { name: "Discard recovered work" }));
+        const external = await ui.findByRole(document.body, "dialog",
+          { name: "Open requested document" });
+        await user.type(ui.getByLabelText(external, "Password"), "password words");
+        await user.click(ui.getByRole(external, "button", { name: "Open" }));
+        await waitScalar(() => host.externalRequests.current(request.token) === null,
+          "resolved recovery external request completion");
+        assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "opened"]);
+        assert.equal(host.currentTarget, otherTarget); return;
       }
       if (outcome === "restart") {
         assert.equal(host.service.active.recovery.text, "restart recovered plaintext");
@@ -537,6 +621,7 @@ export async function runMountedLock(t, origin) {
       return;
     }
     const entry = origin.slice(3);
+    const pickerCounts = { create: createPickerCalls, open: openPickerCalls };
     if (entry === "external") {
       await host.setReady(); const request = host.enqueueExternal({ target,
         source: "second-instance" });
@@ -546,6 +631,8 @@ export async function runMountedLock(t, origin) {
     } else if (entry === "window") {
       const event = fakeWindow.close(); assert.equal(event.prevented, true);
       const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      assert.equal(host.protections.pending?.operation, "exit",
+        "the actual native-close handler requested protection behind the blocking modal");
       await user.click(ui.getByRole(protection, "button",
         { name: "Keep current document open" }));
       await fakeWindow.lastClose;
@@ -553,6 +640,10 @@ export async function runMountedLock(t, origin) {
     } else {
       await command("File", entry === "new" ? /New/ : entry === "open" ? /Open/
         : entry === "close" ? /Close/ : "Exit");
+      assert.equal(host.protections.pending, null,
+        "the blocking recovery modal makes the lifecycle command inapplicable");
+      assert.deepEqual({ create: createPickerCalls, open: openPickerCalls }, pickerCounts,
+        "no picker or host lifecycle entry ran behind the blocking modal");
     }
     assert.ok(await ui.findByRole(document.body, "dialog",
       { name: divergent ? "Divergence needs resolution" : "Recovered work" }));
@@ -569,7 +660,11 @@ export async function runMountedLock(t, origin) {
     return;
   }
   if (origin.startsWith("s1-")) {
-    await driveDirect(origin.slice(3), "Read-only"); return;
+    const entry = origin.slice(3);
+    if (["new", "open", "external"].includes(entry)) {
+      await driveSuccessfulReplacement(entry); return;
+    }
+    await driveDirect(entry, "Read-only"); return;
   }
   await command("Edit", "Edit Contents");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
@@ -586,13 +681,21 @@ export async function runMountedLock(t, origin) {
   const originalLocked = service.onLocked;
   service.onLocked = (result) => { originalLocked(result); lockFinished(result); };
   if (origin.startsWith("s2-")) {
-    await driveDirect(origin.slice(3), "Edit mode", origin.endsWith("window")); return;
+    const entry = origin.slice(3);
+    if (["new", "open", "external"].includes(entry)) {
+      await driveSuccessfulReplacement(entry); return;
+    }
+    await driveDirect(entry, "Edit mode", origin.endsWith("window")); return;
   }
   if (origin.startsWith("s3-")) {
     await command("Security", "Lock");
     await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
       "Document state").textContent, "Locked"));
-    await driveDirect(origin.slice(3), "Locked"); return;
+    const entry = origin.slice(3);
+    if (["new", "open", "external"].includes(entry)) {
+      await driveSuccessfulReplacement(entry); return;
+    }
+    await driveDirect(entry, "Locked"); return;
   }
   await user.clear(editor);
   await user.type(editor, "mounted secret plaintext");
@@ -745,13 +848,35 @@ export async function runMountedLock(t, origin) {
     await user.click(ui.getByLabelText(creation,
       "I understand that lost passwords cannot be recovered."));
     createFault = origin === "rn-create-fault";
-    createdLeaseFault = origin === "rn-post-approval-cleanup";
+    createdLeaseFault = origin === "rn-stage-lease-fault";
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
     if (origin === "rn-mismatch") {
       assert.match(ui.getByRole(creation, "alert").textContent,
         /owner passwords do not match/i);
       assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
       assert.equal(editor.value, "mounted secret plaintext"); return;
+    }
+    if (origin === "rn-post-authorization-revalidation") {
+      const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
+      postAuthorizationFaultTarget = newTarget;
+      await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+      await ui.findByText(protection, /selected target changed/i);
+      assert.equal(host.service, service);
+      assert.equal(editor.value, "mounted secret plaintext");
+      assert.equal(service.active.dirty, false,
+        "the authorized Save completed before the second revalidation failed");
+      assert.equal(document.activeElement,
+        ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+      assert.equal(await fs.stat(newTarget).then(() => true, () => false), true,
+        "the retryable candidate remains staged until the operator cancels replacement");
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      const returned = await ui.findByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await ui.waitFor(async () => assert.equal(
+        await fs.stat(newTarget).then(() => true, () => false), false));
+      await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+      return;
     }
     await ui.findByText(creation, origin === "rn-create-fault"
       ? /injected native create failure/ : /injected created candidate lease failure/);
@@ -789,11 +914,28 @@ export async function runMountedLock(t, origin) {
         "mounted secret plaintext"); return;
     }
     const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
-    await fs.writeFile(otherTarget, "other-container-mutated");
-    await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+    if (origin === "ro-pre-authorization-revalidation") {
+      await fs.writeFile(otherTarget, "other-container-mutated");
+      await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+    } else {
+      postAuthorizationFaultTarget = otherTarget;
+      await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+    }
     await ui.findByText(protection, /target changed/i);
     assert.equal(host.service === service, true);
     assert.equal(editor.value, "mounted secret plaintext");
+    if (origin === "ro-post-authorization-revalidation") {
+      assert.equal(service.active.dirty, false,
+        "the authorized Save completed before the second revalidation failed");
+      assert.equal(document.activeElement,
+        ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+      assert.equal(host.replacements.candidates.size, 1);
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      const returned = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+      await ui.waitFor(() => assert.equal(host.replacements.candidates.size, 0));
+      await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+    }
     return;
   }
   if (origin.startsWith("rx-")) {
@@ -958,27 +1100,57 @@ export async function runMountedLock(t, origin) {
     await maintenanceEntered;
     assert.equal(service.hasActivePublication(), true);
     const entry = origin.slice(3);
-    if (entry === "open" || entry === "external") {
-      let request;
+    const priorService = host.service; let request = null; let stagedSubmit = null;
+    if (entry === "new") {
+      await command("File", /New/);
+      const creation = await ui.findByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+        "owner password words");
+      await user.click(ui.getByLabelText(creation,
+        "I understand that lost passwords cannot be recovered."));
+      await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    } else if (entry === "open" || entry === "external") {
       if (entry === "open") await command("File", /Open/);
-      else { await host.setReady(); request = host.enqueueExternal({ target,
+      else { await host.setReady(); request = host.enqueueExternal({ target: otherTarget,
         source: "second-instance" }); }
       const staged = await ui.findByRole(document.body, "dialog",
         { name: entry === "open" ? "Open document" : "Open requested document" });
-      assert.ok(document.body.contains(staged),
-        "the selected replacement remains staged while real maintenance is active");
-      assert.equal(ui.queryByRole(document.body, "dialog", { name: /before Open/ }), null);
-      await user.click(ui.getByRole(staged, "button", { name: "Cancel" }));
-      releaseMaintenance(); await publishing;
-      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-      if (request) await ui.waitFor(() => assert.equal(
-        host.externalRequests.current(request.token), null));
-    } else {
-      await driveProtectedCancel(entry);
-      releaseMaintenance(); await publishing;
-    }
+      await user.type(ui.getByLabelText(staged, "Password"), "password words");
+      stagedSubmit = user.click(ui.getByRole(staged, "button", { name: "Open" }));
+    } else if (entry === "close") await command("File", /Close/);
+    else if (entry === "exit") await command("File", "Exit");
+    else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
+    const protection = await ui.findByRole(document.body, "dialog", { name:
+      entry === "new" ? /before New/ : ["open", "external"].includes(entry)
+        ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/ });
+    await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+    assert.equal(host.service, priorService,
+      "authorization waits behind the held production lifecycle barrier");
     assert.equal(fakeWindow.closed, 0);
-    assert.equal(editor.value, "mounted secret plaintext");
+    if (request) assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+    releaseMaintenance(); await publishing;
+    if (stagedSubmit) await stagedSubmit;
+    if (entry === "new" || entry === "open" || entry === "external") {
+      const expectedState = entry === "new" ? "Edit mode" : "Read-only";
+      await ui.waitFor(() => assert.notEqual(host.service, priorService));
+      await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+        "Document state").textContent, expectedState));
+      assert.notEqual(host.service, priorService);
+      assert.equal(priorService.active, null);
+      assert.equal(host.currentTarget, entry === "new" ? newTarget : otherTarget);
+      if (request) {
+        await ui.waitFor(() => assert.equal(host.externalRequests.current(request.token), null));
+        assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "opened"]);
+      }
+    } else if (entry === "close") {
+      await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+        "Document state").textContent, "No document"));
+    } else {
+      if (entry === "window") await fakeWindow.lastClose;
+      await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    }
     assert.equal(service.hasActivePublication(), false);
     return;
   }
@@ -1039,6 +1211,7 @@ export async function runMountedLock(t, origin) {
       return;
     }
     const entry = origin.slice(3);
+    const pickerCounts = { create: createPickerCalls, open: openPickerCalls };
     if (entry === "external") {
       await host.setReady(); const request = host.enqueueExternal({ target,
         source: "second-instance" });
@@ -1048,9 +1221,15 @@ export async function runMountedLock(t, origin) {
     } else if (entry === "window") {
       const event = fakeWindow.close(); assert.equal(event.prevented, true);
       assert.equal(fakeWindow.closed, 0);
+      assert.equal(host.protections.pending?.operation, "exit",
+        "the registered native close requested protection while publication is blocked");
     } else {
       await command("File", entry === "new" ? /New/ : entry === "open" ? /Open/
         : entry === "close" ? /Close/ : "Exit");
+      assert.equal(host.protections.pending, null,
+        "the pending-publication modal makes this menu command inapplicable");
+      assert.deepEqual({ create: createPickerCalls, open: openPickerCalls }, pickerCounts,
+        "no picker or host lifecycle entry ran behind the pending-publication modal");
     }
     assert.equal(ui.getByRole(document.body, "dialog"), pending,
       "the real pending-publication decision remains authoritative");
@@ -1262,14 +1441,16 @@ export function lifecycleCaseName(origin) {
   if (origin === "tx-external-before-exit") return "TX active external FIFO is terminally canceled before native exit";
   if (origin.startsWith("rn-")) return `RN-${origin.slice(3)} New replacement ${{
     "picker-cancel": "picker Cancel retains session", mismatch: "mismatch creates no file",
-    "create-fault": "post-approval create fault retains session",
-    "post-approval-cleanup": "post-approval candidate cleanup removes created file",
+    "create-fault": "pre-authorization native create fault retains session",
+    "stage-lease-fault": "pre-authorization candidate lease fault cleans created file",
+    "post-authorization-revalidation": "post-authorization revalidation fault retains saved original and cleans canceled candidate",
   }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("ro-")) return `RO-${origin.slice(3)} Open replacement ${{
     "picker-cancel": "picker Cancel retains session",
     "dialog-cancel": "password dialog Cancel retains session",
     "wrong-password": "wrong password retains session",
-    revalidation: "post-approval revalidation failure retains session",
+    "pre-authorization-revalidation": "pre-authorization revalidation failure retains session",
+    "post-authorization-revalidation": "post-authorization revalidation fault retains saved original",
     invitation: "invitation claim Cancel retains session",
   }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("rx-")) return `RX-${origin.slice(3)} external Open ${{
@@ -1280,12 +1461,14 @@ export function lifecycleCaseName(origin) {
     cancel: "window close Cancel", retry: "window close Retry remains conflict",
     discard: "window close Discard policy blocks changed target",
     merge: "real divergence merge save then close",
-    external: "queues external request", restart: "restart restores conflict merge draft",
+    external: "queues external request; resolution releases FIFO and opens it",
+    restart: "restart restores conflict merge draft",
   }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("rw-")) return `RW-${origin.slice(3)} recovered work ${{
     cancel: "window close Cancel", save: "window close Save and publish",
     "save-retry": "window close Save failure then Retry", discard: "window close Discard",
-    external: "queues external request", restart: "restart preserves identical plaintext",
+    external: "queues external request; recovery resolution releases FIFO and opens it",
+    restart: "restart preserves identical plaintext",
   }[origin.slice(3)] ?? ""}`;
   if (origin === "pp-window-cancel") return "PP-W pending publication window close Cancel retains";
   if (origin === "pp-retry") return "PP-W pending publication Retry unavailable then Retry success";
@@ -1333,27 +1516,30 @@ export function lifecycleCaseName(origin) {
                 ? "L-S4-E dirty Exit: Cancel retains, Discard terminates"
                 : origin.startsWith("s0-")
                   ? `L-S0-${{ new: "N", open: "O", external: "X", close: "C",
-                    exit: "E", window: "W" }[origin.slice(3)]} no-document direct lifecycle behavior`
+                    exit: "E", window: "W" }[origin.slice(3)]} no-document ${
+                    ["new", "open", "external"].includes(origin.slice(3))
+                      ? "successful replacement" : "direct termination behavior"}`
                   : /^s[123]-/.test(origin)
                     ? `L-${origin.slice(0, 2).toUpperCase()}-${{ new: "N", open: "O",
                       external: "X", close: "C", exit: "E", window: "W" }[origin.slice(3)]} ${{
                       s1: "clean read-only", s2: "clean edit", s3: "locked",
-                    }[origin.slice(0, 2)]} direct lifecycle behavior`
+                    }[origin.slice(0, 2)]} ${["new", "open", "external"].includes(origin.slice(3))
+                      ? "successful replacement releases the prior session" : "direct termination behavior"}`
                     : origin.startsWith("s5-")
                       ? `L-S5-${{ new: "N", open: "O", external: "X", close: "C",
                         exit: "E", window: "W" }[origin.slice(3)]} real provisional revision protection Cancel retains`
                       : origin.startsWith("s6-")
                         ? `L-S6-${{ new: "N", open: "O", external: "X", close: "C",
-                          exit: "E", window: "W" }[origin.slice(3)]} real pending publication blocks lifecycle and retains plaintext`
+                          exit: "E", window: "W" }[origin.slice(3)]} INAPPLICABLE-BLOCKED pending-publication modal prevents command; external queues and W protects`
                         : origin.startsWith("s7-")
                           ? `L-S7-${{ new: "N", open: "O", external: "X", close: "C",
-                            exit: "E", window: "W" }[origin.slice(3)]} process-restart recovered work blocks lifecycle and retains journal`
+                            exit: "E", window: "W" }[origin.slice(3)]} INAPPLICABLE-BLOCKED recovered-work modal prevents command; external queues and W protects`
                           : origin.startsWith("s8-")
                             ? `L-S8-${{ new: "N", open: "O", external: "X", close: "C",
-                              exit: "E", window: "W" }[origin.slice(3)]} real divergent publication blocks lifecycle and retains both branches`
+                              exit: "E", window: "W" }[origin.slice(3)]} INAPPLICABLE-BLOCKED conflict modal prevents command; external queues and W protects`
                             : origin.startsWith("s9-")
                               ? `L-S9-${{ new: "N", open: "O", external: "X", close: "C",
-                                exit: "E", window: "W" }[origin.slice(3)]} held real publication maintenance serializes lifecycle Cancel`
+                                exit: "E", window: "W" }[origin.slice(3)]} held real publication maintenance serializes then completes lifecycle outcome`
                               : `mounted renderer wired to real DocumentService clears at ${origin} lock start`;
 }
 
