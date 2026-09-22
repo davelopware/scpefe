@@ -10,6 +10,8 @@ import { compactWithBackupSelection } from "../src/compaction-flow.mjs";
 import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
   DocumentService } from "../src/document-service.mjs";
 import { NativeLifecycleCoordinator } from "../src/native-lifecycle.mjs";
+import { ReplacementCoordinator } from "../src/replacement-coordinator.mjs";
+import { SessionGeneration } from "../src/session-generation.mjs";
 import { SessionProtectionCoordinator } from "../src/session-protection.mjs";
 import { registerNativeWindowClose } from "../src/window-lifecycle.mjs";
 
@@ -2706,6 +2708,129 @@ async function regularPublicationFixture(directory) {
     cursor: { start: 13, end: 13 } });
   return { service, options, target, initial, revisionId };
 }
+
+test("real service staged Open faults and lock fences preserve original journal and restart",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-real-open-stage-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    const original = fixture.service;
+    const active = original.active;
+    await original.journals.write(active.documentId, active.journalKey, {
+      text: active.working.content, baseRevision: active.baseRevision,
+      cursor: { ...active.working.cursor }, target: active.target, state: "unsaved",
+      updateTime: Date.now(),
+    });
+    const assertOriginal = async () => {
+      assert.equal(original.active, active);
+      assert.equal(original.active.working.content, "local unsaved");
+      assert.equal((await original.journals.read(active.documentId,
+        active.journalKey)).text, "local unsaved");
+    };
+
+    await t.test("Open authentication failure", async () => {
+      const native = fixture.options.native;
+      const coordinator = new ReplacementCoordinator({
+        makeCandidate: () => new DocumentService({ ...fixture.options,
+          native: { ...native, openDocument(bytes, password) {
+            if (password === "wrong password") throw new Error("authentication failed");
+            return native.openDocument(bytes, password);
+          } } }),
+        authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+        adopt: () => assert.fail("authentication failure must not adopt"),
+      });
+      await assert.rejects(coordinator.open(fixture.target, "wrong password"),
+        /authentication failed/);
+      await assertOriginal();
+    });
+    await t.test("Open post-approval revalidation failure", async () => {
+      const candidate = new DocumentService(fixture.options);
+      candidate.revalidateTargetForReplacement = async () => {
+        throw new Error("injected revalidation failure");
+      };
+      const coordinator = new ReplacementCoordinator({ makeCandidate: () => candidate,
+        authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+        adopt: () => assert.fail("revalidation failure must not adopt") });
+      await assert.rejects(coordinator.open(fixture.target, "password words"),
+        /revalidation failure/);
+      await assertOriginal();
+    });
+    for (const stage of ["authentication stage", "adoption revalidation"]) {
+      await t.test(`Open auto-lock during ${stage}`, async () => {
+        const generation = new SessionGeneration();
+        const candidate = new DocumentService(fixture.options);
+        let release; let started;
+        const waiting = new Promise((resolve) => { started = resolve; });
+        if (stage === "authentication stage") {
+          const open = candidate.openDocument.bind(candidate);
+          candidate.openDocument = async (...args) => { started();
+            await new Promise((resolve) => { release = resolve; }); return open(...args); };
+        } else {
+          const revalidate = candidate.revalidateTargetForReplacement.bind(candidate);
+          candidate.revalidateTargetForReplacement = async (...args) => { started();
+            await new Promise((resolve) => { release = resolve; }); return revalidate(...args); };
+        }
+        const coordinator = new ReplacementCoordinator({ generation,
+          makeCandidate: () => candidate,
+          authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+          adopt: () => assert.fail("locked stage must not adopt") });
+        const opening = coordinator.open(fixture.target, "password words");
+        await waiting; generation.invalidate(); release();
+        await assert.rejects(opening, /session locked/);
+        await assertOriginal();
+      });
+    }
+    const restarted = new DocumentService(fixture.options);
+    const reopened = await restarted.openDocument(fixture.target, "password words");
+    assert.equal(reopened.recovery.content, "local unsaved");
+  });
+
+test("real original service staged New create fault and lock preserve journal for retry",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-real-new-stage-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    const original = fixture.service; const active = original.active;
+    await original.journals.write(active.documentId, active.journalKey, {
+      text: active.working.content, baseRevision: active.baseRevision,
+      cursor: { ...active.working.cursor }, target: active.target, state: "unsaved",
+      updateTime: Date.now(),
+    });
+    let attempt = 0; let release; let started;
+    const generation = new SessionGeneration();
+    const makeCandidate = () => {
+      const candidate = new DocumentService(fixture.options);
+      candidate.loadClientSettings = async () => {};
+      candidate.createDocument = async (target) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("injected create publication failure");
+        started(); await new Promise((resolve) => { release = resolve; });
+        candidate.active = { target };
+      };
+      candidate.openDocument = async () => ({ content: "", readOnly: true, canEdit: true });
+      candidate.enterEditMode = async () => ({ content: "", readOnly: false, canEdit: true });
+      candidate.revalidateTargetForReplacement = async () => {};
+      candidate.abandonCreatedDocument = async () => { candidate.active = null; };
+      return candidate;
+    };
+    const coordinator = new ReplacementCoordinator({ generation, makeCandidate,
+      authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+      adopt: () => assert.fail("failed or locked New must not adopt") });
+    await assert.rejects(coordinator.create(path.join(directory, "new.scpefe"),
+      { ownerPassword: "owner password words", content: "" }), /publication failure/);
+    assert.equal(original.active, active);
+    const waiting = new Promise((resolve) => { started = resolve; });
+    const creating = coordinator.create(path.join(directory, "new.scpefe"),
+      { ownerPassword: "owner password words", content: "" });
+    await waiting; generation.invalidate(); release();
+    await assert.rejects(creating, /session locked/);
+    assert.equal(original.active.working.content, "local unsaved");
+    assert.equal((await original.journals.read(active.documentId,
+      active.journalKey)).text, "local unsaved");
+    const restarted = new DocumentService(fixture.options);
+    const reopened = await restarted.openDocument(fixture.target, "password words");
+    assert.equal(reopened.recovery.content, "local unsaved");
+  });
 
 for (const stage of ["prepare-write", "atomic-rename", "cleanup-directory-flush"]) {
   test(`integrated lifecycle publication fault | ${stage} | real journal restart and retry`,
