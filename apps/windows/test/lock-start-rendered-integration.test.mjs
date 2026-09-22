@@ -854,7 +854,7 @@ export async function runMountedLock(t, origin) {
       assert.match(ui.getByRole(creation, "alert").textContent,
         /owner passwords do not match/i);
       assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
-      assert.equal(editor.value, "mounted secret plaintext"); return;
+      assert.equal(editor.value, ""); return;
     }
     if (origin === "rn-post-authorization-revalidation") {
       const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
@@ -862,7 +862,7 @@ export async function runMountedLock(t, origin) {
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
       await ui.findByText(protection, /selected target changed/i);
       assert.equal(host.service, service);
-      assert.equal(editor.value, "mounted secret plaintext");
+      assert.equal(editor.value, "");
       assert.equal(service.active.dirty, false,
         "the authorized Save completed before the second revalidation failed");
       assert.equal(document.activeElement,
@@ -903,8 +903,7 @@ export async function runMountedLock(t, origin) {
     await user.click(ui.getByRole(opened, "button", { name: "Open" }));
     if (origin === "ro-wrong-password") {
       await ui.findByRole(opened, "alert");
-      assert.equal(host.service === service, true); assert.equal(editor.value,
-        "mounted secret plaintext"); return;
+      assert.equal(host.service === service, true); assert.equal(editor.value, ""); return;
     }
     if (origin === "ro-invitation") {
       const claim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
