@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -15,6 +15,8 @@ import { acknowledgementCredentials, acknowledgementTargetHash,
 import { validateInvitationCreateRequest, validatePassword,
   validatePasswordChangeRequest, validatePlaintextExportRequest,
   validateSlotId, validateSlotPermissionsRequest } from "./contracts.mjs";
+
+Menu.setApplicationMenu(null);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
