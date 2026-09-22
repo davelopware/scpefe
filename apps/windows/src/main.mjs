@@ -9,6 +9,7 @@ import { DocumentLifecycleHost } from "./document-lifecycle-host.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
 import { createSafeIpc } from "./error-boundary.mjs";
+import { registerWindowFocusProtection } from "./window-focus-protection.mjs";
 import { acknowledgementCredentials, acknowledgementTargetHash,
   createAcknowledgement, openTargetFromAdditionalData, openTargetFromCommandLine,
   openTargetFromUrl, validateAcknowledgement } from "./single-instance.mjs";
@@ -228,9 +229,9 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       : lifecycleHost.service.exportPlaintext(chosen.filePath, validated);
   });
 
-  powerMonitor.on("lock-screen", () => { void lifecycleHost.lockActive("screen-lock"); });
-  window.on("blur", () => { void lifecycleHost.lockActive("background"); });
-  window.on("minimize", () => { void lifecycleHost.lockActive("background"); });
+  registerWindowFocusProtection({ window, powerMonitor,
+    activity: () => lifecycleHost.notifyActivity(),
+    lock: (reason) => lifecycleHost.lockActive(reason) });
   window.loadFile(path.join(here, "..", "dist", "index.html"));
   window.webContents.on("did-finish-load", () => {
     void lifecycleHost.sendJournalSummary();

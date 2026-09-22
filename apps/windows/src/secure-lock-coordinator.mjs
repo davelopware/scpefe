@@ -35,7 +35,7 @@ export class SecureLockCoordinator {
     if (service === this.lockingService) return;
     if (service !== this.getService()) {
       if (this.replacements.hasStagedCandidate(service)
-          && ["inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock"]
+          && ["inactivity", "lease-refresh-failed", "screen-lock", "app-lock"]
             .includes(result.reason)) {
         await this.lock(result.reason ?? "inactivity");
       }

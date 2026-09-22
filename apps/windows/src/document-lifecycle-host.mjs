@@ -17,7 +17,7 @@ import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenR
 import { safeEventCode } from "./error-boundary.mjs";
 
 const AUTOMATIC_LOCK_REASONS = Object.freeze([
-  "inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock",
+  "inactivity", "lease-refresh-failed", "screen-lock", "app-lock",
 ]);
 
 /* Owns the production document session and every replacement/termination lifecycle boundary. */
@@ -49,6 +49,7 @@ export class DocumentLifecycleHost {
     this.externalOpenInProgress = false;
     this.lockStartedServices = new WeakSet();
     this.rendererLockStarted = false;
+    this.inactiveTimer = null;
     this.ready = false;
   }
 
@@ -119,15 +120,37 @@ export class DocumentLifecycleHost {
       this.externalRequests.complete(request.token); this.externalDrainRunning = false;
       return this.drainExternalRequests();
     }
+    this.notifyActivity();
     this.#emit("document:external-open-requested", this.externalPresentation(request));
     await this.acknowledge(request, "presented", 2);
     this.externalDrainRunning = false;
   }
 
   lockActive(reason) {
+    this.#clearInactiveTimer();
     const current = this.service;
     this.#beginServiceLock(current);
     return current.runLifecycleBarrier(() => this.secureLocks.lock(reason));
+  }
+
+  notifyActivity() {
+    this.#clearInactiveTimer();
+    if (this.service.active) return this.service.notifyActivity();
+    if (!this.creation.hasSelectedTarget && this.selectedOpenTarget === null
+        && this.externalRequests.size === 0 && this.lockedTarget === null) {
+      return { tracked: false };
+    }
+    this.inactiveTimer = this.service.setTimer(() => {
+      this.inactiveTimer = null;
+      if (!this.service.active) void this.lockActive("inactivity");
+    }, this.service.inactivityMs);
+    this.inactiveTimer?.unref?.();
+    return { tracked: true };
+  }
+
+  #clearInactiveTimer() {
+    if (this.inactiveTimer !== null) this.service.clearTimer(this.inactiveTimer);
+    this.inactiveTimer = null;
   }
 
   async closeDocument() {
@@ -201,6 +224,7 @@ export class DocumentLifecycleHost {
   }
 
   #adopt(staged, target) {
+    this.#clearInactiveTimer();
     this.leaseTakeovers.clear(); const previous = this.service;
     this.service = staged.candidate; staged.candidate.acceptCreatedDocument?.();
     this.currentTarget = target; this.lockedTarget = target;
@@ -228,19 +252,27 @@ export class DocumentLifecycleHost {
     this.#register("settings:save", (settings) =>
       this.service.saveClientSettings(validateClientSettings(settings)));
     this.#register("journal:summary", () => this.service.unresolvedJournalSummary());
-    this.#register("document:choose-create-target", () => this.creation.chooseTarget(
-      () => this.picker.chooseCreateTarget()));
-    this.#register("document:cancel-create-target", () => this.creation.cancel());
+    this.#register("document:choose-create-target", async () => {
+      const selected = await this.creation.chooseTarget(() => this.picker.chooseCreateTarget());
+      if (selected) this.notifyActivity();
+      return selected;
+    });
+    this.#register("document:cancel-create-target", () => {
+      this.creation.cancel(); this.notifyActivity();
+    });
     this.#register("document:create", (request) => this.creation.create(request,
       async (target, validated) => ({ created: true,
         opened: await this.replacements.create(target, validated),
         name: this.basename(target) })));
     this.#register("document:choose-open-target", async () => {
       this.selectedOpenTarget = await this.picker.chooseOpenTarget();
+      if (this.selectedOpenTarget) this.notifyActivity();
       return this.selectedOpenTarget
         ? Object.freeze({ selected: true, name: this.basename(this.selectedOpenTarget) }) : null;
     });
-    this.#register("document:cancel-open-target", () => { this.selectedOpenTarget = null; });
+    this.#register("document:cancel-open-target", () => {
+      this.selectedOpenTarget = null; this.notifyActivity();
+    });
     this.#register("document:open-selected", (password) =>
       this.#openSelected(validatePassword(password)));
     this.#register("document:unlock", (password) => this.#unlock(validatePassword(password)));
@@ -248,12 +280,14 @@ export class DocumentLifecycleHost {
       token: validateExternalOpenRequest(request).token,
       password: validatePassword(request?.password),
     }));
-    this.#register("document:cancel-external-open", (request) => {
+    this.#register("document:cancel-external-open", async (request) => {
       if (!request || typeof request.token !== "string") {
         throw new TypeError("invalid external open cancellation");
       }
-      return this.externalLifecycle.cancel(request.token,
+      const canceled = await this.externalLifecycle.cancel(request.token,
         { blocked: this.externalOpenInProgress });
+      this.notifyActivity();
+      return canceled;
     });
     this.#register("document:enter-edit-mode", (request = {}) => {
       const validated = validateTakeoverRequest(request);
@@ -264,7 +298,7 @@ export class DocumentLifecycleHost {
     });
     this.#register("document:update-working-copy", (working) =>
       this.service.updateWorkingCopy(validateWorkingCopy(working)));
-    this.#register("document:activity", () => this.service.notifyActivity());
+    this.#register("document:activity", () => this.notifyActivity());
     this.#register("document:save", async (content) => {
       let result;
       const canonical = canonicalizeDocumentText(content);
