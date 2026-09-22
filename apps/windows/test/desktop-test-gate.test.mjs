@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +31,19 @@ async function writeProductionBundle(root) {
   await writeFile(path.join(root, "dist", "assets", "app.css"), "body{}");
   await writeFile(path.join(root, "dist", "assets", "app.js"), "export {};");
   await writeFile(path.join(root, "dist", "preload.cjs"), "module.exports = {};");
+}
+
+async function makeLinkOrSkip(t, target, link, type) {
+  try {
+    await symlink(target, link, type);
+    return true;
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip(`filesystem links are unavailable on this host: ${error.code}`);
+      return false;
+    }
+    throw error;
+  }
 }
 
 test("desktop gate builds and validates production assets before serial tests", async (t) => {
@@ -266,6 +279,90 @@ test("production bundle validation accepts a complete referenced bundle", async 
   const root = await temporaryWindowsRoot(t);
   await writeProductionBundle(root);
   await verifyProductionBundle(root);
+});
+
+test("bundle validation rejects an assets directory symlink or junction", async (t) => {
+  const root = await temporaryWindowsRoot(t);
+  const external = await mkdtemp(path.join(os.tmpdir(), "scpefe-assets-outside-"));
+  t.after(() => rm(external, { recursive: true, force: true }));
+  await writeProductionBundle(root);
+  await writeFile(path.join(external, "app.css"), "body{}");
+  await writeFile(path.join(external, "app.js"), "export {};");
+  await rm(path.join(root, "dist", "assets"), { recursive: true });
+  if (!await makeLinkOrSkip(
+    t,
+    external,
+    path.join(root, "dist", "assets"),
+    process.platform === "win32" ? "junction" : "dir",
+  )) return;
+
+  await assert.rejects(verifyProductionBundle(root), /real directory/u);
+});
+
+test("bundle validation rejects a referenced file symlink", async (t) => {
+  const root = await temporaryWindowsRoot(t);
+  const external = path.join(root, "outside.js");
+  await writeProductionBundle(root);
+  await writeFile(external, "export {};");
+  const linkedAsset = path.join(root, "dist", "assets", "app.js");
+  await rm(linkedAsset);
+  if (!await makeLinkOrSkip(t, external, linkedAsset, "file")) return;
+
+  await assert.rejects(verifyProductionBundle(root), /regular file/u);
+});
+
+test("bundle validation rejects index and preload symlinks", async (t) => {
+  const root = await temporaryWindowsRoot(t);
+  await writeProductionBundle(root);
+  for (const name of ["index.html", "preload.cjs"]) {
+    const output = path.join(root, "dist", name);
+    const external = path.join(root, `outside-${name}`);
+    const contents = name === "index.html"
+      ? '<link href="assets/app.css"><script src="assets/app.js"></script>'
+      : "module.exports = {};";
+    await writeFile(external, contents);
+    await rm(output);
+    if (!await makeLinkOrSkip(t, external, output, "file")) return;
+    await assert.rejects(verifyProductionBundle(root), /regular file/u);
+    await rm(output);
+    await writeFile(output, contents);
+  }
+});
+
+test("bundle validation rejects a nested linked ancestor and realpath escape", async (t) => {
+  const root = await temporaryWindowsRoot(t);
+  const external = await mkdtemp(path.join(os.tmpdir(), "scpefe-nested-outside-"));
+  t.after(() => rm(external, { recursive: true, force: true }));
+  await writeProductionBundle(root);
+  await writeFile(path.join(external, "nested.js"), "export {};");
+  const nested = path.join(root, "dist", "assets", "nested");
+  if (!await makeLinkOrSkip(
+    t,
+    external,
+    nested,
+    process.platform === "win32" ? "junction" : "dir",
+  )) return;
+  await writeFile(
+    path.join(root, "dist", "index.html"),
+    '<link href="assets/app.css"><script src="assets/nested/nested.js"></script>',
+  );
+
+  await assert.rejects(verifyProductionBundle(root), /linked or non-directory ancestor/u);
+});
+
+test("bundle validation rejects a dist root symlink or junction", async (t) => {
+  const root = await temporaryWindowsRoot(t);
+  const externalRoot = await mkdtemp(path.join(os.tmpdir(), "scpefe-dist-outside-"));
+  t.after(() => rm(externalRoot, { recursive: true, force: true }));
+  await writeProductionBundle(externalRoot);
+  if (!await makeLinkOrSkip(
+    t,
+    path.join(externalRoot, "dist"),
+    path.join(root, "dist"),
+    process.platform === "win32" ? "junction" : "dir",
+  )) return;
+
+  await assert.rejects(verifyProductionBundle(root), /real directory/u);
 });
 
 test("desktop test discovery ignores fixtures and has stable ordering", async (t) => {

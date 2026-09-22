@@ -1,4 +1,4 @@
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -47,11 +47,56 @@ export function createNpmBuildInvocation(nodeCommand, npmCli) {
   };
 }
 
-async function requireNonemptyFile(file, description) {
+function isStrictlyContained(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative !== ""
+    && !path.isAbsolute(relative)
+    && relative !== ".."
+    && !relative.startsWith(`..${path.sep}`);
+}
+
+async function requireRealDirectory(directory, description, realParent = undefined) {
+  const metadata = await lstat(directory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new Error(`${description} must be a real directory, not a link.`);
+  }
+  const canonical = await realpath(directory);
+  if (realParent !== undefined && !isStrictlyContained(realParent, canonical)) {
+    throw new Error(`${description} resolves outside its expected parent.`);
+  }
+  return canonical;
+}
+
+async function requireRealAncestors(file, logicalRoot) {
+  let ancestor = path.dirname(file);
+  while (ancestor !== logicalRoot) {
+    const relative = path.relative(logicalRoot, ancestor);
+    if (relative === "" || path.isAbsolute(relative) || relative.startsWith("..")) {
+      throw new Error("Bundle output has an ancestor outside dist.");
+    }
+    const metadata = await lstat(ancestor);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error("Bundle output has a linked or non-directory ancestor.");
+    }
+    ancestor = path.dirname(ancestor);
+  }
+}
+
+async function requireNonemptyFile(
+  file,
+  description,
+  { logicalRoot, realRoot },
+) {
+  await requireRealAncestors(file, logicalRoot);
   const metadata = await lstat(file);
-  if (!metadata.isFile() || metadata.size === 0) {
+  if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size === 0) {
     throw new Error(`${description} must be a nonempty regular file.`);
   }
+  const canonical = await realpath(file);
+  if (!isStrictlyContained(realRoot, canonical)) {
+    throw new Error(`${description} resolves outside its expected bundle root.`);
+  }
+  return canonical;
 }
 
 function parseBundleReferences(indexHtml) {
@@ -92,10 +137,19 @@ function resolveConfinedReference(distRoot, reference) {
  */
 export async function verifyProductionBundle(windowsRoot) {
   const distRoot = path.join(windowsRoot, "dist");
+  const realDistRoot = await requireRealDirectory(distRoot, "Renderer dist");
   const indexFile = path.join(distRoot, "index.html");
   const preloadFile = path.join(distRoot, "preload.cjs");
-  await requireNonemptyFile(indexFile, "Renderer index");
-  await requireNonemptyFile(preloadFile, "Preload bundle");
+  const distBoundary = { logicalRoot: distRoot, realRoot: realDistRoot };
+  await requireNonemptyFile(indexFile, "Renderer index", distBoundary);
+  await requireNonemptyFile(preloadFile, "Preload bundle", distBoundary);
+
+  const assetsRoot = path.join(distRoot, "assets");
+  const realAssetsRoot = await requireRealDirectory(
+    assetsRoot,
+    "Renderer assets",
+    realDistRoot,
+  );
 
   const indexHtml = await readFile(indexFile, "utf8");
   const references = parseBundleReferences(indexHtml);
@@ -108,8 +162,15 @@ export async function verifyProductionBundle(windowsRoot) {
   let hasStylesheet = false;
   for (const reference of references) {
     const { resolved, relative } = resolveConfinedReference(distRoot, reference);
-    await requireNonemptyFile(resolved, "Referenced renderer asset");
-    if (relative.startsWith("assets/")) {
+    const inAssets = relative.startsWith("assets/");
+    await requireNonemptyFile(
+      resolved,
+      "Referenced renderer asset",
+      inAssets
+        ? { logicalRoot: assetsRoot, realRoot: realAssetsRoot }
+        : distBoundary,
+    );
+    if (inAssets) {
       referencedAssets.add(relative);
       hasJavaScript ||= relative.endsWith(".js");
       hasStylesheet ||= relative.endsWith(".css");
@@ -119,7 +180,6 @@ export async function verifyProductionBundle(windowsRoot) {
     throw new Error("Renderer index must reference nonempty JavaScript and CSS assets.");
   }
 
-  const assetsRoot = path.join(distRoot, "assets");
   const assetEntries = await readdir(assetsRoot, { withFileTypes: true });
   if (assetEntries.length === 0) {
     throw new Error("Renderer assets directory must not be empty.");
@@ -129,7 +189,11 @@ export async function verifyProductionBundle(windowsRoot) {
       throw new Error("Renderer assets directory may contain only regular files.");
     }
     const relative = `assets/${entry.name}`;
-    await requireNonemptyFile(path.join(assetsRoot, entry.name), "Renderer asset");
+    await requireNonemptyFile(
+      path.join(assetsRoot, entry.name),
+      "Renderer asset",
+      { logicalRoot: assetsRoot, realRoot: realAssetsRoot },
+    );
     if (!referencedAssets.has(relative)) {
       throw new Error("Renderer assets directory contains an unreferenced output.");
     }
