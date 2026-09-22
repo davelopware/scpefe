@@ -1139,12 +1139,14 @@ export async function runMountedLock(t, origin) {
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
     const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
-    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), true,
+      "the isolated candidate exists until the protection decision completes");
     assert.equal(editor.value, "mounted secret plaintext");
     await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
     const returned = await ui.findByRole(document.body, "dialog",
       { name: "Secure new document" });
-    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    await ui.waitFor(async () => assert.equal(
+      await fs.stat(newTarget).then(() => true, () => false), false));
     assert.equal(editor.value, "mounted secret plaintext");
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
