@@ -46,6 +46,17 @@ provides a developer launch using the already staged native DLLs. Re-run the
 full script whenever the native code, Electron version, or native dependencies
 change.
 
+For a faster artifact intended only for hands-on inspection, dispatch the
+**Windows preview** workflow with **Build an unvalidated artifact for manual
+testing only** enabled. This runs the same native, renderer, preload, and ZIP
+build but skips every automated test gate. GitHub labels its artifact
+`SCPEFE-win32-x64-unsigned-manual-untested` so it cannot be mistaken for a
+validated preview. The equivalent local command is:
+
+```powershell
+.\scripts\build-windows-preview.ps1 -SkipTests
+```
+
 Windows SmartScreen may warn about the preview because it is deliberately
 unsigned. Do not distribute it as a release. Code signing and an installer are
 separate release-engineering work.
