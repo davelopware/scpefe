@@ -1,0 +1,265 @@
+[CmdletBinding()]
+param(
+    [switch]$Launch,
+    [switch]$SkipTests,
+    [string]$VcpkgRoot = $(if ($env:VCPKG_ROOT) {
+        $env:VCPKG_ROOT
+    } else {
+        $env:VCPKG_INSTALLATION_ROOT
+    })
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+. (Join-Path $PSScriptRoot "windows-preview-process.ps1")
+
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    Write-Host "> $FilePath $($Arguments -join ' ')"
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath"
+    }
+}
+
+function Require-Command {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
+        throw "Required command '$Name' was not found on PATH. See apps/windows/README.md."
+    }
+}
+
+if ($env:OS -ne "Windows_NT") {
+    throw "This script builds a native Windows preview and must run on Windows."
+}
+if ([Environment]::Is64BitOperatingSystem -ne $true) {
+    throw "The Windows preview currently supports only x64 Windows."
+}
+
+$RequiredCommands = @("cmake", "node", "npm.cmd", "tar")
+if (-not $SkipTests) { $RequiredCommands += "ctest" }
+foreach ($command in $RequiredCommands) {
+    Require-Command $command
+}
+if (-not $VcpkgRoot) {
+    throw "Set VCPKG_ROOT to a vcpkg checkout. See apps/windows/README.md."
+}
+
+$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$WindowsRoot = Join-Path $RepositoryRoot "apps\windows"
+$BuildRoot = Join-Path $RepositoryRoot "build\windows-preview"
+$SdkRoot = Join-Path $BuildRoot "electron-sdk"
+$HeadersRoot = Join-Path $SdkRoot "headers"
+$NodeLibrary = Join-Path $SdkRoot "x64\node.lib"
+$VcpkgExe = Join-Path $VcpkgRoot "vcpkg.exe"
+$VcpkgToolchain = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
+$Triplet = "x64-windows"
+$BuildTesting = if ($SkipTests) { "OFF" } else { "ON" }
+
+if (-not (Test-Path $VcpkgExe)) {
+    throw "vcpkg.exe was not found at '$VcpkgExe'. Bootstrap the VCPKG_ROOT checkout first."
+}
+if (-not (Test-Path $VcpkgToolchain)) {
+    throw "The vcpkg CMake toolchain was not found at '$VcpkgToolchain'."
+}
+
+Push-Location $WindowsRoot
+try {
+    Invoke-Checked "npm.cmd" @("ci")
+    # Current Electron packages install their runtime lazily; fetch it now so
+    # packaging never depends on a developer having launched Electron first.
+    Invoke-Checked "node" @("node_modules/electron/install.js")
+    $Package = Get-Content "package.json" -Raw | ConvertFrom-Json
+    $ElectronVersion = [string]$Package.dependencies.electron
+    if ($ElectronVersion -notmatch '^\d+\.\d+\.\d+$') {
+        throw "package.json must pin Electron to an exact version; found '$ElectronVersion'."
+    }
+} finally {
+    Pop-Location
+}
+
+New-Item -ItemType Directory -Force $SdkRoot, (Split-Path $NodeLibrary) | Out-Null
+$HeaderArchive = Join-Path $SdkRoot "node-v${ElectronVersion}-headers.tar.gz"
+$HeaderUrl = "https://electronjs.org/headers/v${ElectronVersion}/node-v${ElectronVersion}-headers.tar.gz"
+$NodeLibraryUrl = "https://electronjs.org/headers/v${ElectronVersion}/win-x64/node.lib"
+if (-not (Test-Path $HeaderArchive)) {
+    Write-Host "Downloading Electron $ElectronVersion headers..."
+    Invoke-WebRequest -UseBasicParsing $HeaderUrl -OutFile $HeaderArchive
+}
+if (-not (Test-Path $NodeLibrary)) {
+    Write-Host "Downloading Electron $ElectronVersion x64 import library..."
+    Invoke-WebRequest -UseBasicParsing $NodeLibraryUrl -OutFile $NodeLibrary
+}
+$NodeInclude = Join-Path $HeadersRoot "node_headers\include\node"
+if (-not (Test-Path (Join-Path $NodeInclude "node_api.h"))) {
+    if (Test-Path $HeadersRoot) {
+        Remove-Item $HeadersRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force $HeadersRoot | Out-Null
+    Invoke-Checked "tar" @("-xzf", $HeaderArchive, "-C", $HeadersRoot)
+}
+if (-not (Test-Path (Join-Path $NodeInclude "node_api.h"))) {
+    throw "Electron headers were extracted, but node_api.h was not found at '$NodeInclude'."
+}
+
+Invoke-Checked $VcpkgExe @("install", "libsodium:$Triplet")
+$VcpkgBin = Join-Path $VcpkgRoot "installed\$Triplet\bin"
+# CTest loads the freshly built addon before its runtime DLLs are staged.
+$env:PATH = "$VcpkgBin;$env:PATH"
+Invoke-Checked "cmake" @(
+    "-S", $RepositoryRoot,
+    "-B", $BuildRoot,
+    "-A", "x64",
+    "-DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain",
+    "-DVCPKG_TARGET_TRIPLET=$Triplet",
+    "-DSCPEFE_BUILD_NODE_ADDON=ON",
+    "-DNODE_API_INCLUDE_DIR=$NodeInclude",
+    "-DNODE_API_LIBRARY=$NodeLibrary",
+    "-DBUILD_TESTING=$BuildTesting"
+)
+Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Release", "--parallel")
+if (-not $SkipTests) {
+    Invoke-Checked "ctest" @("--test-dir", $BuildRoot, "-C", "Release", "--output-on-failure")
+}
+
+$NativeRoot = Join-Path $WindowsRoot "native"
+$Addon = Join-Path $BuildRoot "Release\scpefe_electron_native.node"
+$CoreDll = Join-Path $BuildRoot "Release\scpefe.dll"
+$SodiumDll = Get-ChildItem $VcpkgBin -Filter "*sodium*.dll" |
+    Select-Object -First 1
+if (-not (Test-Path $Addon)) { throw "Native addon was not produced at '$Addon'." }
+if (-not (Test-Path $CoreDll)) { throw "Core DLL was not produced at '$CoreDll'." }
+if (-not $SodiumDll) { throw "The vcpkg libsodium runtime DLL was not found." }
+Copy-Item $Addon, $CoreDll -Destination $NativeRoot -Force
+Copy-Item $SodiumDll.FullName -Destination $NativeRoot -Force
+
+Push-Location $WindowsRoot
+try {
+    if ($SkipTests) {
+        Invoke-Checked "npm.cmd" @("run", "build")
+    } else {
+        # The canonical desktop gate builds and validates the renderer and preload
+        # production bundles before running its mounted tests serially. Reuse that
+        # exact verified bundle for packaging instead of rebuilding it afterward.
+        Invoke-Checked "npm.cmd" @("test")
+        Invoke-Checked "npm.cmd" @("run", "typecheck")
+    }
+} finally {
+    Pop-Location
+}
+
+$ReleaseRoot = Join-Path $WindowsRoot "release"
+$PackageRoot = Join-Path $ReleaseRoot "SCPEFE-win32-x64"
+$Archive = "${PackageRoot}.zip"
+$ElectronDist = Join-Path $WindowsRoot "node_modules\electron\dist"
+if (-not (Test-Path (Join-Path $ElectronDist "electron.exe"))) {
+    throw "npm did not install the Windows Electron runtime at '$ElectronDist'."
+}
+if (Test-Path $PackageRoot) { Remove-Item $PackageRoot -Recurse -Force }
+if (Test-Path $Archive) { Remove-Item $Archive -Force }
+New-Item -ItemType Directory -Force $PackageRoot | Out-Null
+Copy-Item (Join-Path $ElectronDist "*") $PackageRoot -Recurse -Force
+Rename-Item (Join-Path $PackageRoot "electron.exe") "SCPEFE.exe"
+Copy-Item (Join-Path $RepositoryRoot "LICENSE") (Join-Path $PackageRoot "LICENSE.txt")
+$LicenseRoot = Join-Path $PackageRoot "licenses"
+New-Item -ItemType Directory -Force $LicenseRoot | Out-Null
+Copy-Item (Join-Path $VcpkgRoot "installed\$Triplet\share\libsodium\copyright") `
+    (Join-Path $LicenseRoot "libsodium.txt")
+
+$AppRoot = Join-Path $PackageRoot "resources\app"
+New-Item -ItemType Directory -Force $AppRoot | Out-Null
+Copy-Item (Join-Path $WindowsRoot "package.json") $AppRoot
+Copy-Item (Join-Path $WindowsRoot "src"), (Join-Path $WindowsRoot "dist"), $NativeRoot `
+    -Destination $AppRoot -Recurse -Force
+
+if (-not $SkipTests) {
+    $PreviousRunAsNode = $env:ELECTRON_RUN_AS_NODE
+    $env:ELECTRON_RUN_AS_NODE = "1"
+    $AdjacentNode = Join-Path $PackageRoot "node.exe"
+    $HostProbeSignal = Join-Path $BuildRoot "native-addon-host.release"
+    try {
+        # A normal Node executable beside the renamed Electron host reproduces the
+        # dangerous Windows loader choice that Electron's delay-load hook prevents.
+        Copy-Item (Get-Command "node").Source $AdjacentNode -Force
+        if (Test-Path $HostProbeSignal) { Remove-Item $HostProbeSignal -Force }
+
+        $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $StartInfo.FileName = Join-Path $PackageRoot "SCPEFE.exe"
+        $StartInfo.WorkingDirectory = $PackageRoot
+        $StartInfo.Arguments = '"{0}" "{1}" "{2}"' -f `
+            (Join-Path $WindowsRoot "test\native-addon-host.integration.mjs"), `
+            (Join-Path $AppRoot "native\scpefe_electron_native.node"), `
+            $HostProbeSignal
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+        $HostProbe = [System.Diagnostics.Process]::Start($StartInfo)
+        try {
+            $Ready = $HostProbe.StandardOutput.ReadLine()
+            if ($Ready -ne "SCPEFE_NATIVE_HOST_READY") {
+                $HostProbe.WaitForExit()
+                $ProbeError = $HostProbe.StandardError.ReadToEnd()
+                throw "Packaged native addon host probe failed before readiness " +
+                    "(exit $($HostProbe.ExitCode)): $ProbeError"
+            }
+            $HostProbe.Refresh()
+            $SeparateNode = @($HostProbe.Modules | Where-Object {
+                $_.ModuleName -ieq "node.exe"
+            })
+            if ($SeparateNode.Count -ne 0) {
+                throw "Packaged native addon loaded a separate node.exe instead of " +
+                    "binding Node-API to SCPEFE.exe."
+            }
+            New-Item -ItemType File -Force $HostProbeSignal | Out-Null
+            if (-not $HostProbe.WaitForExit(10000)) {
+                throw "Packaged native addon host probe did not exit after release."
+            }
+            $ProbeError = $HostProbe.StandardError.ReadToEnd()
+            if ($HostProbe.ExitCode -ne 0) {
+                throw "Packaged native addon host probe exited with " +
+                    "$($HostProbe.ExitCode): $ProbeError"
+            }
+        } finally {
+            if (-not $HostProbe.HasExited) {
+                $HostProbe.Kill()
+                $HostProbe.WaitForExit()
+            }
+            $HostProbe.Dispose()
+        }
+        $null = Wait-ExecutableReleased (Join-Path $PackageRoot "SCPEFE.exe")
+
+        Invoke-PackagedTest `
+            (Join-Path $PackageRoot "SCPEFE.exe") `
+            (Join-Path $WindowsRoot "test\native-head-witness-addon.integration.mjs") `
+            (Join-Path $AppRoot "native\scpefe_electron_native.node")
+        Invoke-PackagedTest `
+            (Join-Path $PackageRoot "SCPEFE.exe") `
+            (Join-Path $WindowsRoot "test\native-invitation-addon.integration.mjs") `
+            (Join-Path $AppRoot "native\scpefe_electron_native.node")
+    } finally {
+        $env:ELECTRON_RUN_AS_NODE = $PreviousRunAsNode
+        if (Test-Path $AdjacentNode) { Remove-Item $AdjacentNode -Force }
+        if (Test-Path $HostProbeSignal) { Remove-Item $HostProbeSignal -Force }
+    }
+}
+
+Compress-Archive -Path $PackageRoot -DestinationPath $Archive -CompressionLevel Optimal
+$Hash = (Get-FileHash $Archive -Algorithm SHA256).Hash
+Write-Host ""
+Write-Host "Windows preview built successfully."
+Write-Host "Executable: $PackageRoot\SCPEFE.exe"
+Write-Host "Archive:    $Archive"
+Write-Host "SHA-256:    $Hash"
+Write-Host "This preview is unsigned and intended for development testing only."
+if ($SkipTests) {
+    Write-Warning "Automated tests were skipped; this artifact is for manual testing only."
+}
+
+if ($Launch) {
+    Start-Process (Join-Path $PackageRoot "SCPEFE.exe")
+}

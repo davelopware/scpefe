@@ -54,7 +54,7 @@ Important boundaries:
 | Backup replica | A verified byte-for-byte replica created by Backup or automatically before migration/compaction. |
 | Active document | The single document currently open in the application instance. |
 | Plaintext export | An intentionally unencrypted copy of only the current resolved text. |
-| Publication | The process that makes a candidate container the current value at a target. |
+| Publication | The process that makes a candidate container the current value at a target, or creates a new backup target without replacing an existing replica. |
 | Publication transaction | The tracked prepare/write/flush/replace/verify/cleanup operation used for crash-safe publication. |
 | Transaction file | The short-lived same-filesystem sibling used during a publication transaction. It is not a companion file or work journal. |
 | App-private state | Client-local storage not placed beside the target, including preferences, work journals, head witnesses, slot hints, and transaction tracking. |
@@ -176,5 +176,6 @@ working copy ──recovery checkpoint──> local work journal
 - A client stores at most one local work journal per document.
 - Shared durable state belongs in the container; client recovery state belongs in app-private storage.
 - Persistent adjacent files are not required. Explicit backup replicas and short-lived transaction files are the documented exceptions.
+- Backup publication is create-only: it uses a UTC standard name plus a numeric collision suffix and never replaces an existing target.
 - Manual save seals history; regular save does not.
 - A new client without a head witness cannot prove that an otherwise valid container is the newest replica.

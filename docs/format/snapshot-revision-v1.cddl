@@ -1,0 +1,39 @@
+; SPDX-License-Identifier: CC0-1.0
+; SCPEFE deterministic-CBOR snapshot revision record, format version 1.
+; Every map and array has a definite length. Map keys use the order shown.
+; Integers and lengths use their shortest RFC 8949 encoding. Text is valid UTF-8.
+; No tags, floats, simple values, duplicate keys, unknown keys, or trailing octets.
+
+snapshot-revision-v1 = {
+  1: 1,                         ; record format version
+  2: [* revision-id],           ; parent revision IDs
+  3: uint,                      ; Unix timestamp in milliseconds
+  4: slot-id,                   ; authoring password slot
+  5: tstr,                      ; registered slot identity name
+  6: tstr,                      ; registered slot identity email
+  7: tstr,                      ; current client profile name
+  8: tstr,                      ; current client profile email
+  9: tstr,                      ; device name
+  10: content-hash,
+  11: snapshot-v1,
+  ? 12: [* revision-graph-node], ; authenticated retained ancestor graph
+  ? 13: false,                    ; present only for a provisional revision
+  ? 14: bstr,                     ; encoded sealed base; required with field 13
+  ? 15: tstr,                     ; non-text history event type
+  ? 16: tstr,                     ; non-text history event detail
+}
+
+revision-graph-node = [
+  revision-id,                    ; ancestor revision ID
+  [* revision-id],               ; its direct parent revision IDs
+]
+
+snapshot-v1 = {
+  1: 0,                         ; codec: none
+  2: uint,                      ; UTF-8 octet length of field 3
+  3: tstr,                      ; canonical document text
+}
+
+revision-id = bytes .size 32
+slot-id = bytes .size 16
+content-hash = bytes .size 32

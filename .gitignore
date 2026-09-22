@@ -1,0 +1,6 @@
+/build/
+/apps/windows/dist/
+/apps/windows/node_modules/
+/apps/windows/native/*.dll
+/apps/windows/native/*.node
+/apps/windows/release/

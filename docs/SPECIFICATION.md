@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # SCPEFE specification
 
 Status: working specification, recorded 19 September 2026. This document captures decisions made so far and distinguishes them from details that remain open.
@@ -43,6 +45,10 @@ The native build is the production path. A WebAssembly build of the platform-neu
 ### 2.3 Library and host adapters
 
 The common C++ implementation is delivered as one `libscpefe` library. Internally it preserves logical separation between pure format/cryptographic code and application orchestration, but exposes both low-level diagnostic/format APIs and high-level session/configuration APIs through one stable, versioned C ABI.
+
+The C ABI is an adapter seam, not the internal programming model. Core state and domain behavior are implemented in idiomatic, object-oriented C++20 classes and value types with encapsulation, RAII ownership, and standard-library types. C entry points remain thin: they validate and marshal C-compatible arguments, delegate to C++ objects, translate results/errors, and must not accumulate the primary implementation logic. C structs, opaque handles, callbacks, and function tables are used only where data crosses the external ABI or a host-adapter seam. Pure stateless algorithms may remain free functions where that is clearer, but domain state must not be represented internally as an anemic C-style struct manipulated primarily by free procedures.
+
+Internal code is organized for discoverability and reuse: each class has a clearly named private `.hpp`/`.cpp` pair, and even small reusable helpers live in their own named files rather than being hidden inside an unrelated implementation file. Files implementing the external C seam use the `_abi.cpp` suffix and contain adapter logic only. Public C headers use `.h`; private C++ interfaces use `.hpp` and are never installed as part of the C ABI. Because this convention creates more files, adding another cohesive, purpose-named folder level is explicitly encouraged when it keeps directory contents navigable.
 
 The public `libscpefe` headers define a versioned host-services interface. Official Windows, POSIX/Linux, and Android adapter libraries implement it; an embedding application may provide its own implementation. The frontend creates an adapter instance and passes its function table and instance data to an explicit SCPEFE context. Registration is per-context rather than process-global, allowing multiple isolated contexts and deterministic test adapters.
 
@@ -265,7 +271,7 @@ Pending journal states survive application restarts. They remain prominently fla
 
 Auto-lock recovery, crash recovery, offline saves, conflicts, and interrupted publication use one encrypted app-private local work journal per document rather than separate draft mechanisms. It records the base revision, current working content or delta, cursor position, whether changes are unsaved or user-saved but pending publication, conflict state, last update, target location, and any active publication transaction.
 
-The journal is encrypted without introducing persistent credentials outside the document's password-based access model. It is updated ten seconds after typing pauses and at least every thirty seconds during continuous typing by default; both values are configurable per client. It is force-flushed before backgrounding or any automatic/app-initiated lock. A manual save changes its state rather than creating a second kind of draft. It is cleared only after a save has been published and verified or the user deliberately discards the work.
+The journal is encrypted without introducing persistent credentials outside the document's password-based access model. It is updated ten seconds after typing pauses and at least every thirty seconds during continuous typing by default; both values are configurable per client. It is force-flushed before any automatic/app-initiated lock; ordinary backgrounding does not lock or close in-progress dialogs. A manual save changes its state rather than creating a second kind of draft. It is cleared only after a save has been published and verified or the user deliberately discards the work.
 
 If a journal write fails, editing shows an immediate persistent warning. Mandatory security locking still clears plaintext even if the final journal flush fails and the latest changes are consequently lost.
 
