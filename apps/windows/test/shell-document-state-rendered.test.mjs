@@ -155,12 +155,12 @@ test("mounted shell presents truthful document states, history, failures, and se
 
   editor.focus();
   await user.keyboard("{Control>}f{/Control}");
-  const findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  let findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
   assert.equal(findDialog.getAttribute("aria-modal"), "false");
   assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), false,
     "modeless search leaves the document interactive");
   const findInput = ui.getByLabelText(findDialog, "Find");
-  const replaceInput = ui.getByLabelText(findDialog, "Replace with");
+  let replaceInput = ui.getByLabelText(findDialog, "Replace with");
   await user.type(findInput, "line");
   assert.equal(ui.getByRole(findDialog, "button", { name: "Replace" }).disabled, true);
   await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
@@ -182,6 +182,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(editor.readOnly, true);
   assert.equal(statusValue("Document state"), "Read-only");
   await user.click(ui.getByRole(failure, "button", { name: "Continue read-only" }));
+  findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  replaceInput = ui.getByLabelText(findDialog, "Replace with");
+  assert.equal(ui.getByLabelText(findDialog, "Find").value, "line",
+    "the remounted modeless dialog restores its in-memory search value");
 
   await command("Edit", "Edit Contents");
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
