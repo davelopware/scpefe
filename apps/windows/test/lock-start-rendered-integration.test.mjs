@@ -18,9 +18,11 @@ export async function runMountedLock(t, origin) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
+  const otherTarget = path.join(directory, "other.scpefe");
   const newTarget = path.join(directory, "new-document.scpefe");
   const profilePath = path.join(directory, "profile.json");
   await fs.writeFile(target, "container");
+  await fs.writeFile(otherTarget, "other-container");
   await fs.writeFile(profilePath, JSON.stringify({ name: "Ada",
     email: "ada@example.test", deviceName: "Desk" }));
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
@@ -48,17 +50,21 @@ export async function runMountedLock(t, origin) {
     }
     return fs.unlink(file);
   } };
-  const openedContent = (bytes) => /^(saved|provisional):/.test(bytes.toString())
-    ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
+  const openedContent = (bytes) => bytes.toString() === "other-container" ? "other plaintext"
+    : /^(saved|provisional):/.test(bytes.toString())
+      ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
   const native = { openDocument(bytes, password) {
     if (password === "wrong password") throw new Error("authentication failed");
     const revision = createHash("sha256").update(bytes).digest("hex");
     return { content: openedContent(bytes), readOnly: true,
     canEdit: true, manuallySealed: !bytes.toString().startsWith("provisional:"),
-    documentId: "61".repeat(16),
+    documentId: bytes.toString().startsWith("other") ? "62".repeat(16) : "61".repeat(16),
     baseRevision: revision,
     revisionGraph: [{ revisionId: revision, parentRevisionIds: [] }],
-    journalKey: Buffer.alloc(32, 0x63), lease: { ...lease } };
+    journalKey: Buffer.alloc(32, bytes.toString().startsWith("other") ? 0x64 : 0x63),
+    lease: { ...(bytes.toString().startsWith("other") ? { active: false,
+      sessionId: "0".repeat(32), heartbeatCounter: 0, holderUtcMs: 0,
+      durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" } : lease) } };
   }, updateLease(bytes, _password, next) { lease = { ...next }; return Buffer.from(bytes); },
   createDocument() { lease = { active: false, sessionId: "0".repeat(32),
     heartbeatCounter: 0, holderUtcMs: 0, durationMs: 600_000,
@@ -119,9 +125,11 @@ export async function runMountedLock(t, origin) {
     window: fakeWindow, picker: { chooseCreateTarget: async () => {
       createPickerCalls += 1; return origin.startsWith("new")
         || origin.startsWith("s5-") || origin.startsWith("s9-")
+        || origin.startsWith("dr-new-")
         ? newTarget : null;
     },
-      chooseOpenTarget: async () => origin === "s0-open" ? null : target },
+      chooseOpenTarget: async () => origin === "s0-open" ? null
+        : origin.startsWith("dr-open-") && createPickerCalls++ > 0 ? otherTarget : target },
     serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
     acknowledge: async (request, status, sequence) => {
       acks.push({ token: request.token, status, sequence });
@@ -352,6 +360,69 @@ export async function runMountedLock(t, origin) {
   await user.type(editor, "mounted secret plaintext");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Working copy state").textContent, "Dirty"));
+  if (origin.startsWith("dr-")) {
+    const [, entry, ...outcomeParts] = origin.split("-");
+    const outcome = outcomeParts.join("-"); let request;
+    if (entry === "new") {
+      await command("File", /New/);
+      const creation = await ui.findByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+        "owner password words");
+      await user.click(ui.getByLabelText(creation,
+        "I understand that lost passwords cannot be recovered."));
+      await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    } else if (entry === "open") {
+      await command("File", /Open/);
+      const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    } else {
+      await host.setReady(); request = host.enqueueExternal({ target: otherTarget,
+        source: "second-instance" });
+      const opened = await ui.findByRole(document.body, "dialog",
+        { name: "Open requested document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    }
+    let protection = await ui.findByRole(document.body, "dialog",
+      { name: entry === "new" ? /before New/ : /before Open/ });
+    if (outcome === "cancel") {
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      const returned = await ui.findByRole(document.body, "dialog");
+      await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+      await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
+      assert.equal(host.service === service, true); assert.equal(editor.value,
+        "mounted secret plaintext");
+      if (request) assert.deepEqual(acks.map(({ status }) => status),
+        ["queued", "presented", "canceled"]);
+      return;
+    }
+    const decision = outcome.startsWith("save") ? "Manual save and continue"
+      : "Discard and continue";
+    if (outcome === "save-retry") saveFault = true;
+    if (outcome === "discard-retry") discardFault = true;
+    await user.click(ui.getByRole(protection, "button", { name: decision }));
+    if (outcome.endsWith("retry")) {
+      await ui.findByText(protection, outcome.startsWith("save")
+        ? /injected native save failure/ : /injected journal discard failure/);
+      assert.equal(host.service === service, true); assert.equal(editor.value,
+        "mounted secret plaintext");
+      saveFault = false; discardFault = false;
+      protection = ui.getByRole(document.body, "dialog",
+        { name: entry === "new" ? /before New/ : /before Open/ });
+      await user.click(ui.getByRole(protection, "button", { name: decision }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(document.querySelector("[role=dialog]") === null, true);
+    assert.equal(host.service === service, false);
+    assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
+    if (request) assert.deepEqual(acks.map(({ status }) => status),
+      ["queued", "presented", "opened"]);
+    return;
+  }
   if (origin.startsWith("dc-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-");
@@ -634,6 +705,14 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("dr-")) {
+    const [, entry, ...outcomeParts] = origin.split("-");
+    const outcome = outcomeParts.join("-");
+    return `D-S4-${{ new: "N", open: "O", external: "X" }[entry]} dirty ${entry} ${{
+      cancel: "Cancel retains", save: "Save success", "save-retry": "Save failure then Retry",
+      discard: "Discard success", "discard-retry": "Discard failure then Retry",
+    }[outcome]}`;
+  }
   if (origin.startsWith("dc-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-");
