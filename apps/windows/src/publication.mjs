@@ -247,6 +247,10 @@ export class PublicationService {
       return { completed: true, record,
         replacementCapabilities: this.capabilities };
     } catch (error) {
+      if (!record) {
+        const persisted = await this.journals.read(documentId, journalKey).catch(() => null);
+        if (!persisted?.publication) throw error;
+      }
       throw publicationError(error);
     }
   }

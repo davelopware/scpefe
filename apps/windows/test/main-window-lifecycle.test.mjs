@@ -104,3 +104,67 @@ for (const [name, active] of protectedStates) {
     assert.deepEqual(service.active, active);
   });
 }
+
+const closeDecisions = [
+  ["Save success", "save", 0],
+  ["Save failure then Retry success", "save", 1],
+  ["Discard allowed", "discard", 0],
+  ["Discard blocked then Retry success", "discard", 1],
+];
+for (const [name, decision, failures] of closeDecisions) {
+  test(`registered BrowserWindow close | dirty edit | ${name}`, async () => {
+    let handler; let request; let remaining = failures; let closes = 0;
+    const active = { editMode: true, dirty: true, manuallySealed: true,
+      working: { content: "authoritative plaintext" } };
+    const service = { active, hasActivePublication: () => false,
+      async saveDocument() { if (remaining-- > 0) throw new Error("publication fault");
+        active.dirty = false; },
+      async discardUnsavedForClose() { if (remaining-- > 0) throw new Error("cleanup fault");
+        active.dirty = false; },
+      async exitEditMode() { active.editMode = false; } };
+    const protections = new SessionProtectionCoordinator({ getService: () => service,
+      present(value) { request = value; } });
+    const lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
+      protections, lockActive: async () => {}, closeWindow: () => { closes += 1; },
+      report: () => {} });
+    registerNativeWindowClose({ on(_event, value) { handler = value; },
+      removeListener() {} }, lifecycle);
+    const event = { preventDefault() {} }; const closing = handler(event);
+    let result = await protections.decide({ token: request.token, decision });
+    if (!result.completed) {
+      assert.equal(active.working.content, "authoritative plaintext");
+      result = await protections.decide({ token: result.retryToken, decision });
+    }
+    assert.equal(result.completed, true);
+    assert.equal(await closing, true);
+    assert.equal(closes, 1);
+  });
+}
+
+for (const [name, service] of [
+  ["clean-edit", { active: { editMode: true, dirty: false, manuallySealed: true },
+    hasActivePublication: () => false }],
+  ["locked", { active: null, hasActivePublication: () => false }],
+  ["active publication", { active: { editMode: false, dirty: false, manuallySealed: true },
+    hasActivePublication: () => true, runLifecycleBarrier: (operation) => operation() }],
+  ["active maintenance", { active: { editMode: false, dirty: false, manuallySealed: true },
+    hasActivePublication: () => true, runLifecycleBarrier: (operation) => operation() }],
+]) {
+  test(`registered BrowserWindow close | ${name} | authoritative outcome`, async () => {
+    let handler; let closes = 0; let request;
+    service.exitEditMode ??= async () => { service.active.editMode = false; };
+    const protections = new SessionProtectionCoordinator({ getService: () => service,
+      present: (value) => { request = value; } });
+    const lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
+      protections, lockActive: async () => {}, closeWindow: () => { closes += 1; },
+      report: () => {} });
+    registerNativeWindowClose({ on(_event, value) { handler = value; },
+      removeListener() {} }, lifecycle);
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    const closing = handler(event);
+    if (request) await protections.decide({ token: request.token, decision: "save" });
+    const result = await closing;
+    if (name === "locked") { assert.equal(event.prevented, false); assert.equal(closes, 0); }
+    else { assert.equal(result, true); assert.equal(closes, 1); }
+  });
+}

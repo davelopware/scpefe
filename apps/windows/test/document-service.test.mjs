@@ -2707,6 +2707,69 @@ async function regularPublicationFixture(directory) {
   return { service, options, target, initial, revisionId };
 }
 
+for (const stage of ["prepare-write", "atomic-rename", "cleanup-directory-flush"]) {
+  test(`integrated lifecycle publication fault | ${stage} | real journal restart and retry`,
+    async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-lifecycle-${stage}-`));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const fixture = await regularPublicationFixture(directory);
+      let failed = false;
+      if (stage === "prepare-write") {
+        const prepare = fixture.service.publications.prepare.bind(fixture.service.publications);
+        fixture.service.publications.prepare = async (...args) => {
+          if (!failed) { failed = true; throw new Error("injected prepare write fault"); }
+          return prepare(...args);
+        };
+      } else if (stage === "atomic-rename") {
+        fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+          if (property !== "rename") return target[property];
+          return async (...args) => {
+            if (!failed) { failed = true; throw new Error("injected atomic rename fault"); }
+            return target.rename(...args);
+          };
+        } });
+      } else {
+        const clear = fixture.service.journals.clear.bind(fixture.service.journals);
+        fixture.service.publications.journals = new Proxy(fixture.service.journals,
+          { get(target, property) {
+            if (property !== "clear") {
+              const value = target[property];
+              return typeof value === "function" ? value.bind(target) : value;
+            }
+            return async (...args) => {
+              if (!failed) { failed = true; throw new Error("injected cleanup directory flush fault"); }
+              return clear(...args);
+            };
+          } });
+      }
+      let request; let closes = 0;
+      const protections = new SessionProtectionCoordinator({
+        getService: () => fixture.service, present: (value) => { request = value; },
+      });
+      const lifecycle = new NativeLifecycleCoordinator({
+        getService: () => fixture.service, protections,
+        lockActive: (reason) => fixture.service.lock(reason),
+        closeWindow: () => { closes += 1; }, report: () => {},
+      });
+      const closing = lifecycle.requestExit();
+      const first = await protections.decide({ token: request.token, decision: "save" });
+      assert.equal(first.completed, false);
+      assert.equal(fixture.service.active.working.content, "local unsaved");
+      assert.equal(closes, 0);
+      fixture.service.publications.fs = fs;
+      const retried = await protections.decide({ token: first.retryToken, decision: "save" });
+      assert.equal(retried.completed, true, retried.error);
+      assert.equal(await closing, true);
+      assert.equal(closes, 1);
+      assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).content,
+        "local unsaved");
+      const restarted = new DocumentService(fixture.options);
+      const opened = await restarted.openDocument(fixture.target, "password words");
+      assert.equal(opened.content, "local unsaved");
+      assert.equal(restarted.active.pendingPublication, false);
+    });
+}
+
 test("regular-save divergence remains restart-safe and accessible", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-regular-diverged-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
