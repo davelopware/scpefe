@@ -29,6 +29,7 @@ export async function runMountedLock(t, origin) {
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
   let saveFault = false;
   let discardFault = false;
+  let provisionalDiscardFault = false;
   let publicationUnavailable = false;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
@@ -74,6 +75,9 @@ export async function runMountedLock(t, origin) {
     return Buffer.from(`saved:${input.content}`);
   }, regularSaveDocument(_bytes, _password, input) {
     return Buffer.from(`provisional:${input.content}`);
+  }, discardProvisional() {
+    if (provisionalDiscardFault) throw new Error("injected provisional discard failure");
+    return Buffer.from("saved:original plaintext");
   } };
   const serviceOptions = (callbacks = {}) => ({ native, fs: serviceFs, profilePath,
     publicationCapabilities: capabilities,
@@ -125,11 +129,12 @@ export async function runMountedLock(t, origin) {
     window: fakeWindow, picker: { chooseCreateTarget: async () => {
       createPickerCalls += 1; return origin.startsWith("new")
         || origin.startsWith("s5-") || origin.startsWith("s9-")
-        || origin.startsWith("dr-new-")
+        || origin.startsWith("dr-new-") || origin.startsWith("prr-new-")
         ? newTarget : null;
     },
       chooseOpenTarget: async () => origin === "s0-open" ? null
-        : origin.startsWith("dr-open-") && createPickerCalls++ > 0 ? otherTarget : target },
+        : (origin.startsWith("dr-open-") || origin.startsWith("prr-open-"))
+          && createPickerCalls++ > 0 ? otherTarget : target },
     serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
     acknowledge: async (request, status, sequence) => {
       acks.push({ token: request.token, status, sequence });
@@ -342,7 +347,7 @@ export async function runMountedLock(t, origin) {
   const originalLockStart = service.onLockStart;
   service.onLockStart = (value) => { assert.equal(value.reason, origin.startsWith("s3-")
     ? "app-lock" : origin === "close" || origin.endsWith("-close")
-      || origin.startsWith("dc-close-")
+      || origin.startsWith("dc-close-") || origin.startsWith("prc-close-")
       ? "document-close" : origin);
     originalLockStart(value); lockStarted(); };
   const originalLocked = service.onLocked;
@@ -360,7 +365,15 @@ export async function runMountedLock(t, origin) {
   await user.type(editor, "mounted secret plaintext");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Working copy state").textContent, "Dirty"));
-  if (origin.startsWith("dr-")) {
+  const provisionalDecision = origin.startsWith("prr-") || origin.startsWith("prc-");
+  if (provisionalDecision) {
+    await service.saveClientSettings({ regularSaveEnabled: true,
+      regularSaveIntervalMs: 120_000 });
+    await service.regularSaveDocument();
+    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+      "Publication state").textContent, "Provisional publication"));
+  }
+  if (origin.startsWith("dr-") || origin.startsWith("prr-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-"); let request;
     if (entry === "new") {
@@ -403,14 +416,28 @@ export async function runMountedLock(t, origin) {
     const decision = outcome.startsWith("save") ? "Manual save and continue"
       : "Discard and continue";
     if (outcome === "save-retry") saveFault = true;
-    if (outcome === "discard-retry") discardFault = true;
+    if (outcome === "discard-retry") {
+      if (provisionalDecision) provisionalDiscardFault = true; else discardFault = true;
+    }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
     if (outcome.endsWith("retry")) {
       await ui.findByText(protection, outcome.startsWith("save")
-        ? /injected native save failure/ : /injected journal discard failure/);
+        ? /injected native save failure/ : provisionalDecision
+          ? /injected provisional discard failure/ : /injected journal discard failure/);
       assert.equal(host.service === service, true); assert.equal(editor.value,
         "mounted secret plaintext");
-      saveFault = false; discardFault = false;
+      if (provisionalDecision && outcome === "discard-retry") {
+        protection = ui.getByRole(document.body, "dialog",
+          { name: entry === "new" ? /before New/ : /before Open/ });
+        await user.click(ui.getByRole(protection, "button",
+          { name: "Keep current document open" }));
+        const returned = await ui.findByRole(document.body, "dialog");
+        await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+        await ui.waitFor(() => assert.equal(
+          document.querySelector("[role=dialog]") === null, true));
+        return;
+      }
+      saveFault = false; discardFault = false; provisionalDiscardFault = false;
       protection = ui.getByRole(document.body, "dialog",
         { name: entry === "new" ? /before New/ : /before Open/ });
       await user.click(ui.getByRole(protection, "button", { name: decision }));
@@ -423,7 +450,7 @@ export async function runMountedLock(t, origin) {
       ["queued", "presented", "opened"]);
     return;
   }
-  if (origin.startsWith("dc-")) {
+  if (origin.startsWith("dc-") || origin.startsWith("prc-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-");
     if (entry === "close") await command("File", /Close/);
@@ -441,14 +468,26 @@ export async function runMountedLock(t, origin) {
     const decision = outcome.startsWith("save") ? "Manual save and continue"
       : "Discard and continue";
     if (outcome === "save-retry") saveFault = true;
-    if (outcome === "discard-retry") discardFault = true;
+    if (outcome === "discard-retry") {
+      if (provisionalDecision) provisionalDiscardFault = true; else discardFault = true;
+    }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
     if (outcome.endsWith("retry")) {
       const message = outcome.startsWith("save") ? /injected native save failure/
-        : /injected journal discard failure/;
+        : provisionalDecision ? /injected provisional discard failure/
+          : /injected journal discard failure/;
       await ui.findByText(protection, message);
       assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
-      saveFault = false; discardFault = false;
+      if (provisionalDecision && outcome === "discard-retry") {
+        protection = ui.getByRole(document.body, "dialog",
+          { name: entry === "close" ? /before Close/ : /before Exit/ });
+        await user.click(ui.getByRole(protection, "button",
+          { name: "Keep current document open" }));
+        await ui.waitFor(() => assert.equal(
+          document.querySelector("[role=dialog]") === null, true));
+        assert.equal(fakeWindow.closed, 0); return;
+      }
+      saveFault = false; discardFault = false; provisionalDiscardFault = false;
       protection = ui.getByRole(document.body, "dialog",
         { name: entry === "close" ? /before Close/ : /before Exit/ });
       await user.click(ui.getByRole(protection, "button", { name: decision }));
@@ -705,6 +744,15 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("prr-") || origin.startsWith("prc-")) {
+    const [, entry, ...outcomeParts] = origin.split("-");
+    const outcome = outcomeParts.join("-");
+    return `P-S5-${{ new: "N", open: "O", external: "X", close: "C", exit: "E",
+      window: "W" }[entry]} provisional ${entry} ${{ cancel: "Cancel retains",
+      save: "Seal success", "save-retry": "Seal failure then Retry",
+      discard: "Discard restores sealed", "discard-retry": "Discard fault blocks",
+    }[outcome]}`;
+  }
   if (origin.startsWith("dr-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-");
