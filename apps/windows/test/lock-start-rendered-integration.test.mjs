@@ -34,6 +34,7 @@ export async function runMountedLock(t, origin) {
   let publicationUnavailable = false;
   let publicationFailureAfter = null;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
+  const revisionGraphs = new Map();
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
   const serviceFs = { ...fs, async rename(source, destination) {
     if (publicationFailureAfter !== null && destination === target) {
@@ -67,11 +68,17 @@ export async function runMountedLock(t, origin) {
   const native = { openDocument(bytes, password) {
     if (password === "wrong password") throw new Error("authentication failed");
     const revision = createHash("sha256").update(bytes).digest("hex");
+    const initialRevision = createHash("sha256").update(Buffer.from("container")).digest("hex");
+    const revisionGraph = revisionGraphs.get(revision)
+      ?? (bytes.toString().startsWith("saved:")
+        ? [{ revisionId: revision, parentRevisionIds: [initialRevision] },
+          { revisionId: initialRevision, parentRevisionIds: [] }]
+        : [{ revisionId: revision, parentRevisionIds: [] }]);
     return { content: openedContent(bytes), readOnly: true,
     canEdit: true, manuallySealed: !bytes.toString().startsWith("provisional:"),
     documentId: bytes.toString().startsWith("other") ? "62".repeat(16) : "61".repeat(16),
     baseRevision: revision,
-    revisionGraph: [{ revisionId: revision, parentRevisionIds: [] }],
+    revisionGraph,
     journalKey: Buffer.alloc(32, bytes.toString().startsWith("other") ? 0x64 : 0x63),
     lease: { ...(bytes.toString().startsWith("other") ? { active: false,
       sessionId: "0".repeat(32), heartbeatCounter: 0, holderUtcMs: 0,
@@ -82,7 +89,26 @@ export async function runMountedLock(t, origin) {
     holderName: "", holderEmail: "", deviceName: "" }; return Buffer.from("saved:"); },
   saveDocument(_bytes, _password, input) {
     if (saveFault) throw new Error("injected native save failure");
-    return Buffer.from(`saved:${input.content}`);
+    const candidate = Buffer.from(`saved:${input.content}`);
+    const revision = createHash("sha256").update(candidate).digest("hex");
+    const parent = createHash("sha256").update(_bytes).digest("hex");
+    revisionGraphs.set(revision, [{ revisionId: revision, parentRevisionIds: [parent] },
+      ...(revisionGraphs.get(parent) ?? [{ revisionId: parent, parentRevisionIds: [] }])]);
+    return candidate;
+  }, mergeDocument(currentBytes, localBytes, _password, input) {
+    const candidate = Buffer.from(`saved:${input.content}`);
+    const revision = createHash("sha256").update(candidate).digest("hex");
+    const current = createHash("sha256").update(currentBytes).digest("hex");
+    const local = createHash("sha256").update(localBytes).digest("hex");
+    const nodes = [...(revisionGraphs.get(current)
+      ?? [{ revisionId: current, parentRevisionIds: [] }])];
+    for (const node of revisionGraphs.get(local)
+        ?? [{ revisionId: local, parentRevisionIds: [] }]) {
+      if (!nodes.some(({ revisionId }) => revisionId === node.revisionId)) nodes.push(node);
+    }
+    revisionGraphs.set(revision,
+      [{ revisionId: revision, parentRevisionIds: [local, current] }, ...nodes]);
+    return candidate;
   }, regularSaveDocument(_bytes, _password, input) {
     return Buffer.from(`provisional:${input.content}`);
   }, discardProvisional() {
@@ -124,7 +150,7 @@ export async function runMountedLock(t, origin) {
       holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
       deviceName: "" };
   }
-  if (origin.startsWith("s8-")) {
+  if (origin.startsWith("s8-") || origin.startsWith("cf-")) {
     const diverged = new DocumentService(serviceOptions());
     await diverged.openDocument(target, "password words");
     await diverged.enterEditMode();
@@ -137,6 +163,9 @@ export async function runMountedLock(t, origin) {
     assert.equal(diverged.active.opened.publicationState, "pending-publication");
     publicationUnavailable = false;
     await fs.writeFile(target, "saved:remote divergent branch");
+    lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
+      holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
+      deviceName: "" };
   }
   if (origin === "pp-restart") {
     const interrupted = new DocumentService(serviceOptions());
@@ -332,18 +361,75 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
     return;
   }
-  if (origin.startsWith("s7-") || origin.startsWith("rw-") || origin.startsWith("s8-")) {
-    const divergent = origin.startsWith("s8-");
+  if (origin.startsWith("s7-") || origin.startsWith("rw-")
+      || origin.startsWith("s8-") || origin.startsWith("cf-")) {
+    const divergent = origin.startsWith("s8-") || origin.startsWith("cf-");
     if (divergent) {
-      const head = await ui.findByRole(document.body, "dialog",
+      const head = ui.queryByRole(document.body, "dialog",
         { name: "This target has diverged" });
-      await user.click(ui.getByRole(head, "button",
+      if (head) await user.click(ui.getByRole(head, "button",
         { name: "Accept current authenticated head" }));
     }
     const recovery = await ui.findByRole(document.body, "dialog",
       { name: divergent ? "Divergence needs resolution" : "Recovered work" });
     assert.equal(editor.value, "",
       "a blocking recovery decision retains but does not expose plaintext behind its overlay");
+    if (origin.startsWith("cf-")) {
+      const outcome = origin.slice(3);
+      if (outcome === "external") {
+        await host.setReady(); const request = host.enqueueExternal({ target: otherTarget,
+          source: "second-instance" });
+        await ui.waitFor(() => assert.equal(
+          host.externalRequests.current(request.token)?.token, request.token));
+        assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+        assert.equal(host.service.active.opened.publicationState, "conflict"); return;
+      }
+      if (outcome === "restart") {
+        assert.equal(host.service.active.pendingRecord.state, "conflict");
+        await user.click(ui.getByRole(recovery, "button", { name: "Retry publication" }));
+        await ui.waitFor(() => assert.equal(editor.value.includes("local unpublished branch"), true));
+        assert.equal(host.service.active.pendingRecord.merge.localContent,
+          "local unpublished branch"); return;
+      }
+      const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      if (outcome === "cancel") {
+        await user.click(ui.getByRole(protection, "button",
+          { name: "Keep current document open" }));
+        assert.ok(await ui.findByRole(document.body, "dialog",
+          { name: "Divergence needs resolution" }));
+        assert.equal(fakeWindow.closed, 0); return;
+      }
+      if (outcome === "retry") {
+        await user.click(ui.getByRole(protection, "button",
+          { name: "Retry publication and continue" }));
+        await ui.findByText(protection, /Resolve the saved divergence/);
+        assert.equal(host.service.active.opened.publicationState, "conflict");
+        assert.equal(fakeWindow.closed, 0); return;
+      }
+      if (outcome === "discard") {
+        await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+        await ui.findByText(protection, /cannot be discarded safely/);
+        assert.equal(fakeWindow.closed, 0);
+        assert.equal(host.service.active.opened.publicationState, "conflict");
+        assert.equal(await fs.readFile(target, "utf8"), "saved:remote divergent branch"); return;
+      }
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      const conflict = await ui.findByRole(document.body, "dialog",
+        { name: "Divergence needs resolution" });
+      await user.click(ui.getByRole(conflict, "button", { name: "Retry publication" }));
+      await ui.waitFor(() => assert.equal(editor.value.includes("local unpublished branch"), true));
+      await user.clear(editor); await user.type(editor, "merged authenticated branch");
+      await user.keyboard("{Control>}s{/Control}");
+      await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+        "Publication state").textContent, "Published"));
+      const closeEvent = fakeWindow.close();
+      if (closeEvent.prevented) await fakeWindow.lastClose;
+      await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+      assert.equal(await fs.readFile(target, "utf8"), "saved:merged authenticated branch");
+      return;
+    }
     if (origin.startsWith("rw-")) {
       const outcome = origin.slice(3);
       if (outcome === "external") {
@@ -870,6 +956,12 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("cf-")) return `CF-${origin.slice(3)} conflict ${{
+    cancel: "window close Cancel", retry: "window close Retry remains conflict",
+    discard: "window close Discard policy blocks changed target",
+    merge: "real divergence merge save then close",
+    external: "queues external request", restart: "restart restores conflict merge draft",
+  }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("rw-")) return `RW-${origin.slice(3)} recovered work ${{
     cancel: "window close Cancel", save: "window close Save and publish",
     "save-retry": "window close Save failure then Retry", discard: "window close Discard",
