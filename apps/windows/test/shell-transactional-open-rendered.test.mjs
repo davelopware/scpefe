@@ -163,7 +163,8 @@ test("mounted shell keeps the session through picker, password, creation, and un
     let dialog = await submitPassword("Open document", "Open", "wrong password");
     await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent,
       /did not open/));
-    assert.equal(editor.value, "original plaintext");
+    assert.equal(editor.value, "",
+      "a failed password dialog retains but does not render the prior plaintext behind it");
     assert.equal(document.activeElement === ui.getByLabelText(dialog, "Password"), true);
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(cancelOpenCalls, 1);
@@ -242,10 +243,12 @@ test("mounted shell keeps the session through picker, password, creation, and un
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(createDialog, "button", { name: "Create" }));
     assert.equal(createCalls, 0, "mounted mismatch reaches no native creation boundary");
-    assert.equal(editor.value, "replacement plaintext");
+    assert.equal(editor.value, "",
+      "creation validation keeps the retained prior session masked");
     await user.click(ui.getByRole(createDialog, "button", { name: "Cancel" }));
     assert.equal(cancelCreateCalls, 1);
-    assert.equal(editor.value, "replacement plaintext");
+    assert.equal(editor.value, "replacement plaintext",
+      "canceling creation restores the retained prior session");
 
     await command("File", /New/);
     createDialog = await ui.findByRole(document.body, "dialog",
@@ -258,7 +261,8 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await user.click(ui.getByRole(createDialog, "button", { name: "Create" }));
     await ui.waitFor(() => assert.match(ui.getByRole(createDialog, "alert").textContent,
       /publication failed safely/));
-    assert.equal(editor.value, "replacement plaintext");
+    assert.equal(editor.value, "",
+      "creation publication failure keeps the retained prior session masked");
     assert.equal(ui.getByLabelText(createDialog, "Owner password").value,
       "owner password words");
     await user.click(ui.getByRole(createDialog, "button", { name: "Create" }));

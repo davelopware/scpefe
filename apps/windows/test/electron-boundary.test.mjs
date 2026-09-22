@@ -58,11 +58,17 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let invitationResult = { created: true,
     temporaryPassword: "generated secret words" };
   const invocations = [];
+  const rendererListeners = new Map();
   const electron = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposed = api; } },
-    ipcRenderer: { on: () => {}, removeListener: () => {},
+    ipcRenderer: { on: (channel, listener) => rendererListeners.set(channel, listener),
+      removeListener: (channel, listener) => {
+        if (rendererListeners.get(channel) === listener) rendererListeners.delete(channel);
+      },
       invoke: async (channel, request) => {
         invocations.push({ channel, request });
+        if (channel === "profile:save") return { ...request,
+          nativeProfilePath: "C:\\private\\profile.json" };
         if (channel === "document:choose-create-target") {
           return { selected: true };
         }
@@ -102,6 +108,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:begin-divergence-resolution") return divergenceResult;
         if (channel === "document:cancel-lease-takeover") return true;
         if (channel === "document:migrate") return migrationResult;
+        if (channel === "document:remove-slot") {
+          return { removed: true, warning: "Password slot removed." };
+        }
         return null;
       } },
   };
@@ -132,6 +141,22 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "onUnresolvedJournalSummary",
     "onSwitchRetained", "onProtectionRequested", "onDocumentClosed",
   ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.saveProfile({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk",
+  }))), { name: "Ada", email: "ada@example.test", deviceName: "Desk" });
+  assert.equal(JSON.stringify(await exposed.saveProfile({
+    name: "Ada", email: "ada@example.test", deviceName: "Desk",
+  })).includes("profile.json"), false, "host-only profile paths do not cross preload");
+  let regularSave;
+  const stopRegularSave = exposed.onRegularSave((value) => { regularSave = value; });
+  rendererListeners.get("document:regular-saved")({}, { published: true,
+    provisional: true, content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
+    password: "must not cross" });
+  assert.deepEqual(JSON.parse(JSON.stringify(regularSave)), {
+    published: true, provisional: true, content: "exact\ntext",
+  });
+  stopRegularSave();
+  assert.equal(rendererListeners.has("document:regular-saved"), false);
   await assert.rejects(exposed.compactDocument(), /explicitly confirmed/);
   assert.equal(invocations.some(({ channel }) => channel === "document:compact"), false);
   assert.equal(await exposed.compactDocument({ confirmed: true }), null);
@@ -263,6 +288,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:unlock", request: "correct password" });
   assert.equal(await exposed.cancelInvitationClaim(), true);
   assert.equal(invocations.at(-1).channel, "document:cancel-invitation-claim");
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.removeSlot("ab".repeat(16)))), {
+    removed: true, warning: "Password slot removed.",
+  });
   await exposed.changePassword({ currentPassword: "current password words",
     newPassword: "replacement password words",
     newPasswordConfirmation: "replacement password words", ignored: "private" });

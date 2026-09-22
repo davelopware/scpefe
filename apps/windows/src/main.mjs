@@ -11,6 +11,9 @@ import { registerMigrationHandler } from "./migration-flow.mjs";
 import { acknowledgementCredentials, acknowledgementTargetHash,
   createAcknowledgement, openTargetFromAdditionalData, openTargetFromCommandLine,
   openTargetFromUrl, validateAcknowledgement } from "./single-instance.mjs";
+import { validateInvitationCreateRequest, validatePassword,
+  validatePasswordChangeRequest, validatePlaintextExportRequest,
+  validateSlotId, validateSlotPermissionsRequest } from "./contracts.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -194,22 +197,20 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     dialog, window, authorizations: lifecycleHost.leaseTakeovers,
     validateAuthorization: leaseRequestAuthorization });
   ipcMain.handle("document:change-password", (_event, request) =>
-    lifecycleHost.service.changePassword(request));
+    lifecycleHost.service.changePassword(validatePasswordChangeRequest(request)));
   ipcMain.handle("document:create-invitation", (_event, request) =>
-    lifecycleHost.service.createInvitation(request));
+    lifecycleHost.service.createInvitation(validateInvitationCreateRequest(request)));
   ipcMain.handle("document:copy-invitation-passphrase", (_event, password) => {
-    if (typeof password !== "string" || password.length === 0 || password.length > 4096) {
-      throw new TypeError("invitation passphrase is invalid");
-    }
-    clipboard.writeText(password); return true;
+    clipboard.writeText(validatePassword(password)); return true;
   });
   ipcMain.handle("document:reconcile-identity", () =>
     lifecycleHost.service.reconcileIdentity());
   ipcMain.handle("document:update-slot-permissions", (_event, request) =>
-    lifecycleHost.service.updateSlotPermissions(request));
+    lifecycleHost.service.updateSlotPermissions(validateSlotPermissionsRequest(request)));
   ipcMain.handle("document:remove-slot", (_event, slotId) =>
-    lifecycleHost.service.removeSlot(slotId));
+    lifecycleHost.service.removeSlot(validateSlotId(slotId)));
   ipcMain.handle("document:export-plaintext", async (_event, request) => {
+    const validated = validatePlaintextExportRequest(request);
     const warning = await dialog.showMessageBox(window, { type: "warning",
       title: "Export unprotected plaintext?",
       message: "The exported copy will not be password protected.",
@@ -220,7 +221,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       filters: [{ name: "Plain text", extensions: ["txt"] }],
       properties: ["createDirectory", "showOverwriteConfirmation"] });
     return chosen.canceled || !chosen.filePath ? null
-      : lifecycleHost.service.exportPlaintext(chosen.filePath, request);
+      : lifecycleHost.service.exportPlaintext(chosen.filePath, validated);
   });
 
   powerMonitor.on("lock-screen", () => { void lifecycleHost.lockActive("screen-lock"); });

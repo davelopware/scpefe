@@ -11,6 +11,9 @@ import { SessionProtectionCoordinator } from "./session-protection.mjs";
 import { OrderedOpenRequests } from "./single-instance.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { registerNativeWindowClose } from "./window-lifecycle.mjs";
+import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
+  validatePassword, validateProfile, validateTakeoverCancellation,
+  validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
 
 const AUTOMATIC_LOCK_REASONS = Object.freeze([
   "inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock",
@@ -213,10 +216,11 @@ export class DocumentLifecycleHost {
 
   #registerHandlers() {
     this.#register("profile:get", () => this.service.loadProfile());
-    this.#register("profile:save", (profile) => this.service.saveProfile(profile));
+    this.#register("profile:save", (profile) => this.service.saveProfile(validateProfile(profile)));
     this.#register("profile:reconcile-active", () => this.service.reconcileProfile());
     this.#register("settings:get", () => this.service.loadClientSettings());
-    this.#register("settings:save", (settings) => this.service.saveClientSettings(settings));
+    this.#register("settings:save", (settings) =>
+      this.service.saveClientSettings(validateClientSettings(settings)));
     this.#register("journal:summary", () => this.service.unresolvedJournalSummary());
     this.#register("document:choose-create-target", () => this.creation.chooseTarget(
       () => this.picker.chooseCreateTarget()));
@@ -231,9 +235,13 @@ export class DocumentLifecycleHost {
         ? Object.freeze({ selected: true, name: this.basename(this.selectedOpenTarget) }) : null;
     });
     this.#register("document:cancel-open-target", () => { this.selectedOpenTarget = null; });
-    this.#register("document:open-selected", (password) => this.#openSelected(password));
-    this.#register("document:unlock", (password) => this.#unlock(password));
-    this.#register("document:open-external", (request) => this.#openExternal(request));
+    this.#register("document:open-selected", (password) =>
+      this.#openSelected(validatePassword(password)));
+    this.#register("document:unlock", (password) => this.#unlock(validatePassword(password)));
+    this.#register("document:open-external", (request) => this.#openExternal({
+      token: validateExternalOpenRequest(request).token,
+      password: validatePassword(request?.password),
+    }));
     this.#register("document:cancel-external-open", (request) => {
       if (!request || typeof request.token !== "string") {
         throw new TypeError("invalid external open cancellation");
@@ -242,20 +250,22 @@ export class DocumentLifecycleHost {
         { blocked: this.externalOpenInProgress });
     });
     this.#register("document:enter-edit-mode", (request = {}) => {
+      const validated = validateTakeoverRequest(request);
       const current = this.service;
       return runLeaseOperation({ authorizations: this.leaseTakeovers, operation: "edit",
-        service: current, authorization: request.authorization,
+        service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.enterEditMode({ takeoverToken }) });
     });
     this.#register("document:update-working-copy", (working) =>
-      this.service.updateWorkingCopy(working));
+      this.service.updateWorkingCopy(validateWorkingCopy(working)));
     this.#register("document:activity", () => this.service.notifyActivity());
     this.#register("document:save", async (content) => {
       let result;
-      try { result = await this.service.saveDocument(content); }
+      const canonical = canonicalizeDocumentText(content);
+      try { result = await this.service.saveDocument(canonical); }
       catch (error) {
         if (!error?.publicationPrepared || !this.service.active?.opened) throw error;
-        result = { saved: true, content,
+        result = { saved: true, content: canonical,
           publicationState: this.service.active.opened.publicationState };
       }
       await this.sendJournalSummary(); return result;
@@ -265,13 +275,15 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:begin-divergence-resolution", (request = {}) => {
+      const validated = validateTakeoverRequest(request);
       const current = this.service;
       return runLeaseOperation({ authorizations: this.leaseTakeovers, operation: "divergence",
-        service: current, authorization: request.authorization,
+        service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken }) });
     });
     this.#register("document:save-divergence-resolution", async (content) => {
-      const result = await this.service.saveDivergenceResolution(content);
+      const result = await this.service.saveDivergenceResolution(
+        canonicalizeDocumentText(content));
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:discard-publication", async () => {
@@ -279,9 +291,10 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:restore-recovery", async (request = {}) => {
+      const validated = validateTakeoverRequest(request);
       const current = this.service;
       const result = await runLeaseOperation({ authorizations: this.leaseTakeovers,
-        operation: "recovery", service: current, authorization: request.authorization,
+        operation: "recovery", service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.restoreRecoveredWork({ takeoverToken }) });
       await this.sendJournalSummary(); return result;
     });
@@ -291,8 +304,9 @@ export class DocumentLifecycleHost {
     });
     this.#register("document:accept-head-mismatch", () => this.service.acceptHeadMismatch());
     this.#register("document:cancel-lease-takeover", (authorization) =>
-      this.leaseTakeovers.cancel(authorization, this.service));
-    this.#register("document:claim-invitation", (password) => this.#claim(password));
+      this.leaseTakeovers.cancel(validateTakeoverCancellation(authorization), this.service));
+    this.#register("document:claim-invitation", (password) =>
+      this.#claim(validatePassword(password)));
     this.#register("document:cancel-invitation-claim", async () => {
       const canceled = await this.replacements.cancelClaim();
       if (canceled && this.externalLifecycle.invitation) {

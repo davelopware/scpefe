@@ -15,14 +15,15 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePasswordChangeRequest, validateInvitationCreateRequest,
   validateInvitationResult, validateInvitationClaimRequest,
   validateSlotPermissionsRequest,
-  validateSlotId } from "./contracts.mjs";
+  validateSlotId, validateRegularSaveResult, validateSlotRemovalResult } from "./contracts.mjs";
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
     const value = await ipcRenderer.invoke("profile:get");
     return value === null ? null : validateProfile(value);
   },
-  saveProfile: (profile) => ipcRenderer.invoke("profile:save", validateProfile(profile)),
+  saveProfile: async (profile) => validateProfile(
+    await ipcRenderer.invoke("profile:save", validateProfile(profile))),
   reconcileProfile: async () => {
     const value = await ipcRenderer.invoke("profile:reconcile-active");
     return value === null ? null : validateOpenedDocument(value);
@@ -37,7 +38,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:choose-create-target");
     return value === null ? null : validateCreationTargetResult(value);
   },
-  cancelCreateTarget: () => ipcRenderer.invoke("document:cancel-create-target"),
+  cancelCreateTarget: async () => {
+    await ipcRenderer.invoke("document:cancel-create-target");
+  },
   createDocument: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:create", validateCreateFormRequest(request));
@@ -47,7 +50,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:choose-open-target");
     return value === null ? null : validateOpenTargetResult(value);
   },
-  cancelOpenTarget: () => ipcRenderer.invoke("document:cancel-open-target"),
+  cancelOpenTarget: async () => {
+    await ipcRenderer.invoke("document:cancel-open-target");
+  },
   openSelectedDocument: async (password) => validateOpenedDocument(
     await ipcRenderer.invoke("document:open-selected", validatePassword(password))),
   unlockDocument: async (password) => validateOpenedDocument(
@@ -129,16 +134,19 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   updateSlotPermissions: async (request) => validateOpenedDocument(
     await ipcRenderer.invoke("document:update-slot-permissions",
       validateSlotPermissionsRequest(request))),
-  removeSlot: (slotId) => ipcRenderer.invoke("document:remove-slot",
-    validateSlotId(slotId)),
+  removeSlot: async (slotId) => validateSlotRemovalResult(
+    await ipcRenderer.invoke("document:remove-slot", validateSlotId(slotId))),
   exportPlaintext: async (request) => {
     const value = await ipcRenderer.invoke(
       "document:export-plaintext", validatePlaintextExportRequest(request));
     return value === null ? null : validatePlaintextExportResult(value);
   },
-  updateWorkingCopy: (working) => ipcRenderer.invoke(
-    "document:update-working-copy", validateWorkingCopy(working)),
-  activity: () => ipcRenderer.invoke("document:activity"),
+  updateWorkingCopy: async (working) => {
+    await ipcRenderer.invoke("document:update-working-copy", validateWorkingCopy(working));
+  },
+  activity: async () => {
+    await ipcRenderer.invoke("document:activity");
+  },
   restoreRecoveredWork: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:restore-recovery",
       validateTakeoverRequest(request));
@@ -202,17 +210,14 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   onJournalWarning: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     const handler = (_event, value) => {
-      if (typeof value === "string") listener(value);
+      if (typeof value === "string" && value.length <= 4096) listener(value);
     };
     ipcRenderer.on("document:journal-warning", handler);
     return () => ipcRenderer.removeListener("document:journal-warning", handler);
   },
   onRegularSave: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
-    const handler = (_event, value) => {
-      if (value?.published === true && value?.provisional === true
-          && typeof value.content === "string") listener(Object.freeze({ ...value }));
-    };
+    const handler = (_event, value) => listener(validateRegularSaveResult(value));
     ipcRenderer.on("document:regular-saved", handler);
     return () => ipcRenderer.removeListener("document:regular-saved", handler);
   },

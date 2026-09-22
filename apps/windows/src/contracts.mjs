@@ -37,6 +37,15 @@ function requiredText(value, field, maximum = 512) {
   return normalized;
 }
 
+function optionalBoundedText(value, field, maximum = 4096) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || hasUnpairedSurrogate(value)
+      || Buffer.byteLength(value, "utf8") > maximum) {
+    throw new TypeError(`${field} must be bounded text`);
+  }
+  return value;
+}
+
 function canonicalCursorOffset(value, offset) {
   let prefix = value.slice(0, offset);
   if (prefix.startsWith("\ufeff")) prefix = prefix.slice(1);
@@ -297,12 +306,26 @@ export function validateOpenedDocument(value) {
       || typeof value.content !== "string" || typeof value.canEdit !== "boolean") {
     throw new TypeError("native bridge returned an invalid document");
   }
+  const content = canonicalizeDocumentText(value.content);
   if (value.mustBeChanged !== undefined && typeof value.mustBeChanged !== "boolean") {
     throw new TypeError("native bridge returned invalid invitation state");
   }
   if (value.canAddPasswords !== undefined
       && typeof value.canAddPasswords !== "boolean") {
     throw new TypeError("native bridge returned invalid slot permissions");
+  }
+  if (value.canRemovePasswords !== undefined
+      && typeof value.canRemovePasswords !== "boolean") {
+    throw new TypeError("native bridge returned invalid slot permissions");
+  }
+  if (value.recoverySlot !== undefined && typeof value.recoverySlot !== "boolean") {
+    throw new TypeError("native bridge returned invalid recovery-slot state");
+  }
+  if (value.slotId !== undefined && !/^[0-9a-f]{32}$/.test(value.slotId)) {
+    throw new TypeError("native bridge returned invalid active slot ID");
+  }
+  if ((value.slotIdentityName === undefined) !== (value.slotIdentityEmail === undefined)) {
+    throw new TypeError("native bridge returned incomplete slot identity");
   }
   const invitationRequired = value.mustBeChanged === true;
   const targetName = validateTargetName(value.targetName);
@@ -328,7 +351,11 @@ export function validateOpenedDocument(value) {
         || typeof candidate.deviceName !== "string") {
       throw new TypeError("host returned invalid editing lease details");
     }
-    lease = Object.freeze({ ...candidate });
+    lease = Object.freeze({ active: candidate.active,
+      holderName: requiredText(candidate.holderName || "Unknown editor", "lease holder"),
+      holderEmail: optionalBoundedText(candidate.holderEmail, "lease holder email", 512) ?? "",
+      deviceName: optionalBoundedText(candidate.deviceName, "lease device name", 512) ?? "",
+      holderUtcMs: candidate.holderUtcMs, durationMs: candidate.durationMs });
   }
   let headMismatch;
   if (value.headMismatch !== undefined) {
@@ -346,7 +373,10 @@ export function validateOpenedDocument(value) {
           && !/^[0-9a-f]{64}$/.test(mismatch.witnessedHead))) {
       throw new TypeError("host returned an invalid head mismatch");
     }
-    headMismatch = Object.freeze({ ...mismatch });
+    headMismatch = Object.freeze({ kind: mismatch.kind,
+      title: requiredText(mismatch.title, "head mismatch title"),
+      explanation: requiredText(mismatch.explanation, "head mismatch explanation", 4096),
+      editingBlocked: true });
   }
   if (value.recovery !== undefined) {
     if (!value.recovery || typeof value.recovery !== "object"
@@ -361,14 +391,16 @@ export function validateOpenedDocument(value) {
         || value.recovery.cursor.end > value.recovery.content.length) {
       throw new TypeError("host returned invalid recovered work");
     }
-    recovery = Object.freeze({ content: value.recovery.content, state: "unsaved",
+    const recoveryContent = canonicalizeDocumentText(value.recovery.content);
+    recovery = Object.freeze({ content: recoveryContent, state: "unsaved",
       updateTime: value.recovery.updateTime,
       ...(typeof value.recovery.authorName === "string" && value.recovery.authorName
-        ? { authorName: value.recovery.authorName } : {}),
+        ? { authorName: requiredText(value.recovery.authorName, "recovery author") } : {}),
       ...(typeof value.recovery.deviceName === "string" && value.recovery.deviceName
-        ? { deviceName: value.recovery.deviceName } : {}),
-      cursor: Object.freeze({ start: value.recovery.cursor.start,
-        end: value.recovery.cursor.end }) });
+        ? { deviceName: requiredText(value.recovery.deviceName, "recovery device") } : {}),
+      cursor: Object.freeze({
+        start: canonicalCursorOffset(value.recovery.content, value.recovery.cursor.start),
+        end: canonicalCursorOffset(value.recovery.content, value.recovery.cursor.end) }) });
   }
   const publicationState = value.publicationState ?? "target-published";
   if (!["target-published", "pending-publication", "conflict"].includes(publicationState)) {
@@ -395,9 +427,15 @@ export function validateOpenedDocument(value) {
         || typeof mismatch.profileEmail !== "string") {
       throw new TypeError("host returned invalid profile mismatch details");
     }
-    profileMismatch = Object.freeze({ ...mismatch, editingBlocked: true });
+    profileMismatch = Object.freeze({
+      slotName: requiredText(mismatch.slotName, "slot name"),
+      slotEmail: requiredText(mismatch.slotEmail, "slot email"),
+      profileName: requiredText(mismatch.profileName, "profile name"),
+      profileEmail: requiredText(mismatch.profileEmail, "profile email"),
+      editingBlocked: true });
   }
-  if (value.managedSlots !== undefined && !Array.isArray(value.managedSlots)) {
+  if (value.managedSlots !== undefined && (!Array.isArray(value.managedSlots)
+      || value.managedSlots.length > 8)) {
     throw new TypeError("host returned invalid managed slots");
   }
   const managedSlots = value.managedSlots?.map((slot) => {
@@ -414,9 +452,19 @@ export function validateOpenedDocument(value) {
         || (slot.identityKnown !== undefined && typeof slot.identityKnown !== "boolean")) {
       throw new TypeError("host returned invalid managed slot details");
     }
-    return Object.freeze({ ...slot });
+    return Object.freeze({ slotId: slot.slotId,
+      identityName: optionalBoundedText(slot.identityName, "slot identity name", 512) ?? "",
+      identityEmail: optionalBoundedText(slot.identityEmail, "slot identity email", 512) ?? "",
+      canEdit: slot.canEdit, canAddPasswords: slot.canAddPasswords,
+      canRemovePasswords: slot.canRemovePasswords, mustBeChanged: slot.mustBeChanged,
+      ...(slot.slotIdKnown !== undefined ? { slotIdKnown: slot.slotIdKnown } : {}),
+      ...(slot.permissionsKnown !== undefined
+        ? { permissionsKnown: slot.permissionsKnown } : {}),
+      ...(slot.mustBeChangedKnown !== undefined
+        ? { mustBeChangedKnown: slot.mustBeChangedKnown } : {}),
+      ...(slot.identityKnown !== undefined ? { identityKnown: slot.identityKnown } : {}) });
   });
-  return Object.freeze({ content: value.content, readOnly: true,
+  return Object.freeze({ content, readOnly: true,
     canEdit: migrationRequired ? false : value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
     ...(migrationRequired ? { migrationRequired: true,
@@ -429,8 +477,10 @@ export function validateOpenedDocument(value) {
     ...(value.recoverySlot !== undefined ? { recoverySlot: value.recoverySlot } : {}),
     ...(value.slotId !== undefined ? { slotId: value.slotId } : {}),
     ...(value.slotIdentityName !== undefined
-      ? { slotIdentityName: value.slotIdentityName,
-        slotIdentityEmail: value.slotIdentityEmail } : {}),
+      ? { slotIdentityName: optionalBoundedText(
+        value.slotIdentityName, "slot identity name", 512) ?? "",
+      slotIdentityEmail: optionalBoundedText(
+        value.slotIdentityEmail, "slot identity email", 512) ?? "" } : {}),
     ...(managedSlots ? { managedSlots: Object.freeze(managedSlots) } : {}),
     ...(profileMismatch ? { profileMismatch } : {}),
     ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),
@@ -449,20 +499,11 @@ export function validateEditMode(value) {
     .includes(publicationState)) {
     throw new TypeError("host returned an invalid publication state");
   }
-  return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
+  const narrowed = validateOpenedDocument({ ...value, readOnly: true });
+  return Object.freeze({ ...narrowed, content: canonicalizeDocumentText(value.content),
+    readOnly: false, canEdit: true,
     publicationState,
-    ...(value.canAddPasswords !== undefined
-      ? { canAddPasswords: value.canAddPasswords } : {}),
-    ...(value.canRemovePasswords !== undefined
-      ? { canRemovePasswords: value.canRemovePasswords } : {}),
-    ...(value.recoverySlot !== undefined ? { recoverySlot: value.recoverySlot } : {}),
-    ...(value.slotId !== undefined ? { slotId: value.slotId } : {}),
-    ...(value.slotIdentityName !== undefined
-      ? { slotIdentityName: value.slotIdentityName,
-        slotIdentityEmail: value.slotIdentityEmail } : {}),
-    ...(value.managedSlots !== undefined ? { managedSlots: value.managedSlots } : {}),
-    ...(value.invitationRequired !== undefined
-      ? { invitationRequired: false } : {}) });
+    ...(value.invitationRequired !== undefined ? { invitationRequired: false } : {}) });
 }
 
 export function validateLeaseDecisionResult(value) {
@@ -515,9 +556,15 @@ export function validateRecoveredWork(value) {
       || !Number.isSafeInteger(value.cursor.end)) {
     throw new TypeError("host did not restore recovered work");
   }
-  return Object.freeze({ content: value.content, readOnly: false, canEdit: true,
-    recoveredUnsaved: true, cursor: Object.freeze({ start: value.cursor.start,
-      end: value.cursor.end }) });
+  const content = canonicalizeDocumentText(value.content);
+  if (value.cursor.start < 0 || value.cursor.end < value.cursor.start
+      || value.cursor.end > value.content.length) {
+    throw new TypeError("host did not restore recovered work");
+  }
+  return Object.freeze({ content, readOnly: false, canEdit: true,
+    recoveredUnsaved: true, cursor: Object.freeze({
+      start: canonicalCursorOffset(value.content, value.cursor.start),
+      end: canonicalCursorOffset(value.content, value.cursor.end) }) });
 }
 
 export function validateSaveResult(value) {
@@ -527,7 +574,7 @@ export function validateSaveResult(value) {
       || Object.keys(value).length !== 3) {
     throw new TypeError("host returned an invalid save result");
   }
-  return Object.freeze({ saved: true, content: value.content,
+  return Object.freeze({ saved: true, content: canonicalizeDocumentText(value.content),
     publicationState: value.publicationState });
 }
 
@@ -538,7 +585,7 @@ export function validatePublicationResult(value) {
     throw new TypeError("host returned an invalid publication result");
   }
   return Object.freeze({ publicationState: value.publicationState,
-    content: value.content });
+    content: canonicalizeDocumentText(value.content) });
 }
 
 export function validateMergeDraft(value) {
@@ -601,11 +648,14 @@ export function validateCompactionResult(value) {
 
 export function validateMigrationResult(value) {
   if (!value || typeof value !== "object" || value.migrated !== true
-      || value.backupCreated !== true || typeof value.compatibilityWarning !== "string") {
+      || value.backupCreated !== true || typeof value.compatibilityWarning !== "string"
+      || Object.keys(value).some((key) => !["migrated", "backupCreated",
+        "compatibilityWarning", "opened"].includes(key))) {
     throw new TypeError("host returned an invalid migration result");
   }
   return Object.freeze({ migrated: true, backupCreated: true,
-    compatibilityWarning: value.compatibilityWarning,
+    compatibilityWarning: requiredText(value.compatibilityWarning,
+      "migration compatibility warning", 4096),
     opened: validateEditMode(value.opened) });
 }
 
@@ -636,7 +686,25 @@ export function validateLockResult(value) {
     throw new TypeError("host returned an invalid lock result");
   }
   return Object.freeze({ locked: true, journalSaved: value.journalSaved,
-    warning: value.warning });
+    warning: optionalBoundedText(value.warning, "lock warning") });
+}
+
+export function validateRegularSaveResult(value) {
+  if (!value || typeof value !== "object" || value.published !== true
+      || value.provisional !== true || typeof value.content !== "string") {
+    throw new TypeError("host returned an invalid regular-save result");
+  }
+  return Object.freeze({ published: true, provisional: true,
+    content: canonicalizeDocumentText(value.content) });
+}
+
+export function validateSlotRemovalResult(value) {
+  if (!value || typeof value !== "object" || value.removed !== true
+      || Object.keys(value).some((key) => !["removed", "warning"].includes(key))) {
+    throw new TypeError("host returned an invalid slot-removal result");
+  }
+  return Object.freeze({ removed: true,
+    warning: optionalBoundedText(value.warning, "slot-removal warning") ?? "Password slot removed." });
 }
 
 export function validateCreationResult(value) {

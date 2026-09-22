@@ -262,6 +262,8 @@ test("mounted shell presents truthful document states, history, failures, and se
   await command("File", /Export Plaintext/);
   let exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
   assert.match(exportDialog.textContent, /Not password protected/);
+  assert.equal(editor.value, "",
+    "the modal plaintext-export warning does not leave document text rendered behind it");
   await user.selectOptions(ui.getByLabelText(exportDialog, "Line endings"), "native");
   await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
   await ui.waitFor(() => assert.equal(
@@ -273,7 +275,8 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.match((await ui.findByRole(exportDialog, "alert")).textContent,
     /export destination unavailable/);
   assert.equal(document.activeElement?.textContent.trim(), "Export current text…");
-  assert.equal(editor.value, beforeTransfer);
+  assert.equal(editor.value, "",
+    "export failure retains but does not render document text behind the modal");
   await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
   await ui.waitFor(() => assert.equal(
     ui.queryByRole(document.body, "dialog", { name: "Export plaintext" }), null));

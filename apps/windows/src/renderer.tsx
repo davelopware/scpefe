@@ -1,4 +1,4 @@
-import React, { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import React, { FormEvent, KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
@@ -152,6 +152,7 @@ function FocusedDialog({ title, children, close, initialFocus, returnFocus }: {
   title: string; children: React.ReactNode; close?: () => void;
   initialFocus?: React.RefObject<HTMLElement | null>; returnFocus?: HTMLElement | null }) {
   const dialog = useRef<HTMLElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const prior = returnFocus ?? document.activeElement as HTMLElement | null;
     const chrome = document.querySelector<HTMLElement>(".shell-chrome");
@@ -176,7 +177,7 @@ function FocusedDialog({ title, children, close, initialFocus, returnFocus }: {
       : (at >= controls.length - 1 ? 0 : at + 1);
     event.preventDefault(); controls[next].focus();
   }}><section ref={dialog} className="app-dialog" role="dialog" aria-modal="true"
-    aria-labelledby="focused-dialog-title"><h2 id="focused-dialog-title">{title}</h2>
+    aria-labelledby={titleId}><h2 id={titleId}>{title}</h2>
     {children}</section></div>;
 }
 
@@ -375,6 +376,9 @@ function App() {
   const [protection, setProtection] = useState<ProtectionRequest | null>(null);
   const [protectionError, setProtectionError] = useState("");
   const editor = useRef<HTMLTextAreaElement>(null);
+  const manualBaselineValid = useRef(true);
+  const editorSelection = useRef<Cursor>({ start: 0, end: 0 });
+  const wasModalBusy = useRef(false);
   const replacementFocusPending = useRef(false);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
@@ -412,6 +416,8 @@ function App() {
     const stopWarning = window.scpefe.onJournalWarning(setMessage);
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
       setSaveState("provisional");
+      manualBaselineValid.current = false;
+      setDirty(true);
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: result.content, provisional: true } : current);
       setMessage("Regular save published provisionally; changes remain unsaved until manual save.");
@@ -477,6 +483,7 @@ function App() {
     }
     setWorkingText(content);
     setManualSavedText(content);
+    manualBaselineValid.current = !(result && !result.invitationRequired && result.provisional);
     setDirty(Boolean(result && !result.invitationRequired && result.provisional));
     setSaveState(result && !result.invitationRequired && result.provisional ? "provisional"
       : result && !result.invitationRequired && result.recovery ? "unsaved"
@@ -484,6 +491,7 @@ function App() {
         ? result.publicationState : "target-published");
     setHistory([content]);
     setHistoryIndex(0);
+    editorSelection.current = { start: 0, end: 0 };
     setFindOpen(false);
     setFindText("");
     setReplaceText("");
@@ -513,6 +521,14 @@ function App() {
 
   const activeDocument = isDocumentOpened(opened);
   const lockedDocument = locked && targetName !== null;
+  useEffect(() => {
+    const restoreSelection = wasModalBusy.current && !modalBusy.current && activeDocument;
+    wasModalBusy.current = modalBusy.current;
+    if (!restoreSelection) return;
+    const { start, end } = editorSelection.current;
+    requestAnimationFrame(() => editor.current?.setSelectionRange(
+      Math.min(start, workingText.length), Math.min(end, workingText.length)));
+  });
   useEffect(() => {
     if (!replacementFocusPending.current || creating || dialog !== null
         || visibleOpenedDialog !== null || protection !== null || !activeDocument) return;
@@ -978,7 +994,9 @@ function App() {
     setWorkingText(result.content);
     setHistory([result.content]);
     setHistoryIndex(0);
+    editorSelection.current = result.cursor;
     setDirty(true);
+    manualBaselineValid.current = false;
     setSaveState("unsaved");
     setOpenedDialogError("");
     setMessage("Recovered work restored as unsaved changes.");
@@ -1019,6 +1037,7 @@ function App() {
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);
+      manualBaselineValid.current = true;
       setSaveState("target-published");
       setMessage("Recovered work discarded.");
     } catch (error) {
@@ -1054,6 +1073,7 @@ function App() {
       setManualSavedText("");
       setHistory([""]);
       setHistoryIndex(0);
+      manualBaselineValid.current = true;
       setFindText("");
       setReplaceText("");
       setFindOpen(false);
@@ -1088,11 +1108,12 @@ function App() {
 
   function edit(content: string, cursor?: Cursor) {
     setWorkingText(content);
-    setDirty(content !== manualSavedText);
+    setDirty(!manualBaselineValid.current || content !== manualSavedText);
     setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
     setHistory((current) => [...current.slice(0, historyIndex + 1), content]);
     setHistoryIndex((current) => current + 1);
     const nextCursor = cursor ?? { start: content.length, end: content.length };
+    editorSelection.current = nextCursor;
     void window.scpefe.updateWorkingCopy({ content, cursor: nextCursor }).catch(showError);
   }
 
@@ -1105,6 +1126,7 @@ function App() {
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);
+      manualBaselineValid.current = true;
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         content: result.content,
         readOnly: result.publicationState !== "target-published",
@@ -1126,6 +1148,7 @@ function App() {
   function applyDivergenceDraft(draft: MergeDraft) {
     setWorkingText(draft.content);
     setDirty(true);
+    manualBaselineValid.current = false;
     setHistory([draft.content]);
     setHistoryIndex(0);
     setOpened((current) => isDocumentOpened(current) ? { ...current,
@@ -1172,6 +1195,7 @@ function App() {
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);
+      manualBaselineValid.current = true;
       setSaveState(result.publicationState);
       if (result.publicationState !== "conflict") setResolvingConflict(false);
       setMessage(result.publicationState === "target-published"
@@ -1194,6 +1218,7 @@ function App() {
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);
+      manualBaselineValid.current = true;
       setSaveState("target-published");
       setMessage("Pending manual save explicitly discarded.");
     } catch (error) {
@@ -1229,7 +1254,8 @@ function App() {
     const content = history[next];
     setHistoryIndex(next);
     setWorkingText(content);
-    setDirty(content !== manualSavedText);
+    setDirty(!manualBaselineValid.current || content !== manualSavedText);
+    editorSelection.current = { start: content.length, end: content.length };
     void window.scpefe.updateWorkingCopy({ content,
       cursor: { start: content.length, end: content.length } }).catch(showError);
   }
@@ -1248,6 +1274,7 @@ function App() {
     }
     editor.current.focus();
     editor.current.setSelectionRange(match, match + findText.length);
+    editorSelection.current = { start: match, end: match + findText.length };
     const status = wrapped ? "Match selected after wrapping to the start."
       : "Match selected.";
     setFindStatus(status); setMessage(status);
@@ -1348,9 +1375,12 @@ function App() {
         {lockedDocument ? "Document locked. Use Security → Unlock to continue."
           : "No document. Use File → New or File → Open."}</p>}
       <textarea ref={editor} aria-label="Document text"
-        value={activeDocument && visibleOpenedDialog === null && !leaseDecision && !saveError
+        value={activeDocument && !modalBusy.current
           ? workingText : ""}
         disabled={!activeDocument} readOnly={!activeDocument || opened.readOnly}
+        onSelect={(event) => { editorSelection.current = {
+          start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd,
+        }; }}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
       {findOpen && activeDocument && <section className="modeless-dialog" role="dialog"

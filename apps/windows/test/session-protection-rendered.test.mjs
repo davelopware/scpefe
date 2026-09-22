@@ -164,6 +164,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   for (const [operation, trigger] of triggers) {
     await trigger();
     dialog = await ui.findByRole(document.body, "dialog", { name: /Protect current document/ });
+    assert.equal(editor.value, "",
+      "lifecycle decisions retain but do not render protected plaintext behind a modal");
     assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
     assert.ok(ui.getAllByRole(dialog, "listitem").length >= 1);
     assert.equal(ui.getByRole(dialog, "alert").textContent.includes("silently lost"), true);
@@ -197,7 +199,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       await ui.waitFor(() => assert.ok(ui.getByText(dialog,
         /publication retry failed safely/)));
       assert.equal(document.activeElement === retry, true);
-      assert.equal(editor.value, "unsaved plaintext");
+      assert.equal(editor.value, "",
+        "a failed publication decision keeps protected plaintext masked");
       await user.click(retry);
       await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     });
@@ -224,7 +227,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       await user.click(discard);
       await ui.waitFor(() => assert.ok(ui.getByText(dialog, /discard cleanup failed safely/)));
       assert.equal(document.activeElement, discard);
-      assert.equal(editor.value, "unsaved plaintext");
+      assert.equal(editor.value, "",
+        "a failed discard decision keeps protected plaintext masked");
       await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
       await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
       assert.equal(editor.value, "unsaved plaintext");
@@ -233,7 +237,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   await t.test("mounted Close discards recovered work only after approval", async () => {
     await fileCommand(/Close/);
     dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
-    assert.equal(editor.value, "unsaved plaintext");
+    assert.equal(editor.value, "",
+      "a pending destructive decision masks protected plaintext");
     await user.click(ui.getByRole(dialog, "button", { name: "Discard and continue" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     assert.equal(editor.value, "");
