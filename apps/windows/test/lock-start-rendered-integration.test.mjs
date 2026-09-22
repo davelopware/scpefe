@@ -281,9 +281,8 @@ export async function runMountedLock(t, origin) {
     }
     const recovery = await ui.findByRole(document.body, "dialog",
       { name: divergent ? "Divergence needs resolution" : "Recovered work" });
-    assert.equal(editor.value, divergent ? "local unpublished branch" : "original plaintext",
-      divergent ? "the exact local publication candidate remains visible while the remote branch is preserved"
-        : "the authenticated base remains visible until recovery is explicitly restored");
+    assert.equal(editor.value, "",
+      "a blocking recovery decision retains but does not expose plaintext behind its overlay");
     const entry = origin.slice(3);
     if (entry === "external") {
       await host.setReady(); const request = host.enqueueExternal({ target,
@@ -304,11 +303,15 @@ export async function runMountedLock(t, origin) {
     }
     assert.ok(await ui.findByRole(document.body, "dialog",
       { name: divergent ? "Divergence needs resolution" : "Recovered work" }));
-    assert.equal(editor.value, divergent ? "local unpublished branch" : "original plaintext");
+    assert.equal(editor.value, "");
     if (divergent) {
       assert.equal(host.service.active.opened.publicationState, "conflict");
+      assert.equal(host.service.active.opened.content, "local unpublished branch");
       assert.equal(host.service.active.pendingRecord.text, "local unpublished branch");
-    } else assert.equal(host.service.active.recovery.text, "restart recovered plaintext");
+    } else {
+      assert.equal(host.service.active.opened.content, "original plaintext");
+      assert.equal(host.service.active.recovery.text, "restart recovered plaintext");
+    }
     assert.equal(fakeWindow.closed, 0);
     return;
   }
@@ -376,9 +379,10 @@ export async function runMountedLock(t, origin) {
     await command("File", /^Save/);
     const pending = await ui.findByRole(document.body, "dialog",
       { name: "Manual save pending publication" });
-    assert.equal(editor.value, "mounted secret plaintext",
-      "pending publication keeps the authoritative session visibly mounted");
+    assert.equal(editor.value, "",
+      "the pending publication decision retains but does not expose plaintext behind its overlay");
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
+    assert.equal(host.service.active.opened.content, "mounted secret plaintext");
     const entry = origin.slice(3);
     if (entry === "external") {
       await host.setReady(); const request = host.enqueueExternal({ target,
@@ -395,7 +399,7 @@ export async function runMountedLock(t, origin) {
     }
     assert.equal(ui.getByRole(document.body, "dialog"), pending,
       "the real pending-publication decision remains authoritative");
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     assert.equal(fakeWindow.closed, 0);
     return;
   }

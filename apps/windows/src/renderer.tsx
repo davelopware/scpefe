@@ -1329,7 +1329,8 @@ function App() {
         {lockedDocument ? "Document locked. Use Security → Unlock to continue."
           : "No document. Use File → New or File → Open."}</p>}
       <textarea ref={editor} aria-label="Document text"
-        value={activeDocument ? workingText : ""}
+        value={activeDocument && visibleOpenedDialog === null && !leaseDecision && !saveError
+          ? workingText : ""}
         disabled={!activeDocument} readOnly={!activeDocument || opened.readOnly}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
