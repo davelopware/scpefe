@@ -860,7 +860,7 @@ export async function runMountedLock(t, origin) {
       const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
       postAuthorizationFaultTarget = newTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
-      await ui.findByText(protection, /selected target changed/i);
+      await ui.findByText(protection, /document protection choice could not be completed/i);
       assert.equal(host.service, service);
       assert.equal(editor.value, "");
       assert.equal(service.active.dirty, false,
@@ -878,8 +878,7 @@ export async function runMountedLock(t, origin) {
       await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
       return;
     }
-    await ui.findByText(creation, origin === "rn-create-fault"
-      ? /injected native create failure/ : /injected created candidate lease failure/);
+    await ui.findByText(creation, /encrypted document could not be created/i);
     assert.equal(host.service === service, true);
     assert.equal(editor.value, "");
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
@@ -920,7 +919,7 @@ export async function runMountedLock(t, origin) {
       postAuthorizationFaultTarget = otherTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
     }
-    await ui.findByText(protection, /target changed/i);
+    await ui.findByText(protection, /document protection choice could not be completed/i);
     assert.equal(host.service === service, true);
     assert.equal(editor.value, "");
     if (origin === "ro-post-authorization-revalidation") {
@@ -1015,9 +1014,8 @@ export async function runMountedLock(t, origin) {
     }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
     if (outcome.endsWith("retry")) {
-      await ui.findByText(protection, outcome.startsWith("save")
-        ? /injected native save failure/ : provisionalDecision
-          ? /injected provisional discard failure/ : /injected journal discard failure/);
+      await ui.findByText(protection,
+        /document protection choice could not be completed/i);
       assert.equal(host.service === service, true); assert.equal(editor.value, "");
       if (provisionalDecision && outcome === "discard-retry") {
         protection = ui.getByRole(document.body, "dialog",
@@ -1066,9 +1064,7 @@ export async function runMountedLock(t, origin) {
     }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
     if (outcome.endsWith("retry")) {
-      const message = outcome.startsWith("save") ? /injected native save failure/
-        : provisionalDecision ? /injected provisional discard failure/
-          : /injected journal discard failure/;
+      const message = /document protection choice could not be completed/i;
       await ui.findByText(protection, message);
       assert.equal(editor.value, ""); assert.equal(fakeWindow.closed, 0);
       if (provisionalDecision && outcome === "discard-retry") {
@@ -1343,7 +1339,8 @@ export async function runMountedLock(t, origin) {
     saveFault = true;
     await user.click(ui.getByRole(retryProtection, "button",
       { name: "Manual save and continue" }));
-    await ui.findByText(retryProtection, /injected native save failure/);
+    await ui.findByText(retryProtection,
+      /document protection choice could not be completed/i);
     saveFault = false;
     await user.click(ui.getByRole(retryProtection, "button",
       { name: "Manual save and continue" }));
@@ -1388,7 +1385,8 @@ export async function runMountedLock(t, origin) {
     const save = ui.getByRole(protection, "button", { name: "Manual save and continue" });
     saveFault = true; await user.click(save);
     await ui.waitFor(() => assert.match(ui.getByText(protection,
-      /injected native save failure/).textContent, /injected native save failure/));
+      /document protection choice could not be completed/i).textContent,
+    /document protection choice could not be completed/i));
     assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "");
     assert.equal(document.activeElement, save);
     saveFault = false; await user.click(save);
