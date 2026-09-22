@@ -15,8 +15,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     new URL("../dist/preload.cjs", import.meta.url), "utf8");
   assert.match(main, /sandbox:\s*true/);
   assert.match(main, /contextIsolation:\s*true/);
-  assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
-  assert.match(main, /window\.on\(["']blur["']/);
+  assert.match(main, /registerWindowFocusProtection\(\{ window, powerMonitor/);
+  assert.doesNotMatch(main, /lockActive\(["']background["']\)/);
   assert.match(main, /new DocumentLifecycleHost/);
   assert.match(lifecycleHost, /lockActive\(["']app-lock["']\)/);
   assert.match(lifecycleHost, /onLockStart:/);

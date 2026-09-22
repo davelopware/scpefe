@@ -10,6 +10,7 @@ import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { DocumentService } from "../src/document-service.mjs";
 import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
+import { registerWindowFocusProtection } from "../src/window-focus-protection.mjs";
 
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -184,7 +185,9 @@ export async function runMountedLock(t, origin) {
     }, clearTimer() {} } : {}), ...callbacks });
   const timers = []; const acks = [];
   const ipcListeners = new Map(); const ipcHandlers = new Map();
+  const emittedChannels = [];
   const emit = (channel, value) => {
+    emittedChannels.push(channel);
     for (const listener of ipcListeners.get(channel) ?? []) listener({}, value);
   };
   let lockStarted; const starting = new Promise((resolve) => { lockStarted = resolve; });
@@ -244,7 +247,7 @@ export async function runMountedLock(t, origin) {
         || /^s[0-3]-new$/.test(origin)
         || origin.startsWith("s5-") || origin.startsWith("s9-")
         || origin.startsWith("dr-new-") || origin.startsWith("prr-new-")
-        || origin.startsWith("al-new-")
+        || origin.startsWith("al-new-") || origin.startsWith("focus-")
         || origin === "als-new-candidate"
         || (origin.startsWith("rn-") && origin !== "rn-picker-cancel")
         ? newTarget : null;
@@ -264,6 +267,9 @@ export async function runMountedLock(t, origin) {
     },
   }).start();
   let service = host.service;
+  const powerMonitor = new EventEmitter();
+  registerWindowFocusProtection({ window: fakeWindow, powerMonitor,
+    activity: () => host.notifyActivity(), lock: (reason) => host.lockActive(reason) });
 
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",
     { url: "https://scpefe.invalid/" });
@@ -324,6 +330,19 @@ export async function runMountedLock(t, origin) {
     "menuitem", { name: menu })); await user.click(ui.getByRole(
     ui.getByRole(document.body, "menu", { name: menu }), "menuitem", { name })); };
   const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
+  const assertFocusPreserved = async (dialog, field) => {
+    const focused = ui.getByLabelText(dialog, field);
+    focused.focus(); focused.setSelectionRange(2, 5);
+    const priorEmits = emittedChannels.length;
+    for (const event of ["blur", "minimize", "focus", "restore"]) fakeWindow.emit(event);
+    await Promise.resolve();
+    assert.equal(document.body.contains(dialog), true);
+    assert.equal(document.activeElement, focused);
+    assert.deepEqual([focused.selectionStart, focused.selectionEnd], [2, 5]);
+    assert.equal(emittedChannels.slice(priorEmits).some((channel) =>
+      channel === "document:lock-started" || channel === "document:locked"), false);
+    assert.equal(createdCandidate, false);
+  };
   const driveDirect = async (entry, expectedState, windowPrevented = false) => {
     if (entry === "new") {
       await command("File", /New/); assert.equal(ui.queryByRole(document.body, "dialog"), null);
@@ -464,12 +483,63 @@ export async function runMountedLock(t, origin) {
       "No document");
     return;
   }
+  if (origin === "focus-no-doc") {
+    await command("File", /New/);
+    const creation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    const owner = ui.getByLabelText(creation, "Owner password");
+    const recovery = ui.getByLabelText(creation,
+      "Independent recovery password (strongly recommended)");
+    await user.type(owner, "owner password words");
+    await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+      "owner password typo");
+    await user.type(recovery, "independent recovery secret");
+    await user.type(ui.getByLabelText(creation, "Confirm recovery password"),
+      "independent recovery secret");
+    await user.click(ui.getByLabelText(creation,
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByLabelText(creation,
+      "I will store the recovery password independently."));
+    await user.click(ui.getByRole(creation, "button", { name: "Show owner passwords" }));
+    await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    assert.match(ui.getByRole(creation, "alert").textContent, /owner passwords do not match/i);
+    await assertFocusPreserved(creation, "Confirm owner password");
+    assert.equal(owner.value, "owner password words");
+    assert.equal(owner.type, "text");
+    assert.equal(recovery.value, "independent recovery secret");
+    assert.equal(ui.getByLabelText(creation,
+      "I will store the recovery password independently.").checked, true);
+    assert.match(ui.getByRole(creation, "alert").textContent, /owner passwords do not match/i);
+    assert.equal(createPickerCalls, 1);
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    await user.click(ui.getByRole(creation, "button", { name: "Cancel" }));
+    await command("File", /Open/);
+    const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    await user.type(ui.getByLabelText(opened, "Password"), "password words");
+    await assertFocusPreserved(opened, "Password");
+    assert.equal(ui.getByLabelText(opened, "Password").value, "password words");
+    await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
+    return;
+  }
   await command("File", /Open/);
   let dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.type(ui.getByLabelText(dialog, "Password"), "password words");
   await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Read-only"));
+  if (origin === "focus-active") {
+    await command("File", /New/);
+    const creation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+    await assertFocusPreserved(creation, "Owner password");
+    assert.equal(host.service.active.opened.content, "original plaintext");
+    assert.equal(ui.getByLabelText(creation, "Owner password").value,
+      "owner password words");
+    await user.click(ui.getByRole(creation, "button", { name: "Cancel" }));
+    assert.equal(editor.value, "original plaintext");
+    return;
+  }
   if (origin === "pp-restart") {
     const pending = await ui.findByRole(document.body, "dialog",
       { name: "Manual save pending publication" });
@@ -683,6 +753,34 @@ export async function runMountedLock(t, origin) {
     originalLockStart(value); lockStarted(); };
   const originalLocked = service.onLocked;
   service.onLocked = (result) => { originalLocked(result); lockFinished(result); };
+  if (origin === "focus-decision") {
+    await user.clear(editor);
+    await user.type(editor, "unsaved focus decision");
+    await command("File", /New/);
+    const creation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+    await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+      "owner password words");
+    await user.click(ui.getByLabelText(creation,
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    const decision = await ui.findByRole(document.body, "dialog", { name: /before New/ });
+    const priorEmits = emittedChannels.length;
+    for (const event of ["blur", "minimize", "focus", "restore"]) fakeWindow.emit(event);
+    assert.equal(document.body.contains(decision), true);
+    assert.equal(ui.getByRole(decision, "button",
+      { name: "Keep current document open" }).disabled, false);
+    assert.equal(emittedChannels.slice(priorEmits).some((channel) =>
+      channel === "document:lock-started" || channel === "document:locked"), false);
+    assert.equal(host.service.active.working.content, "unsaved focus decision");
+    await user.click(ui.getByRole(decision, "button",
+      { name: "Keep current document open" }));
+    const returned = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+    return;
+  }
   if (origin.startsWith("s2-")) {
     const entry = origin.slice(3);
     if (["new", "open", "external"].includes(entry)) {

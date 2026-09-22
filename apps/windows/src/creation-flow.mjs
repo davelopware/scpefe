@@ -5,6 +5,8 @@ export class CreationTargetFlow {
   #target = null;
   #creating = false;
 
+  get hasSelectedTarget() { return this.#target !== null; }
+
   /* Chooses the target before any creation secret crosses the renderer boundary. */
   async chooseTarget(chooseTarget) {
     if (this.#creating) throw new Error("Document creation is already in progress");

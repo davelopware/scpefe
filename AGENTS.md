@@ -12,9 +12,15 @@ Use the standard five-role triage vocabulary. See `docs/agents/triage-labels.md`
 
 This is a single-context repository. `docs/DOMAIN_MODEL.md` is the canonical glossary. See `docs/agents/domain.md`.
 
-### Resource-safe Node tests
+### Resource-contained Node and Electron work
 
-After a Node/renderer/DOM OOM, runner stall, WSL swap or disk thrash, or when adding a production-bundle mounted harness, follow `docs/agents/resource-safety.md` before broader tests.
+Treat every Node/Electron renderer test or build process tree as host-risky from its first invocation. This includes `npm` test/build scripts, `node --test`, Electron tests, Vite builds, JSDOM/React mounted tests, production-bundle harnesses, and scripts that spawn test files or child processes.
+
+- Before running one, read and follow `docs/agents/resource-safety.md`.
+- Run it serially inside a transient systemd user scope that contains the whole process tree, with a timeout, resource measurement, `MemoryHigh=768M`, `MemoryMax=1G`, `MemorySwapMax=0`, and `TasksMax=256`.
+- Allow at most one such host-risky command at a time across all agents and worktrees. Wait for it to finish before starting another.
+- If a systemd user scope or any required limit is unavailable, stop and report the blocker. A bare or partially bounded run is not a fallback.
+- Keep every retry and broader follow-up gate contained. A passing isolated test does not authorize an unconstrained suite.
 
 ## C++ header documentation
 
