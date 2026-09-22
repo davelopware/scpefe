@@ -134,9 +134,11 @@ Copy-Item $SodiumDll.FullName -Destination $NativeRoot -Force
 
 Push-Location $WindowsRoot
 try {
+    # The canonical desktop gate builds and validates the renderer and preload
+    # production bundles before running its mounted tests serially. Reuse that
+    # exact verified bundle for packaging instead of rebuilding it afterward.
     Invoke-Checked "npm.cmd" @("test")
     Invoke-Checked "npm.cmd" @("run", "typecheck")
-    Invoke-Checked "npm.cmd" @("run", "build")
 } finally {
     Pop-Location
 }
