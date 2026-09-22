@@ -85,7 +85,8 @@ test("mounted shell keeps the session through picker, password, creation, and un
       openSelectedDocument: async () => {
         openCalls += 1;
         if (openCalls === 1) return first;
-        if (openCalls === 2) throw new Error("Password did not open this document");
+        if (openCalls === 2) throw new Error(
+          "native failure at C:\\Users\\Ada\\Documents\\private-note.scpefe:42:9");
         return { readOnly: true, invitationRequired: true,
           targetName: "invitation.scpefe" };
       },
@@ -101,7 +102,8 @@ test("mounted shell keeps the session through picker, password, creation, and un
       cancelCreateTarget: async () => { cancelCreateCalls += 1; },
       createDocument: async () => {
         createCalls += 1;
-        if (createCalls === 1) throw new Error("Encrypted publication failed safely");
+        if (createCalls === 1) throw new Error(
+          "publication failed at C:\\Users\\Ada\\Documents\\private-note.scpefe:42:9");
         return { created: true, name: "new.scpefe",
           opened: { content: "", readOnly: false, canEdit: true,
             publicationState: "target-published" } };
@@ -162,8 +164,11 @@ test("mounted shell keeps the session through picker, password, creation, and un
     await command("File", /Open/);
     let dialog = await submitPassword("Open document", "Open", "wrong password");
     await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent,
-      /did not open/));
-    assert.equal(editor.value, "original plaintext");
+      /operation could not be completed safely/i));
+    assert.doesNotMatch(ui.getByRole(dialog, "alert").textContent,
+      /Users|Documents|private-note|\.scpefe|:42:9/i);
+    assert.equal(editor.value, "",
+      "a failed password dialog retains but does not render the prior plaintext behind it");
     assert.equal(document.activeElement === ui.getByLabelText(dialog, "Password"), true);
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(cancelOpenCalls, 1);
@@ -242,10 +247,12 @@ test("mounted shell keeps the session through picker, password, creation, and un
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(createDialog, "button", { name: "Create" }));
     assert.equal(createCalls, 0, "mounted mismatch reaches no native creation boundary");
-    assert.equal(editor.value, "replacement plaintext");
+    assert.equal(editor.value, "",
+      "creation validation keeps the retained prior session masked");
     await user.click(ui.getByRole(createDialog, "button", { name: "Cancel" }));
     assert.equal(cancelCreateCalls, 1);
-    assert.equal(editor.value, "replacement plaintext");
+    assert.equal(editor.value, "replacement plaintext",
+      "canceling creation restores the retained prior session");
 
     await command("File", /New/);
     createDialog = await ui.findByRole(document.body, "dialog",
@@ -257,8 +264,11 @@ test("mounted shell keeps the session through picker, password, creation, and un
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(createDialog, "button", { name: "Create" }));
     await ui.waitFor(() => assert.match(ui.getByRole(createDialog, "alert").textContent,
-      /publication failed safely/));
-    assert.equal(editor.value, "replacement plaintext");
+      /operation could not be completed safely/i));
+    assert.doesNotMatch(ui.getByRole(createDialog, "alert").textContent,
+      /Users|Documents|private-note|\.scpefe|:42:9/i);
+    assert.equal(editor.value, "",
+      "creation publication failure keeps the retained prior session masked");
     assert.equal(ui.getByLabelText(createDialog, "Owner password").value,
       "owner password words");
     await user.click(ui.getByRole(createDialog, "button", { name: "Create" }));

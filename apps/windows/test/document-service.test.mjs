@@ -162,8 +162,9 @@ test("integrated native close | real DocumentService restart journal | Cancel th
     const discardEvent = { prevented: false, preventDefault() { this.prevented = true; } };
     const discarded = closeHandler(discardEvent);
     assert.equal(discardEvent.prevented, true);
-    await restartedProtections.decide({ token: protectionRequest.token,
+    const discardDecision = await restartedProtections.decide({ token: protectionRequest.token,
       decision: "discard" });
+    assert.deepEqual(discardDecision, { completed: true, proceed: true });
     assert.equal(await discarded, true);
     assert.equal(closes, 1);
     assert.equal(await restarted.journals.read(fixture.documentId,
@@ -485,7 +486,7 @@ test("authenticated switch discard removes only the active unreadable journal", 
     } }) });
   await service.openDocument(target, "owner password words");
   assert.equal(service.active.unreadableJournal, true);
-  assert.match(warnings.at(-1), /could not be read/);
+  assert.equal(warnings.at(-1), "RECOVERY_READ_FAILED");
   await assert.rejects(service.discardUnreadableJournalForSwitch("discard"),
     /not explicitly confirmed/);
   assert.equal(await fs.readFile(activeJournal, "utf8"),
@@ -546,7 +547,7 @@ test("older containers remain read-only until verified-backup migration", async 
   await assert.rejects(service.enterEditMode(), /must be migrated before editing or saving/);
   const result = await service.migrateDocument();
   assert.equal(result.migrated, true);
-  assert.match(result.compatibilityWarning, /Older SCPEFE clients/);
+  assert.equal(result.compatibilityCode, "MIGRATION_COMPATIBILITY");
   assert.ok((await fs.readFile(target)).equals(migrated));
   assert.ok((await fs.readFile(path.join(directory,
     "document.backup-19700101T000001Z.scpefe"))).equals(legacy));
@@ -1292,8 +1293,7 @@ test("restart finishes an interrupted invitation claim with its replacement cred
     assert.equal(opened.content, "secret");
     assert.notEqual(opened.invitationRequired, true);
     assert.equal(restarted.active.password, replacement);
-    assert.deepEqual(warnings,
-      ["Interrupted publication was completed and verified."]);
+    assert.deepEqual(warnings, ["PUBLICATION_RECOVERED"]);
   });
 
 test("claim cleanup is restart-safe at every removal boundary", async (t) => {
@@ -1471,8 +1471,7 @@ test("ordinary pending publications still require candidate plaintext to match",
   const opened = await restarted.openDocument(target, "password words");
   assert.equal(opened.publicationState, "pending-publication");
   assert.equal(await fs.readFile(target, "utf8"), "container");
-  assert.equal(warnings.some((warning) =>
-    warning.includes("candidate does not match its document")), true);
+  assert.equal(warnings.includes("RECOVERY_READ_FAILED"), true);
 });
 
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
@@ -1561,7 +1560,7 @@ test("mandatory locking clears plaintext when the final journal write fails", as
   const result = await service.lock("screen-lock");
   assert.equal(result.locked, true);
   assert.equal(result.journalSaved, false);
-  assert.match(result.warning, /disk full/);
+  assert.equal(result.warningCode, "LOCK_CHECKPOINT_FAILED");
   assert.equal(service.active, null);
 });
 
@@ -1777,8 +1776,7 @@ test("restart completes a tracked save while lock preserves its publication", as
     onJournalWarning: (warning) => warnings.push(warning) });
   const opened = await restarted.openDocument(target, "password words");
   assert.equal(opened.content, "saved after restart");
-  assert.deepEqual(warnings,
-    ["Interrupted publication was completed and verified."]);
+  assert.deepEqual(warnings, ["PUBLICATION_RECOVERED"]);
   assert.equal(await fs.readFile(target, "utf8"), "saved:saved after restart");
   await restarted.lock();
 });

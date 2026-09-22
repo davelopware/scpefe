@@ -155,12 +155,12 @@ test("mounted shell presents truthful document states, history, failures, and se
 
   editor.focus();
   await user.keyboard("{Control>}f{/Control}");
-  const findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  let findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
   assert.equal(findDialog.getAttribute("aria-modal"), "false");
   assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), false,
     "modeless search leaves the document interactive");
   const findInput = ui.getByLabelText(findDialog, "Find");
-  const replaceInput = ui.getByLabelText(findDialog, "Replace with");
+  let replaceInput = ui.getByLabelText(findDialog, "Replace with");
   await user.type(findInput, "line");
   assert.equal(ui.getByRole(findDialog, "button", { name: "Replace" }).disabled, true);
   await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
@@ -177,11 +177,16 @@ test("mounted shell presents truthful document states, history, failures, and se
 
   await command("Edit", "Edit Contents");
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
-  assert.match(ui.getByRole(failure, "alert").textContent, /lease is held/);
+  assert.match(ui.getByRole(failure, "alert").textContent,
+    /operation could not be completed safely/i);
   assert.equal(document.activeElement?.textContent.trim(), "Retry editing");
   assert.equal(editor.readOnly, true);
   assert.equal(statusValue("Document state"), "Read-only");
   await user.click(ui.getByRole(failure, "button", { name: "Continue read-only" }));
+  findDialog = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  replaceInput = ui.getByLabelText(findDialog, "Replace with");
+  assert.equal(ui.getByLabelText(findDialog, "Find").value, "line",
+    "the remounted modeless dialog restores its in-memory search value");
 
   await command("Edit", "Edit Contents");
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
@@ -253,7 +258,7 @@ test("mounted shell presents truthful document states, history, failures, and se
     /Backup canceled; the document and destination are unchanged/);
   await command("File", /Backup/);
   assert.match(ui.getByRole(document.body, "status").textContent,
-    /backup destination unavailable/);
+    /operation could not be completed safely/i);
   assert.equal(editor.value, beforeTransfer);
   await command("File", /Backup/);
   assert.match(ui.getByRole(document.body, "status").textContent,
@@ -262,6 +267,8 @@ test("mounted shell presents truthful document states, history, failures, and se
   await command("File", /Export Plaintext/);
   let exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
   assert.match(exportDialog.textContent, /Not password protected/);
+  assert.equal(editor.value, "",
+    "the modal plaintext-export warning does not leave document text rendered behind it");
   await user.selectOptions(ui.getByLabelText(exportDialog, "Line endings"), "native");
   await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
   await ui.waitFor(() => assert.equal(
@@ -271,9 +278,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
   await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
   assert.match((await ui.findByRole(exportDialog, "alert")).textContent,
-    /export destination unavailable/);
+    /operation could not be completed safely/i);
   assert.equal(document.activeElement?.textContent.trim(), "Export current text…");
-  assert.equal(editor.value, beforeTransfer);
+  assert.equal(editor.value, "",
+    "export failure retains but does not render document text behind the modal");
   await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
   await ui.waitFor(() => assert.equal(
     ui.queryByRole(document.body, "dialog", { name: "Export plaintext" }), null));

@@ -1,8 +1,23 @@
 import React, { useEffect, useRef, useState } from "react";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
+import { safeRendererErrorMessage } from "./error-boundary.mjs";
 
 const h = React.createElement;
+const VALIDATION_MESSAGES = new Map([
+  ["owner passwords do not match", "owner passwords do not match"],
+  ["recovery passwords do not match", "recovery passwords do not match"],
+  ["owner password must contain at least 12 characters",
+    "owner password must contain at least 12 characters"],
+  ["recovery password must contain at least 12 characters",
+    "recovery password must contain at least 12 characters"],
+  ["recovery password must be independent from the owner password",
+    "recovery password must be independent from the owner password"],
+  ["irrecoverability must be acknowledged",
+    "irrecoverability must be acknowledged"],
+  ["recovery password storage must be acknowledged",
+    "recovery password storage must be acknowledged"],
+]);
 
 /* Collects and validates creation secrets after a target has been selected. */
 export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
@@ -52,12 +67,13 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
         content: "", understandsIrrecoverable,
         storedRecoverySeparately: hasRecovery && storedRecoverySeparately });
     } catch (submissionError) {
-      const message = submissionError instanceof Error
-        ? submissionError.message : String(submissionError);
+      const source = submissionError instanceof Error ? submissionError.message : "";
+      const message = VALIDATION_MESSAGES.get(source)
+        ?? "The security details are invalid. Review the form and try again.";
       setError(message);
-      if (message.includes("owner passwords do not match")) {
+      if (source === "owner passwords do not match") {
         ownerConfirmationRef.current?.focus();
-      } else if (message.includes("recovery passwords do not match")) {
+      } else if (source === "recovery passwords do not match") {
         recoveryConfirmationRef.current?.focus();
       } else {
         ownerRef.current?.focus();
@@ -69,8 +85,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       await onCreate(request);
       completedRef.current = true;
     } catch (submissionError) {
-      setError(submissionError instanceof Error
-        ? submissionError.message : String(submissionError));
+      setError(safeRendererErrorMessage(submissionError));
       ownerRef.current?.focus();
     } finally {
       setSubmitting(false);

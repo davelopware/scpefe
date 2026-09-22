@@ -479,7 +479,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     await user.click(ui.getByRole(pending, "button", { name: "Retry publication" }));
-    await ui.findByText(pending, /injected publication target unavailable/i);
+    await ui.findByText(pending, /operation could not be completed safely/i);
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
@@ -545,13 +545,15 @@ export async function runMountedLock(t, origin) {
       if (outcome === "retry") {
         await user.click(ui.getByRole(protection, "button",
           { name: "Retry publication and continue" }));
-        await ui.findByText(protection, /Resolve the saved divergence/);
+        await ui.findByText(protection,
+          /document protection choice could not be completed/i);
         assert.equal(host.service.active.opened.publicationState, "conflict");
         assert.equal(fakeWindow.closed, 0); return;
       }
       if (outcome === "discard") {
         await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
-        await ui.findByText(protection, /cannot be discarded safely/);
+        await ui.findByText(protection,
+          /document protection choice could not be completed/i);
         assert.equal(fakeWindow.closed, 0);
         assert.equal(host.service.active.opened.publicationState, "conflict");
         assert.equal(await fs.readFile(target, "utf8"), "saved:remote divergent branch"); return;
@@ -610,7 +612,8 @@ export async function runMountedLock(t, origin) {
         : "Manual save and continue";
       await user.click(ui.getByRole(protection, "button", { name: decision }));
       if (outcome === "save-retry") {
-        await ui.findByText(protection, /injected publication target unavailable/);
+        await ui.findByText(protection,
+          /document protection choice could not be completed/i);
         assert.equal(fakeWindow.closed, 0);
         protection = ui.getByRole(document.body, "dialog", { name: /before Exit/ });
         await user.click(ui.getByRole(protection, "button", { name: decision }));
@@ -854,15 +857,15 @@ export async function runMountedLock(t, origin) {
       assert.match(ui.getByRole(creation, "alert").textContent,
         /owner passwords do not match/i);
       assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
-      assert.equal(editor.value, "mounted secret plaintext"); return;
+      assert.equal(editor.value, ""); return;
     }
     if (origin === "rn-post-authorization-revalidation") {
       const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
       postAuthorizationFaultTarget = newTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
-      await ui.findByText(protection, /selected target changed/i);
+      await ui.findByText(protection, /document protection choice could not be completed/i);
       assert.equal(host.service, service);
-      assert.equal(editor.value, "mounted secret plaintext");
+      assert.equal(editor.value, "");
       assert.equal(service.active.dirty, false,
         "the authorized Save completed before the second revalidation failed");
       assert.equal(document.activeElement,
@@ -878,10 +881,9 @@ export async function runMountedLock(t, origin) {
       await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
       return;
     }
-    await ui.findByText(creation, origin === "rn-create-fault"
-      ? /injected native create failure/ : /injected created candidate lease failure/);
+    await ui.findByText(creation, /operation could not be completed safely/i);
     assert.equal(host.service === service, true);
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
     return;
   }
@@ -903,8 +905,7 @@ export async function runMountedLock(t, origin) {
     await user.click(ui.getByRole(opened, "button", { name: "Open" }));
     if (origin === "ro-wrong-password") {
       await ui.findByRole(opened, "alert");
-      assert.equal(host.service === service, true); assert.equal(editor.value,
-        "mounted secret plaintext"); return;
+      assert.equal(host.service === service, true); assert.equal(editor.value, ""); return;
     }
     if (origin === "ro-invitation") {
       const claim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
@@ -921,9 +922,9 @@ export async function runMountedLock(t, origin) {
       postAuthorizationFaultTarget = otherTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
     }
-    await ui.findByText(protection, /target changed/i);
+    await ui.findByText(protection, /document protection choice could not be completed/i);
     assert.equal(host.service === service, true);
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     if (origin === "ro-post-authorization-revalidation") {
       assert.equal(service.active.dirty, false,
         "the authorized Save completed before the second revalidation failed");
@@ -1016,11 +1017,9 @@ export async function runMountedLock(t, origin) {
     }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
     if (outcome.endsWith("retry")) {
-      await ui.findByText(protection, outcome.startsWith("save")
-        ? /injected native save failure/ : provisionalDecision
-          ? /injected provisional discard failure/ : /injected journal discard failure/);
-      assert.equal(host.service === service, true); assert.equal(editor.value,
-        "mounted secret plaintext");
+      await ui.findByText(protection,
+        /document protection choice could not be completed/i);
+      assert.equal(host.service === service, true); assert.equal(editor.value, "");
       if (provisionalDecision && outcome === "discard-retry") {
         protection = ui.getByRole(document.body, "dialog",
           { name: entry === "new" ? /before New/ : /before Open/ });
@@ -1068,11 +1067,9 @@ export async function runMountedLock(t, origin) {
     }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
     if (outcome.endsWith("retry")) {
-      const message = outcome.startsWith("save") ? /injected native save failure/
-        : provisionalDecision ? /injected provisional discard failure/
-          : /injected journal discard failure/;
+      const message = /document protection choice could not be completed/i;
       await ui.findByText(protection, message);
-      assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
+      assert.equal(editor.value, ""); assert.equal(fakeWindow.closed, 0);
       if (provisionalDecision && outcome === "discard-retry") {
         protection = ui.getByRole(document.body, "dialog",
           { name: entry === "close" ? /before Close/ : /before Exit/ });
@@ -1189,7 +1186,8 @@ export async function runMountedLock(t, origin) {
       const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
       const discard = ui.getByRole(protection, "button", { name: "Discard and continue" });
       await user.click(discard);
-      await ui.findByText(protection, /injected publication target unavailable/i);
+      await ui.findByText(protection,
+        /document protection choice could not be completed/i);
       assert.equal(document.activeElement, discard);
       assert.equal(host.service.active.opened.publicationState, "pending-publication");
       assert.equal(fakeWindow.closed, 0);
@@ -1276,13 +1274,14 @@ export async function runMountedLock(t, origin) {
     await user.type(ui.getByLabelText(openDialog, "Password"), "password words");
     await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
     const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
     const returned = await ui.findByRole(document.body, "dialog", { name: "Open document" });
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     assert.equal(host.service, service);
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(editor.value, "mounted secret plaintext");
     return;
   }
   if (origin === "new") {
@@ -1301,7 +1300,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(document.activeElement,
       ui.getByLabelText(creation, "Confirm owner password"));
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     await user.click(ui.getByRole(creation, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     assert.equal(editor.value, "mounted secret plaintext");
@@ -1320,13 +1319,13 @@ export async function runMountedLock(t, origin) {
     const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), true,
       "the isolated candidate exists until the protection decision completes");
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
     const returned = await ui.findByRole(document.body, "dialog",
       { name: "Secure new document" });
     await ui.waitFor(async () => assert.equal(
       await fs.stat(newTarget).then(() => true, () => false), false));
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     await command("File", /New/);
@@ -1344,7 +1343,8 @@ export async function runMountedLock(t, origin) {
     saveFault = true;
     await user.click(ui.getByRole(retryProtection, "button",
       { name: "Manual save and continue" }));
-    await ui.findByText(retryProtection, /injected native save failure/);
+    await ui.findByText(retryProtection,
+      /document protection choice could not be completed/i);
     saveFault = false;
     await user.click(ui.getByRole(retryProtection, "button",
       { name: "Manual save and continue" }));
@@ -1363,7 +1363,7 @@ export async function runMountedLock(t, origin) {
     await user.type(ui.getByLabelText(externalDialog, "Password"), "wrong password");
     await user.click(ui.getByRole(externalDialog, "button", { name: "Open" }));
     await ui.findByRole(externalDialog, "alert");
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
     assert.equal(host.externalRequests.current(request.token).token, request.token);
     await user.click(ui.getByRole(externalDialog, "button", { name: "Cancel" }));
@@ -1377,7 +1377,7 @@ export async function runMountedLock(t, origin) {
     const first = fakeWindow.close();
     assert.equal(first.prevented, true);
     let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
-    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(editor.value, "");
     assert.equal(document.activeElement, ui.getByRole(protection, "button",
       { name: "Keep current document open" }));
     await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
@@ -1389,8 +1389,9 @@ export async function runMountedLock(t, origin) {
     const save = ui.getByRole(protection, "button", { name: "Manual save and continue" });
     saveFault = true; await user.click(save);
     await ui.waitFor(() => assert.match(ui.getByText(protection,
-      /injected native save failure/).textContent, /injected native save failure/));
-    assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "mounted secret plaintext");
+      /document protection choice could not be completed/i).textContent,
+    /document protection choice could not be completed/i));
+    assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "");
     assert.equal(document.activeElement, save);
     saveFault = false; await user.click(save);
     await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));

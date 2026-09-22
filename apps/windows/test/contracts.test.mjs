@@ -10,7 +10,8 @@ import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequ
   validateUnresolvedJournalSummary, validatePasswordChangeRequest,
   validateInvitationCreateRequest, validateInvitationResult,
   validateInvitationClaimRequest,
-  validateSlotPermissionsRequest, validateSlotId } from "../src/contracts.mjs";
+  validateSlotPermissionsRequest, validateSlotId, validateRegularSaveResult,
+  validateSlotRemovalResult } from "../src/contracts.mjs";
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({
@@ -130,6 +131,39 @@ test("accepts only validated read-only native results", () => {
     assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: true,
       canEdit: true, targetName }), /invalid target filename/);
   }
+  const narrowed = validateOpenedDocument({ content: "secret\r\n", readOnly: true,
+    canEdit: true, targetName: "notes.scpefe", nativePassword: "must not cross",
+    lease: { active: true, holderName: "Remote", holderEmail: "remote@example.test",
+      deviceName: "Laptop", sessionId: "ab".repeat(16), heartbeatCounter: 2,
+      holderUtcMs: 10, durationMs: 600000, nativeLeaseToken: "must not cross" },
+    headMismatch: { kind: "rollback", title: "Rollback", explanation: "Review it.",
+      editingBlocked: true, observedDocumentId: "cd".repeat(16),
+      observedHead: "ef".repeat(32), nativeProof: "must not cross" } });
+  assert.equal(narrowed.content, "secret\n");
+  assert.deepEqual(Object.keys(narrowed.lease).sort(), ["active", "deviceName", "durationMs",
+    "holderEmail", "holderName", "holderUtcMs"]);
+  assert.deepEqual(narrowed.headMismatch, { kind: "rollback",
+    title: "Authenticated rollback detected",
+    explanation: "The authenticated head is an ancestor of the last head seen by this client. This may be a stale replica; inspect it read-only and explicitly accept it only if the rollback is intended.",
+    editingBlocked: true });
+  assert.equal(JSON.stringify(narrowed).includes("must not cross"), false);
+  assert.deepEqual(validateOpenedDocument(narrowed), narrowed,
+    "canonical boundary results remain safe to revalidate inside the service");
+});
+
+test("push and administration results are canonical and narrowly projected", () => {
+  assert.deepEqual(validateRegularSaveResult({ published: true, provisional: true,
+    content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
+    password: "must not cross" }), {
+    published: true, provisional: true, content: "exact\ntext",
+  });
+  assert.deepEqual(validateSlotRemovalResult({ removed: true,
+    warningCode: "SLOT_REMOVED" }), {
+    removed: true, warningCode: "SLOT_REMOVED",
+  });
+  assert.throws(() => validateSlotRemovalResult({ removed: true,
+    warningCode: "SLOT_REMOVED", targetPath: "C:\\private\\notes.scpefe" }),
+  /invalid slot-removal result/);
 });
 
 test("permits only the invitation claim surface before password replacement", () => {

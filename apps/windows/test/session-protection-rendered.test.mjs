@@ -31,6 +31,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     IS_REACT_ACT_ENVIRONMENT: true });
 
   const listeners = {}; const decisions = []; let failedSave = true; let failedDiscard = true;
+  let directSaveFailure = false;
   let stopped = 0;
   let protectedNumber = 0; let pendingHost = null; let openCalls = 0;
   const listen = (name, listener) => { listeners[name] = listener;
@@ -77,23 +78,27 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     openExternalDocument: async () => requestProtection("external-open"),
     cancelExternalOpen: async () => true,
     enterEditMode: async () => opened, updateWorkingCopy: async () => ({}),
-    saveDocument: async (content) => ({ saved: true, content,
-      publicationState: "target-published" }), backupDocument: async () => null,
+    saveDocument: async (content) => {
+      if (directSaveFailure) throw new Error(
+        "native failure at C:\\Users\\Ada\\Documents\\private-note.scpefe:42:9");
+      return { saved: true, content, publicationState: "target-published" };
+    }, backupDocument: async () => null,
     exportPlaintext: async () => null, lock: async () =>
       ({ locked: true, journalSaved: true, warning: null }),
     closeDocument: async () => requestProtection("close"),
     exitApplication: async () => requestProtection("exit"),
+    discardRecoveredWork: async () => opened,
     resolveProtection: async (request) => {
       decisions.push(request);
       if (request.decision === "save" && failedSave) {
         failedSave = false; return { completed: false, proceed: false,
           retryToken: "20000000-0000-4000-8000-000000000000",
-          error: "publication retry failed safely" };
+          errorCode: "LIFECYCLE_FAILED" };
       }
       if (request.decision === "discard" && failedDiscard) {
         failedDiscard = false; return { completed: false, proceed: false,
           retryToken: "40000000-0000-4000-8000-000000000000",
-          error: "discard cleanup failed safely" };
+          errorCode: "LIFECYCLE_FAILED" };
       }
       if (request.decision === "cancel" && pendingHost) {
         const pending = pendingHost; pendingHost = null;
@@ -134,6 +139,12 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   editor.focus();
   ui.fireEvent.change(editor, { target: { value: "unsaved plaintext",
     selectionStart: 17, selectionEnd: 17 } });
+  await user.keyboard("{Control>}f{/Control}");
+  let find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  const protectedFind = "sensitive lifecycle search";
+  const protectedReplacement = "sensitive lifecycle replacement";
+  await user.type(ui.getByLabelText(find, "Find"), protectedFind);
+  await user.type(ui.getByLabelText(find, "Replace with"), protectedReplacement);
 
   const fileCommand = async (name) => {
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
@@ -164,6 +175,12 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   for (const [operation, trigger] of triggers) {
     await trigger();
     dialog = await ui.findByRole(document.body, "dialog", { name: /Protect current document/ });
+    assert.equal(editor.value, "",
+      "lifecycle decisions retain but do not render protected plaintext behind a modal");
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
+    assert.doesNotMatch(Array.from(document.querySelectorAll("input"),
+      (input) => input.value).join(" "), /sensitive lifecycle/,
+      "protection dialogs unmount modeless search plaintext and controls");
     assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
     assert.ok(ui.getAllByRole(dialog, "listitem").length >= 1);
     assert.equal(ui.getByRole(dialog, "alert").textContent.includes("silently lost"), true);
@@ -181,9 +198,31 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       const open = await ui.findByRole(document.body, "dialog", { name: "Open document" });
       await user.click(ui.getByRole(open, "button", { name: "Cancel" }));
     }
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
     assert.equal(editor.value, "unsaved plaintext");
+    assert.equal(ui.getByLabelText(find, "Find").value, protectedFind);
+    assert.equal(ui.getByLabelText(find, "Replace with").value, protectedReplacement);
   }
+  await user.click(ui.getByRole(find, "button", { name: "Close" }));
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+
+  editor.focus(); await user.keyboard("{Control>}f{/Control}");
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  directSaveFailure = true;
+  await fileCommand(/Save/);
+  dialog = await ui.findByRole(document.body, "dialog", { name: "Manual save failed" });
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
+  assert.equal(editor.value, "");
+  assert.doesNotMatch(ui.getByRole(dialog, "alert").textContent,
+    /Users|Documents|private-note|\.scpefe|:42:9/i);
+  const continueEditing = ui.getByRole(dialog, "button", { name: "Continue editing" });
+  await user.click(continueEditing);
+  directSaveFailure = false;
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  assert.equal(ui.getByLabelText(find, "Find").value, protectedFind);
+  assert.equal(ui.getByLabelText(find, "Replace with").value, protectedReplacement);
+  await ui.waitFor(() => assert.equal(document.activeElement, ui.getByLabelText(find, "Find")));
+  await user.click(ui.getByRole(find, "button", { name: "Close" }));
 
   await t.test("mounted Exit keeps conflict work through publication failure and retry",
     async () => {
@@ -195,9 +234,10 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       const retry = ui.getByRole(dialog, "button", { name: "Retry publication and continue" });
       await user.click(retry);
       await ui.waitFor(() => assert.ok(ui.getByText(dialog,
-        /publication retry failed safely/)));
+        /document protection choice could not be completed/i)));
       assert.equal(document.activeElement === retry, true);
-      assert.equal(editor.value, "unsaved plaintext");
+      assert.equal(editor.value, "",
+        "a failed publication decision keeps protected plaintext masked");
       await user.click(retry);
       await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     });
@@ -222,18 +262,35 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
       const discard = ui.getByRole(dialog, "button", { name: "Discard and continue" });
       await user.click(discard);
-      await ui.waitFor(() => assert.ok(ui.getByText(dialog, /discard cleanup failed safely/)));
+      await ui.waitFor(() => assert.ok(ui.getByText(dialog,
+        /document protection choice could not be completed/i)));
       assert.equal(document.activeElement, discard);
-      assert.equal(editor.value, "unsaved plaintext");
+      assert.equal(editor.value, "",
+        "a failed discard decision keeps protected plaintext masked");
       await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
       await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
       assert.equal(editor.value, "unsaved plaintext");
     });
 
+  editor.focus(); await user.keyboard("{Control>}f{/Control}");
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  listeners.retained({ ...opened, recovery: { content: "recovered private plaintext",
+    state: "unsaved", updateTime: 1, cursor: { start: 0, end: 0 } } });
+  dialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
+  assert.equal(editor.value, "");
+  assert.doesNotMatch(Array.from(document.querySelectorAll("input"),
+    (input) => input.value).join(" "), /sensitive lifecycle/);
+  await user.click(ui.getByRole(dialog, "button", { name: "Discard recovered work" }));
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+  assert.equal(ui.queryByDisplayValue(document.body, protectedFind), null,
+    "replacement recovery state permanently clears prior modeless search values");
+
   await t.test("mounted Close discards recovered work only after approval", async () => {
     await fileCommand(/Close/);
     dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
-    assert.equal(editor.value, "unsaved plaintext");
+    assert.equal(editor.value, "",
+      "a pending destructive decision masks protected plaintext");
     await user.click(ui.getByRole(dialog, "button", { name: "Discard and continue" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     assert.equal(editor.value, "");

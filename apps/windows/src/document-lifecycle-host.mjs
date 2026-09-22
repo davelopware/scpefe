@@ -11,6 +11,10 @@ import { SessionProtectionCoordinator } from "./session-protection.mjs";
 import { OrderedOpenRequests } from "./single-instance.mjs";
 import { OpenRequestQueue } from "./switch-document.mjs";
 import { registerNativeWindowClose } from "./window-lifecycle.mjs";
+import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
+  validatePassword, validateProfile, validateTakeoverCancellation,
+  validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
+import { safeEventCode } from "./error-boundary.mjs";
 
 const AUTOMATIC_LOCK_REASONS = Object.freeze([
   "inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock",
@@ -98,7 +102,7 @@ export class DocumentLifecycleHost {
     void this.acknowledge(request, "queued", 1).then(() => this.observe("queued", request))
       .then(() => this.drainExternalRequests())
       .catch((error) => this.#emit("document:journal-warning",
-        `Could not handle the open request: ${error.message}`));
+        safeEventCode(error, "document:open-external")));
     return request;
   }
 
@@ -131,7 +135,7 @@ export class DocumentLifecycleHost {
       if (this.service.active?.editMode) await this.service.exitEditMode();
       if (this.service.active) {
         const result = await this.service.lock("document-close");
-        if (!result.journalSaved) throw new Error(result.warning
+        if (!result.journalSaved) throw new Error(result.warningCode
           ?? "The document could not be checkpointed before closing");
       }
       this.currentTarget = null; this.lockedTarget = null; this.selectedOpenTarget = null;
@@ -148,7 +152,7 @@ export class DocumentLifecycleHost {
   async sendJournalSummary() {
     try { this.#emit("journal:summary", await this.service.unresolvedJournalSummary()); }
     catch (error) { this.#emit("document:journal-warning",
-      `Unresolved journals could not be inspected: ${error.message}`); }
+      safeEventCode(error, "journal:summary")); }
   }
 
   #makeService() {
@@ -168,7 +172,7 @@ export class DocumentLifecycleHost {
         }
         void this.secureLocks?.serviceLocked(created, result).catch((error) =>
           this.#emit("document:journal-warning",
-            `Secure lock cleanup needs attention: ${error.message}`)).finally(() => {
+            safeEventCode(error, "document:lock"))).finally(() => {
           this.lockStartedServices.delete(created);
         });
       },
@@ -191,7 +195,7 @@ export class DocumentLifecycleHost {
       this.#emit("document:lock-started");
       void this.externalLifecycle?.cancelForLock().catch((error) =>
         this.#emit("document:journal-warning",
-          `External open cancellation needs attention: ${error.message}`));
+          safeEventCode(error, "document:open-external")));
     }
     return true;
   }
@@ -203,20 +207,26 @@ export class DocumentLifecycleHost {
     if (previous !== this.service && previous.active) {
       void previous.lock("document-replaced").catch((error) =>
         this.#emit("document:journal-warning",
-          `The replaced session cleanup needs attention: ${error.message}`));
+          safeEventCode(error, "document:lock")));
     }
   }
 
-  #emit(channel, value) { this.window.webContents.send(channel, value); }
+  #emit(channel, value) {
+    const safeValue = channel === "document:journal-warning"
+      ? Object.freeze({ code: safeEventCode(value, "journal:summary") })
+      : value;
+    this.window.webContents.send(channel, safeValue);
+  }
 
   #register(channel, handler) { this.ipc.handle(channel, (_event, value) => handler(value)); }
 
   #registerHandlers() {
     this.#register("profile:get", () => this.service.loadProfile());
-    this.#register("profile:save", (profile) => this.service.saveProfile(profile));
+    this.#register("profile:save", (profile) => this.service.saveProfile(validateProfile(profile)));
     this.#register("profile:reconcile-active", () => this.service.reconcileProfile());
     this.#register("settings:get", () => this.service.loadClientSettings());
-    this.#register("settings:save", (settings) => this.service.saveClientSettings(settings));
+    this.#register("settings:save", (settings) =>
+      this.service.saveClientSettings(validateClientSettings(settings)));
     this.#register("journal:summary", () => this.service.unresolvedJournalSummary());
     this.#register("document:choose-create-target", () => this.creation.chooseTarget(
       () => this.picker.chooseCreateTarget()));
@@ -231,9 +241,13 @@ export class DocumentLifecycleHost {
         ? Object.freeze({ selected: true, name: this.basename(this.selectedOpenTarget) }) : null;
     });
     this.#register("document:cancel-open-target", () => { this.selectedOpenTarget = null; });
-    this.#register("document:open-selected", (password) => this.#openSelected(password));
-    this.#register("document:unlock", (password) => this.#unlock(password));
-    this.#register("document:open-external", (request) => this.#openExternal(request));
+    this.#register("document:open-selected", (password) =>
+      this.#openSelected(validatePassword(password)));
+    this.#register("document:unlock", (password) => this.#unlock(validatePassword(password)));
+    this.#register("document:open-external", (request) => this.#openExternal({
+      token: validateExternalOpenRequest(request).token,
+      password: validatePassword(request?.password),
+    }));
     this.#register("document:cancel-external-open", (request) => {
       if (!request || typeof request.token !== "string") {
         throw new TypeError("invalid external open cancellation");
@@ -242,20 +256,22 @@ export class DocumentLifecycleHost {
         { blocked: this.externalOpenInProgress });
     });
     this.#register("document:enter-edit-mode", (request = {}) => {
+      const validated = validateTakeoverRequest(request);
       const current = this.service;
       return runLeaseOperation({ authorizations: this.leaseTakeovers, operation: "edit",
-        service: current, authorization: request.authorization,
+        service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.enterEditMode({ takeoverToken }) });
     });
     this.#register("document:update-working-copy", (working) =>
-      this.service.updateWorkingCopy(working));
+      this.service.updateWorkingCopy(validateWorkingCopy(working)));
     this.#register("document:activity", () => this.service.notifyActivity());
     this.#register("document:save", async (content) => {
       let result;
-      try { result = await this.service.saveDocument(content); }
+      const canonical = canonicalizeDocumentText(content);
+      try { result = await this.service.saveDocument(canonical); }
       catch (error) {
         if (!error?.publicationPrepared || !this.service.active?.opened) throw error;
-        result = { saved: true, content,
+        result = { saved: true, content: canonical,
           publicationState: this.service.active.opened.publicationState };
       }
       await this.sendJournalSummary(); return result;
@@ -265,13 +281,15 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:begin-divergence-resolution", (request = {}) => {
+      const validated = validateTakeoverRequest(request);
       const current = this.service;
       return runLeaseOperation({ authorizations: this.leaseTakeovers, operation: "divergence",
-        service: current, authorization: request.authorization,
+        service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken }) });
     });
     this.#register("document:save-divergence-resolution", async (content) => {
-      const result = await this.service.saveDivergenceResolution(content);
+      const result = await this.service.saveDivergenceResolution(
+        canonicalizeDocumentText(content));
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:discard-publication", async () => {
@@ -279,9 +297,10 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:restore-recovery", async (request = {}) => {
+      const validated = validateTakeoverRequest(request);
       const current = this.service;
       const result = await runLeaseOperation({ authorizations: this.leaseTakeovers,
-        operation: "recovery", service: current, authorization: request.authorization,
+        operation: "recovery", service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.restoreRecoveredWork({ takeoverToken }) });
       await this.sendJournalSummary(); return result;
     });
@@ -291,8 +310,9 @@ export class DocumentLifecycleHost {
     });
     this.#register("document:accept-head-mismatch", () => this.service.acceptHeadMismatch());
     this.#register("document:cancel-lease-takeover", (authorization) =>
-      this.leaseTakeovers.cancel(authorization, this.service));
-    this.#register("document:claim-invitation", (password) => this.#claim(password));
+      this.leaseTakeovers.cancel(validateTakeoverCancellation(authorization), this.service));
+    this.#register("document:claim-invitation", (password) =>
+      this.#claim(validatePassword(password)));
     this.#register("document:cancel-invitation-claim", async () => {
       const canceled = await this.replacements.cancelClaim();
       if (canceled && this.externalLifecycle.invitation) {
@@ -301,7 +321,10 @@ export class DocumentLifecycleHost {
       return canceled;
     });
     this.#register("document:lock", () => this.lockActive("app-lock"));
-    this.#register("document:resolve-protection", (request) => this.protections.decide(request));
+    this.#register("document:resolve-protection", async (request) => {
+      const result = await this.protections.decide(request);
+      return result;
+    });
     this.#register("document:close", () => this.closeDocument());
     this.#register("application:exit", () => this.lifecycle.requestExit());
   }

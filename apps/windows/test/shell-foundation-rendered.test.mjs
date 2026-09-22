@@ -239,14 +239,50 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.match(document.activeElement?.textContent ?? "", /^Find/);
   ui.fireEvent.keyDown(openedEditMenu, { key: "Escape" });
   editor.focus(); await user.keyboard("{Control>}f{/Control}");
-  const find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  let find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
   assert.equal(document.activeElement === ui.getByLabelText(find, "Find"), true,
     "the Find field receives initial focus");
-  await user.keyboard("{Escape}");
+  const sensitiveFind = "private find phrase";
+  const sensitiveReplacement = "private replacement phrase";
+  await user.type(ui.getByLabelText(find, "Find"), sensitiveFind);
+  await user.type(ui.getByLabelText(find, "Replace with"), sensitiveReplacement);
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "Security" }));
+  await user.click(ui.getByRole(ui.getByRole(document.body, "menu", { name: "Security" }),
+    "menuitem", { name: /Profile/ }));
+  const securityDialog = await ui.findByRole(document.body, "dialog", { name: "Profile" });
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
+  assert.doesNotMatch(Array.from(document.querySelectorAll("input"),
+    (input) => input.value).join(" "), /private (?:find|replacement) phrase/);
+  await user.click(ui.getByRole(securityDialog, "button", { name: "Cancel" }));
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  assert.equal(ui.getByLabelText(find, "Find").value, sensitiveFind);
+  assert.equal(ui.getByLabelText(find, "Replace with").value, sensitiveReplacement);
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
+  await user.click(ui.getByRole(ui.getByRole(document.body, "menu", { name: "File" }),
+    "menuitem", { name: /Export Plaintext/ }));
+  const exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null,
+    "a modal unmounts the modeless search surface from the accessibility tree");
+  assert.equal(editor.value, "", "a modal masks the retained document plaintext");
+  for (const input of document.querySelectorAll("input")) {
+    assert.notEqual(input.value, sensitiveFind);
+    assert.notEqual(input.value, sensitiveReplacement);
+  }
+  assert.doesNotMatch(document.body.textContent ?? "", /private (?:find|replacement) phrase/);
+  await user.click(ui.getByRole(exportDialog, "button", { name: "Cancel" }));
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  assert.equal(ui.getByLabelText(find, "Find").value, sensitiveFind);
+  assert.equal(ui.getByLabelText(find, "Replace with").value, sensitiveReplacement);
+  await ui.waitFor(() => assert.equal(document.activeElement, ui.getByLabelText(find, "Find")),
+    { message: "ordinary modal cancellation restores modeless search focus" });
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "Security" }));
+  await user.click(ui.getByRole(ui.getByRole(document.body, "menu", { name: "Security" }),
+    "menuitem", { name: "Lock" }));
   await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog",
-    { name: "Find and replace" }) === null, true, "Escape closes Find and replace"));
-  await ui.waitFor(() => assert.equal(
-    document.activeElement?.getAttribute("aria-label"), "Document text"));
+    { name: "Find and replace" }) === null, true, "lock clears Find and replace"));
+  assert.equal(editor.value, "");
+  assert.doesNotMatch(Array.from(document.querySelectorAll("input"),
+    (input) => input.value).join(" "), /private (?:find|replacement) phrase/);
   assert.deepEqual(calls, ["new", "open"]);
   mountedRoot.unmount();
   mountedRoot = null;

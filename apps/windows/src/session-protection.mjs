@@ -146,7 +146,7 @@ export class SessionProtectionCoordinator {
       pending.token = retryToken;
       pending.state = "presented";
       return Object.freeze({ completed: false, proceed: false, retryToken,
-        error: error instanceof Error ? error.message : String(error) });
+        errorCode: "LIFECYCLE_FAILED" });
     }
   }
 

@@ -148,7 +148,7 @@ test("cancel changes nothing, stale decisions fail closed, and failures can retr
   current.service.saveDocument = async () => { throw new Error("publication unavailable"); };
   const firstFailure = await policy.decide({ token: request.token, decision: "save" });
   assert.equal(firstFailure.completed, false);
-  assert.match(firstFailure.error, /publication unavailable/);
+  assert.equal(firstFailure.errorCode, "LIFECYCLE_FAILED");
   await assert.rejects(policy.decide({ token: request.token, decision: "save" }),
     /no longer active/);
   current.service.saveDocument = originalSave;
