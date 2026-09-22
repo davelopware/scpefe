@@ -340,10 +340,12 @@ export function validateOpenedDocument(value) {
   let lease;
   if (value.lease !== undefined) {
     const candidate = value.lease;
+    const hasPrivateLeaseState = candidate?.sessionId !== undefined
+      || candidate?.heartbeatCounter !== undefined;
     if (!candidate || typeof candidate !== "object"
         || typeof candidate.active !== "boolean"
-        || !/^[0-9a-f]{32}$/.test(candidate.sessionId)
-        || !Number.isSafeInteger(candidate.heartbeatCounter)
+        || (hasPrivateLeaseState && (!/^[0-9a-f]{32}$/.test(candidate.sessionId)
+          || !Number.isSafeInteger(candidate.heartbeatCounter)))
         || !Number.isSafeInteger(candidate.holderUtcMs)
         || !Number.isSafeInteger(candidate.durationMs) || candidate.durationMs <= 0
         || typeof candidate.holderName !== "string"
@@ -360,13 +362,17 @@ export function validateOpenedDocument(value) {
   let headMismatch;
   if (value.headMismatch !== undefined) {
     const mismatch = value.headMismatch;
+    const hasPrivateHeadEvidence = mismatch?.observedDocumentId !== undefined
+      || mismatch?.observedHead !== undefined || mismatch?.witnessedDocumentId !== undefined
+      || mismatch?.witnessedHead !== undefined;
     if (!mismatch || typeof mismatch !== "object"
         || !["rollback", "divergence", "replacement", "witness-error"].includes(mismatch.kind)
         || typeof mismatch.title !== "string" || !mismatch.title
         || typeof mismatch.explanation !== "string" || !mismatch.explanation
         || mismatch.editingBlocked !== true
-        || !/^[0-9a-f]{32}$/.test(mismatch.observedDocumentId)
-        || !/^[0-9a-f]{64}$/.test(mismatch.observedHead)
+        || (hasPrivateHeadEvidence
+          && (!/^[0-9a-f]{32}$/.test(mismatch.observedDocumentId)
+            || !/^[0-9a-f]{64}$/.test(mismatch.observedHead)))
         || (mismatch.witnessedDocumentId !== undefined
           && !/^[0-9a-f]{32}$/.test(mismatch.witnessedDocumentId))
         || (mismatch.witnessedHead !== undefined

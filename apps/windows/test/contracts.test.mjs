@@ -145,6 +145,8 @@ test("accepts only validated read-only native results", () => {
   assert.deepEqual(narrowed.headMismatch, { kind: "rollback", title: "Rollback",
     explanation: "Review it.", editingBlocked: true });
   assert.equal(JSON.stringify(narrowed).includes("must not cross"), false);
+  assert.deepEqual(validateOpenedDocument(narrowed), narrowed,
+    "canonical boundary results remain safe to revalidate inside the service");
 });
 
 test("push and administration results are canonical and narrowly projected", () => {

@@ -162,8 +162,9 @@ test("integrated native close | real DocumentService restart journal | Cancel th
     const discardEvent = { prevented: false, preventDefault() { this.prevented = true; } };
     const discarded = closeHandler(discardEvent);
     assert.equal(discardEvent.prevented, true);
-    await restartedProtections.decide({ token: protectionRequest.token,
+    const discardDecision = await restartedProtections.decide({ token: protectionRequest.token,
       decision: "discard" });
+    assert.deepEqual(discardDecision, { completed: true, proceed: true });
     assert.equal(await discarded, true);
     assert.equal(closes, 1);
     assert.equal(await restarted.journals.read(fixture.documentId,
