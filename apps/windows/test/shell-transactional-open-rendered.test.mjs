@@ -5,7 +5,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
-test("mounted shell keeps the session through picker, password, creation, and unlock failures",
+test("mounted matrix | New/Open | post-approval create/open failures retain prior session and focus",
   async (t) => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "https://scpefe.invalid/",

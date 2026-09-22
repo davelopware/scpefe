@@ -5,7 +5,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
-test("mounted claim secrets are synchronously torn down by automatic and manual locks",
+test("mounted matrix | external invitation claim | lock during staged replacement clears secrets",
   async (t) => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "https://scpefe.invalid/",

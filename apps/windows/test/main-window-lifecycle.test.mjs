@@ -4,6 +4,7 @@ import { ExternalOpenLifecycle } from "../src/external-open-lifecycle.mjs";
 import { NativeLifecycleCoordinator } from "../src/native-lifecycle.mjs";
 import { OrderedOpenRequests } from "../src/single-instance.mjs";
 import { registerNativeWindowClose } from "../src/window-lifecycle.mjs";
+import { SessionProtectionCoordinator } from "../src/session-protection.mjs";
 
 const states = [
   ["no document", null],
@@ -54,4 +55,52 @@ for (const [name, active] of states) {
           "ack:canceled:3", "record"]);
       });
   }
+}
+
+for (const [name, active] of states.slice(0, 2)) {
+  test(`registered BrowserWindow close | ${name} | no external request | direct close`, async () => {
+    let handler;
+    const window = { on(_event, value) { handler = value; }, removeListener() {} };
+    const lifecycle = new NativeLifecycleCoordinator({ getService: () => ({ active,
+      hasActivePublication: () => false }),
+    protections: { authorize: () => assert.fail("clean direct close must not authorize") },
+    lockActive: async () => {}, closeWindow: () => assert.fail("native reentry owns closing"),
+    report: () => {} });
+    registerNativeWindowClose(window, lifecycle);
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    assert.equal(await handler(event), true);
+    assert.equal(event.prevented, false);
+  });
+}
+
+const protectedStates = [
+  ["dirty edit", { editMode: true, dirty: true, manuallySealed: true }],
+  ["provisional edit", { editMode: true, dirty: false, manuallySealed: false }],
+  ["pending-publication read-only", { editMode: false, dirty: false,
+    manuallySealed: true, pendingPublication: true, unresolvedJournal: true }],
+  ["recovered read-only", { editMode: false, dirty: false, manuallySealed: true,
+    recovery: { text: "recoverable" }, unresolvedJournal: true }],
+  ["conflict read-only", { editMode: false, dirty: false, manuallySealed: true,
+    pendingPublication: true, unresolvedJournal: true,
+    pendingRecord: { state: "conflict", publication: { purpose: "manual-save" } } }],
+];
+
+for (const [name, active] of protectedStates) {
+  test(`registered BrowserWindow close | ${name} | Cancel | prior session retained`, async () => {
+    let handler; let request;
+    const service = { active: { ...active }, hasActivePublication: () => false };
+    const protections = new SessionProtectionCoordinator({ getService: () => service,
+      present(value) { request = value; } });
+    const lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
+      protections, lockActive: async () => {},
+      closeWindow: () => assert.fail("Cancel must not close"), report: () => {} });
+    registerNativeWindowClose({ on(_event, value) { handler = value; },
+      removeListener() {} }, lifecycle);
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    const closing = handler(event);
+    assert.equal(event.prevented, true);
+    await protections.decide({ token: request.token, decision: "cancel" });
+    assert.equal(await closing, false);
+    assert.deepEqual(service.active, active);
+  });
 }

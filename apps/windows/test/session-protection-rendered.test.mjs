@@ -30,7 +30,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     requestAnimationFrame: raf, cancelAnimationFrame: (id) => frames.delete(id),
     IS_REACT_ACT_ENVIRONMENT: true });
 
-  const listeners = {}; const decisions = []; let failedSave = true; let stopped = 0;
+  const listeners = {}; const decisions = []; let failedSave = true; let failedDiscard = true;
+  let stopped = 0;
   let protectedNumber = 0; let pendingHost = null; let openCalls = 0;
   const listen = (name, listener) => { listeners[name] = listener;
     return () => { stopped += 1; delete listeners[name]; }; };
@@ -86,6 +87,11 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
           retryToken: "20000000-0000-4000-8000-000000000000",
           error: "publication retry failed safely" };
       }
+      if (request.decision === "discard" && failedDiscard) {
+        failedDiscard = false; return { completed: false, proceed: false,
+          retryToken: "40000000-0000-4000-8000-000000000000",
+          error: "discard cleanup failed safely" };
+      }
       if (request.decision === "cancel" && pendingHost) {
         const pending = pendingHost; pendingHost = null;
         if (pending.operation === "new" || pending.operation === "open") {
@@ -93,6 +99,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
         } else pending.resolve(pending.operation === "external-open" ? null : false);
       } else if (pendingHost) {
         const pending = pendingHost; pendingHost = null; pending.resolve(true);
+        if (pending.operation === "close") queueMicrotask(() => listeners.closed());
       }
       return { completed: true, proceed: request.decision !== "cancel" };
     },
@@ -194,50 +201,80 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   ];
   for (const [stateName, state] of mountedMatrix) {
     for (const [operation, trigger] of triggers) {
-      states[operation] = state;
-      await trigger();
-      dialog = await ui.findByRole(document.body, "dialog", { name: /Protect current document/ });
-      assert.equal(ui.getAllByRole(dialog, "listitem").length >= 1, true,
-        `${operation} exposes ${stateName} risk through its actual command path`);
-      await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
-      if (operation === "new") {
-        const create = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
-        await user.click(ui.getByRole(create, "button", { name: "Cancel" }));
-      } else if (operation === "open") {
-        const open = await ui.findByRole(document.body, "dialog", { name: "Open document" });
-        await user.click(ui.getByRole(open, "button", { name: "Cancel" }));
-      }
-      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-      assert.equal(editor.value, "unsaved plaintext",
-        `${operation} cancellation retains the prior edit session for ${stateName}`);
+      await t.test(`mounted matrix | ${operation} | edit ${stateName} | Cancel`, async () => {
+        states[operation] = state;
+        await trigger();
+        dialog = await ui.findByRole(document.body, "dialog", { name: /Protect current document/ });
+        assert.equal(ui.getAllByRole(dialog, "listitem").length >= 1, true);
+        await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
+        if (operation === "new") {
+          const create = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
+          await user.click(ui.getByRole(create, "button", { name: "Cancel" }));
+        } else if (operation === "open") {
+          const open = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+          await user.click(ui.getByRole(open, "button", { name: "Cancel" }));
+        }
+        await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+        assert.equal(editor.value, "unsaved plaintext");
+        assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "Edit mode");
+      });
     }
   }
 
-  states.exit = { dirty: false, provisional: false, pendingPublication: true,
-    recovered: false, conflict: true, unresolvedJournal: true,
-    activePublication: false };
-  await fileCommand("Exit");
-  dialog = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
-  const retry = ui.getByRole(dialog, "button", { name: "Retry publication and continue" });
-  await user.click(retry);
-  await ui.waitFor(() => assert.ok(ui.getByText(dialog,
-    /publication retry failed safely/)));
-  assert.equal(document.activeElement === retry, true);
-  assert.equal(editor.value, "unsaved plaintext");
-  await user.click(retry);
-  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+  await t.test("mounted matrix | Exit | conflict pending-publication | publication failure then Retry success",
+    async () => {
+      states.exit = { dirty: false, provisional: false, pendingPublication: true,
+        recovered: false, conflict: true, unresolvedJournal: true,
+        activePublication: false };
+      await fileCommand("Exit");
+      dialog = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      const retry = ui.getByRole(dialog, "button", { name: "Retry publication and continue" });
+      await user.click(retry);
+      await ui.waitFor(() => assert.ok(ui.getByText(dialog,
+        /publication retry failed safely/)));
+      assert.equal(document.activeElement === retry, true);
+      assert.equal(editor.value, "unsaved plaintext");
+      await user.click(retry);
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    });
 
-  await fileCommand(/Close/);
-  dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
-  await user.click(ui.getByRole(dialog, "button", { name: "Discard and continue" }));
-  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-  assert.equal(editor.value, "unsaved plaintext");
+  await t.test("mounted matrix | Exit | dirty edit | Save success", async () => {
+    states.exit = mountedMatrix[0][1];
+    await fileCommand("Exit");
+    dialog = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+    await user.click(ui.getByRole(dialog, "button", { name: "Manual save and continue" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(editor.value, "unsaved plaintext");
+  });
 
-  listeners.closed();
+  await t.test("mounted matrix | Close | recovered edit | Discard blocked then Cancel",
+    async () => {
+      states.close = mountedMatrix[3][1];
+      await fileCommand(/Close/);
+      dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
+      const discard = ui.getByRole(dialog, "button", { name: "Discard and continue" });
+      await user.click(discard);
+      await ui.waitFor(() => assert.ok(ui.getByText(dialog, /discard cleanup failed safely/)));
+      assert.equal(document.activeElement, discard);
+      assert.equal(editor.value, "unsaved plaintext");
+      await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      assert.equal(editor.value, "unsaved plaintext");
+    });
+
+  await t.test("mounted matrix | Close | recovered edit | Discard allowed", async () => {
+    await fileCommand(/Close/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
+    assert.equal(editor.value, "unsaved plaintext");
+    await user.click(ui.getByRole(dialog, "button", { name: "Discard and continue" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(editor.value, "");
+  });
+
   await ui.waitFor(() => assert.equal(
     ui.getByRole(document.body, "note").textContent.includes("No document"), true));
   assert.equal(editor.value, "");
-  assert.equal(decisions.length, 33);
+  assert.equal(decisions.length, 36);
   mountedRoot.unmount(); mountedRoot = null; await Promise.resolve();
   assert.equal(document.getElementById("root").childElementCount, 0);
   assert.equal(stopped, 8); assert.equal(frames.size, 0);

@@ -9,6 +9,9 @@ import { applyCloseDecision } from "../src/close-document.mjs";
 import { compactWithBackupSelection } from "../src/compaction-flow.mjs";
 import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
   DocumentService } from "../src/document-service.mjs";
+import { NativeLifecycleCoordinator } from "../src/native-lifecycle.mjs";
+import { SessionProtectionCoordinator } from "../src/session-protection.mjs";
+import { registerNativeWindowClose } from "../src/window-lifecycle.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -105,6 +108,65 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
   return { directory, target, current, candidate, leaseChanged, previousHead,
     compactedHead, documentId, journalKey, native, options, service };
 }
+
+test("integrated native close | real DocumentService restart journal | Cancel then Discard",
+  async (t) => {
+    const fixture = await compactionFixture(t, "scpefe-lifecycle-restart-");
+    fixture.service.updateWorkingCopy({ content: "restart-safe unsaved text",
+      cursor: { start: 24, end: 24 } });
+    let protectionRequest; let closeHandler; let closes = 0;
+    const protections = new SessionProtectionCoordinator({
+      getService: () => fixture.service,
+      present: (request) => { protectionRequest = request; },
+    });
+    const lifecycle = new NativeLifecycleCoordinator({
+      getService: () => fixture.service, protections,
+      lockActive: (reason) => fixture.service.lock(reason),
+      closeWindow: () => { closes += 1; }, report: () => {},
+    });
+    registerNativeWindowClose({ on(_event, handler) { closeHandler = handler; },
+      removeListener() {} }, lifecycle);
+    const cancelEvent = { prevented: false, preventDefault() { this.prevented = true; } };
+    const canceled = closeHandler(cancelEvent);
+    assert.equal(cancelEvent.prevented, true);
+    await protections.decide({ token: protectionRequest.token, decision: "cancel" });
+    assert.equal(await canceled, false);
+    assert.equal(closes, 0);
+    assert.equal(fixture.service.active.working.content, "restart-safe unsaved text");
+    assert.deepEqual(await fs.readFile(fixture.target), fixture.current);
+
+    await fixture.service.lock("restart-evidence");
+    const pending = await fixture.service.journals.read(fixture.documentId,
+      fixture.journalKey);
+    assert.equal(pending.text, "restart-safe unsaved text");
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target,
+      "recovery or owner password");
+    assert.equal(opened.recovery.content, "restart-safe unsaved text");
+    assert.equal(restarted.active.recovery.text, "restart-safe unsaved text");
+
+    protectionRequest = null; closeHandler = null;
+    const restartedProtections = new SessionProtectionCoordinator({
+      getService: () => restarted,
+      present: (request) => { protectionRequest = request; },
+    });
+    const restartedLifecycle = new NativeLifecycleCoordinator({
+      getService: () => restarted, protections: restartedProtections,
+      lockActive: (reason) => restarted.lock(reason),
+      closeWindow: () => { closes += 1; }, report: () => {},
+    });
+    registerNativeWindowClose({ on(_event, handler) { closeHandler = handler; },
+      removeListener() {} }, restartedLifecycle);
+    const discardEvent = { prevented: false, preventDefault() { this.prevented = true; } };
+    const discarded = closeHandler(discardEvent);
+    assert.equal(discardEvent.prevented, true);
+    await restartedProtections.decide({ token: protectionRequest.token,
+      decision: "discard" });
+    assert.equal(await discarded, true);
+    assert.equal(closes, 1);
+    assert.equal(await restarted.journals.read(fixture.documentId,
+      fixture.journalKey), null);
+  });
 
 async function migrationFixture(t, prefix = "scpefe-migration-fixture-", fsImpl = fs) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
