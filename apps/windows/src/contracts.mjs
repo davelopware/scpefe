@@ -283,6 +283,16 @@ function validateTargetName(value) {
 }
 
 export function validateOpenedDocument(value) {
+  if (value && typeof value === "object" && value.readOnly === true
+      && value.invitationRequired === true) {
+    if (Object.keys(value).some((key) => !["readOnly", "invitationRequired", "targetName"]
+      .includes(key))) {
+      throw new TypeError("host returned an invalid staged invitation");
+    }
+    const targetName = validateTargetName(value.targetName);
+    return Object.freeze({ readOnly: true, invitationRequired: true,
+      ...(targetName ? { targetName } : {}) });
+  }
   if (!value || typeof value !== "object" || value.readOnly !== true
       || typeof value.content !== "string" || typeof value.canEdit !== "boolean") {
     throw new TypeError("native bridge returned an invalid document");

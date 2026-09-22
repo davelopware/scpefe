@@ -163,15 +163,22 @@ test("external mutation after a real claim prevents adoption and preserves the o
     assert.equal(authoritative, original);
   });
 
-test("unsafe current state cancels New before a candidate or target can exist", async () => {
-  let candidates = 0;
+test("canceled New removes its validated staged candidate before returning", async () => {
+  let candidates = 0; let removed = false;
   const coordinator = new ReplacementCoordinator({
-    makeCandidate: () => { candidates += 1; return {}; },
+    makeCandidate: () => { candidates += 1; return {
+      async loadClientSettings() {}, async createDocument() {},
+      async openDocument() { this.active = {}; return { content: "", readOnly: true }; },
+      async enterEditMode() { return { content: "", readOnly: false }; },
+      async revalidateTargetForReplacement() {},
+      async abandonCreatedDocument() { removed = true; this.active = null; },
+    }; },
     authorizeCurrent: async () => false, adopt: () => assert.fail("must not adopt") });
   await assert.rejects(coordinator.create("new.scpefe", {
     ownerPassword: "owner password words", content: "",
   }), /current document remains open/);
-  assert.equal(candidates, 0);
+  assert.equal(candidates, 1);
+  assert.equal(removed, true);
 });
 
 function delayedCandidate({ invitation = false, delay = "open" } = {}) {

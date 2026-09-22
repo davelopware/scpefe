@@ -14,24 +14,26 @@ export class ReplacementCoordinator {
 
   async create(target, request) {
     const generation = this.#capture(); let staged; let candidate;
-    const authorized = await this.authorizeCurrent("new", async () => {
-      try {
-        staged = await createReplacement({ makeCandidate: () => {
-          candidate = this.makeCandidate(); this.candidates.add(candidate); return candidate;
-        },
-          target, request, authorizeCurrent: async () => true });
+    try {
+      staged = await createReplacement({ makeCandidate: () => {
+        candidate = this.makeCandidate(); this.candidates.add(candidate); return candidate;
+      }, target, request, authorizeCurrent: async () => true });
+      this.#assertCurrent(generation);
+      const authorized = await this.authorizeCurrent("new", async () => {
+        this.#assertCurrent(generation);
+        await staged.candidate.revalidateTargetForReplacement();
         this.#assertCurrent(generation);
         this.adopt(staged, target);
         this.#assertCurrent(generation);
         this.candidates.delete(staged.candidate);
-      } catch (error) {
-        if (staged) await disposeReplacement(staged);
-        if (candidate) this.candidates.delete(candidate);
-        throw error;
-      }
-    });
-    if (!authorized) throw canceledReplacement();
-    return staged.opened;
+      }, () => staged.candidate.revalidateTargetForReplacement());
+      if (!authorized) throw canceledReplacement();
+      return staged.opened;
+    } catch (error) {
+      if (staged) await disposeReplacement(staged);
+      if (candidate) this.candidates.delete(candidate);
+      throw error;
+    }
   }
 
   async open(target, password, operation = "open") {
@@ -60,7 +62,7 @@ export class ReplacementCoordinator {
         this.adopt(staged, target);
         this.#assertCurrent(generation);
         this.candidates.delete(staged.candidate);
-      });
+      }, () => staged.candidate.revalidateTargetForReplacement());
       if (!authorized) throw canceledReplacement();
       return staged.opened;
     } catch (error) {

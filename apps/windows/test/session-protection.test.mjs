@@ -284,6 +284,7 @@ test("null and clean originals fence late replacement results and remain reusabl
       await new Promise((resolve) => { release = resolve; }); committed += 1;
     });
     const rejected = assert.rejects(first, /session locked/);
+    await new Promise((resolve) => setImmediate(resolve));
     generation.invalidate(); policy.cancelForLock(); release(); await rejected;
     assert.equal(committed, 1);
     assert.equal(await policy.authorize("open", async () => { committed += 1; }), true);

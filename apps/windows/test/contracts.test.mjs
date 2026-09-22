@@ -144,6 +144,11 @@ test("permits only the invitation claim surface before password replacement", ()
   });
   assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
   assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
+  assert.deepEqual(validateOpenedDocument({ readOnly: true, invitationRequired: true,
+    targetName: "invitation.scpefe" }), { readOnly: true, invitationRequired: true,
+    targetName: "invitation.scpefe" });
+  assert.throws(() => validateOpenedDocument({ readOnly: true, invitationRequired: true,
+    content: "smuggled secret" }), /invalid staged invitation/);
   assert.throws(() => validateOpenedDocument({ content: "secret", readOnly: true,
     canEdit: false, mustBeChanged: true }), /exposed before claim/);
 });

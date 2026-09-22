@@ -55,7 +55,8 @@ export class DocumentLifecycleHost {
       generation: this.generation,
       present: (request) => this.#emit("document:protection-requested", request) });
     this.replacements = new ReplacementCoordinator({ makeCandidate: () => this.#makeService(),
-      authorizeCurrent: (operation, commit) => this.protections.authorize(operation, commit),
+      authorizeCurrent: (operation, commit, validateCandidate) =>
+        this.protections.authorize(operation, commit, validateCandidate),
       adopt: (staged, target) => this.#adopt(staged, target), generation: this.generation });
     this.secureLocks = new SecureLockCoordinator({ getService: () => this.service,
       replacements: this.replacements, creationFlow: this.creation,

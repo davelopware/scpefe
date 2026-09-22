@@ -33,6 +33,9 @@ export async function runMountedLock(t, origin) {
   let provisionalDiscardFault = false;
   let publicationUnavailable = false;
   let publicationFailureAfter = null;
+  let createFault = false;
+  let createdCandidate = false;
+  let createdLeaseFault = false;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const revisionGraphs = new Map();
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
@@ -74,8 +77,14 @@ export async function runMountedLock(t, origin) {
         ? [{ revisionId: revision, parentRevisionIds: [initialRevision] },
           { revisionId: initialRevision, parentRevisionIds: [] }]
         : [{ revisionId: revision, parentRevisionIds: [] }]);
-    return { content: openedContent(bytes), readOnly: true,
-    canEdit: true, manuallySealed: !bytes.toString().startsWith("provisional:"),
+    const invitation = origin === "ro-invitation" && bytes.toString() === "other-container";
+    return { content: invitation ? "" : openedContent(bytes), readOnly: true,
+    canEdit: !invitation, canAddPasswords: !invitation, canRemovePasswords: !invitation,
+    ...(invitation ? { mustBeChanged: true,
+      slotIdentityName: "Temporary colleague label",
+      slotIdentityEmail: "invited@example.test", profileName: "Document author",
+      profileEmail: "author@example.test", deviceName: "Author device" } : {}),
+    manuallySealed: !bytes.toString().startsWith("provisional:"),
     documentId: bytes.toString().startsWith("other") ? "62".repeat(16) : "61".repeat(16),
     baseRevision: revision,
     revisionGraph,
@@ -83,10 +92,17 @@ export async function runMountedLock(t, origin) {
     lease: { ...(bytes.toString().startsWith("other") ? { active: false,
       sessionId: "0".repeat(32), heartbeatCounter: 0, holderUtcMs: 0,
       durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" } : lease) } };
-  }, updateLease(bytes, _password, next) { lease = { ...next }; return Buffer.from(bytes); },
-  createDocument() { lease = { active: false, sessionId: "0".repeat(32),
+  }, updateLease(bytes, _password, next) {
+    if (createdCandidate && createdLeaseFault) throw new Error("injected created candidate lease failure");
+    lease = { ...next }; return Buffer.from(bytes);
+  },
+  createDocument() {
+    if (createFault) throw new Error("injected native create failure");
+    createdCandidate = true;
+    lease = { active: false, sessionId: "0".repeat(32),
     heartbeatCounter: 0, holderUtcMs: 0, durationMs: 600_000,
-    holderName: "", holderEmail: "", deviceName: "" }; return Buffer.from("saved:"); },
+    holderName: "", holderEmail: "", deviceName: "" }; return Buffer.from("saved:");
+  },
   saveDocument(_bytes, _password, input) {
     if (saveFault) throw new Error("injected native save failure");
     const candidate = Buffer.from(`saved:${input.content}`);
@@ -137,7 +153,7 @@ export async function runMountedLock(t, origin) {
       if (!event.prevented) this.closed += 1; return event; }
     show() {} focus() {} isMinimized() { return false; }
   }
-  const fakeWindow = new FakeWindow(); let createPickerCalls = 0;
+  const fakeWindow = new FakeWindow(); let createPickerCalls = 0; let openPickerCalls = 0;
   let restartCandidateHash = null;
   if (origin.startsWith("s7-") || origin.startsWith("rw-")) {
     const crashed = new DocumentService(serviceOptions());
@@ -184,9 +200,13 @@ export async function runMountedLock(t, origin) {
       createPickerCalls += 1; return origin.startsWith("new")
         || origin.startsWith("s5-") || origin.startsWith("s9-")
         || origin.startsWith("dr-new-") || origin.startsWith("prr-new-")
+        || (origin.startsWith("rn-") && origin !== "rn-picker-cancel")
         ? newTarget : null;
     },
       chooseOpenTarget: async () => origin === "s0-open" ? null
+        : origin.startsWith("ro-") || origin.startsWith("rx-")
+          ? (openPickerCalls++ === 0 ? target
+            : origin === "ro-picker-cancel" ? null : otherTarget)
         : (origin.startsWith("dr-open-") || origin.startsWith("prr-open-"))
           && createPickerCalls++ > 0 ? otherTarget : target },
     serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
@@ -537,6 +557,102 @@ export async function runMountedLock(t, origin) {
     await service.regularSaveDocument();
     await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
       "Publication state").textContent, "Provisional publication"));
+  }
+  if (origin.startsWith("rn-")) {
+    await command("File", /New/);
+    if (origin === "rn-picker-cancel") {
+      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+      assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+      assert.equal(editor.value, "mounted secret plaintext"); return;
+    }
+    const creation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+    await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+      origin === "rn-mismatch" ? "owner password typo" : "owner password words");
+    await user.click(ui.getByLabelText(creation,
+      "I understand that lost passwords cannot be recovered."));
+    createFault = origin === "rn-create-fault";
+    createdLeaseFault = origin === "rn-post-approval-cleanup";
+    await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    if (origin === "rn-mismatch") {
+      assert.match(ui.getByRole(creation, "alert").textContent,
+        /owner passwords do not match/i);
+      assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+      assert.equal(editor.value, "mounted secret plaintext"); return;
+    }
+    await ui.findByText(creation, origin === "rn-create-fault"
+      ? /injected native create failure/ : /injected created candidate lease failure/);
+    assert.equal(host.service === service, true);
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    return;
+  }
+  if (origin.startsWith("ro-")) {
+    await command("File", /Open/);
+    if (origin === "ro-picker-cancel") {
+      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+      assert.equal(editor.value, "mounted secret plaintext"); return;
+    }
+    let opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    if (origin === "ro-dialog-cancel") {
+      await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      assert.equal(host.service === service, true); assert.equal(editor.value,
+        "mounted secret plaintext"); return;
+    }
+    await user.type(ui.getByLabelText(opened, "Password"),
+      origin === "ro-wrong-password" ? "wrong password" : "password words");
+    await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    if (origin === "ro-wrong-password") {
+      await ui.findByRole(opened, "alert");
+      assert.equal(host.service === service, true); assert.equal(editor.value,
+        "mounted secret plaintext"); return;
+    }
+    if (origin === "ro-invitation") {
+      const claim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
+      await user.click(ui.getByRole(claim, "button", { name: "Cancel" }));
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      assert.equal(host.service === service, true); assert.equal(editor.value,
+        "mounted secret plaintext"); return;
+    }
+    const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
+    await fs.writeFile(otherTarget, "other-container-mutated");
+    await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+    await ui.findByText(protection, /target changed/i);
+    assert.equal(host.service === service, true);
+    assert.equal(editor.value, "mounted secret plaintext");
+    return;
+  }
+  if (origin.startsWith("rx-")) {
+    await host.setReady(); const request = host.enqueueExternal({ target: otherTarget,
+      source: "second-instance" });
+    const opened = await ui.findByRole(document.body, "dialog",
+      { name: "Open requested document" });
+    if (origin === "rx-cancel") {
+      await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
+      await ui.waitFor(() => assert.deepEqual(acks.map(({ status }) => status),
+        ["queued", "presented", "canceled"]));
+      assert.equal(host.externalRequests.current(request.token), null);
+      assert.equal(editor.value, "mounted secret plaintext"); return;
+    }
+    if (origin === "rx-retry") {
+      await user.type(ui.getByLabelText(opened, "Password"), "wrong password");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+      await ui.findByRole(opened, "alert");
+      assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+      await user.clear(ui.getByLabelText(opened, "Password"));
+    }
+    await user.type(ui.getByLabelText(opened, "Password"), "password words");
+    await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
+    await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+    await ui.waitFor(() => assert.deepEqual(acks.map(({ status }) => status),
+      ["queued", "presented", "opened"]));
+    assert.equal(host.externalRequests.current(request.token), null);
+    assert.equal(host.service === service, false);
+    await ui.waitFor(() => assert.equal(editor.value, "other plaintext"));
+    return;
   }
   if (origin.startsWith("dr-") || origin.startsWith("prr-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
@@ -956,6 +1072,22 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("rn-")) return `RN-${origin.slice(3)} New replacement ${{
+    "picker-cancel": "picker Cancel retains session", mismatch: "mismatch creates no file",
+    "create-fault": "post-approval create fault retains session",
+    "post-approval-cleanup": "post-approval candidate cleanup removes created file",
+  }[origin.slice(3)] ?? ""}`;
+  if (origin.startsWith("ro-")) return `RO-${origin.slice(3)} Open replacement ${{
+    "picker-cancel": "picker Cancel retains session",
+    "dialog-cancel": "password dialog Cancel retains session",
+    "wrong-password": "wrong password retains session",
+    revalidation: "post-approval revalidation failure retains session",
+    invitation: "invitation claim Cancel retains session",
+  }[origin.slice(3)] ?? ""}`;
+  if (origin.startsWith("rx-")) return `RX-${origin.slice(3)} external Open ${{
+    retry: "wrong password Retry then opened acknowledgement",
+    cancel: "Cancel terminal acknowledgement", "open-ack": "opened terminal acknowledgement",
+  }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("cf-")) return `CF-${origin.slice(3)} conflict ${{
     cancel: "window close Cancel", retry: "window close Retry remains conflict",
     discard: "window close Discard policy blocks changed target",

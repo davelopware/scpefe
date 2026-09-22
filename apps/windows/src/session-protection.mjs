@@ -29,9 +29,12 @@ export class SessionProtectionCoordinator {
     this.cleanOperation = null;
   }
 
-  async authorize(operation, commit = async () => {}) {
+  async authorize(operation, commit = async () => {}, validateCandidate = async () => {}) {
     if (!OPERATIONS.has(operation)) throw new TypeError("invalid protection operation");
     if (typeof commit !== "function") throw new TypeError("invalid protection commit");
+    if (typeof validateCandidate !== "function") {
+      throw new TypeError("invalid protection candidate validation");
+    }
     const service = this.getService();
     const generation = this.generation?.capture();
     const state = describeProtection(service.active,
@@ -58,6 +61,8 @@ export class SessionProtectionCoordinator {
             { code: "DOCUMENT_PROTECTION_STALE" });
           }
           this.#assertGeneration(generation);
+          await validateCandidate();
+          this.#assertGeneration(generation);
           claimed.state = "commit";
           await commit();
           this.#assertGeneration(generation);
@@ -68,7 +73,8 @@ export class SessionProtectionCoordinator {
     const token = randomUUID();
     return new Promise((resolve, reject) => {
       this.pending = { token, operation, service, active: service.active,
-        generation, state: "presented", aborted: false, commit, resolve, reject };
+        generation, state: "presented", aborted: false, commit, validateCandidate,
+        resolve, reject };
       try { this.present(Object.freeze({ token, operation, state })); }
       catch (error) { this.pending = null; reject(error); }
     });
@@ -109,6 +115,8 @@ export class SessionProtectionCoordinator {
             "The document changed while the decision was running; nothing was abandoned"),
           { code: "DOCUMENT_PROTECTION_STALE" });
         }
+        await pending.validateCandidate();
+        this.#assertGeneration(pending.generation);
         const allowed = !needsCloseDecision(pending.service.active)
           || await applyCloseDecision(pending.service, request.decision);
         if (!allowed) return false;

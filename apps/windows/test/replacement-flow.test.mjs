@@ -71,15 +71,15 @@ test("an authorization fault disposes the candidate and preserves current state"
   assert.deepEqual(log.slice(-1), ["candidate:lock:replacement-canceled"]);
 });
 
-test("new authorizes before publication and revalidates its blank edit candidate", async () => {
+test("new stages only after security validation and revalidates its blank edit candidate", async () => {
   const log = [];
   const request = { ownerPassword: "owner password words", content: "" };
   const result = await createReplacement({ makeCandidate: () => candidate(log),
     target: "new-target", request,
     authorizeCurrent: async () => { log.push("current:authorize"); return true; } });
-  assert.deepEqual(log, ["current:authorize", "candidate:settings",
-    "candidate:create:new-target:", "candidate:open:new-target:owner password words",
-    "candidate:edit", "candidate:revalidate"]);
+  assert.deepEqual(log, ["candidate:settings", "candidate:create:new-target:",
+    "candidate:open:new-target:owner password words",
+    "candidate:edit", "candidate:revalidate", "current:authorize"]);
   assert.deepEqual(result.opened, { content: "", readOnly: false, canEdit: true });
 });
 
