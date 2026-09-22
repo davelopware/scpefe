@@ -332,6 +332,17 @@ export async function runMountedLock(t, origin) {
     }
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
   };
+  if (origin === "tc-close-no-doc") {
+    await command("File", /Close/);
+    assert.equal(ui.queryByRole(document.body, "dialog"), null);
+    assert.equal(ui.getByLabelText(document.body, "Document state").textContent,
+      "No document"); assert.equal(fakeWindow.closed, 0); return;
+  }
+  if (origin === "te-exit-once") {
+    await command("File", "Exit");
+    await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    assert.equal(acks.length, 0); return;
+  }
   if (origin.startsWith("s0-")) {
     const entry = origin.slice(3);
     if (entry === "new") {
@@ -532,7 +543,7 @@ export async function runMountedLock(t, origin) {
   service.onLockStart = (value) => { assert.equal(value.reason, origin.startsWith("s3-")
     ? "app-lock" : origin === "close" || origin.endsWith("-close")
       || origin.startsWith("dc-close-") || origin.startsWith("prc-close-")
-      || origin.startsWith("rw-")
+      || origin.startsWith("rw-") || origin.startsWith("tw-") || origin.startsWith("tx-")
       ? "document-close" : origin);
     originalLockStart(value); lockStarted(); };
   const originalLocked = service.onLocked;
@@ -557,6 +568,19 @@ export async function runMountedLock(t, origin) {
     await service.regularSaveDocument();
     await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
       "Publication state").textContent, "Provisional publication"));
+  }
+  if (origin === "tx-external-before-exit") {
+    await host.setReady(); const request = host.enqueueExternal({ target: otherTarget,
+      source: "second-instance" });
+    await ui.findByRole(document.body, "dialog", { name: "Open requested document" });
+    assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+    const event = fakeWindow.close(); assert.equal(event.prevented, true);
+    const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+    await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+    await fakeWindow.lastClose;
+    assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "canceled"]);
+    assert.equal(host.externalRequests.current(request.token), null);
+    assert.equal(fakeWindow.closed, 1); return;
   }
   if (origin.startsWith("rn-")) {
     await command("File", /New/);
@@ -1020,7 +1044,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.externalRequests.current(request.token), null);
     return;
   }
-  if (origin === "window-close") {
+  if (origin === "window-close" || origin === "tw-protect-reentry") {
     const first = fakeWindow.close();
     assert.equal(first.prevented, true);
     let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
@@ -1072,6 +1096,10 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin === "tc-close-no-doc") return "TC Close command on no-document is direct and non-terminating";
+  if (origin === "te-exit-once") return "TE Exit command closes exactly once from no-document";
+  if (origin === "tw-protect-reentry") return "TW registered window close prevents, protects, retries fault, and reenters once";
+  if (origin === "tx-external-before-exit") return "TX active external FIFO is terminally canceled before native exit";
   if (origin.startsWith("rn-")) return `RN-${origin.slice(3)} New replacement ${{
     "picker-cancel": "picker Cancel retains session", mismatch: "mismatch creates no file",
     "create-fault": "post-approval create fault retains session",
