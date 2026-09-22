@@ -26,6 +26,7 @@ export async function runMountedLock(t, origin) {
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
   let saveFault = false;
+  let discardFault = false;
   let publicationUnavailable = false;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
@@ -40,6 +41,12 @@ export async function runMountedLock(t, origin) {
       holdMaintenance = false;
     }
     return fs.rename(source, destination);
+  }, async unlink(file) {
+    if (discardFault && file.startsWith(path.join(directory, "journals"))) {
+      const error = new Error("injected journal discard failure");
+      error.code = "EIO"; throw error;
+    }
+    return fs.unlink(file);
   } };
   const openedContent = (bytes) => /^(saved|provisional):/.test(bytes.toString())
     ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
@@ -53,7 +60,9 @@ export async function runMountedLock(t, origin) {
     revisionGraph: [{ revisionId: revision, parentRevisionIds: [] }],
     journalKey: Buffer.alloc(32, 0x63), lease: { ...lease } };
   }, updateLease(bytes, _password, next) { lease = { ...next }; return Buffer.from(bytes); },
-  createDocument() { return Buffer.from("saved:"); },
+  createDocument() { lease = { active: false, sessionId: "0".repeat(32),
+    heartbeatCounter: 0, holderUtcMs: 0, durationMs: 600_000,
+    holderName: "", holderEmail: "", deviceName: "" }; return Buffer.from("saved:"); },
   saveDocument(_bytes, _password, input) {
     if (saveFault) throw new Error("injected native save failure");
     return Buffer.from(`saved:${input.content}`);
@@ -325,6 +334,7 @@ export async function runMountedLock(t, origin) {
   const originalLockStart = service.onLockStart;
   service.onLockStart = (value) => { assert.equal(value.reason, origin.startsWith("s3-")
     ? "app-lock" : origin === "close" || origin.endsWith("-close")
+      || origin.startsWith("dc-close-")
       ? "document-close" : origin);
     originalLockStart(value); lockStarted(); };
   const originalLocked = service.onLocked;
@@ -342,6 +352,41 @@ export async function runMountedLock(t, origin) {
   await user.type(editor, "mounted secret plaintext");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Working copy state").textContent, "Dirty"));
+  if (origin.startsWith("dc-")) {
+    const [, entry, ...outcomeParts] = origin.split("-");
+    const outcome = outcomeParts.join("-");
+    if (entry === "close") await command("File", /Close/);
+    else if (entry === "exit") await command("File", "Exit");
+    else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
+    let protection = await ui.findByRole(document.body, "dialog",
+      { name: entry === "close" ? /before Close/ : /before Exit/ });
+    if (outcome === "cancel") {
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
+      assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
+      return;
+    }
+    const decision = outcome.startsWith("save") ? "Manual save and continue"
+      : "Discard and continue";
+    if (outcome === "save-retry") saveFault = true;
+    if (outcome === "discard-retry") discardFault = true;
+    await user.click(ui.getByRole(protection, "button", { name: decision }));
+    if (outcome.endsWith("retry")) {
+      const message = outcome.startsWith("save") ? /injected native save failure/
+        : /injected journal discard failure/;
+      await ui.findByText(protection, message);
+      assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
+      saveFault = false; discardFault = false;
+      protection = ui.getByRole(document.body, "dialog",
+        { name: entry === "close" ? /before Close/ : /before Exit/ });
+      await user.click(ui.getByRole(protection, "button", { name: decision }));
+    }
+    if (entry === "close") await ui.waitFor(() => assert.equal(
+      ui.getByLabelText(document.body, "Document state").textContent, "No document"));
+    else await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    return;
+  }
   if (origin.startsWith("s9-")) {
     await service.saveClientSettings({ regularSaveEnabled: true,
       regularSaveIntervalMs: 120_000 });
@@ -493,6 +538,30 @@ export async function runMountedLock(t, origin) {
     assert.equal(editor.value, "mounted secret plaintext");
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await command("File", /New/);
+    const retryCreation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    await user.type(ui.getByLabelText(retryCreation, "Owner password"),
+      "owner password words");
+    await user.type(ui.getByLabelText(retryCreation, "Confirm owner password"),
+      "owner password words");
+    await user.click(ui.getByLabelText(retryCreation,
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByRole(retryCreation, "button", { name: "Create" }));
+    const retryProtection = await ui.findByRole(document.body, "dialog",
+      { name: /before New/ });
+    saveFault = true;
+    await user.click(ui.getByRole(retryProtection, "button",
+      { name: "Manual save and continue" }));
+    await ui.findByText(retryProtection, /injected native save failure/);
+    saveFault = false;
+    await user.click(ui.getByRole(retryProtection, "button",
+      { name: "Manual save and continue" }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(document.querySelector(".dialog-error")?.textContent ?? "", "");
+    assert.equal(document.querySelector("[role=dialog]") === null, true);
+    assert.equal(host.service === service, false);
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), true);
     return;
   }
   if (origin === "external-open") {
@@ -565,6 +634,14 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("dc-")) {
+    const [, entry, ...outcomeParts] = origin.split("-");
+    const outcome = outcomeParts.join("-");
+    return `D-S4-${{ close: "C", exit: "E", window: "W" }[entry]} dirty ${entry} ${{
+      cancel: "Cancel retains", save: "Save success", "save-retry": "Save failure then Retry",
+      discard: "Discard success", "discard-retry": "Discard failure then Retry",
+    }[outcome]}`;
+  }
   return origin === "window-close"
     ? "L-S4-W dirty BrowserWindow close: Cancel retains, Save failure focuses retry, success terminates"
     : origin === "external-open"
