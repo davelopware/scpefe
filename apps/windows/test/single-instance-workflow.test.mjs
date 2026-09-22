@@ -210,13 +210,15 @@ test("renderer makes external requests and unresolved journals accessible", asyn
 
 test("main registers file and URL lifecycle events before draining staged requests", async () => {
   const main = await fs.readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
+  const host = await fs.readFile(
+    new URL("../src/document-lifecycle-host.mjs", import.meta.url), "utf8");
   assert.match(main, /app\.on\("open-file"/);
   assert.match(main, /app\.on\("open-url"/);
-  assert.match(main, /externalRequests\.setReady\(\)/);
-  assert.match(main, /acknowledgeRequest\(request, "queued", 1\)/);
-  assert.match(main, /acknowledgeRequest\(request, "presented", 2\)/);
-  assert.match(main, /externalLifecycle\.finish\(pending, opened \? "opened" : "canceled"/);
-  assert.match(main, /document:cancel-external-open/);
-  assert.match(main, /externalLifecycle\.stageInvitation\(pending\)/);
+  assert.match(host, /externalRequests\.setReady\(\)/);
+  assert.match(host, /acknowledge\(request, "queued", 1\)/);
+  assert.match(host, /acknowledge\(request, "presented", 2\)/);
+  assert.match(host, /externalLifecycle\.finish\(pending, opened \? "opened" : "canceled"/);
+  assert.match(host, /document:cancel-external-open/);
+  assert.match(host, /externalLifecycle\.stageInvitation\(pending\)/);
   assert.match(main, /validateAcknowledgement\(instanceAcknowledgement/);
 });

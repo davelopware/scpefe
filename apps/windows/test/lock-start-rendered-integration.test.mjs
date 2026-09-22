@@ -4,10 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { EventEmitter } from "node:events";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { DocumentService } from "../src/document-service.mjs";
-import { SessionGeneration } from "../src/session-generation.mjs";
+import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -28,22 +29,33 @@ async function runMountedLock(t, origin) {
     revisionGraph: [{ revisionId: "62".repeat(32), parentRevisionIds: [] }],
     journalKey: Buffer.alloc(32, 0x63), lease: { ...lease } };
   }, updateLease(bytes, _password, next) { lease = { ...next }; return Buffer.from(bytes); } };
-  const timers = []; const ipcListeners = new Map(); const generation = new SessionGeneration();
+  const timers = []; const ipcListeners = new Map(); const ipcHandlers = new Map();
   const emit = (channel, value) => {
     for (const listener of ipcListeners.get(channel) ?? []) listener({}, value);
   };
   let lockStarted; const starting = new Promise((resolve) => { lockStarted = resolve; });
   let lockFinished; const finished = new Promise((resolve) => { lockFinished = resolve; });
-  const service = new DocumentService({ native, fs, profilePath, publicationCapabilities: capabilities,
-    journalDirectory: path.join(directory, "journals"),
-    witnessDirectory: path.join(directory, "witnesses"),
-    inactivityMs: origin === "inactivity" ? 1_500 : 999_999,
-    ...(origin === "lease-refresh-failed" ? { setTimer(callback, delay) {
-      const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
-    }, clearTimer() {} } : {}),
-    onLockStart: ({ reason }) => { assert.equal(reason, origin); generation.invalidate();
-      emit("document:lock-started"); lockStarted(); },
-    onLocked: (result) => { emit("document:locked", result); lockFinished(result); } });
+  class FakeWindow extends EventEmitter {
+    constructor() { super(); this.webContents = { send: emit }; }
+    close() { const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      this.emit("close", event); }
+    show() {} focus() {} isMinimized() { return false; }
+  }
+  const fakeWindow = new FakeWindow();
+  const host = await new DocumentLifecycleHost({
+    ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
+    window: fakeWindow, picker: { chooseCreateTarget: async () => null,
+      chooseOpenTarget: async () => target },
+    serviceFactory: (callbacks) => new DocumentService({ native, fs, profilePath,
+      publicationCapabilities: capabilities,
+      journalDirectory: path.join(directory, "journals"),
+      witnessDirectory: path.join(directory, "witnesses"),
+      inactivityMs: origin === "inactivity" ? 1_500 : 999_999,
+      ...(origin === "lease-refresh-failed" ? { setTimer(callback, delay) {
+        const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
+      }, clearTimer() {} } : {}), ...callbacks }),
+  }).start();
+  let service = host.service;
 
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",
     { url: "https://scpefe.invalid/" });
@@ -65,22 +77,9 @@ async function runMountedLock(t, origin) {
     dom.window.close(); for (const [key, descriptor] of prior) descriptor
       ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key]; });
   const invoke = async (channel, value) => {
-    if (channel === "profile:get") return service.loadProfile();
-    if (channel === "profile:save") return service.saveProfile(value);
-    if (channel === "settings:get") return service.loadClientSettings();
-    if (channel === "settings:save") return service.saveClientSettings(value);
-    if (channel === "journal:summary") return service.unresolvedJournalSummary();
-    if (channel === "document:choose-open-target") {
-      return { selected: true, name: "document.scpefe" };
-    }
-    if (channel === "document:open-selected" || channel === "document:unlock") {
-      return { ...await service.openDocument(target, value), targetName: "document.scpefe" };
-    }
-    if (channel === "document:enter-edit-mode") return service.enterEditMode();
-    if (channel === "document:update-working-copy") return service.updateWorkingCopy(value);
-    if (channel === "document:activity") return service.notifyActivity();
-    if (channel === "document:lock") return service.lock("app-lock");
-    return null;
+    const handler = ipcHandlers.get(channel);
+    if (!handler) return null;
+    return handler({}, value);
   };
   const preload = await fs.readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8");
   vm.runInNewContext(preload, { Buffer, setTimeout,
@@ -116,6 +115,12 @@ async function runMountedLock(t, origin) {
   await command("Edit", "Edit Contents");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Edit mode"));
+  service = host.service;
+  const originalLockStart = service.onLockStart;
+  service.onLockStart = (value) => { assert.equal(value.reason, origin);
+    originalLockStart(value); lockStarted(); };
+  const originalLocked = service.onLocked;
+  service.onLocked = (result) => { originalLocked(result); lockFinished(result); };
   const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
   ui.fireEvent.change(editor, { target: { value: "mounted secret plaintext",
     selectionStart: 24, selectionEnd: 24 } });
@@ -135,7 +140,7 @@ async function runMountedLock(t, origin) {
   }
   await Promise.race([starting, new Promise((_, reject) => setTimeout(() =>
     reject(new Error(`${origin} did not start`)), 3_000))]);
-  assert.equal(generation.capture(), 1);
+  assert.equal(host.generation.capture(), 1);
   assert.equal(editor.value, "", "renderer plaintext is gone before journal cleanup settles");
   assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "Locked");
   assert.equal(service.active.working.content, "mounted secret plaintext",

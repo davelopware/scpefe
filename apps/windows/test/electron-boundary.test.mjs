@@ -5,6 +5,8 @@ import vm from "node:vm";
 
 test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   const main = await fs.readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
+  const lifecycleHost = await fs.readFile(
+    new URL("../src/document-lifecycle-host.mjs", import.meta.url), "utf8");
   const nativeLifecycle = await fs.readFile(
     new URL("../src/native-lifecycle.mjs", import.meta.url), "utf8");
   const config = await fs.readFile(
@@ -15,10 +17,11 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /contextIsolation:\s*true/);
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
-  assert.match(main, /lockActive\(["']app-lock["']\)/);
-  assert.match(main, /onLockStart:/);
-  assert.match(main, /document:lock-started/);
-  assert.match(main, /beginServiceLock\(current\)/);
+  assert.match(main, /new DocumentLifecycleHost/);
+  assert.match(lifecycleHost, /lockActive\(["']app-lock["']\)/);
+  assert.match(lifecycleHost, /onLockStart:/);
+  assert.match(lifecycleHost, /document:lock-started/);
+  assert.match(lifecycleHost, /#beginServiceLock\(current\)/);
   assert.match(main, /defaultPath:\s*["']Untitled\.scpefe["']/);
   assert.match(main, /extensions:\s*\[["']scpefe["']\]/);
   assert.match(main, /requestSingleInstanceLock/);
@@ -26,11 +29,11 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /existing instance remains authoritative/);
   assert.match(main, /Windows Task Manager/);
   assert.doesNotMatch(main, /taskkill|process\.kill|child_process/);
-  assert.match(main, /SessionProtectionCoordinator/);
-  assert.match(main, /NativeLifecycleCoordinator/);
+  assert.match(lifecycleHost, /SessionProtectionCoordinator/);
+  assert.match(lifecycleHost, /NativeLifecycleCoordinator/);
   assert.match(nativeLifecycle, /protections\.authorize\(["']exit["'],/);
-  assert.match(main, /ipcMain\.handle\(["']document:close["']/);
-  assert.doesNotMatch(main,
+  assert.match(lifecycleHost, /#register\(["']document:close["']/);
+  assert.doesNotMatch(lifecycleHost,
     /if \(closingAfterRelease \|\| !service\.active\?\.editMode\) return/);
   assert.match(main, /dist["'],\s*["']preload\.cjs/);
   assert.doesNotMatch(main, /preload\.mjs/);
