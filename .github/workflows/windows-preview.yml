@@ -2,6 +2,12 @@ name: Windows preview
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: Build an unvalidated artifact for manual testing only
+        required: true
+        default: false
+        type: boolean
   push:
     branches:
       - codex/windows-preview-build
@@ -21,18 +27,34 @@ jobs:
           cache: npm
           cache-dependency-path: apps/windows/package-lock.json
       - name: Test Windows process lifecycle barrier
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: powershell
         run: .\scripts\test-windows-preview-process.ps1
       - name: Build and smoke-test unsigned preview
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: powershell
         run: .\scripts\build-windows-preview.ps1
+      - name: Build unsigned manual-testing preview (automated tests skipped)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
+        shell: powershell
+        run: .\scripts\build-windows-preview.ps1 -SkipTests
       - name: Test packaged single-instance lifecycle
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: powershell
         run: .\scripts\test-windows-single-instance.ps1 -PackageRoot .\apps\windows\release\SCPEFE-win32-x64
-      - name: Upload unsigned Windows preview
+      - name: Upload validated unsigned Windows preview
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         uses: actions/upload-artifact@v4
         with:
           name: SCPEFE-win32-x64-unsigned
+          path: apps/windows/release/SCPEFE-win32-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload unvalidated manual-testing preview
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCPEFE-win32-x64-unsigned-manual-untested
           path: apps/windows/release/SCPEFE-win32-x64.zip
           if-no-files-found: error
           retention-days: 14
