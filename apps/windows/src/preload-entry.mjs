@@ -187,6 +187,12 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
       ...(value.completed === false ? { retryToken: value.retryToken, error: value.error } : {}) });
   },
   lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
+  onLockStarted: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    const handler = () => listener();
+    ipcRenderer.on("document:lock-started", handler);
+    return () => ipcRenderer.removeListener("document:lock-started", handler);
+  },
   onLocked: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     const handler = (_event, value) => listener(validateLockResult(value));

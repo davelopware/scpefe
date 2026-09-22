@@ -16,6 +16,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.match(main, /powerMonitor\.on\(["']lock-screen["']/);
   assert.match(main, /window\.on\(["']blur["']/);
   assert.match(main, /lockActive\(["']app-lock["']\)/);
+  assert.match(main, /onLockStart:/);
+  assert.match(main, /document:lock-started/);
+  assert.match(main, /beginServiceLock\(current\)/);
   assert.match(main, /defaultPath:\s*["']Untitled\.scpefe["']/);
   assert.match(main, /extensions:\s*\[["']scpefe["']\]/);
   assert.match(main, /requestSingleInstanceLock/);
@@ -121,7 +124,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "cancelLeaseTakeover", "discardRecoveredWork",
     "acceptHeadMismatch", "closeDocument", "exitApplication", "resolveProtection",
-    "lock", "onLocked",
+    "lock", "onLockStarted", "onLocked",
     "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
     "onUnresolvedJournalSummary",
     "onSwitchRetained", "onProtectionRequested", "onDocumentClosed",

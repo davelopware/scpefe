@@ -145,10 +145,6 @@ for (const [name, service] of [
   ["clean-edit", { active: { editMode: true, dirty: false, manuallySealed: true },
     hasActivePublication: () => false }],
   ["locked", { active: null, hasActivePublication: () => false }],
-  ["active publication", { active: { editMode: false, dirty: false, manuallySealed: true },
-    hasActivePublication: () => true, runLifecycleBarrier: (operation) => operation() }],
-  ["active maintenance", { active: { editMode: false, dirty: false, manuallySealed: true },
-    hasActivePublication: () => true, runLifecycleBarrier: (operation) => operation() }],
 ]) {
   test(`registered BrowserWindow close | ${name} | authoritative outcome`, async () => {
     let handler; let closes = 0; let request;

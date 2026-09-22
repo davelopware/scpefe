@@ -5,7 +5,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
-test("mounted matrix | external invitation claim | lock during staged replacement clears secrets",
+test("mounted lock-start clears invitation secrets before a late claim can settle",
   async (t) => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "https://scpefe.invalid/",
@@ -43,6 +43,7 @@ test("mounted matrix | external invitation claim | lock during staged replacemen
     const lockResult = { locked: true, journalSaved: true, warning: null };
     const hostLock = () => {
       disposedClaims += 1;
+      listeners.lockStarted();
       listeners.locked(lockResult);
       return lockResult;
     };
@@ -80,6 +81,7 @@ test("mounted matrix | external invitation claim | lock during staged replacemen
       updateWorkingCopy: async () => ({}), saveDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
       lock: async () => hostLock(),
+      onLockStarted: (listener) => listen("lockStarted", listener),
       onLocked: (listener) => listen("locked", listener),
       onJournalWarning: (listener) => listen("warning", listener),
       onRegularSave: (listener) => listen("regular", listener),
@@ -115,7 +117,8 @@ test("mounted matrix | external invitation claim | lock during staged replacemen
     await user.click(ui.getByRole(claim.dialog, "button",
       { name: "Replace password and claim identity" }));
     await ui.waitFor(() => assert.equal(claimCalls, 1));
-    hostLock();
+    disposedClaims += 1;
+    listeners.lockStarted();
     assert.equal(claim.password.value, "");
     assert.equal(claim.confirmation.value, "");
     assert.equal(claim.dialog.isConnected, false);
@@ -125,6 +128,7 @@ test("mounted matrix | external invitation claim | lock during staged replacemen
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "",
       "a late claim failure cannot re-expose plaintext after lock teardown");
+    listeners.locked(lockResult);
 
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
     await user.click(ui.getByRole(ui.getByRole(document.body, "menu", { name: "File" }),

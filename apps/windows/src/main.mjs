@@ -212,17 +212,26 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   let leaseTakeovers = null;
   let protections = null;
   let replacements = null;
-  let lifecycleLockInProgress = false;
   const sessionGeneration = new SessionGeneration();
+  const lockStartedServices = new WeakSet();
+  let rendererLockStarted = false;
   const invalidateAndClearRenderer = () => {
     sessionGeneration.invalidate();
     protections?.cancelForLock();
     leaseTakeovers?.clear();
-    window?.webContents.send("document:locked",
-      { locked: true, journalSaved: false, warning: null });
+    window?.webContents.send("document:lock-started");
     void externalLifecycle?.cancelForLock().catch((error) =>
       window?.webContents.send("document:journal-warning",
         `External open cancellation needs attention: ${error.message}`));
+  };
+  const beginServiceLock = (created) => {
+    if (!created.active || lockStartedServices.has(created)) return false;
+    lockStartedServices.add(created);
+    if (!rendererLockStarted) {
+      rendererLockStarted = true;
+      invalidateAndClearRenderer();
+    }
+    return true;
   };
   const makeService = () => {
     let created;
@@ -237,14 +246,20 @@ if (hasInstanceLock) app.whenReady().then(async () => {
       replacementGuarantee: "best-effort-replace",
     },
     witnessDirectory: path.join(app.getPath("userData"), "head-witnesses"),
-    onLocked: (result) => {
-      if (!lifecycleLockInProgress && !secureLocks?.isLocking(created)
-          && (created === service || replacements?.hasStagedCandidate(created))) {
-        invalidateAndClearRenderer();
+    onLockStart: ({ reason }) => {
+      const stagedAutomaticLock = replacements?.hasStagedCandidate(created)
+        && ["inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock"]
+          .includes(reason);
+      if (created === service || stagedAutomaticLock) {
+        beginServiceLock(created);
       }
+    },
+    onLocked: (result) => {
       void secureLocks?.serviceLocked(created, result).catch((error) =>
         window?.webContents.send("document:journal-warning",
-          `Secure lock cleanup needs attention: ${error.message}`));
+          `Secure lock cleanup needs attention: ${error.message}`)).finally(() => {
+        lockStartedServices.delete(created);
+      });
     },
     onJournalWarning: (warning) => {
       if (created === service) window?.webContents.send("document:journal-warning", warning);
@@ -299,6 +314,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     },
     emitLocked: (result) => {
       window?.webContents.send("document:locked", result);
+      rendererLockStarted = false;
       void sendJournalSummary();
     } });
   ipcMain.handle("document:choose-create-target", async () =>
@@ -562,8 +578,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return leaseTakeovers.cancel(authorization, service);
   });
   const lockActive = (reason) => {
-    invalidateAndClearRenderer();
     const current = service;
+    beginServiceLock(current);
     return current.runLifecycleBarrier(() => secureLocks.lock(reason));
   };
   ipcMain.handle("document:lock", () => lockActive("app-lock"));
@@ -573,10 +589,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     const closed = await protections.authorize("close", async () => {
       if (service.active?.editMode) await service.exitEditMode();
       if (service.active) {
-        lifecycleLockInProgress = true;
-        let result;
-        try { result = await service.lock("document-close"); }
-        finally { lifecycleLockInProgress = false; }
+        const result = await service.lock("document-close");
         if (!result.journalSaved) throw new Error(result.warning
           ?? "The document could not be checkpointed before closing");
       }

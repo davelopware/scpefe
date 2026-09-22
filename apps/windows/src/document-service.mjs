@@ -36,7 +36,8 @@ export class DocumentService {
     inactivityMs = 120_000, now = () => Date.now(),
     utcNow = now, monotonicNow = now, randomSessionId = () => randomBytes(16),
     setTimer = setTimeout, clearTimer = clearTimeout,
-    onLocked = () => {}, onJournalWarning = () => {}, onRegularSave = () => {} }) {
+    onLockStart = () => {}, onLocked = () => {}, onJournalWarning = () => {},
+    onRegularSave = () => {} }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
@@ -57,6 +58,7 @@ export class DocumentService {
     this.randomSessionId = randomSessionId;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
+    this.onLockStart = onLockStart;
     this.onLocked = onLocked;
     this.onJournalWarning = onJournalWarning;
     this.onRegularSave = onRegularSave;
@@ -64,6 +66,7 @@ export class DocumentService {
     this.inactivityTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatOperation = null;
+    this.lockOperation = null;
     this.regularSaveTimer = null;
     this.clientSettings = validateClientSettings();
     this.leaseGeneration = 0;
@@ -1126,9 +1129,31 @@ export class DocumentService {
     return { tracked: true };
   }
 
-  async lock(reason = "app-lock") {
+  lock(reason = "app-lock") {
     const active = this.active;
-    if (!active) return { locked: true, journalSaved: true, warning: null };
+    if (!active) return Promise.resolve(
+      { locked: true, journalSaved: true, warning: null });
+    if (this.lockOperation) return this.lockOperation;
+    let resolveLock; let rejectLock;
+    const tracked = new Promise((resolve, reject) => {
+      resolveLock = resolve; rejectLock = reject;
+    });
+    this.lockOperation = tracked;
+    tracked.then(() => {
+      if (this.lockOperation === tracked) this.lockOperation = null;
+    }, () => {
+      if (this.lockOperation === tracked) this.lockOperation = null;
+    });
+    let startError = null;
+    try { this.onLockStart(Object.freeze({ reason })); }
+    catch (error) { startError = error; }
+    this.#finishLock(active, reason).then((result) => {
+      if (startError) rejectLock(startError); else resolveLock(result);
+    }, rejectLock);
+    return tracked;
+  }
+
+  async #finishLock(active, reason) {
     this.#cancelCheckpoint();
     this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);

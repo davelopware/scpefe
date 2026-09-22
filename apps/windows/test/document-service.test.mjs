@@ -1565,6 +1565,82 @@ test("mandatory locking clears plaintext when the final journal write fails", as
   assert.equal(service.active, null);
 });
 
+test("lock start is synchronous, once-only, and precedes awaited journal cleanup", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lock-start-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  let starts = 0; let finals = 0; let reentrantLock;
+  const generation = new SessionGeneration();
+  let protections;
+  const service = new DocumentService({ fs, publicationCapabilities,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "45".repeat(16), baseRevision: "56".repeat(32),
+      journalKey: Buffer.alloc(32, 10) }) }),
+    onLockStart: ({ reason }) => { starts += 1; generation.invalidate();
+      protections?.cancelForLock(); assert.equal(reason, "screen-lock");
+      reentrantLock = service.lock("screen-lock"); },
+    onLocked: () => { finals += 1; },
+  });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  service.updateWorkingCopy({ content: "plaintext held during flush",
+    cursor: { start: 27, end: 27 } });
+  let protectionRequest;
+  protections = new SessionProtectionCoordinator({ getService: () => service,
+    generation, present: (request) => { protectionRequest = request; } });
+  const protectedOpen = protections.authorize("open");
+  assert.equal(typeof protectionRequest.token, "string");
+  let release; let writeStarted;
+  const started = new Promise((resolve) => { writeStarted = resolve; });
+  const write = service.journals.write.bind(service.journals);
+  service.journals.write = async (...args) => { writeStarted();
+    await new Promise((resolve) => { release = resolve; }); return write(...args); };
+  const locking = service.lock("screen-lock");
+  const duplicate = service.lock("screen-lock");
+  assert.equal(locking, duplicate); assert.equal(locking, reentrantLock);
+  assert.equal(starts, 1); assert.equal(generation.capture(), 1); assert.equal(finals, 0);
+  await assert.rejects(protectedOpen, /locked/);
+  assert.equal(service.active.working.content, "plaintext held during flush");
+  await started; assert.equal(finals, 0); release();
+  await locking;
+  assert.equal(finals, 1); assert.equal(service.active, null);
+  await service.lock("screen-lock");
+  assert.equal(starts, 1, "inactive lock does not emit a false lock-start transition");
+});
+
+test("real inactivity timer starts lock before an awaited journal flush", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-inactivity-start-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe"); await fs.writeFile(target, "container");
+  let startLock; const started = new Promise((resolve) => { startLock = resolve; });
+  let release; let writeStarted; let final = false;
+  const writing = new Promise((resolve) => { writeStarted = resolve; });
+  const service = new DocumentService({ fs, publicationCapabilities, inactivityMs: 100,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "46".repeat(16), baseRevision: "57".repeat(32),
+      journalKey: Buffer.alloc(32, 11) }) }),
+    onLockStart: ({ reason }) => { assert.equal(reason, "inactivity"); startLock(); },
+    onLocked: () => { final = true; },
+  });
+  await service.openDocument(target, "password words"); await service.enterEditMode();
+  service.updateWorkingCopy({ content: "timer plaintext", cursor: { start: 15, end: 15 } });
+  const write = service.journals.write.bind(service.journals);
+  service.journals.write = async (...args) => {
+    writeStarted();
+    await new Promise((resolve) => { release = resolve; }); return write(...args); };
+  await Promise.race([started, new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("inactivity lock did not start")), 750);
+  })]);
+  assert.equal(final, false); assert.equal(service.active.working.content, "timer plaintext");
+  await writing;
+  release();
+  await new Promise((resolve) => { const poll = () => final ? resolve() : setImmediate(poll); poll(); });
+  assert.equal(service.active, null);
+});
+
 test("verified save waits for an in-flight checkpoint before clearing its journal", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-save-race-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -2316,6 +2392,42 @@ test("lock and release invalidate and await an in-flight heartbeat", async (t) =
   assert.equal(timers.length, timersBeforeRelease);
 });
 
+test("real lease-refresh failure starts lock before final journal cleanup", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lease-fail-start-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe"); await fs.writeFile(target, "container");
+  const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+    canEdit: true, documentId: "47".repeat(16), baseRevision: "58".repeat(32),
+    journalKey: Buffer.alloc(32, 12) }) });
+  const timers = []; let startLock; let final = false; let release; let writeStarted;
+  const started = new Promise((resolve) => { startLock = resolve; });
+  const writing = new Promise((resolve) => { writeStarted = resolve; });
+  const service = new DocumentService({ native, fs, publicationCapabilities,
+    inactivityMs: 999_999, profilePath: await writeProfile(directory, "Ada", "Desk"),
+    setTimer(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimer() {}, onLockStart: ({ reason }) => {
+      assert.equal(reason, "lease-refresh-failed"); startLock(); },
+    onLocked: () => { final = true; } });
+  await service.openDocument(target, "password words"); await service.enterEditMode();
+  service.updateWorkingCopy({ content: "lease failure plaintext", cursor: { start: 23, end: 23 } });
+  service.fs = { ...fs, async readFile(file, ...args) {
+    if (file === target) throw new Error("injected lease provider failure");
+    return fs.readFile(file, ...args);
+  } };
+  const write = service.journals.write.bind(service.journals);
+  service.journals.write = async (...args) => {
+    writeStarted();
+    await new Promise((resolve) => { release = resolve; }); return write(...args); };
+  timers.find((timer) => timer.delay === 120_000).callback();
+  await started;
+  assert.equal(final, false);
+  assert.equal(service.active.working.content, "lease failure plaintext");
+  await writing;
+  release();
+  await new Promise((resolve) => { const poll = () => final ? resolve() : setImmediate(poll); poll(); });
+  assert.equal(service.active, null);
+});
+
 test("resumes only an unchanged valid suspended lease and flags counter changes", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-lease-resume-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -2785,52 +2897,87 @@ test("real service staged Open faults and lock fences preserve original journal 
     assert.equal(reopened.recovery.content, "local unsaved");
   });
 
-test("real original service staged New create fault and lock preserve journal for retry",
-  async (t) => {
-    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-real-new-stage-"));
-    t.after(() => fs.rm(directory, { recursive: true, force: true }));
-    const fixture = await regularPublicationFixture(directory);
-    const original = fixture.service; const active = original.active;
-    await original.journals.write(active.documentId, active.journalKey, {
-      text: active.working.content, baseRevision: active.baseRevision,
-      cursor: { ...active.working.cursor }, target: active.target, state: "unsaved",
-      updateTime: Date.now(),
-    });
-    let attempt = 0; let release; let started;
-    const generation = new SessionGeneration();
-    const makeCandidate = () => {
-      const candidate = new DocumentService(fixture.options);
-      candidate.loadClientSettings = async () => {};
-      candidate.createDocument = async (target) => {
-        attempt += 1;
-        if (attempt === 1) throw new Error("injected create publication failure");
-        started(); await new Promise((resolve) => { release = resolve; });
-        candidate.active = { target };
-      };
-      candidate.openDocument = async () => ({ content: "", readOnly: true, canEdit: true });
-      candidate.enterEditMode = async () => ({ content: "", readOnly: false, canEdit: true });
-      candidate.revalidateTargetForReplacement = async () => {};
-      candidate.abandonCreatedDocument = async () => { candidate.active = null; };
-      return candidate;
-    };
-    const coordinator = new ReplacementCoordinator({ generation, makeCandidate,
+test("real DocumentService New candidate faults, lock fencing, cleanup, and retry", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-real-new-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const originalFixture = await regularPublicationFixture(directory);
+  const original = originalFixture.service; const active = original.active;
+  await original.journals.write(active.documentId, active.journalKey, {
+    text: active.working.content, baseRevision: active.baseRevision,
+    cursor: { ...active.working.cursor }, target: active.target, state: "unsaved",
+    updateTime: Date.now(),
+  });
+  const profilePath = originalFixture.options.profilePath;
+  const target = path.join(directory, "new.scpefe");
+  const request = { ownerPassword: "owner password words", recoveryPassword: "",
+    ownerPasswordConfirmation: "owner password words", recoveryPasswordConfirmation: "",
+    content: "", understandsIrrecoverable: true, storedRecoverySeparately: false };
+  const makeCandidate = ({ createFault = false, editFault = false, gate = null } = {}) => {
+    let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
+      holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
+    const native = { createDocument() {
+      if (createFault) throw new Error("injected native create failure");
+      return Buffer.from("real-created-container");
+    }, openDocument(bytes, password) {
+      assert.equal(bytes.toString(), "real-created-container");
+      assert.equal(password, "owner password words");
+      return { content: "", readOnly: true, canEdit: true, manuallySealed: true,
+        documentId: "48".repeat(16), baseRevision: "59".repeat(32),
+        revisionGraph: [{ revisionId: "59".repeat(32), parentRevisionIds: [] }],
+        journalKey: Buffer.alloc(32, 13), lease: { ...lease } };
+    }, updateLease(bytes, _password, next) {
+      if (editFault) throw new Error("injected enter-edit lease failure");
+      lease = { ...next }; return Buffer.from(bytes);
+    } };
+    let readAfterCreate = false;
+    const candidateFs = gate ? { ...fs, async readFile(file, ...args) {
+      if (file === target && !readAfterCreate) {
+        readAfterCreate = true; gate.started();
+        await new Promise((resolve) => { gate.release = resolve; });
+      }
+      return fs.readFile(file, ...args);
+    } } : fs;
+    return new DocumentService({ native, fs: candidateFs, profilePath,
+      publicationCapabilities, journalDirectory: path.join(directory, "candidate-journals"),
+      witnessDirectory: path.join(directory, "candidate-witnesses") });
+  };
+  for (const [name, options, pattern] of [
+    ["native create failure", { createFault: true }, /native create failure/],
+    ["enter-edit failure", { editFault: true }, /enter-edit lease failure/],
+  ]) await t.test(name, async () => {
+    const coordinator = new ReplacementCoordinator({ makeCandidate: () => makeCandidate(options),
       authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
-      adopt: () => assert.fail("failed or locked New must not adopt") });
-    await assert.rejects(coordinator.create(path.join(directory, "new.scpefe"),
-      { ownerPassword: "owner password words", content: "" }), /publication failure/);
+      adopt: () => assert.fail("failed New must not adopt") });
+    await assert.rejects(coordinator.create(target, request), pattern);
+    assert.equal(await fs.stat(target).then(() => true, () => false), false);
     assert.equal(original.active, active);
-    const waiting = new Promise((resolve) => { started = resolve; });
-    const creating = coordinator.create(path.join(directory, "new.scpefe"),
-      { ownerPassword: "owner password words", content: "" });
-    await waiting; generation.invalidate(); release();
-    await assert.rejects(creating, /session locked/);
-    assert.equal(original.active.working.content, "local unsaved");
     assert.equal((await original.journals.read(active.documentId,
       active.journalKey)).text, "local unsaved");
-    const restarted = new DocumentService(fixture.options);
-    const reopened = await restarted.openDocument(fixture.target, "password words");
-    assert.equal(reopened.recovery.content, "local unsaved");
   });
+  const generation = new SessionGeneration(); let startGate;
+  const gate = { started: () => startGate() }; let fencedCandidate;
+  const coordinator = new ReplacementCoordinator({ generation,
+    makeCandidate: () => { fencedCandidate = makeCandidate({ gate }); return fencedCandidate; },
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: () => assert.fail("locked New must not adopt") });
+  const started = new Promise((resolve) => { startGate = resolve; });
+  const creating = coordinator.create(target, request);
+  await started; generation.invalidate(); gate.release();
+  await assert.rejects(creating, /session locked/);
+  assert.equal(await fs.stat(target).then(() => true, () => false), false);
+  assert.equal(original.active, active);
+
+  let adopted; const retry = new ReplacementCoordinator({ generation,
+    makeCandidate: () => makeCandidate(),
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: (staged) => { adopted = staged.candidate; } });
+  const opened = await retry.create(target, request);
+  assert.equal(opened.content, ""); assert.ok(adopted instanceof DocumentService);
+  await adopted.abandonCreatedDocument();
+  assert.equal(await fs.stat(target).then(() => true, () => false), false);
+  assert.equal((await original.journals.read(active.documentId,
+    active.journalKey)).text, "local unsaved");
+});
 
 for (const stage of ["prepare-write", "atomic-rename", "cleanup-directory-flush"]) {
   test(`integrated lifecycle publication fault | ${stage} | real journal restart and retry`,
@@ -2842,8 +2989,9 @@ for (const stage of ["prepare-write", "atomic-rename", "cleanup-directory-flush"
       if (stage === "prepare-write") {
         const prepare = fixture.service.publications.prepare.bind(fixture.service.publications);
         fixture.service.publications.prepare = async (...args) => {
-          if (!failed) { failed = true; throw new Error("injected prepare write fault"); }
-          return prepare(...args);
+          const record = await prepare(...args);
+          if (!failed) { failed = true; throw new Error("injected prepare write acknowledgement fault"); }
+          return record;
         };
       } else if (stage === "atomic-rename") {
         fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
@@ -2881,17 +3029,20 @@ for (const stage of ["prepare-write", "atomic-rename", "cleanup-directory-flush"
       assert.equal(first.completed, false);
       assert.equal(fixture.service.active.working.content, "local unsaved");
       assert.equal(closes, 0);
+      const pending = await fixture.service.journals.read(
+        fixture.service.active.documentId, fixture.service.active.journalKey);
+      assert.equal(typeof pending.publication.stage, "string");
       fixture.service.publications.fs = fs;
-      const retried = await protections.decide({ token: first.retryToken, decision: "save" });
-      assert.equal(retried.completed, true, retried.error);
-      assert.equal(await closing, true);
-      assert.equal(closes, 1);
-      assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).content,
-        "local unsaved");
+      const canceled = assert.rejects(closing, /locked/);
+      assert.equal(protections.cancelForLock(), true);
+      await canceled;
       const restarted = new DocumentService(fixture.options);
       const opened = await restarted.openDocument(fixture.target, "password words");
       assert.equal(opened.content, "local unsaved");
       assert.equal(restarted.active.pendingPublication, false);
+      assert.equal(await restarted.journals.read(restarted.active.documentId,
+        restarted.active.journalKey), null);
+      assert.equal(closes, 0);
     });
 }
 

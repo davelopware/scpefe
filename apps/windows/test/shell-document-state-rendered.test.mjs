@@ -5,7 +5,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
-test("mounted matrix | no-document/read-only/edit/locked | truthful state and secure locking", async (t) => {
+test("mounted shell presents truthful document states, history, failures, and secure locking", async (t) => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
     url: "https://scpefe.invalid/",
   });

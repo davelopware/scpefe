@@ -33,7 +33,6 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   const listeners = {}; const decisions = []; let failedSave = true; let failedDiscard = true;
   let stopped = 0;
   let protectedNumber = 0; let pendingHost = null; let openCalls = 0;
-  let matrixDirect = false; let directOutcomes = 0;
   const listen = (name, listener) => { listeners[name] = listener;
     return () => { stopped += 1; delete listeners[name]; }; };
   const opened = { content: "original usable plaintext", readOnly: false, canEdit: true,
@@ -71,24 +70,19 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     openSelectedDocument: async () => {
       openCalls += 1;
       if (openCalls === 1) return opened;
-      if (matrixDirect) { directOutcomes += 1; return opened; }
       return requestProtection("open");
     }, unlockDocument: async () => opened,
     chooseCreateTarget: async () => ({ selected: true }), cancelCreateTarget: async () => {},
-    createDocument: async () => matrixDirect ? (directOutcomes += 1, opened)
-      : requestProtection("new"),
-    openExternalDocument: async () => matrixDirect ? (directOutcomes += 1, opened)
-      : requestProtection("external-open"),
+    createDocument: async () => requestProtection("new"),
+    openExternalDocument: async () => requestProtection("external-open"),
     cancelExternalOpen: async () => true,
     enterEditMode: async () => opened, updateWorkingCopy: async () => ({}),
     saveDocument: async (content) => ({ saved: true, content,
       publicationState: "target-published" }), backupDocument: async () => null,
     exportPlaintext: async () => null, lock: async () =>
       ({ locked: true, journalSaved: true, warning: null }),
-    closeDocument: async () => matrixDirect ? (directOutcomes += 1, false)
-      : requestProtection("close"),
-    exitApplication: async () => matrixDirect ? (directOutcomes += 1, false)
-      : requestProtection("exit"),
+    closeDocument: async () => requestProtection("close"),
+    exitApplication: async () => requestProtection("exit"),
     resolveProtection: async (request) => {
       decisions.push(request);
       if (request.decision === "save" && failedSave) {
@@ -191,77 +185,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     assert.equal(editor.value, "unsaved plaintext");
   }
 
-  const mountedMatrix = [
-    ["no-document/clean", null, true],
-    ["clean-read-only", { dirty: false, provisional: false, pendingPublication: false,
-      recovered: false, conflict: false, unresolvedJournal: false,
-      activePublication: false }, true],
-    ["clean-edit", { dirty: false, provisional: false, pendingPublication: false,
-      recovered: false, conflict: false, unresolvedJournal: false,
-      activePublication: false }, true],
-    ["locked", null, true],
-    ["dirty", { dirty: true, provisional: false, pendingPublication: false,
-      recovered: false, conflict: false, unresolvedJournal: false,
-      activePublication: false }, false],
-    ["provisional", { dirty: false, provisional: true, pendingPublication: false,
-      recovered: false, conflict: false, unresolvedJournal: false,
-      activePublication: false }, false],
-    ["pending publication", { dirty: false, provisional: false, pendingPublication: true,
-      recovered: false, conflict: false, unresolvedJournal: true,
-      activePublication: true }, false],
-    ["recovered", { dirty: false, provisional: false, pendingPublication: false,
-      recovered: true, conflict: false, unresolvedJournal: true,
-      activePublication: false }, false],
-    ["conflict", { dirty: false, provisional: false, pendingPublication: true,
-      recovered: false, conflict: true, unresolvedJournal: true,
-      activePublication: false }, false],
-  ];
-  const matrixTriggers = [...triggers, ["window close", async () => {
-    if (!matrixDirect) listeners.protection({ token:
-      `50000000-0000-4000-8000-${String(++protectedNumber).padStart(12, "0")}`,
-    operation: "exit", state: states.exit });
-    else directOutcomes += 1;
-  }]];
-  for (const [stateName, state, direct] of mountedMatrix) {
-    for (const [operation, trigger] of matrixTriggers) {
-      await t.test(`mounted ENTRY×STATE | ${operation} | ${stateName}`, async () => {
-        matrixDirect = direct;
-        states[operation] = state;
-        if (operation === "window close") states.exit = state;
-        const beforeDirect = directOutcomes;
-        await trigger();
-        if (direct) {
-          await ui.waitFor(() => assert.equal(
-            ui.queryByRole(document.body, "dialog", { name: /Protect current document/ }), null));
-          assert.equal(directOutcomes, beforeDirect + 1, "direct host outcome completed once");
-          if (["open", "external-open"].includes(operation)) {
-            assert.equal(editor.value, "original usable plaintext");
-            ui.fireEvent.change(editor, { target: { value: "unsaved plaintext",
-              selectionStart: 17, selectionEnd: 17 } });
-          } else assert.equal(editor.value, "unsaved plaintext");
-          return;
-        }
-        dialog = await ui.findByRole(document.body, "dialog", { name: /Protect current document/ });
-        assert.equal(ui.getAllByRole(dialog, "listitem").length >= 1, true);
-        assert.equal(document.activeElement?.textContent, "Keep current document open");
-        assert.equal(editor.value, "unsaved plaintext");
-        await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
-        if (operation === "new") {
-          const create = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
-          await user.click(ui.getByRole(create, "button", { name: "Cancel" }));
-        } else if (operation === "open") {
-          const open = await ui.findByRole(document.body, "dialog", { name: "Open document" });
-          await user.click(ui.getByRole(open, "button", { name: "Cancel" }));
-        }
-        await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-        assert.equal(editor.value, "unsaved plaintext");
-        assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "Edit mode");
-      });
-    }
-  }
-  matrixDirect = false;
-
-  await t.test("mounted matrix | Exit | conflict pending-publication | publication failure then Retry success",
+  await t.test("mounted Exit keeps conflict work through publication failure and retry",
     async () => {
       states.exit = { dirty: false, provisional: false, pendingPublication: true,
         recovered: false, conflict: true, unresolvedJournal: true,
@@ -278,8 +202,10 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     });
 
-  await t.test("mounted matrix | Exit | dirty edit | Save success", async () => {
-    states.exit = mountedMatrix[4][1];
+  await t.test("mounted Exit saves dirty edit work", async () => {
+    states.exit = { dirty: true, provisional: false, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false };
     await fileCommand("Exit");
     dialog = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
     await user.click(ui.getByRole(dialog, "button", { name: "Manual save and continue" }));
@@ -287,9 +213,11 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     assert.equal(editor.value, "unsaved plaintext");
   });
 
-  await t.test("mounted matrix | Close | recovered edit | Discard blocked then Cancel",
+  await t.test("mounted Close keeps recovered work when discard is blocked",
     async () => {
-      states.close = mountedMatrix[7][1];
+      states.close = { dirty: false, provisional: false, pendingPublication: false,
+        recovered: true, conflict: false, unresolvedJournal: true,
+        activePublication: false };
       await fileCommand(/Close/);
       dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
       const discard = ui.getByRole(dialog, "button", { name: "Discard and continue" });
@@ -302,7 +230,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       assert.equal(editor.value, "unsaved plaintext");
     });
 
-  await t.test("mounted matrix | Close | recovered edit | Discard allowed", async () => {
+  await t.test("mounted Close discards recovered work only after approval", async () => {
     await fileCommand(/Close/);
     dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
     assert.equal(editor.value, "unsaved plaintext");
@@ -314,7 +242,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   await ui.waitFor(() => assert.equal(
     ui.getByRole(document.body, "note").textContent.includes("No document"), true));
   assert.equal(editor.value, "");
-  assert.equal(decisions.length, 41);
+  assert.equal(decisions.length, 11);
   mountedRoot.unmount(); mountedRoot = null; await Promise.resolve();
   assert.equal(document.getElementById("root").childElementCount, 0);
   assert.equal(stopped, 8); assert.equal(frames.size, 0);

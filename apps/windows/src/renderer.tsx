@@ -314,6 +314,7 @@ declare global { interface Window { scpefe: {
   resolveProtection(request: { token: string; decision: "cancel" | "save" | "discard" }):
     Promise<{ completed: boolean; proceed: boolean; retryToken?: string; error?: string }>;
   lock(): Promise<LockResult>;
+  onLockStarted?(listener: () => void): () => void;
   onLocked(listener: (result: LockResult) => void): () => void;
   onJournalWarning(listener: (warning: string) => void): () => void;
   onRegularSave(listener: (result: { published: true; provisional: true;
@@ -403,6 +404,9 @@ function App() {
   }, []);
   const showError = (error: unknown) => setMessage(error instanceof Error ? error.message : String(error));
   useEffect(() => {
+    const stopLockStarted = window.scpefe.onLockStarted?.(() => showLockedResult({
+      locked: true, journalSaved: true, warning: null,
+    })) ?? (() => {});
     const stopLocked = window.scpefe.onLocked(showLockedResult);
     const stopWarning = window.scpefe.onJournalWarning(setMessage);
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
@@ -440,7 +444,7 @@ function App() {
     window.addEventListener("keydown", activity);
     window.addEventListener("pointerdown", activity);
     return () => {
-      stopLocked(); stopWarning(); stopRegularSave(); stopExternalOpen();
+      stopLockStarted(); stopLocked(); stopWarning(); stopRegularSave(); stopExternalOpen();
       stopJournalSummary();
       stopSwitchRetained(); stopProtection(); stopClosed();
       window.removeEventListener("keydown", activity);
