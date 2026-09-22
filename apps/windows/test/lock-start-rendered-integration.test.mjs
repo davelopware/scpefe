@@ -14,7 +14,7 @@ import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
 
-async function runMountedLock(t, origin) {
+export async function runMountedLock(t, origin) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
@@ -26,6 +26,21 @@ async function runMountedLock(t, origin) {
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
   let saveFault = false;
+  let publicationUnavailable = false;
+  let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
+  const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
+  const serviceFs = { ...fs, async rename(source, destination) {
+    if (publicationUnavailable && destination === target) {
+      const error = new Error("injected publication target unavailable");
+      error.code = "EACCES"; throw error;
+    }
+    if (holdMaintenance && destination === target) {
+      maintenanceStarted();
+      await new Promise((resolve) => { releaseMaintenance = resolve; });
+      holdMaintenance = false;
+    }
+    return fs.rename(source, destination);
+  } };
   const openedContent = (bytes) => /^(saved|provisional):/.test(bytes.toString())
     ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
   const native = { openDocument(bytes, password) {
@@ -45,6 +60,14 @@ async function runMountedLock(t, origin) {
   }, regularSaveDocument(_bytes, _password, input) {
     return Buffer.from(`provisional:${input.content}`);
   } };
+  const serviceOptions = (callbacks = {}) => ({ native, fs: serviceFs, profilePath,
+    publicationCapabilities: capabilities,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    inactivityMs: origin === "inactivity" ? 1_500 : 999_999,
+    ...(origin === "lease-refresh-failed" ? { setTimer(callback, delay) {
+      const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
+    }, clearTimer() {} } : {}), ...callbacks });
   const timers = []; const acks = [];
   const ipcListeners = new Map(); const ipcHandlers = new Map();
   const emit = (channel, value) => {
@@ -60,21 +83,37 @@ async function runMountedLock(t, origin) {
     show() {} focus() {} isMinimized() { return false; }
   }
   const fakeWindow = new FakeWindow(); let createPickerCalls = 0;
+  if (origin.startsWith("s7-")) {
+    const crashed = new DocumentService(serviceOptions());
+    await crashed.openDocument(target, "password words");
+    await crashed.enterEditMode();
+    crashed.updateWorkingCopy({ content: "restart recovered plaintext",
+      cursor: { start: 27, end: 27 } });
+    await crashed.lock("process-restart");
+  }
+  if (origin.startsWith("s8-")) {
+    const diverged = new DocumentService(serviceOptions());
+    await diverged.openDocument(target, "password words");
+    await diverged.enterEditMode();
+    diverged.updateWorkingCopy({ content: "local unpublished branch",
+      cursor: { start: 24, end: 24 } });
+    publicationUnavailable = true;
+    await assert.rejects(diverged.saveDocument("local unpublished branch"), (error) =>
+      error.publicationPrepared === true
+        && /injected publication target unavailable/.test(error.message));
+    assert.equal(diverged.active.opened.publicationState, "pending-publication");
+    publicationUnavailable = false;
+    await fs.writeFile(target, "saved:remote divergent branch");
+  }
   const host = await new DocumentLifecycleHost({
     ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
     window: fakeWindow, picker: { chooseCreateTarget: async () => {
-      createPickerCalls += 1; return origin.startsWith("new") || origin.startsWith("s5-")
+      createPickerCalls += 1; return origin.startsWith("new")
+        || origin.startsWith("s5-") || origin.startsWith("s9-")
         ? newTarget : null;
     },
       chooseOpenTarget: async () => origin === "s0-open" ? null : target },
-    serviceFactory: (callbacks) => new DocumentService({ native, fs, profilePath,
-      publicationCapabilities: capabilities,
-      journalDirectory: path.join(directory, "journals"),
-      witnessDirectory: path.join(directory, "witnesses"),
-      inactivityMs: origin === "inactivity" ? 1_500 : 999_999,
-      ...(origin === "lease-refresh-failed" ? { setTimer(callback, delay) {
-        const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
-      }, clearTimer() {} } : {}), ...callbacks }),
+    serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
     acknowledge: async (request, status, sequence) => {
       acks.push({ token: request.token, status, sequence });
     },
@@ -232,6 +271,47 @@ async function runMountedLock(t, origin) {
   await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Read-only"));
+  if (origin.startsWith("s7-") || origin.startsWith("s8-")) {
+    const divergent = origin.startsWith("s8-");
+    if (divergent) {
+      const head = await ui.findByRole(document.body, "dialog",
+        { name: "This target has diverged" });
+      await user.click(ui.getByRole(head, "button",
+        { name: "Accept current authenticated head" }));
+    }
+    const recovery = await ui.findByRole(document.body, "dialog",
+      { name: divergent ? "Divergence needs resolution" : "Recovered work" });
+    assert.equal(editor.value, divergent ? "local unpublished branch" : "original plaintext",
+      divergent ? "the exact local publication candidate remains visible while the remote branch is preserved"
+        : "the authenticated base remains visible until recovery is explicitly restored");
+    const entry = origin.slice(3);
+    if (entry === "external") {
+      await host.setReady(); const request = host.enqueueExternal({ target,
+        source: "second-instance" });
+      await ui.waitFor(() => assert.equal(
+        host.externalRequests.current(request.token)?.token, request.token));
+      assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+    } else if (entry === "window") {
+      const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      const protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      await user.click(ui.getByRole(protection, "button",
+        { name: "Keep current document open" }));
+      await fakeWindow.lastClose;
+      assert.equal(fakeWindow.closed, 0);
+    } else {
+      await command("File", entry === "new" ? /New/ : entry === "open" ? /Open/
+        : entry === "close" ? /Close/ : "Exit");
+    }
+    assert.ok(await ui.findByRole(document.body, "dialog",
+      { name: divergent ? "Divergence needs resolution" : "Recovered work" }));
+    assert.equal(editor.value, divergent ? "local unpublished branch" : "original plaintext");
+    if (divergent) {
+      assert.equal(host.service.active.opened.publicationState, "conflict");
+      assert.equal(host.service.active.pendingRecord.text, "local unpublished branch");
+    } else assert.equal(host.service.active.recovery.text, "restart recovered plaintext");
+    assert.equal(fakeWindow.closed, 0);
+    return;
+  }
   if (origin.startsWith("s1-")) {
     await driveDirect(origin.slice(3), "Read-only"); return;
   }
@@ -259,6 +339,66 @@ async function runMountedLock(t, origin) {
   await user.type(editor, "mounted secret plaintext");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Working copy state").textContent, "Dirty"));
+  if (origin.startsWith("s9-")) {
+    await service.saveClientSettings({ regularSaveEnabled: true,
+      regularSaveIntervalMs: 120_000 });
+    holdMaintenance = true;
+    const publishing = service.regularSaveDocument();
+    await maintenanceEntered;
+    assert.equal(service.hasActivePublication(), true);
+    const entry = origin.slice(3);
+    if (entry === "open" || entry === "external") {
+      let request;
+      if (entry === "open") await command("File", /Open/);
+      else { await host.setReady(); request = host.enqueueExternal({ target,
+        source: "second-instance" }); }
+      const staged = await ui.findByRole(document.body, "dialog",
+        { name: entry === "open" ? "Open document" : "Open requested document" });
+      assert.ok(document.body.contains(staged),
+        "the selected replacement remains staged while real maintenance is active");
+      assert.equal(ui.queryByRole(document.body, "dialog", { name: /before Open/ }), null);
+      await user.click(ui.getByRole(staged, "button", { name: "Cancel" }));
+      releaseMaintenance(); await publishing;
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      if (request) await ui.waitFor(() => assert.equal(
+        host.externalRequests.current(request.token), null));
+    } else {
+      await driveProtectedCancel(entry);
+      releaseMaintenance(); await publishing;
+    }
+    assert.equal(fakeWindow.closed, 0);
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(service.hasActivePublication(), false);
+    return;
+  }
+  if (origin.startsWith("s6-")) {
+    publicationUnavailable = true;
+    await command("File", /^Save/);
+    const pending = await ui.findByRole(document.body, "dialog",
+      { name: "Manual save pending publication" });
+    assert.equal(editor.value, "mounted secret plaintext",
+      "pending publication keeps the authoritative session visibly mounted");
+    assert.equal(host.service.active.opened.publicationState, "pending-publication");
+    const entry = origin.slice(3);
+    if (entry === "external") {
+      await host.setReady(); const request = host.enqueueExternal({ target,
+        source: "second-instance" });
+      await ui.waitFor(() => assert.equal(
+        host.externalRequests.current(request.token)?.token, request.token));
+      assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+    } else if (entry === "window") {
+      const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      assert.equal(fakeWindow.closed, 0);
+    } else {
+      await command("File", entry === "new" ? /New/ : entry === "open" ? /Open/
+        : entry === "close" ? /Close/ : "Exit");
+    }
+    assert.equal(ui.getByRole(document.body, "dialog"), pending,
+      "the real pending-publication decision remains authoritative");
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(fakeWindow.closed, 0);
+    return;
+  }
   if (origin.startsWith("s5-")) {
     await service.saveClientSettings({ regularSaveEnabled: true,
       regularSaveIntervalMs: 120_000 });
@@ -420,13 +560,8 @@ async function runMountedLock(t, origin) {
   assert.equal(result.locked, true); assert.equal(service.active, null);
 }
 
-for (const origin of ["inactivity", "lease-refresh-failed", "window-close", "external-open",
-  "new", "new-approved", "open", "close", "exit", "s0-new", "s0-open", "s0-external",
-  "s0-close", "s0-exit", "s0-window",
-  ...["s1", "s2", "s3"].flatMap((state) => ["new", "open", "external", "close", "exit",
-    "window"].map((entry) => `${state}-${entry}`)),
-  ...["new", "open", "external", "close", "exit", "window"].map((entry) => `s5-${entry}`)]) {
-  test(origin === "window-close"
+export function lifecycleCaseName(origin) {
+  return origin === "window-close"
     ? "L-S4-W dirty BrowserWindow close: Cancel retains, Save failure focuses retry, success terminates"
     : origin === "external-open"
       ? "L-S4-X dirty external Open: wrong password retains FIFO request, Cancel terminally acks"
@@ -451,6 +586,29 @@ for (const origin of ["inactivity", "lease-refresh-failed", "window-close", "ext
                     : origin.startsWith("s5-")
                       ? `L-S5-${{ new: "N", open: "O", external: "X", close: "C",
                         exit: "E", window: "W" }[origin.slice(3)]} real provisional revision protection Cancel retains`
-    : `mounted renderer wired to real DocumentService clears at ${origin} lock start`,
-    (t) => runMountedLock(t, origin));
+                      : origin.startsWith("s6-")
+                        ? `L-S6-${{ new: "N", open: "O", external: "X", close: "C",
+                          exit: "E", window: "W" }[origin.slice(3)]} real pending publication blocks lifecycle and retains plaintext`
+                        : origin.startsWith("s7-")
+                          ? `L-S7-${{ new: "N", open: "O", external: "X", close: "C",
+                            exit: "E", window: "W" }[origin.slice(3)]} process-restart recovered work blocks lifecycle and retains journal`
+                          : origin.startsWith("s8-")
+                            ? `L-S8-${{ new: "N", open: "O", external: "X", close: "C",
+                              exit: "E", window: "W" }[origin.slice(3)]} real divergent publication blocks lifecycle and retains both branches`
+                            : origin.startsWith("s9-")
+                              ? `L-S9-${{ new: "N", open: "O", external: "X", close: "C",
+                                exit: "E", window: "W" }[origin.slice(3)]} held real publication maintenance serializes lifecycle Cancel`
+                              : `mounted renderer wired to real DocumentService clears at ${origin} lock start`;
+}
+
+const primaryOrigins = ["inactivity", "lease-refresh-failed", "window-close", "external-open",
+  "new", "new-approved", "open", "close", "exit", "s0-new", "s0-open", "s0-external",
+  "s0-close", "s0-exit", "s0-window",
+  ...["s1", "s2", "s3"].flatMap((state) => ["new", "open", "external", "close", "exit",
+    "window"].map((entry) => `${state}-${entry}`))];
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  for (const origin of primaryOrigins) {
+    test(lifecycleCaseName(origin), (t) => runMountedLock(t, origin));
+  }
 }
