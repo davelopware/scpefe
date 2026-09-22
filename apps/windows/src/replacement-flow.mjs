@@ -48,7 +48,6 @@ export async function completeOpenReplacement({ staged, authorizeCurrent }) {
 /* Creates only after authorization and removes exact created bytes on later failure. */
 export async function createReplacement({ makeCandidate, target, request,
   authorizeCurrent }) {
-  if (!await authorizeCurrent()) throw canceledReplacement();
   const candidate = makeCandidate();
   const staged = { candidate, target, created: true };
   try {
@@ -57,6 +56,7 @@ export async function createReplacement({ makeCandidate, target, request,
     await candidate.openDocument(target, request.ownerPassword);
     const opened = await candidate.enterEditMode();
     await candidate.revalidateTargetForReplacement();
+    if (!await authorizeCurrent()) throw canceledReplacement();
     return Object.freeze({ ...staged, opened });
   } catch (error) {
     await disposeReplacement(staged);

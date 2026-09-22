@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { DocumentService } from "../src/document-service.mjs";
 import { ReplacementCoordinator } from "../src/replacement-coordinator.mjs";
+import { SessionGeneration } from "../src/session-generation.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -83,7 +84,7 @@ test("invitation open, failed claim, and cancellation retain the authoritative s
     let authoritative = original;
     const coordinator = new ReplacementCoordinator({
       makeCandidate: () => invitationCandidate({ claimFails: true }),
-      authorizeCurrent: async () => true,
+      authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
       adopt: (staged) => { authoritative = staged.candidate; },
     });
     assert.deepEqual(await coordinator.open("invitation.scpefe", "temporary password"),
@@ -108,7 +109,7 @@ test("real invitation claim refreshes its authenticated baseline before adoption
     return revalidate();
   };
   const coordinator = new ReplacementCoordinator({ makeCandidate: () => candidate,
-    authorizeCurrent: async () => true,
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
     adopt: (staged) => { log.push("adopt"); authoritative = staged.candidate; } });
   await coordinator.open(fixture.target, fixture.temporary);
   const opened = await coordinator.claim(fixture.replacement);
@@ -128,7 +129,8 @@ test("real invitation claim refreshes its authenticated baseline before adoption
 test("failed invitation cancellation stays staged for a recoverable retry", async () => {
   const coordinator = new ReplacementCoordinator({
     makeCandidate: () => invitationCandidate({ cancelFailsOnce: true }),
-    authorizeCurrent: async () => true, adopt: () => assert.fail("must not adopt"),
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: () => assert.fail("must not adopt"),
   });
   await coordinator.open("invitation.scpefe", "temporary password");
   await assert.rejects(coordinator.cancelClaim(), /cancel cleanup failed/);
@@ -149,7 +151,7 @@ test("external mutation after a real claim prevents adoption and preserves the o
     };
     const coordinator = new ReplacementCoordinator({
       makeCandidate: () => fixture.candidate,
-      authorizeCurrent: async () => true,
+      authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
       adopt: (staged) => { authoritative = staged.candidate; },
     });
     await coordinator.open(fixture.target, fixture.temporary);
@@ -161,13 +163,113 @@ test("external mutation after a real claim prevents adoption and preserves the o
     assert.equal(authoritative, original);
   });
 
-test("unsafe current state cancels New before a candidate or target can exist", async () => {
-  let candidates = 0;
+test("canceled New removes its validated staged candidate before returning", async () => {
+  let candidates = 0; let removed = false;
   const coordinator = new ReplacementCoordinator({
-    makeCandidate: () => { candidates += 1; return {}; },
+    makeCandidate: () => { candidates += 1; return {
+      async loadClientSettings() {}, async createDocument() {},
+      async openDocument() { this.active = {}; return { content: "", readOnly: true }; },
+      async enterEditMode() { return { content: "", readOnly: false }; },
+      async revalidateTargetForReplacement() {},
+      async abandonCreatedDocument() { removed = true; this.active = null; },
+    }; },
     authorizeCurrent: async () => false, adopt: () => assert.fail("must not adopt") });
   await assert.rejects(coordinator.create("new.scpefe", {
     ownerPassword: "owner password words", content: "",
   }), /current document remains open/);
-  assert.equal(candidates, 0);
+  assert.equal(candidates, 1);
+  assert.equal(removed, true);
+});
+
+function delayedCandidate({ invitation = false, delay = "open" } = {}) {
+  let release; const calls = [];
+  const wait = () => new Promise((resolve) => { release = resolve; });
+  const candidate = { active: null,
+    async loadClientSettings() {},
+    async createDocument(target) { calls.push("create"); this.active = { target };
+      if (delay === "create") await wait(); },
+    async openDocument(target) { calls.push("open"); this.active = { target };
+      if (delay === "open") await wait();
+      return invitation ? { readOnly: true, invitationRequired: true }
+        : { content: "candidate plaintext", readOnly: true, canEdit: true,
+          publicationState: "target-published" }; },
+    async enterEditMode() { return { content: "", readOnly: false, canEdit: true,
+      publicationState: "target-published" }; },
+    async claimInvitation() { calls.push("claim"); if (delay === "claim") await wait();
+      return { content: "claimed plaintext", readOnly: true, canEdit: true,
+        publicationState: "target-published" }; },
+    async revalidateTargetForReplacement() { calls.push("revalidate");
+      if (delay === "commit") await wait(); },
+    async lock() { calls.push("dispose"); this.active = null; },
+    async abandonCreatedDocument() { calls.push("abandon"); this.active = null; },
+  };
+  return { candidate, calls, release: () => release() };
+}
+
+for (const [operation, stage] of [["open", "open"], ["open", "commit"],
+  ["external-open", "open"], ["external-open", "commit"]]) {
+  test(`lock generation prevents ${operation} adoption during awaited ${stage}`, async () => {
+    const generation = new SessionGeneration(); const delayed = delayedCandidate({ delay: stage });
+    let adopted = false;
+    const coordinator = new ReplacementCoordinator({ generation,
+      makeCandidate: () => delayed.candidate,
+      authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+      adopt: () => { adopted = true; } });
+    const opening = coordinator.open("candidate.scpefe", "password words", operation);
+    await new Promise((resolve) => setImmediate(resolve));
+    generation.invalidate(); delayed.release();
+    await assert.rejects(opening, /session locked/);
+    assert.equal(adopted, false);
+    assert.equal(delayed.candidate.active, null);
+    assert.equal(delayed.calls.includes("dispose"), true);
+  });
+}
+
+test("lock generation prevents New adoption during awaited creation", async () => {
+  const generation = new SessionGeneration(); const delayed = delayedCandidate({ delay: "create" });
+  let adopted = false;
+  const coordinator = new ReplacementCoordinator({ generation,
+    makeCandidate: () => delayed.candidate,
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: () => { adopted = true; } });
+  const creating = coordinator.create("candidate.scpefe", { ownerPassword: "password words" });
+  await new Promise((resolve) => setImmediate(resolve));
+  generation.invalidate(); delayed.release();
+  await assert.rejects(creating, /session locked/);
+  assert.equal(adopted, false);
+  assert.equal(delayed.calls.includes("abandon"), true);
+});
+
+test("lock generation disposes an invitation whose awaited claim finishes late", async () => {
+  const generation = new SessionGeneration();
+  const delayed = delayedCandidate({ invitation: true, delay: "claim" });
+  let adopted = false;
+  const coordinator = new ReplacementCoordinator({ generation,
+    makeCandidate: () => delayed.candidate,
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: () => { adopted = true; } });
+  await coordinator.open("invitation.scpefe", "temporary words");
+  const claiming = coordinator.claim("replacement words");
+  await new Promise((resolve) => setImmediate(resolve));
+  generation.invalidate(); delayed.release();
+  await assert.rejects(claiming, /session locked/);
+  assert.equal(adopted, false);
+  assert.equal(delayed.candidate.active, null);
+  assert.equal(await coordinator.cancelClaim(), false);
+});
+
+test("a fenced staged Open leaves the next generation recoverable", async () => {
+  const generation = new SessionGeneration(); const first = delayedCandidate({ delay: "open" });
+  const healthy = delayedCandidate({ delay: "none" }); let candidates = 0; let adopted = null;
+  const coordinator = new ReplacementCoordinator({ generation,
+    makeCandidate: () => ++candidates === 1 ? first.candidate : healthy.candidate,
+    authorizeCurrent: async (_operation, commit) => { await commit(); return true; },
+    adopt: (staged) => { adopted = staged.candidate; } });
+  const raced = coordinator.open("first.scpefe", "password words");
+  await new Promise((resolve) => setImmediate(resolve));
+  generation.invalidate(); first.release();
+  await assert.rejects(raced, /session locked/);
+  const opened = await coordinator.open("second.scpefe", "password words");
+  assert.equal(opened.content, "candidate plaintext");
+  assert.equal(adopted, healthy.candidate);
 });

@@ -5,7 +5,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
-test("mounted claim secrets are synchronously torn down by automatic and manual locks",
+test("mounted lock-start clears invitation secrets before a late claim can settle",
   async (t) => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "https://scpefe.invalid/",
@@ -36,11 +36,14 @@ test("mounted claim secrets are synchronously torn down by automatic and manual 
     const listeners = {};
     let openCount = 0;
     let disposedClaims = 0;
+    let claimCalls = 0;
+    let rejectClaim;
     const ordinary = { content: "original plaintext", readOnly: true, canEdit: true,
       publicationState: "target-published", targetName: "original.scpefe" };
     const lockResult = { locked: true, journalSaved: true, warning: null };
     const hostLock = () => {
       disposedClaims += 1;
+      listeners.lockStarted();
       listeners.locked(lockResult);
       return lockResult;
     };
@@ -67,12 +70,18 @@ test("mounted claim secrets are synchronously torn down by automatic and manual 
       },
       unlockDocument: async () => ordinary,
       openExternalDocument: async () => null,
-      claimInvitation: async () => assert.fail("lock must dispose before a claim"),
+      claimInvitation: () => {
+        claimCalls += 1;
+        return new Promise((_resolve, reject) => { rejectClaim = () => reject(
+          Object.assign(new Error("The session locked while the claim was running"),
+            { code: "DOCUMENT_SESSION_INVALIDATED" })); });
+      },
       cancelInvitationClaim: async () => { disposedClaims += 1; return true; },
       enterEditMode: async () => ({ ...ordinary, readOnly: false }),
       updateWorkingCopy: async () => ({}), saveDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
       lock: async () => hostLock(),
+      onLockStarted: (listener) => listen("lockStarted", listener),
       onLocked: (listener) => listen("locked", listener),
       onJournalWarning: (listener) => listen("warning", listener),
       onRegularSave: (listener) => listen("regular", listener),
@@ -105,12 +114,21 @@ test("mounted claim secrets are synchronously torn down by automatic and manual 
     };
 
     let claim = await openInvitation();
-    hostLock();
+    await user.click(ui.getByRole(claim.dialog, "button",
+      { name: "Replace password and claim identity" }));
+    await ui.waitFor(() => assert.equal(claimCalls, 1));
+    disposedClaims += 1;
+    listeners.lockStarted();
     assert.equal(claim.password.value, "");
     assert.equal(claim.confirmation.value, "");
     assert.equal(claim.dialog.isConnected, false);
     assert.equal(document.querySelectorAll("input[type='password']").length, 0);
     assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "No document");
+    rejectClaim();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "",
+      "a late claim failure cannot re-expose plaintext after lock teardown");
+    listeners.locked(lockResult);
 
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
     await user.click(ui.getByRole(ui.getByRole(document.body, "menu", { name: "File" }),

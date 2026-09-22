@@ -34,7 +34,9 @@ export class SecureLockCoordinator {
   async serviceLocked(service, result) {
     if (service === this.lockingService) return;
     if (service !== this.getService()) {
-      if (this.replacements.hasStagedCandidate(service)) {
+      if (this.replacements.hasStagedCandidate(service)
+          && ["inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock"]
+            .includes(result.reason)) {
         await this.lock(result.reason ?? "inactivity");
       }
       return;
@@ -43,6 +45,8 @@ export class SecureLockCoordinator {
     await this.#disposeStagedWorkflows();
     this.emitLocked(result);
   }
+
+  isLocking(service) { return service === this.lockingService; }
 
   #rememberTarget(service) {
     this.rememberLockedTarget(service.active?.target ?? null);

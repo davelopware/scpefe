@@ -10,6 +10,7 @@ import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 import { HeadWitnessStore, compareHeadWitness } from "./head-witness.mjs";
 import { createMergeDraft, hasConflictMarkers } from "./divergence-merge.mjs";
+import { LifecycleBarrier } from "./lifecycle-barrier.mjs";
 
 const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
@@ -35,7 +36,8 @@ export class DocumentService {
     inactivityMs = 120_000, now = () => Date.now(),
     utcNow = now, monotonicNow = now, randomSessionId = () => randomBytes(16),
     setTimer = setTimeout, clearTimer = clearTimeout,
-    onLocked = () => {}, onJournalWarning = () => {}, onRegularSave = () => {} }) {
+    onLockStart = () => {}, onLocked = () => {}, onJournalWarning = () => {},
+    onRegularSave = () => {} }) {
     this.native = native;
     this.fs = fs;
     this.profilePath = profilePath;
@@ -56,6 +58,7 @@ export class DocumentService {
     this.randomSessionId = randomSessionId;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
+    this.onLockStart = onLockStart;
     this.onLocked = onLocked;
     this.onJournalWarning = onJournalWarning;
     this.onRegularSave = onRegularSave;
@@ -63,11 +66,14 @@ export class DocumentService {
     this.inactivityTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatOperation = null;
+    this.lockOperation = null;
     this.regularSaveTimer = null;
     this.clientSettings = validateClientSettings();
     this.leaseGeneration = 0;
     this.flushChain = Promise.resolve();
     this.publicationChain = Promise.resolve();
+    this.publicationOperations = 0;
+    this.lifecycle = new LifecycleBarrier();
     this.active = null;
     this.createdTarget = null;
     this.createdBytes = null;
@@ -157,6 +163,16 @@ export class DocumentService {
 
   async unresolvedJournalSummary() {
     return this.journals.discoverUnresolved();
+  }
+
+  /* Reports whether a publication, migration, compaction, or lease write is queued. */
+  hasActivePublication() {
+    return this.lifecycle.hasMaintenance;
+  }
+
+  /* Runs session abandonment only after earlier maintenance and before later work. */
+  runLifecycleBarrier(operation) {
+    return this.lifecycle.runExclusive(operation);
   }
 
   async createDocument(target, request) {
@@ -1113,9 +1129,31 @@ export class DocumentService {
     return { tracked: true };
   }
 
-  async lock(reason = "app-lock") {
+  lock(reason = "app-lock") {
     const active = this.active;
-    if (!active) return { locked: true, journalSaved: true, warning: null };
+    if (!active) return Promise.resolve(
+      { locked: true, journalSaved: true, warning: null });
+    if (this.lockOperation) return this.lockOperation;
+    let resolveLock; let rejectLock;
+    const tracked = new Promise((resolve, reject) => {
+      resolveLock = resolve; rejectLock = reject;
+    });
+    this.lockOperation = tracked;
+    tracked.then(() => {
+      if (this.lockOperation === tracked) this.lockOperation = null;
+    }, () => {
+      if (this.lockOperation === tracked) this.lockOperation = null;
+    });
+    let startError = null;
+    try { this.onLockStart(Object.freeze({ reason })); }
+    catch (error) { startError = error; }
+    this.#finishLock(active, reason).then((result) => {
+      if (startError) rejectLock(startError); else resolveLock(result);
+    }, rejectLock);
+    return tracked;
+  }
+
+  async #finishLock(active, reason) {
     this.#cancelCheckpoint();
     this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
@@ -2356,7 +2394,13 @@ export class DocumentService {
   }
 
   #queuePublication(operation) {
-    const queued = this.publicationChain.catch(() => {}).then(operation);
+    this.publicationOperations += 1;
+    const previous = this.publicationChain.catch(() => {});
+    const queued = this.lifecycle.runMaintenance(async () => {
+      await previous;
+      return operation();
+    })
+      .finally(() => { this.publicationOperations -= 1; });
     this.publicationChain = queued;
     return queued;
   }

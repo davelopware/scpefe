@@ -79,5 +79,16 @@ test("a staged candidate automatic lock tears down and locks the authoritative s
     await setup.coordinator.serviceLocked(candidate, automatic);
     assert.equal(setup.service.active, null);
     assert.equal(setup.replacements.hasStagedCandidate(candidate), false);
-    assert.deepEqual(setup.log.slice(-2), ["authoritative-lock:inactivity", "emit:inactivity"]);
-  });
+  assert.deepEqual(setup.log.slice(-2), ["authoritative-lock:inactivity", "emit:inactivity"]);
+});
+
+test("replacement cleanup lock never reports the authoritative session as locked", async () => {
+  const setup = fixture({ activeTarget: "original.scpefe" });
+  await setup.replacements.open("invitation.scpefe", "temporary password words");
+  const candidate = setup.candidate();
+  const cleanup = await candidate.lock("replacement-canceled");
+  await setup.coordinator.serviceLocked(candidate, cleanup);
+  assert.equal(setup.service.active.target, "original.scpefe");
+  assert.equal(setup.log.includes("authoritative-lock:replacement-canceled"), false);
+  assert.equal(setup.log.some((entry) => entry.startsWith("emit:")), false);
+});

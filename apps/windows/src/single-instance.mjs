@@ -78,7 +78,7 @@ export function validateAcknowledgement(credentials, value, targetHash) {
   const validState = value?.sequence === 1 && value?.status === "queued"
     || value?.sequence === 2 && value?.status === "presented"
     || value?.sequence === 3
-      && ["focused", "opened", "canceled"].includes(value?.status);
+      && ["focused", "opened", "canceled", "failed"].includes(value?.status);
   if (!value || typeof value !== "object" || value.id !== credentials.id
       || typeof value.requestToken !== "string" || !UUID.test(value.requestToken)
       || value.targetHash !== targetHash
@@ -117,9 +117,18 @@ export class OrderedOpenRequests {
     return this.active;
   }
 
+  takeForTermination() {
+    if (this.active) return this.active;
+    if (this.pending.length === 0) return null;
+    this.active = this.pending.shift();
+    return this.active;
+  }
+
   current(token) {
     return this.active?.token === token ? this.active : null;
   }
+
+  get currentRequest() { return this.active; }
 
   complete(token) {
     if (!this.current(token)) throw new TypeError("external open request is not active");
