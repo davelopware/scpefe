@@ -138,6 +138,7 @@ export class DocumentLifecycleHost {
     if (closed) {
       this.generation.invalidate();
       await this.externalLifecycle.cancelForLock();
+      this.rendererLockStarted = false;
       this.#emit("document:closed"); await this.sendJournalSummary();
     }
     return closed;
@@ -155,9 +156,15 @@ export class DocumentLifecycleHost {
       onLockStart: ({ reason }) => {
         const staged = this.replacements?.hasStagedCandidate(created)
           && AUTOMATIC_LOCK_REASONS.includes(reason);
-        if (created === this.service || staged) this.#beginServiceLock(created);
+        if (reason !== "document-close" && (created === this.service || staged)) {
+          this.#beginServiceLock(created);
+        }
       },
       onLocked: (result) => {
+        if (result.reason === "document-close") {
+          this.lockStartedServices.delete(created);
+          return;
+        }
         void this.secureLocks?.serviceLocked(created, result).catch((error) =>
           this.#emit("document:journal-warning",
             `Secure lock cleanup needs attention: ${error.message}`)).finally(() => {

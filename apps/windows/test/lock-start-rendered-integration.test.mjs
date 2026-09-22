@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,35 +18,55 @@ async function runMountedLock(t, origin) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
+  const newTarget = path.join(directory, "new-document.scpefe");
   const profilePath = path.join(directory, "profile.json");
   await fs.writeFile(target, "container");
   await fs.writeFile(profilePath, JSON.stringify({ name: "Ada",
     email: "ada@example.test", deviceName: "Desk" }));
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
-  const native = { openDocument() { return { content: "original plaintext", readOnly: true,
-    canEdit: true, manuallySealed: true, documentId: "61".repeat(16),
-    baseRevision: "62".repeat(32),
-    revisionGraph: [{ revisionId: "62".repeat(32), parentRevisionIds: [] }],
+  let saveFault = false;
+  const openedContent = (bytes) => /^(saved|provisional):/.test(bytes.toString())
+    ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
+  const native = { openDocument(bytes, password) {
+    if (password === "wrong password") throw new Error("authentication failed");
+    const revision = createHash("sha256").update(bytes).digest("hex");
+    return { content: openedContent(bytes), readOnly: true,
+    canEdit: true, manuallySealed: !bytes.toString().startsWith("provisional:"),
+    documentId: "61".repeat(16),
+    baseRevision: revision,
+    revisionGraph: [{ revisionId: revision, parentRevisionIds: [] }],
     journalKey: Buffer.alloc(32, 0x63), lease: { ...lease } };
-  }, updateLease(bytes, _password, next) { lease = { ...next }; return Buffer.from(bytes); } };
-  const timers = []; const ipcListeners = new Map(); const ipcHandlers = new Map();
+  }, updateLease(bytes, _password, next) { lease = { ...next }; return Buffer.from(bytes); },
+  createDocument() { return Buffer.from("saved:"); },
+  saveDocument(_bytes, _password, input) {
+    if (saveFault) throw new Error("injected native save failure");
+    return Buffer.from(`saved:${input.content}`);
+  }, regularSaveDocument(_bytes, _password, input) {
+    return Buffer.from(`provisional:${input.content}`);
+  } };
+  const timers = []; const acks = [];
+  const ipcListeners = new Map(); const ipcHandlers = new Map();
   const emit = (channel, value) => {
     for (const listener of ipcListeners.get(channel) ?? []) listener({}, value);
   };
   let lockStarted; const starting = new Promise((resolve) => { lockStarted = resolve; });
   let lockFinished; const finished = new Promise((resolve) => { lockFinished = resolve; });
   class FakeWindow extends EventEmitter {
-    constructor() { super(); this.webContents = { send: emit }; }
+    constructor() { super(); this.webContents = { send: emit }; this.closed = 0; }
     close() { const event = { prevented: false, preventDefault() { this.prevented = true; } };
-      this.emit("close", event); }
+      this.lastClose = Promise.all(this.listeners("close").map((listener) => listener(event)));
+      if (!event.prevented) this.closed += 1; return event; }
     show() {} focus() {} isMinimized() { return false; }
   }
-  const fakeWindow = new FakeWindow();
+  const fakeWindow = new FakeWindow(); let createPickerCalls = 0;
   const host = await new DocumentLifecycleHost({
     ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
-    window: fakeWindow, picker: { chooseCreateTarget: async () => null,
-      chooseOpenTarget: async () => target },
+    window: fakeWindow, picker: { chooseCreateTarget: async () => {
+      createPickerCalls += 1; return origin.startsWith("new") || origin.startsWith("s5-")
+        ? newTarget : null;
+    },
+      chooseOpenTarget: async () => origin === "s0-open" ? null : target },
     serviceFactory: (callbacks) => new DocumentService({ native, fs, profilePath,
       publicationCapabilities: capabilities,
       journalDirectory: path.join(directory, "journals"),
@@ -54,6 +75,9 @@ async function runMountedLock(t, origin) {
       ...(origin === "lease-refresh-failed" ? { setTimer(callback, delay) {
         const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
       }, clearTimer() {} } : {}), ...callbacks }),
+    acknowledge: async (request, status, sequence) => {
+      acks.push({ token: request.token, status, sequence });
+    },
   }).start();
   let service = host.service;
 
@@ -103,27 +127,273 @@ async function runMountedLock(t, origin) {
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
   await ui.waitFor(() => assert.ok(ui.getByRole(document.body, "menubar")));
+  await ui.waitFor(() => assert.ok(
+    ipcListeners.get("document:external-open-requested")?.size));
   const command = async (menu, name) => { await user.click(ui.getByRole(document.body,
     "menuitem", { name: menu })); await user.click(ui.getByRole(
     ui.getByRole(document.body, "menu", { name: menu }), "menuitem", { name })); };
+  const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
+  const driveDirect = async (entry, expectedState, windowPrevented = false) => {
+    if (entry === "new") {
+      await command("File", /New/); assert.equal(ui.queryByRole(document.body, "dialog"), null);
+    } else if (entry === "open") {
+      await command("File", /Open/);
+      const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+      await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
+    } else if (entry === "external") {
+      await host.setReady(); host.enqueueExternal({ target, source: "second-instance" });
+      const opened = await ui.findByRole(document.body, "dialog",
+        { name: "Open requested document" });
+      await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
+    } else if (entry === "close") {
+      await command("File", /Close/); expectedState = "No document";
+    } else if (entry === "exit") {
+      await command("File", "Exit"); await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    } else {
+      const event = fakeWindow.close(); assert.equal(event.prevented, windowPrevented);
+      if (windowPrevented) await fakeWindow.lastClose;
+      await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    }
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+      "Document state").textContent, expectedState));
+  };
+  const driveProtectedCancel = async (entry) => {
+    if (entry === "new") {
+      await command("File", /New/);
+      const creation = await ui.findByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+        "owner password words");
+      await user.click(ui.getByLabelText(creation,
+        "I understand that lost passwords cannot be recovered."));
+      await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    } else if (entry === "open") {
+      await command("File", /Open/);
+      const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    } else if (entry === "external") {
+      await host.setReady(); host.enqueueExternal({ target, source: "second-instance" });
+      const opened = await ui.findByRole(document.body, "dialog",
+        { name: "Open requested document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    } else if (entry === "close") await command("File", /Close/);
+    else if (entry === "exit") await command("File", "Exit");
+    else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
+    const title = entry === "new" ? /before New/ : ["open", "external"].includes(entry)
+      ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/;
+    const protection = await ui.findByRole(document.body, "dialog", { name: title });
+    const keep = ui.getByRole(protection, "button", { name: "Keep current document open" });
+    assert.equal(document.activeElement, keep); await user.click(keep);
+    await ui.waitFor(() => assert.equal(
+      ui.queryByRole(document.body, "dialog", { name: title }), null));
+    const returned = ui.queryByRole(document.body, "dialog");
+    if (returned) {
+      const cancel = ui.queryByRole(returned, "button", { name: "Cancel" });
+      if (cancel) await user.click(cancel);
+    }
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+  };
+  if (origin.startsWith("s0-")) {
+    const entry = origin.slice(3);
+    if (entry === "new") {
+      await command("File", /New/); assert.equal(createPickerCalls, 1);
+      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+    } else if (entry === "open") {
+      await command("File", /Open/); assert.equal(ui.queryByRole(document.body, "dialog"), null);
+    } else if (entry === "external") {
+      await host.setReady(); const request = host.enqueueExternal({ target,
+        source: "second-instance" });
+      const dialog = await ui.findByRole(document.body, "dialog",
+        { name: "Open requested document" });
+      await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      assert.equal(host.externalRequests.current(request.token), null);
+      assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "canceled"]);
+    } else if (entry === "close") {
+      await command("File", /Close/);
+      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+    } else if (entry === "exit") {
+      await command("File", "Exit"); await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    } else {
+      const event = fakeWindow.close(); assert.equal(event.prevented, false);
+      assert.equal(fakeWindow.closed, 1);
+    }
+    assert.equal(ui.getByLabelText(document.body, "Document state").textContent,
+      "No document");
+    return;
+  }
   await command("File", /Open/);
   let dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.type(ui.getByLabelText(dialog, "Password"), "password words");
   await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Read-only"));
+  if (origin.startsWith("s1-")) {
+    await driveDirect(origin.slice(3), "Read-only"); return;
+  }
   await command("Edit", "Edit Contents");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Edit mode"));
   service = host.service;
   const originalLockStart = service.onLockStart;
-  service.onLockStart = (value) => { assert.equal(value.reason, origin);
+  service.onLockStart = (value) => { assert.equal(value.reason, origin.startsWith("s3-")
+    ? "app-lock" : origin === "close" || origin.endsWith("-close")
+      ? "document-close" : origin);
     originalLockStart(value); lockStarted(); };
   const originalLocked = service.onLocked;
   service.onLocked = (result) => { originalLocked(result); lockFinished(result); };
-  const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
-  ui.fireEvent.change(editor, { target: { value: "mounted secret plaintext",
-    selectionStart: 24, selectionEnd: 24 } });
+  if (origin.startsWith("s2-")) {
+    await driveDirect(origin.slice(3), "Edit mode", origin.endsWith("window")); return;
+  }
+  if (origin.startsWith("s3-")) {
+    await command("Security", "Lock");
+    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+      "Document state").textContent, "Locked"));
+    await driveDirect(origin.slice(3), "Locked"); return;
+  }
+  await user.clear(editor);
+  await user.type(editor, "mounted secret plaintext");
+  await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+    "Working copy state").textContent, "Dirty"));
+  if (origin.startsWith("s5-")) {
+    await service.saveClientSettings({ regularSaveEnabled: true,
+      regularSaveIntervalMs: 120_000 });
+    await service.regularSaveDocument();
+    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+      "Publication state").textContent, "Provisional publication"));
+    await driveProtectedCancel(origin.slice(3));
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(ui.getByLabelText(document.body, "Working copy state").textContent, "Dirty");
+    assert.equal(ui.getByLabelText(document.body, "Publication state").textContent,
+      "Provisional publication");
+    assert.equal(fakeWindow.closed, 0);
+    return;
+  }
+  if (["close", "exit"].includes(origin)) {
+    await command("File", origin === "close" ? /Close/ : "Exit");
+    let protection = await ui.findByRole(document.body, "dialog",
+      { name: new RegExp(`before ${origin === "close" ? "Close" : "Exit"}`) });
+    const keep = ui.getByRole(protection, "button", { name: "Keep current document open" });
+    assert.equal(document.activeElement, keep); await user.click(keep);
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
+    await command("File", origin === "close" ? /Close/ : "Exit");
+    protection = await ui.findByRole(document.body, "dialog",
+      { name: new RegExp(`before ${origin === "close" ? "Close" : "Exit"}`) });
+    await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+    if (origin === "close") {
+      await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+        "Document state").textContent, "No document"));
+      assert.equal(editor.value, "");
+    } else await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    return;
+  }
+  if (origin === "open") {
+    await command("File", /Open/);
+    const openDialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    await user.type(ui.getByLabelText(openDialog, "Password"), "password words");
+    await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
+    const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
+    assert.equal(editor.value, "mounted secret plaintext");
+    await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
+    const returned = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(host.service, service);
+    await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    return;
+  }
+  if (origin === "new") {
+    await command("File", /New/);
+    const creation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    assert.equal(createPickerCalls, 1, "the real picker completed before the security dialog");
+    await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+    await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+      "owner password typo");
+    await user.click(ui.getByLabelText(creation,
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    assert.match(ui.getByRole(creation, "alert").textContent,
+      /owner passwords do not match/i);
+    assert.equal(document.activeElement,
+      ui.getByLabelText(creation, "Confirm owner password"));
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    assert.equal(editor.value, "mounted secret plaintext");
+    await user.click(ui.getByRole(creation, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(editor.value, "mounted secret plaintext");
+    return;
+  }
+  if (origin === "new-approved") {
+    await command("File", /New/);
+    const creation = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+    await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+      "owner password words");
+    await user.click(ui.getByLabelText(creation,
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    assert.equal(editor.value, "mounted secret plaintext");
+    await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
+    const returned = await ui.findByRole(document.body, "dialog",
+      { name: "Secure new document" });
+    assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
+    assert.equal(editor.value, "mounted secret plaintext");
+    await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    return;
+  }
+  if (origin === "external-open") {
+    await host.setReady();
+    const request = host.enqueueExternal({ target, source: "second-instance" });
+    const externalDialog = await ui.findByRole(document.body, "dialog",
+      { name: "Open requested document" });
+    await user.type(ui.getByLabelText(externalDialog, "Password"), "wrong password");
+    await user.click(ui.getByRole(externalDialog, "button", { name: "Open" }));
+    await ui.findByRole(externalDialog, "alert");
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+    assert.equal(host.externalRequests.current(request.token).token, request.token);
+    await user.click(ui.getByRole(externalDialog, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "canceled"]);
+    assert.equal(host.externalRequests.current(request.token), null);
+    return;
+  }
+  if (origin === "window-close") {
+    const first = fakeWindow.close();
+    assert.equal(first.prevented, true);
+    let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+    assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(document.activeElement, ui.getByRole(protection, "button",
+      { name: "Keep current document open" }));
+    await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await fakeWindow.lastClose;
+    assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "mounted secret plaintext");
+    const second = fakeWindow.close(); assert.equal(second.prevented, true);
+    protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+    const save = ui.getByRole(protection, "button", { name: "Manual save and continue" });
+    saveFault = true; await user.click(save);
+    await ui.waitFor(() => assert.match(ui.getByText(protection,
+      /injected native save failure/).textContent, /injected native save failure/));
+    assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "mounted secret plaintext");
+    assert.equal(document.activeElement, save);
+    saveFault = false; await user.click(save);
+    await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+    assert.equal(host.service.active.editMode, false);
+    assert.equal(await fs.readFile(target, "utf8"), "saved:mounted secret plaintext");
+    return;
+  }
   let releaseJournal; let journalStarted;
   const journalWriting = new Promise((resolve) => { journalStarted = resolve; });
   const write = service.journals.write.bind(service.journals);
@@ -150,7 +420,37 @@ async function runMountedLock(t, origin) {
   assert.equal(result.locked, true); assert.equal(service.active, null);
 }
 
-for (const origin of ["inactivity", "lease-refresh-failed"]) {
-  test(`mounted renderer wired to real DocumentService clears at ${origin} lock start`,
+for (const origin of ["inactivity", "lease-refresh-failed", "window-close", "external-open",
+  "new", "new-approved", "open", "close", "exit", "s0-new", "s0-open", "s0-external",
+  "s0-close", "s0-exit", "s0-window",
+  ...["s1", "s2", "s3"].flatMap((state) => ["new", "open", "external", "close", "exit",
+    "window"].map((entry) => `${state}-${entry}`)),
+  ...["new", "open", "external", "close", "exit", "window"].map((entry) => `s5-${entry}`)]) {
+  test(origin === "window-close"
+    ? "L-S4-W dirty BrowserWindow close: Cancel retains, Save failure focuses retry, success terminates"
+    : origin === "external-open"
+      ? "L-S4-X dirty external Open: wrong password retains FIFO request, Cancel terminally acks"
+      : origin === "new"
+        ? "RN-S4 dirty New: picker precedes security, mismatch creates no target, Cancel retains"
+        : origin === "new-approved"
+          ? "L-S4-N dirty New: protection Cancel preserves session and creates no target"
+          : origin === "open"
+            ? "L-S4-O dirty Open: authenticated candidate protection Cancel retains authority"
+            : origin === "close"
+              ? "L-S4-C dirty Close: Cancel retains, Discard reaches no-document shell"
+              : origin === "exit"
+                ? "L-S4-E dirty Exit: Cancel retains, Discard terminates"
+                : origin.startsWith("s0-")
+                  ? `L-S0-${{ new: "N", open: "O", external: "X", close: "C",
+                    exit: "E", window: "W" }[origin.slice(3)]} no-document direct lifecycle behavior`
+                  : /^s[123]-/.test(origin)
+                    ? `L-${origin.slice(0, 2).toUpperCase()}-${{ new: "N", open: "O",
+                      external: "X", close: "C", exit: "E", window: "W" }[origin.slice(3)]} ${{
+                      s1: "clean read-only", s2: "clean edit", s3: "locked",
+                    }[origin.slice(0, 2)]} direct lifecycle behavior`
+                    : origin.startsWith("s5-")
+                      ? `L-S5-${{ new: "N", open: "O", external: "X", close: "C",
+                        exit: "E", window: "W" }[origin.slice(3)]} real provisional revision protection Cancel retains`
+    : `mounted renderer wired to real DocumentService clears at ${origin} lock start`,
     (t) => runMountedLock(t, origin));
 }
