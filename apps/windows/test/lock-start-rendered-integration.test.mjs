@@ -28,6 +28,7 @@ export async function runMountedLock(t, origin) {
     email: "ada@example.test", deviceName: "Desk" }));
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
+  let newLease = { ...lease };
   let saveFault = false;
   let discardFault = false;
   let provisionalDiscardFault = false;
@@ -39,7 +40,28 @@ export async function runMountedLock(t, origin) {
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const revisionGraphs = new Map();
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
-  const serviceFs = { ...fs, async rename(source, destination) {
+  let holdDiscard = false; let releaseDiscard; let discardStarted;
+  const discardEntered = new Promise((resolve) => { discardStarted = resolve; });
+  let holdNewLink = false; let releaseNewLink; let newLinkStarted;
+  const newLinkEntered = new Promise((resolve) => { newLinkStarted = resolve; });
+  let holdOtherReadAt = 0; let otherReadCount = 0; let releaseOtherRead; let otherReadStarted;
+  const otherReadEntered = new Promise((resolve) => { otherReadStarted = resolve; });
+  const serviceFs = { ...fs, async readFile(file, ...args) {
+    if (file === otherTarget && holdOtherReadAt > 0
+        && ++otherReadCount === holdOtherReadAt) {
+      otherReadStarted();
+      await new Promise((resolve) => { releaseOtherRead = resolve; });
+      holdOtherReadAt = 0;
+    }
+    return fs.readFile(file, ...args);
+  }, async link(source, destination) {
+    if (holdNewLink && destination === newTarget) {
+      newLinkStarted();
+      await new Promise((resolve) => { releaseNewLink = resolve; });
+      holdNewLink = false;
+    }
+    return fs.link(source, destination);
+  }, async rename(source, destination) {
     if (publicationFailureAfter !== null && destination === target) {
       if (publicationFailureAfter === 0) {
         publicationFailureAfter = null;
@@ -59,6 +81,11 @@ export async function runMountedLock(t, origin) {
     }
     return fs.rename(source, destination);
   }, async unlink(file) {
+    if (holdDiscard && file.startsWith(path.join(directory, "journals"))) {
+      discardStarted();
+      await new Promise((resolve) => { releaseDiscard = resolve; });
+      holdDiscard = false;
+    }
     if (discardFault && file.startsWith(path.join(directory, "journals"))) {
       const error = new Error("injected journal discard failure");
       error.code = "EIO"; throw error;
@@ -66,6 +93,7 @@ export async function runMountedLock(t, origin) {
     return fs.unlink(file);
   } };
   const openedContent = (bytes) => bytes.toString() === "other-container" ? "other plaintext"
+    : bytes.toString().startsWith("new:") ? bytes.toString().slice(4)
     : /^(saved|provisional):/.test(bytes.toString())
       ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
   const native = { openDocument(bytes, password) {
@@ -85,23 +113,28 @@ export async function runMountedLock(t, origin) {
       slotIdentityEmail: "invited@example.test", profileName: "Document author",
       profileEmail: "author@example.test", deviceName: "Author device" } : {}),
     manuallySealed: !bytes.toString().startsWith("provisional:"),
-    documentId: bytes.toString().startsWith("other") ? "62".repeat(16) : "61".repeat(16),
+    documentId: bytes.toString().startsWith("other") ? "62".repeat(16)
+      : bytes.toString().startsWith("new:") ? "63".repeat(16) : "61".repeat(16),
     baseRevision: revision,
     revisionGraph,
-    journalKey: Buffer.alloc(32, bytes.toString().startsWith("other") ? 0x64 : 0x63),
+    journalKey: Buffer.alloc(32, bytes.toString().startsWith("other") ? 0x64
+      : bytes.toString().startsWith("new:") ? 0x65 : 0x63),
     lease: { ...(bytes.toString().startsWith("other") ? { active: false,
       sessionId: "0".repeat(32), heartbeatCounter: 0, holderUtcMs: 0,
-      durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" } : lease) } };
+      durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" }
+      : bytes.toString().startsWith("new:") ? newLease : lease) } };
   }, updateLease(bytes, _password, next) {
     if (createdCandidate && createdLeaseFault) throw new Error("injected created candidate lease failure");
-    lease = { ...next }; return Buffer.from(bytes);
+    if (bytes.toString().startsWith("new:")) newLease = { ...next };
+    else lease = { ...next };
+    return Buffer.from(bytes);
   },
   createDocument() {
     if (createFault) throw new Error("injected native create failure");
     createdCandidate = true;
-    lease = { active: false, sessionId: "0".repeat(32),
+    newLease = { active: false, sessionId: "0".repeat(32),
     heartbeatCounter: 0, holderUtcMs: 0, durationMs: 600_000,
-    holderName: "", holderEmail: "", deviceName: "" }; return Buffer.from("saved:");
+    holderName: "", holderEmail: "", deviceName: "" }; return Buffer.from("new:");
   },
   saveDocument(_bytes, _password, input) {
     if (saveFault) throw new Error("injected native save failure");
@@ -200,11 +233,14 @@ export async function runMountedLock(t, origin) {
       createPickerCalls += 1; return origin.startsWith("new")
         || origin.startsWith("s5-") || origin.startsWith("s9-")
         || origin.startsWith("dr-new-") || origin.startsWith("prr-new-")
+        || origin.startsWith("al-new-")
+        || origin === "als-new-candidate"
         || (origin.startsWith("rn-") && origin !== "rn-picker-cancel")
         ? newTarget : null;
     },
       chooseOpenTarget: async () => origin === "s0-open" ? null
         : origin.startsWith("ro-") || origin.startsWith("rx-")
+          || origin.startsWith("als-open-")
           ? (openPickerCalls++ === 0 ? target
             : origin === "ro-picker-cancel" ? null : otherTarget)
         : (origin.startsWith("dr-open-") || origin.startsWith("prr-open-"))
@@ -540,7 +576,8 @@ export async function runMountedLock(t, origin) {
     "Document state").textContent, "Edit mode"));
   service = host.service;
   const originalLockStart = service.onLockStart;
-  service.onLockStart = (value) => { assert.equal(value.reason, origin.startsWith("s3-")
+  service.onLockStart = (value) => { assert.equal(value.reason,
+    origin.startsWith("s3-") || origin.startsWith("al-") || origin.startsWith("als-")
     ? "app-lock" : origin === "close" || origin.endsWith("-close")
       || origin.startsWith("dc-close-") || origin.startsWith("prc-close-")
       || origin.startsWith("rw-") || origin.startsWith("tw-") || origin.startsWith("tx-")
@@ -568,6 +605,117 @@ export async function runMountedLock(t, origin) {
     await service.regularSaveDocument();
     await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
       "Publication state").textContent, "Provisional publication"));
+  }
+  if (origin.startsWith("als-")) {
+    const [, entry, stage] = origin.split("-"); let request;
+    if (entry === "new") {
+      holdNewLink = true;
+      await command("File", /New/);
+      const creation = await ui.findByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+        "owner password words");
+      await user.click(ui.getByLabelText(creation,
+        "I understand that lost passwords cannot be recovered."));
+      await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+      await newLinkEntered;
+    } else {
+      holdOtherReadAt = stage === "auth" ? 1 : 2;
+      if (entry === "open") await command("File", /Open/);
+      else { await host.setReady(); request = host.enqueueExternal({ target: otherTarget,
+        source: "second-instance" }); }
+      const opened = await ui.findByRole(document.body, "dialog",
+        { name: entry === "open" ? "Open document" : "Open requested document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+      if (stage === "auth") await otherReadEntered;
+      else {
+        const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
+        await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+        await otherReadEntered;
+      }
+    }
+    const generation = host.generation.capture();
+    const locking = host.lockActive("app-lock");
+    assert.equal(host.generation.capture(), generation + 1);
+    await ui.waitFor(() => assert.equal(editor.value, ""));
+    if (entry === "new") releaseNewLink(); else releaseOtherRead();
+    await locking;
+    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+      "Document state").textContent, "Locked"));
+    assert.equal(host.service.active, null); assert.equal(fakeWindow.closed, 0);
+    await ui.waitFor(() => assert.equal(host.replacements.candidates.size, 0));
+    await new Promise((resolve) => setImmediate(resolve));
+    if (entry === "new") await ui.waitFor(async () => assert.equal(
+      await fs.stat(newTarget).then(() => true, () => false), false));
+    if (request) {
+      await ui.waitFor(() => assert.equal(host.externalRequests.current(request.token), null));
+      assert.equal(acks.at(-1).status, "canceled");
+    }
+    return;
+  }
+  if (origin.startsWith("al-")) {
+    const [, entry, variant] = origin.split("-"); let request;
+    if (entry === "new") {
+      await command("File", /New/);
+      const creation = await ui.findByRole(document.body, "dialog",
+        { name: "Secure new document" });
+      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Confirm owner password"),
+        "owner password words");
+      await user.click(ui.getByLabelText(creation,
+        "I understand that lost passwords cannot be recovered."));
+      await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    } else if (entry === "open") {
+      await command("File", /Open/);
+      const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    } else if (entry === "external") {
+      await host.setReady(); request = host.enqueueExternal({ target: otherTarget,
+        source: "second-instance" });
+      const opened = await ui.findByRole(document.body, "dialog",
+        { name: "Open requested document" });
+      await user.type(ui.getByLabelText(opened, "Password"), "password words");
+      await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+    } else if (entry === "close") await command("File", /Close/);
+    else if (entry === "exit") await command("File", "Exit");
+    else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
+    const protection = await ui.findByRole(document.body, "dialog",
+      { name: entry === "new" ? /before New/ : ["open", "external"].includes(entry)
+        ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/ });
+    if (variant === "save") {
+      holdMaintenance = true;
+      await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+      await Promise.race([maintenanceEntered, new Promise((_, reject) => setTimeout(() =>
+        reject(new Error(`save did not enter publication: ${protection.textContent}`)), 1_000))]);
+    } else if (variant === "discard") {
+      holdDiscard = true;
+      await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
+      await Promise.race([discardEntered, new Promise((_, reject) => setTimeout(() =>
+        reject(new Error(`discard did not enter journal cleanup: ${protection.textContent}`)),
+      1_000))]);
+    }
+    const generation = host.generation.capture();
+    const locking = host.lockActive("app-lock");
+    if (variant === "dialog") await starting;
+    assert.equal(host.generation.capture(), generation + 1);
+    await ui.waitFor(() => assert.equal(editor.value, ""));
+    assert.equal(fakeWindow.closed, 0);
+    if (variant === "save") releaseMaintenance();
+    if (variant === "discard") releaseDiscard();
+    await locking;
+    await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
+      "Document state").textContent, "Locked"));
+    assert.equal(host.service.active, null);
+    if (entry === "new") await ui.waitFor(async () => assert.equal(
+      await fs.stat(newTarget).then(() => true, () => false), false));
+    if (request) {
+      await ui.waitFor(() => assert.equal(host.externalRequests.current(request.token), null));
+      assert.equal(acks.at(-1).status, "canceled");
+    }
+    return;
   }
   if (origin === "tx-external-before-exit") {
     await host.setReady(); const request = host.enqueueExternal({ target: otherTarget,
@@ -1096,6 +1244,16 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("als-")) {
+    const [, entry, stage] = origin.split("-");
+    return `ALS-${{ new: "N", open: "O", external: "X" }[entry]} real lock-start during staged ${entry} ${stage}`;
+  }
+  if (origin.startsWith("al-")) {
+    const [, entry, variant] = origin.split("-");
+    return `AL-${{ new: "N", open: "O", external: "X", close: "C", exit: "E",
+      window: "W" }[entry]} real lock-start during ${entry} ${variant === "dialog"
+      ? "open protection dialog" : `${variant} decision await`}`;
+  }
   if (origin === "tc-close-no-doc") return "TC Close command on no-document is direct and non-terminating";
   if (origin === "te-exit-once") return "TE Exit command closes exactly once from no-document";
   if (origin === "tw-protect-reentry") return "TW registered window close prevents, protects, retries fault, and reenters once";
