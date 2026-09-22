@@ -479,7 +479,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     await user.click(ui.getByRole(pending, "button", { name: "Retry publication" }));
-    await ui.findByText(pending, /pending publication could not be completed/i);
+    await ui.findByText(pending, /operation could not be completed safely/i);
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
@@ -881,7 +881,7 @@ export async function runMountedLock(t, origin) {
       await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
       return;
     }
-    await ui.findByText(creation, /encrypted document could not be created/i);
+    await ui.findByText(creation, /operation could not be completed safely/i);
     assert.equal(host.service === service, true);
     assert.equal(editor.value, "");
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);

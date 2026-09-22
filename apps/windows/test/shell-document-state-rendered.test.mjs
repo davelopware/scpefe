@@ -177,7 +177,8 @@ test("mounted shell presents truthful document states, history, failures, and se
 
   await command("Edit", "Edit Contents");
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
-  assert.match(ui.getByRole(failure, "alert").textContent, /lease is held/);
+  assert.match(ui.getByRole(failure, "alert").textContent,
+    /operation could not be completed safely/i);
   assert.equal(document.activeElement?.textContent.trim(), "Retry editing");
   assert.equal(editor.readOnly, true);
   assert.equal(statusValue("Document state"), "Read-only");
@@ -257,7 +258,7 @@ test("mounted shell presents truthful document states, history, failures, and se
     /Backup canceled; the document and destination are unchanged/);
   await command("File", /Backup/);
   assert.match(ui.getByRole(document.body, "status").textContent,
-    /backup destination unavailable/);
+    /operation could not be completed safely/i);
   assert.equal(editor.value, beforeTransfer);
   await command("File", /Backup/);
   assert.match(ui.getByRole(document.body, "status").textContent,
@@ -277,7 +278,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   exportDialog = await ui.findByRole(document.body, "dialog", { name: "Export plaintext" });
   await user.click(ui.getByRole(exportDialog, "button", { name: /Export current text/ }));
   assert.match((await ui.findByRole(exportDialog, "alert")).textContent,
-    /export destination unavailable/);
+    /operation could not be completed safely/i);
   assert.equal(document.activeElement?.textContent.trim(), "Export current text…");
   assert.equal(editor.value, "",
     "export failure retains but does not render document text behind the modal");

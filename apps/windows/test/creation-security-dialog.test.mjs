@@ -125,7 +125,7 @@ test("creation failure remains inline with retained secrets and can be retried",
   });
   await enterOwner(ui, user);
   await user.click(ui.getByRole("button", { name: "Create" }));
-  assert.match(ui.getByRole("alert").textContent, /publication failed safely/i);
+  assert.match(ui.getByRole("alert").textContent, /operation could not be completed safely/i);
   assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
   assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
     true, "creation failure returns focus to the owner password");
