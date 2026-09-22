@@ -1,3 +1,5 @@
+import { safeRendererErrorMessage } from "./error-boundary.mjs";
+
 const MAX_TEXT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
 const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
@@ -381,7 +383,8 @@ export function validateOpenedDocument(value) {
     }
     headMismatch = Object.freeze({ kind: mismatch.kind,
       title: requiredText(mismatch.title, "head mismatch title"),
-      explanation: requiredText(mismatch.explanation, "head mismatch explanation", 4096),
+      explanation: safeRendererErrorMessage(requiredText(
+        mismatch.explanation, "head mismatch explanation", 4096)),
       editingBlocked: true });
   }
   if (value.recovery !== undefined) {
@@ -692,7 +695,8 @@ export function validateLockResult(value) {
     throw new TypeError("host returned an invalid lock result");
   }
   return Object.freeze({ locked: true, journalSaved: value.journalSaved,
-    warning: optionalBoundedText(value.warning, "lock warning") });
+    warning: value.warning === null ? null : safeRendererErrorMessage(
+      optionalBoundedText(value.warning, "lock warning")) });
 }
 
 export function validateRegularSaveResult(value) {
@@ -710,7 +714,8 @@ export function validateSlotRemovalResult(value) {
     throw new TypeError("host returned an invalid slot-removal result");
   }
   return Object.freeze({ removed: true,
-    warning: optionalBoundedText(value.warning, "slot-removal warning") ?? "Password slot removed." });
+    warning: safeRendererErrorMessage(optionalBoundedText(
+      value.warning, "slot-removal warning") ?? "Password slot removed.") });
 }
 
 export function validateCreationResult(value) {

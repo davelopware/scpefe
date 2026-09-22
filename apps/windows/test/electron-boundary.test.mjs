@@ -57,6 +57,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let migrationResult = null;
   let invitationResult = { created: true,
     temporaryPassword: "generated secret words" };
+  let rejectedChannel = null;
   const invocations = [];
   const rendererListeners = new Map();
   const electron = {
@@ -67,6 +68,13 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       },
       invoke: async (channel, request) => {
         invocations.push({ channel, request });
+        if (channel === rejectedChannel) {
+          const error = new Error(
+            "native failure at C:\\Users\\Ada\\Documents\\private-note.scpefe");
+          error.stack = "Error: native failure\n at private-note.scpefe:42:9";
+          error.nativeExtra = { password: "must not cross" };
+          throw error;
+        }
         if (channel === "profile:save") return { ...request,
           nativeProfilePath: "C:\\private\\profile.json" };
         if (channel === "document:choose-create-target") {
@@ -338,4 +346,38 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(invocations.filter(({ channel }) =>
     channel === "document:create").length, 2);
   await assert.rejects(exposed.backupDocument(), /invalid backup result/);
+
+  const privateTokens = /Users|Documents|private-note|\.scpefe|:42:9|native failure|must not cross/i;
+  const rejectedOperations = [
+    ["profile:save", () => exposed.saveProfile({
+      name: "Ada", email: "ada@example.test", deviceName: "Desk" })],
+    ["document:create", () => exposed.createDocument({
+      ownerPassword: "owner password words",
+      ownerPasswordConfirmation: "owner password words",
+      recoveryPassword: "", recoveryPasswordConfirmation: "", content: "",
+      understandsIrrecoverable: true, storedRecoverySeparately: false })],
+    ["document:open-selected", () => exposed.openSelectedDocument("password words")],
+    ["document:reconnect-publication", () => exposed.reconnectPendingPublication()],
+    ["document:backup", () => exposed.backupDocument()],
+    ["document:export-plaintext", () => exposed.exportPlaintext({
+      content: "private text", lineEndings: "lf" })],
+    ["document:change-password", () => exposed.changePassword({
+      currentPassword: "current password words", newPassword: "replacement password words",
+      newPasswordConfirmation: "replacement password words" })],
+    ["document:create-invitation", () => exposed.createInvitation({
+      temporaryLabel: "Colleague", canEdit: false,
+      canAddPasswords: false, canRemovePasswords: false })],
+    ["document:close", () => exposed.closeDocument()],
+    ["application:exit", () => exposed.exitApplication()],
+  ];
+  for (const [channel, invoke] of rejectedOperations) {
+    rejectedChannel = channel;
+    await assert.rejects(invoke, (error) => {
+      assert.doesNotMatch(error.message, privateTokens, `${channel} rejection is renderer-safe`);
+      assert.match(error.code, /^[A-Z][A-Z0-9_]+$/);
+      assert.equal(typeof error.nextAction, "string");
+      return true;
+    });
+  }
+  rejectedChannel = null;
 });

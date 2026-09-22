@@ -8,6 +8,7 @@ import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { DocumentLifecycleHost } from "./document-lifecycle-host.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
 import { registerMigrationHandler } from "./migration-flow.mjs";
+import { createSafeIpc } from "./error-boundary.mjs";
 import { acknowledgementCredentials, acknowledgementTargetHash,
   createAcknowledgement, openTargetFromAdditionalData, openTargetFromCommandLine,
   openTargetFromUrl, validateAcknowledgement } from "./single-instance.mjs";
@@ -26,6 +27,7 @@ const instanceAcknowledgementPath = path.join(app.getPath("temp"),
 const pendingExternalRequests = [];
 let window = null;
 let lifecycleHost = null;
+const safeIpcMain = createSafeIpc(ipcMain);
 
 const hasInstanceLock = app.requestSingleInstanceLock(
   { ...(initialOpenTarget ? { openTarget: initialOpenTarget } : {}),
@@ -155,7 +157,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     publicationCapabilities: { sameFilesystemTransaction: true,
       replacementGuarantee: "best-effort-replace" },
     witnessDirectory: path.join(userData, "head-witnesses"), ...callbacks });
-  lifecycleHost = await new DocumentLifecycleHost({ ipc: ipcMain, window, serviceFactory,
+  lifecycleHost = await new DocumentLifecycleHost({ ipc: safeIpcMain, window, serviceFactory,
     picker: {
       async chooseCreateTarget() {
         const chosen = await dialog.showSaveDialog(window, { title: "Create encrypted document",
@@ -183,7 +185,7 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   for (const request of pendingExternalRequests.splice(0)) lifecycleHost.enqueueExternal(request);
 
   const liveService = lifecycleHost.liveService;
-  ipcMain.handle("document:backup", async () => {
+  safeIpcMain.handle("document:backup", async () => {
     const chosen = await dialog.showSaveDialog(window, { title: "Create verified backup replica",
       defaultPath: lifecycleHost.service.suggestedBackupTarget(),
       filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
@@ -191,25 +193,25 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return chosen.canceled || !chosen.filePath ? null
       : lifecycleHost.service.backupDocument(chosen.filePath);
   });
-  registerCompactionHandler({ ipcMain, service: liveService, dialog, window,
+  registerCompactionHandler({ ipcMain: safeIpcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
-  registerMigrationHandler({ ipcMain, getService: () => lifecycleHost.service,
+  registerMigrationHandler({ ipcMain: safeIpcMain, getService: () => lifecycleHost.service,
     dialog, window, authorizations: lifecycleHost.leaseTakeovers,
     validateAuthorization: leaseRequestAuthorization });
-  ipcMain.handle("document:change-password", (_event, request) =>
+  safeIpcMain.handle("document:change-password", (_event, request) =>
     lifecycleHost.service.changePassword(validatePasswordChangeRequest(request)));
-  ipcMain.handle("document:create-invitation", (_event, request) =>
+  safeIpcMain.handle("document:create-invitation", (_event, request) =>
     lifecycleHost.service.createInvitation(validateInvitationCreateRequest(request)));
-  ipcMain.handle("document:copy-invitation-passphrase", (_event, password) => {
+  safeIpcMain.handle("document:copy-invitation-passphrase", (_event, password) => {
     clipboard.writeText(validatePassword(password)); return true;
   });
-  ipcMain.handle("document:reconcile-identity", () =>
+  safeIpcMain.handle("document:reconcile-identity", () =>
     lifecycleHost.service.reconcileIdentity());
-  ipcMain.handle("document:update-slot-permissions", (_event, request) =>
+  safeIpcMain.handle("document:update-slot-permissions", (_event, request) =>
     lifecycleHost.service.updateSlotPermissions(validateSlotPermissionsRequest(request)));
-  ipcMain.handle("document:remove-slot", (_event, slotId) =>
+  safeIpcMain.handle("document:remove-slot", (_event, slotId) =>
     lifecycleHost.service.removeSlot(validateSlotId(slotId)));
-  ipcMain.handle("document:export-plaintext", async (_event, request) => {
+  safeIpcMain.handle("document:export-plaintext", async (_event, request) => {
     const validated = validatePlaintextExportRequest(request);
     const warning = await dialog.showMessageBox(window, { type: "warning",
       title: "Export unprotected plaintext?",

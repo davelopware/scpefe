@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer as rawIpcRenderer } from "electron";
 import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
   validateOpenTargetResult,
@@ -16,6 +16,16 @@ import { validateCreateFormRequest, validateCreationResult,
   validateInvitationResult, validateInvitationClaimRequest,
   validateSlotPermissionsRequest,
   validateSlotId, validateRegularSaveResult, validateSlotRemovalResult } from "./contracts.mjs";
+import { decodeBoundaryError, safeRendererErrorMessage } from "./error-boundary.mjs";
+
+const ipcRenderer = Object.freeze({
+  async invoke(channel, ...args) {
+    try { return await rawIpcRenderer.invoke(channel, ...args); }
+    catch (error) { throw decodeBoundaryError(error, channel); }
+  },
+  on: rawIpcRenderer.on.bind(rawIpcRenderer),
+  removeListener: rawIpcRenderer.removeListener.bind(rawIpcRenderer),
+});
 
 contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   getProfile: async () => {
@@ -210,7 +220,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   onJournalWarning: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     const handler = (_event, value) => {
-      if (typeof value === "string" && value.length <= 4096) listener(value);
+      if (typeof value === "string" && value.length <= 4096) {
+        listener(safeRendererErrorMessage(value));
+      }
     };
     ipcRenderer.on("document:journal-warning", handler);
     return () => ipcRenderer.removeListener("document:journal-warning", handler);

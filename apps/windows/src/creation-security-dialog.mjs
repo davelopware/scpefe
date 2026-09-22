@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
+import { safeRendererErrorMessage } from "./error-boundary.mjs";
 
 const h = React.createElement;
 
@@ -69,8 +70,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       await onCreate(request);
       completedRef.current = true;
     } catch (submissionError) {
-      setError(submissionError instanceof Error
-        ? submissionError.message : String(submissionError));
+      setError(safeRendererErrorMessage(submissionError));
       ownerRef.current?.focus();
     } finally {
       setSubmitting(false);

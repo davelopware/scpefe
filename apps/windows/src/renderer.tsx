@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
+import { safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
 
 type Profile = { name: string; email: string; deviceName: string };
@@ -382,6 +383,7 @@ function App() {
   const replacementFocusPending = useRef(false);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
+  const suspendedFindFocus = useRef<"find" | "replace" | null>(null);
   const findReturnFocus = useRef<HTMLElement | null>(null);
   const exportAction = useRef<HTMLButtonElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
@@ -400,6 +402,10 @@ function App() {
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
     || invitationStaged
     || editFailure !== null || leaseDecision !== null || saveError !== "";
+  if (modalBusy.current && !wasModalBusy.current && findOpen) {
+    suspendedFindFocus.current = document.activeElement === replaceInput.current
+      ? "replace" : "find";
+  }
   useEffect(() => {
     window.scpefe.getProfile().then((value) => {
       setProfile(value); if (!value) setDialog("profile");
@@ -407,7 +413,7 @@ function App() {
     window.scpefe.getClientSettings().then(setClientSettings).catch(showError);
     window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError);
   }, []);
-  const showError = (error: unknown) => setMessage(error instanceof Error ? error.message : String(error));
+  const showError = (error: unknown) => setMessage(safeRendererErrorMessage(error));
   useEffect(() => {
     const stopLockStarted = window.scpefe.onLockStarted?.(() => showLockedResult({
       locked: true, journalSaved: true, warning: null,
@@ -523,11 +529,19 @@ function App() {
   const lockedDocument = locked && targetName !== null;
   useEffect(() => {
     const restoreSelection = wasModalBusy.current && !modalBusy.current && activeDocument;
+    const restoreFindFocus = restoreSelection && findOpen && suspendedFindFocus.current !== null;
     wasModalBusy.current = modalBusy.current;
     if (!restoreSelection) return;
     const { start, end } = editorSelection.current;
-    requestAnimationFrame(() => editor.current?.setSelectionRange(
-      Math.min(start, workingText.length), Math.min(end, workingText.length)));
+    requestAnimationFrame(() => {
+      editor.current?.setSelectionRange(
+        Math.min(start, workingText.length), Math.min(end, workingText.length));
+      if (restoreFindFocus) {
+        (suspendedFindFocus.current === "replace" ? replaceInput.current : findInput.current)
+          ?.focus();
+        suspendedFindFocus.current = null;
+      }
+    });
   });
   useEffect(() => {
     if (!replacementFocusPending.current || creating || dialog !== null
@@ -610,7 +624,7 @@ function App() {
         setMessage("Action canceled; the current document remains open and usable.");
       }
     } catch (error) {
-      setProtectionError(error instanceof Error ? error.message : String(error));
+      setProtectionError(safeRendererErrorMessage(error));
     }
   }
 
@@ -657,7 +671,7 @@ function App() {
       setDialog(null);
       setMessage("Local profile saved.");
     } catch (error) {
-      setProfileError(error instanceof Error ? error.message : String(error));
+      setProfileError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => profileConfirmation.current?.focus());
     }
   }
@@ -691,7 +705,7 @@ function App() {
       }
     }
     catch (error) {
-      setOpenError(error instanceof Error ? error.message : String(error));
+      setOpenError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => openPassword.current?.focus());
     }
   }
@@ -701,7 +715,7 @@ function App() {
       if (externalOpenRequest) await window.scpefe.cancelExternalOpen(externalOpenRequest);
       else if (dialog === "open") await window.scpefe.cancelOpenTarget();
     } catch (error) {
-      setOpenError(error instanceof Error ? error.message : String(error));
+      setOpenError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => openPassword.current?.focus());
       return;
     }
@@ -727,7 +741,7 @@ function App() {
         setMessage("Open request canceled; the current document remains open."); }
       setJournalSummary(await window.scpefe.getUnresolvedJournalSummary());
     } catch (error) {
-      setOpenError(error instanceof Error ? error.message : String(error));
+      setOpenError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => openPassword.current?.focus());
     }
   }
@@ -744,7 +758,7 @@ function App() {
       setOpened(result);
       setMessage("Edit mode entered.");
     } catch (error) {
-      setEditFailure(error instanceof Error ? error.message : String(error));
+      setEditFailure(safeRendererErrorMessage(error));
     }
   }
 
@@ -790,7 +804,7 @@ function App() {
       setWorkingText(result.opened.content);
       setMessage(result.compatibilityWarning);
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       if (request.authorization !== undefined) leaveConsumedTakeover("migration", value);
       else {
         setOpenedDialogError(value);
@@ -842,7 +856,7 @@ function App() {
       setOpened(result); setLeaseDecision(null);
       setMessage("Edit mode entered after confirmed lease takeover.");
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       leaveConsumedTakeover(leaseDecision.operation, value);
     }
   }
@@ -857,7 +871,7 @@ function App() {
         ? "Lease takeover canceled; the document session is unchanged."
         : "Lease takeover was already inactive; the document session is unchanged.");
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       setDecisionError(value);
       setMessage(`Lease takeover cancellation needs attention: ${value}`);
     }
@@ -883,7 +897,7 @@ function App() {
       setInvitationStaged(false); showOpenedResult(result);
       setMessage("Invitation claimed and replacement password safely published.");
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       if (/current document remains open/i.test(value)) {
         setInvitationStaged(false);
         setMessage("Invitation claim canceled; the current session remains open.");
@@ -904,7 +918,7 @@ function App() {
       setInvitationStaged(false);
       setMessage("Invitation claim canceled; the current session is unchanged.");
     } catch (error) {
-      setClaimError(error instanceof Error ? error.message : String(error));
+      setClaimError(safeRendererErrorMessage(error));
     }
   }
 
@@ -923,7 +937,7 @@ function App() {
       setOpened(result);
       setMessage("Password changed and the updated document was published safely.");
     } catch (error) {
-      setPasswordError(error instanceof Error ? error.message : String(error));
+      setPasswordError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => {
         const current = form.elements.namedItem("currentPassword") as HTMLElement | null;
         current?.focus();
@@ -947,7 +961,7 @@ function App() {
       setInvitationPassphrase(result.temporaryPassword);
       form.reset();
     } catch (error) {
-      setInvitationError(error instanceof Error ? error.message : String(error));
+      setInvitationError(safeRendererErrorMessage(error));
     }
   }
 
@@ -958,7 +972,7 @@ function App() {
       setOpened(result);
       setMessage("Password-slot identity reconciled through a sealed publication.");
     } catch (error) {
-      setPasswordError(error instanceof Error ? error.message : String(error));
+      setPasswordError(safeRendererErrorMessage(error));
     }
   }
 
@@ -971,7 +985,7 @@ function App() {
       setOpened(result);
       setMessage("Slot permissions published.");
     } catch (error) {
-      setPasswordError(error instanceof Error ? error.message : String(error));
+      setPasswordError(safeRendererErrorMessage(error));
     }
   }
 
@@ -984,7 +998,7 @@ function App() {
           (candidate) => candidate.slotId !== slot.slotId) } : current);
       setMessage(result.warning);
     } catch (error) {
-      setPasswordError(error instanceof Error ? error.message : String(error));
+      setPasswordError(safeRendererErrorMessage(error));
     }
   }
 
@@ -1003,7 +1017,7 @@ function App() {
   }
 
   function openedActionFailure(error: unknown, action: HTMLElement | null, prefix: string) {
-    const value = error instanceof Error ? error.message : String(error);
+    const value = safeRendererErrorMessage(error);
     setOpenedDialogError(value);
     setMessage(`${prefix}: ${value}`);
     requestAnimationFrame(() => action?.focus());
@@ -1078,6 +1092,7 @@ function App() {
       setReplaceText("");
       setFindOpen(false);
       setFindStatus("");
+      suspendedFindFocus.current = null;
       setPendingProfile(null);
       setProfileError("");
       setOpenError("");
@@ -1140,7 +1155,7 @@ function App() {
           ? "Manual save is local, but the target changed; divergence must be resolved."
           : "Manual save published and verified.");
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       setSaveError(value); setMessage(`Manual save failed; changes remain recoverable: ${value}`);
     }
   }
@@ -1243,7 +1258,7 @@ function App() {
         setMessage("Verified backup created and document history compacted.");
       } else setMessage("Compaction canceled; document history is unchanged.");
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       setCompactionError(value); setMessage(`Compaction needs attention: ${value}`);
     }
   }
@@ -1338,7 +1353,7 @@ function App() {
         setDialog(null);
       }
     } catch (error) {
-      const value = error instanceof Error ? error.message : String(error);
+      const value = safeRendererErrorMessage(error);
       setExportError(value);
       setMessage(`Plaintext export failed; the document and destination are unchanged: ${value}`);
       requestAnimationFrame(() => exportAction.current?.focus());
@@ -1383,7 +1398,8 @@ function App() {
         }; }}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
-      {findOpen && activeDocument && <section className="modeless-dialog" role="dialog"
+      {findOpen && activeDocument && !modalBusy.current
+        && <section className="modeless-dialog" role="dialog"
         aria-modal="false" aria-labelledby="find-replace-title" onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault(); setFindOpen(false);
@@ -1518,7 +1534,7 @@ function App() {
             await window.scpefe.copyInvitationPassphrase(invitationPassphrase);
             setMessage("Invitation passphrase copied. Complete the secure transfer, then choose Done.");
           } catch (error) {
-            setInvitationError(error instanceof Error ? error.message : String(error));
+            setInvitationError(safeRendererErrorMessage(error));
           }
         }}>Copy</button><button type="button" onClick={() => {
           setInvitationPassphrase(null); setMessage("Invitation created.");

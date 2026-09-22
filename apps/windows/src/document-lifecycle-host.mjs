@@ -14,6 +14,7 @@ import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
   validatePassword, validateProfile, validateTakeoverCancellation,
   validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
+import { safeEventWarning, safeRendererErrorMessage } from "./error-boundary.mjs";
 
 const AUTOMATIC_LOCK_REASONS = Object.freeze([
   "inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock",
@@ -101,7 +102,7 @@ export class DocumentLifecycleHost {
     void this.acknowledge(request, "queued", 1).then(() => this.observe("queued", request))
       .then(() => this.drainExternalRequests())
       .catch((error) => this.#emit("document:journal-warning",
-        `Could not handle the open request: ${error.message}`));
+        safeEventWarning(error, "document:open-external")));
     return request;
   }
 
@@ -151,7 +152,7 @@ export class DocumentLifecycleHost {
   async sendJournalSummary() {
     try { this.#emit("journal:summary", await this.service.unresolvedJournalSummary()); }
     catch (error) { this.#emit("document:journal-warning",
-      `Unresolved journals could not be inspected: ${error.message}`); }
+      safeEventWarning(error, "journal:summary")); }
   }
 
   #makeService() {
@@ -171,7 +172,7 @@ export class DocumentLifecycleHost {
         }
         void this.secureLocks?.serviceLocked(created, result).catch((error) =>
           this.#emit("document:journal-warning",
-            `Secure lock cleanup needs attention: ${error.message}`)).finally(() => {
+            safeEventWarning(error, "document:lock"))).finally(() => {
           this.lockStartedServices.delete(created);
         });
       },
@@ -194,7 +195,7 @@ export class DocumentLifecycleHost {
       this.#emit("document:lock-started");
       void this.externalLifecycle?.cancelForLock().catch((error) =>
         this.#emit("document:journal-warning",
-          `External open cancellation needs attention: ${error.message}`));
+          safeEventWarning(error, "document:open-external")));
     }
     return true;
   }
@@ -206,11 +207,17 @@ export class DocumentLifecycleHost {
     if (previous !== this.service && previous.active) {
       void previous.lock("document-replaced").catch((error) =>
         this.#emit("document:journal-warning",
-          `The replaced session cleanup needs attention: ${error.message}`));
+          safeEventWarning(error, "document:lock")));
     }
   }
 
-  #emit(channel, value) { this.window.webContents.send(channel, value); }
+  #emit(channel, value) {
+    const safeValue = channel === "document:journal-warning"
+      ? safeRendererErrorMessage(value)
+      : channel === "document:locked" && value?.warning
+        ? Object.freeze({ ...value, warning: safeRendererErrorMessage(value.warning) }) : value;
+    this.window.webContents.send(channel, safeValue);
+  }
 
   #register(channel, handler) { this.ipc.handle(channel, (_event, value) => handler(value)); }
 
@@ -315,7 +322,11 @@ export class DocumentLifecycleHost {
       return canceled;
     });
     this.#register("document:lock", () => this.lockActive("app-lock"));
-    this.#register("document:resolve-protection", (request) => this.protections.decide(request));
+    this.#register("document:resolve-protection", async (request) => {
+      const result = await this.protections.decide(request);
+      return result.completed === false ? Object.freeze({ ...result,
+        error: safeEventWarning(new Error(result.error), "document:resolve-protection") }) : result;
+    });
     this.#register("document:close", () => this.closeDocument());
     this.#register("application:exit", () => this.lifecycle.requestExit());
   }
