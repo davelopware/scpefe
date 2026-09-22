@@ -1036,10 +1036,11 @@ export async function runMountedLock(t, origin) {
         { name: entry === "new" ? /before New/ : /before Open/ });
       await user.click(ui.getByRole(protection, "button", { name: decision }));
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(document.querySelector("[role=dialog]") === null, true);
-    assert.equal(host.service === service, false);
-    assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
+    await ui.waitFor(() => {
+      assert.equal(document.querySelector("[role=dialog]") === null, true);
+      assert.equal(host.service === service, false);
+      assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
+    });
     if (request) assert.deepEqual(acks.map(({ status }) => status),
       ["queued", "presented", "opened"]);
     return;
@@ -1348,11 +1349,12 @@ export async function runMountedLock(t, origin) {
     saveFault = false;
     await user.click(ui.getByRole(retryProtection, "button",
       { name: "Manual save and continue" }));
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(document.querySelector(".dialog-error")?.textContent ?? "", "");
-    assert.equal(document.querySelector("[role=dialog]") === null, true);
-    assert.equal(host.service === service, false);
-    assert.equal(await fs.stat(newTarget).then(() => true, () => false), true);
+    await ui.waitFor(async () => {
+      assert.equal(document.querySelector(".dialog-error")?.textContent ?? "", "");
+      assert.equal(document.querySelector("[role=dialog]") === null, true);
+      assert.equal(host.service === service, false);
+      assert.equal(await fs.stat(newTarget).then(() => true, () => false), true);
+    });
     return;
   }
   if (origin === "external-open") {
