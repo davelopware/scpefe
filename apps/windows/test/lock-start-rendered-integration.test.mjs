@@ -32,9 +32,18 @@ export async function runMountedLock(t, origin) {
   let discardFault = false;
   let provisionalDiscardFault = false;
   let publicationUnavailable = false;
+  let publicationFailureAfter = null;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
   const serviceFs = { ...fs, async rename(source, destination) {
+    if (publicationFailureAfter !== null && destination === target) {
+      if (publicationFailureAfter === 0) {
+        publicationFailureAfter = null;
+        const error = new Error("injected publication target unavailable");
+        error.code = "EACCES"; throw error;
+      }
+      publicationFailureAfter -= 1;
+    }
     if (publicationUnavailable && destination === target) {
       const error = new Error("injected publication target unavailable");
       error.code = "EACCES"; throw error;
@@ -104,13 +113,16 @@ export async function runMountedLock(t, origin) {
   }
   const fakeWindow = new FakeWindow(); let createPickerCalls = 0;
   let restartCandidateHash = null;
-  if (origin.startsWith("s7-")) {
+  if (origin.startsWith("s7-") || origin.startsWith("rw-")) {
     const crashed = new DocumentService(serviceOptions());
     await crashed.openDocument(target, "password words");
     await crashed.enterEditMode();
     crashed.updateWorkingCopy({ content: "restart recovered plaintext",
       cursor: { start: 27, end: 27 } });
     await crashed.lock("process-restart");
+    lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
+      holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
+      deviceName: "" };
   }
   if (origin.startsWith("s8-")) {
     const diverged = new DocumentService(serviceOptions());
@@ -320,7 +332,7 @@ export async function runMountedLock(t, origin) {
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
     return;
   }
-  if (origin.startsWith("s7-") || origin.startsWith("s8-")) {
+  if (origin.startsWith("s7-") || origin.startsWith("rw-") || origin.startsWith("s8-")) {
     const divergent = origin.startsWith("s8-");
     if (divergent) {
       const head = await ui.findByRole(document.body, "dialog",
@@ -332,6 +344,45 @@ export async function runMountedLock(t, origin) {
       { name: divergent ? "Divergence needs resolution" : "Recovered work" });
     assert.equal(editor.value, "",
       "a blocking recovery decision retains but does not expose plaintext behind its overlay");
+    if (origin.startsWith("rw-")) {
+      const outcome = origin.slice(3);
+      if (outcome === "external") {
+        await host.setReady(); const request = host.enqueueExternal({ target: otherTarget,
+          source: "second-instance" });
+        await ui.waitFor(() => assert.equal(
+          host.externalRequests.current(request.token)?.token, request.token));
+        assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
+        assert.ok(document.body.contains(recovery)); return;
+      }
+      if (outcome === "restart") {
+        assert.equal(host.service.active.recovery.text, "restart recovered plaintext");
+        const record = await host.service.journals.read(host.service.active.documentId,
+          host.service.active.journalKey);
+        assert.equal(record.text, "restart recovered plaintext"); return;
+      }
+      const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+      if (outcome === "cancel") {
+        await user.click(ui.getByRole(protection, "button",
+          { name: "Keep current document open" }));
+        assert.ok(await ui.findByRole(document.body, "dialog", { name: "Recovered work" }));
+        assert.equal(fakeWindow.closed, 0); return;
+      }
+      if (outcome === "save-retry") publicationFailureAfter = 1;
+      const decision = outcome === "discard" ? "Discard and continue"
+        : "Manual save and continue";
+      await user.click(ui.getByRole(protection, "button", { name: decision }));
+      if (outcome === "save-retry") {
+        await ui.findByText(protection, /injected publication target unavailable/);
+        assert.equal(fakeWindow.closed, 0);
+        protection = ui.getByRole(document.body, "dialog", { name: /before Exit/ });
+        await user.click(ui.getByRole(protection, "button", { name: decision }));
+      }
+      await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+      if (outcome !== "discard") assert.equal(await fs.readFile(target, "utf8"),
+        "saved:restart recovered plaintext");
+      return;
+    }
     const entry = origin.slice(3);
     if (entry === "external") {
       await host.setReady(); const request = host.enqueueExternal({ target,
@@ -375,6 +426,7 @@ export async function runMountedLock(t, origin) {
   service.onLockStart = (value) => { assert.equal(value.reason, origin.startsWith("s3-")
     ? "app-lock" : origin === "close" || origin.endsWith("-close")
       || origin.startsWith("dc-close-") || origin.startsWith("prc-close-")
+      || origin.startsWith("rw-")
       ? "document-close" : origin);
     originalLockStart(value); lockStarted(); };
   const originalLocked = service.onLocked;
@@ -818,6 +870,11 @@ export async function runMountedLock(t, origin) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin.startsWith("rw-")) return `RW-${origin.slice(3)} recovered work ${{
+    cancel: "window close Cancel", save: "window close Save and publish",
+    "save-retry": "window close Save failure then Retry", discard: "window close Discard",
+    external: "queues external request", restart: "restart preserves identical plaintext",
+  }[origin.slice(3)] ?? ""}`;
   if (origin === "pp-window-cancel") return "PP-W pending publication window close Cancel retains";
   if (origin === "pp-retry") return "PP-W pending publication Retry unavailable then Retry success";
   if (origin === "pp-discard-refused") return "PP-W pending publication Discard refused while unavailable";
