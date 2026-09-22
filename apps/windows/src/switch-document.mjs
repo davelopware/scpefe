@@ -76,7 +76,7 @@ export async function finishDocumentSwitch(service) {
   }
   const result = await service.lock("open-another");
   if (!result.journalSaved) {
-    throw switchError(result.warning
+    throw switchError(result.warningCode
       ?? "The current document could not be checkpointed before switching");
   }
   return Object.freeze({ switched: true });

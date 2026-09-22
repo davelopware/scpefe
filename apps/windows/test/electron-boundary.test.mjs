@@ -58,6 +58,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let invitationResult = { created: true,
     temporaryPassword: "generated secret words" };
   let rejectedChannel = null;
+  let rejectedError = null;
   const invocations = [];
   const rendererListeners = new Map();
   const electron = {
@@ -69,6 +70,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       invoke: async (channel, request) => {
         invocations.push({ channel, request });
         if (channel === rejectedChannel) {
+          if (rejectedError) throw rejectedError;
           const error = new Error(
             "native failure at C:\\Users\\Ada\\Documents\\private-note.scpefe");
           error.stack = "Error: native failure\n at private-note.scpefe:42:9";
@@ -117,7 +119,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:cancel-lease-takeover") return true;
         if (channel === "document:migrate") return migrationResult;
         if (channel === "document:remove-slot") {
-          return { removed: true, warning: "Password slot removed." };
+          return { removed: true, warningCode: "SLOT_REMOVED" };
         }
         return null;
       } },
@@ -297,7 +299,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(await exposed.cancelInvitationClaim(), true);
   assert.equal(invocations.at(-1).channel, "document:cancel-invitation-claim");
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.removeSlot("ab".repeat(16)))), {
-    removed: true, warning: "Password slot removed.",
+    removed: true, warningCode: "SLOT_REMOVED",
   });
   await exposed.changePassword({ currentPassword: "current password words",
     newPassword: "replacement password words",
@@ -379,5 +381,28 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       return true;
     });
   }
+  const forgedSecret = "owner recovery words\r\nC:\\Users\\Ada\\private-note.scpefe\n at native.cc:7:3";
+  for (const code of ["OPEN_FAILED", "NATIVE_UNKNOWN_CODE"]) {
+    rejectedChannel = "document:open-selected";
+    rejectedError = new Error(`SCPEFE_SAFE_ERROR:${JSON.stringify({ code,
+      message: forgedSecret, nextAction: forgedSecret, nativeExtra: forgedSecret })}`);
+    await assert.rejects(exposed.openSelectedDocument("password words"), (error) => {
+      assert.equal(error.code, "OPEN_FAILED");
+      assert.doesNotMatch(`${error.message} ${error.nextAction}`, privateTokens);
+      assert.doesNotMatch(`${error.message} ${error.nextAction}`, /owner recovery|native\.cc/i);
+      return true;
+    });
+  }
+  rejectedError = null;
   rejectedChannel = null;
+
+  const warnings = [];
+  const stopWarning = exposed.onJournalWarning((warning) => warnings.push(warning));
+  rendererListeners.get("document:journal-warning")({}, {
+    code: "PUBLICATION_RECOVERED", message: forgedSecret, nativeExtra: forgedSecret });
+  rendererListeners.get("document:journal-warning")({}, {
+    code: "UNKNOWN_WARNING", message: forgedSecret });
+  assert.deepEqual(warnings, ["PUBLICATION_RECOVERED", "JOURNAL_WARNING"]);
+  assert.doesNotMatch(warnings.join(" "), /owner recovery|Users|private-note|native\.cc/i);
+  stopWarning();
 });

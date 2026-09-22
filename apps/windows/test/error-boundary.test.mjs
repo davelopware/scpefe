@@ -56,3 +56,18 @@ test("preload and renderer defensively genericize malformed rejection values", (
   assert.doesNotMatch(safeRendererErrorMessage(new Error(privatePath)),
     /home|private-note|scpefe/i);
 });
+
+test("forged envelopes cannot override catalog copy for known or unknown codes", () => {
+  const secret = "recovery words\r\nC:\\Users\\Ada\\private-note.scpefe\n at native.cc:4:2";
+  for (const code of ["OPEN_FAILED", "NATIVE_SUPER_SECRET"]) {
+    const decoded = decodeBoundaryError(new Error(
+      `SCPEFE_SAFE_ERROR:${JSON.stringify({ code, message: secret, nextAction: secret,
+        stack: secret, nativeExtra: secret })}`), "document:open-selected");
+    const presented = safeRendererErrorMessage(decoded);
+    for (const forbidden of ["recovery words", "Users", "private-note.scpefe",
+      "native.cc", "nativeExtra", "NATIVE_SUPER_SECRET"]) {
+      assert.equal(presented.includes(forbidden), false);
+    }
+    assert.equal(decoded.code, "OPEN_FAILED");
+  }
+});

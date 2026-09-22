@@ -14,7 +14,7 @@ import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
   validatePassword, validateProfile, validateTakeoverCancellation,
   validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
-import { safeEventWarning, safeRendererErrorMessage } from "./error-boundary.mjs";
+import { safeEventCode } from "./error-boundary.mjs";
 
 const AUTOMATIC_LOCK_REASONS = Object.freeze([
   "inactivity", "lease-refresh-failed", "screen-lock", "background", "app-lock",
@@ -102,7 +102,7 @@ export class DocumentLifecycleHost {
     void this.acknowledge(request, "queued", 1).then(() => this.observe("queued", request))
       .then(() => this.drainExternalRequests())
       .catch((error) => this.#emit("document:journal-warning",
-        safeEventWarning(error, "document:open-external")));
+        safeEventCode(error, "document:open-external")));
     return request;
   }
 
@@ -135,7 +135,7 @@ export class DocumentLifecycleHost {
       if (this.service.active?.editMode) await this.service.exitEditMode();
       if (this.service.active) {
         const result = await this.service.lock("document-close");
-        if (!result.journalSaved) throw new Error(result.warning
+        if (!result.journalSaved) throw new Error(result.warningCode
           ?? "The document could not be checkpointed before closing");
       }
       this.currentTarget = null; this.lockedTarget = null; this.selectedOpenTarget = null;
@@ -152,7 +152,7 @@ export class DocumentLifecycleHost {
   async sendJournalSummary() {
     try { this.#emit("journal:summary", await this.service.unresolvedJournalSummary()); }
     catch (error) { this.#emit("document:journal-warning",
-      safeEventWarning(error, "journal:summary")); }
+      safeEventCode(error, "journal:summary")); }
   }
 
   #makeService() {
@@ -172,7 +172,7 @@ export class DocumentLifecycleHost {
         }
         void this.secureLocks?.serviceLocked(created, result).catch((error) =>
           this.#emit("document:journal-warning",
-            safeEventWarning(error, "document:lock"))).finally(() => {
+            safeEventCode(error, "document:lock"))).finally(() => {
           this.lockStartedServices.delete(created);
         });
       },
@@ -195,7 +195,7 @@ export class DocumentLifecycleHost {
       this.#emit("document:lock-started");
       void this.externalLifecycle?.cancelForLock().catch((error) =>
         this.#emit("document:journal-warning",
-          safeEventWarning(error, "document:open-external")));
+          safeEventCode(error, "document:open-external")));
     }
     return true;
   }
@@ -207,15 +207,14 @@ export class DocumentLifecycleHost {
     if (previous !== this.service && previous.active) {
       void previous.lock("document-replaced").catch((error) =>
         this.#emit("document:journal-warning",
-          safeEventWarning(error, "document:lock")));
+          safeEventCode(error, "document:lock")));
     }
   }
 
   #emit(channel, value) {
     const safeValue = channel === "document:journal-warning"
-      ? safeRendererErrorMessage(value)
-      : channel === "document:locked" && value?.warning
-        ? Object.freeze({ ...value, warning: safeRendererErrorMessage(value.warning) }) : value;
+      ? Object.freeze({ code: safeEventCode(value, "journal:summary") })
+      : value;
     this.window.webContents.send(channel, safeValue);
   }
 
@@ -324,8 +323,7 @@ export class DocumentLifecycleHost {
     this.#register("document:lock", () => this.lockActive("app-lock"));
     this.#register("document:resolve-protection", async (request) => {
       const result = await this.protections.decide(request);
-      return result.completed === false ? Object.freeze({ ...result,
-        error: safeEventWarning(new Error(result.error), "document:resolve-protection") }) : result;
+      return result;
     });
     this.#register("document:close", () => this.closeDocument());
     this.#register("application:exit", () => this.lifecycle.requestExit());

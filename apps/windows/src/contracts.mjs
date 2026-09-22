@@ -1,9 +1,20 @@
-import { safeRendererErrorMessage } from "./error-boundary.mjs";
+import { isCatalogCode } from "./error-boundary.mjs";
 
 const MAX_TEXT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
 const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
 const MAX_REGULAR_SAVE_INTERVAL_MS = 86_400_000;
+
+const HEAD_MISMATCH_COPY = Object.freeze({
+  rollback: ["Authenticated rollback detected",
+    "The authenticated head is an ancestor of the last head seen by this client. This may be a stale replica; inspect it read-only and explicitly accept it only if the rollback is intended."],
+  divergence: ["Authenticated histories diverged",
+    "The authenticated head is unrelated to the last head seen by this client. Resolve the divergent histories, or explicitly accept the current branch before editing."],
+  replacement: ["Authenticated document replacement detected",
+    "The authenticated permanent document ID differs from the document previously observed at this target. Inspect it read-only and explicitly accept the replacement before editing."],
+  "witness-error": ["Local head witness could not be authenticated",
+    "The local head witness could not be authenticated. The document remains available read-only, but editing and saving are blocked until you explicitly accept this authenticated head."],
+});
 
 function hasUnpairedSurrogate(value) {
   for (let index = 0; index < value.length; index += 1) {
@@ -381,10 +392,8 @@ export function validateOpenedDocument(value) {
           && !/^[0-9a-f]{64}$/.test(mismatch.witnessedHead))) {
       throw new TypeError("host returned an invalid head mismatch");
     }
-    headMismatch = Object.freeze({ kind: mismatch.kind,
-      title: requiredText(mismatch.title, "head mismatch title"),
-      explanation: safeRendererErrorMessage(requiredText(
-        mismatch.explanation, "head mismatch explanation", 4096)),
+    const [title, explanation] = HEAD_MISMATCH_COPY[mismatch.kind];
+    headMismatch = Object.freeze({ kind: mismatch.kind, title, explanation,
       editingBlocked: true });
   }
   if (value.recovery !== undefined) {
@@ -657,14 +666,13 @@ export function validateCompactionResult(value) {
 
 export function validateMigrationResult(value) {
   if (!value || typeof value !== "object" || value.migrated !== true
-      || value.backupCreated !== true || typeof value.compatibilityWarning !== "string"
+      || value.backupCreated !== true || value.compatibilityCode !== "MIGRATION_COMPATIBILITY"
       || Object.keys(value).some((key) => !["migrated", "backupCreated",
-        "compatibilityWarning", "opened"].includes(key))) {
+        "compatibilityCode", "opened"].includes(key))) {
     throw new TypeError("host returned an invalid migration result");
   }
   return Object.freeze({ migrated: true, backupCreated: true,
-    compatibilityWarning: requiredText(value.compatibilityWarning,
-      "migration compatibility warning", 4096),
+    compatibilityCode: value.compatibilityCode,
     opened: validateEditMode(value.opened) });
 }
 
@@ -691,12 +699,11 @@ export function validateWorkingCopy(value) {
 export function validateLockResult(value) {
   if (!value || typeof value !== "object" || value.locked !== true
       || typeof value.journalSaved !== "boolean"
-      || (value.warning !== null && typeof value.warning !== "string")) {
+      || (value.warningCode !== null && !isCatalogCode(value.warningCode))) {
     throw new TypeError("host returned an invalid lock result");
   }
   return Object.freeze({ locked: true, journalSaved: value.journalSaved,
-    warning: value.warning === null ? null : safeRendererErrorMessage(
-      optionalBoundedText(value.warning, "lock warning")) });
+    warningCode: value.warningCode });
 }
 
 export function validateRegularSaveResult(value) {
@@ -710,12 +717,11 @@ export function validateRegularSaveResult(value) {
 
 export function validateSlotRemovalResult(value) {
   if (!value || typeof value !== "object" || value.removed !== true
-      || Object.keys(value).some((key) => !["removed", "warning"].includes(key))) {
+      || value.warningCode !== "SLOT_REMOVED"
+      || Object.keys(value).some((key) => !["removed", "warningCode"].includes(key))) {
     throw new TypeError("host returned an invalid slot-removal result");
   }
-  return Object.freeze({ removed: true,
-    warning: safeRendererErrorMessage(optionalBoundedText(
-      value.warning, "slot-removal warning") ?? "Password slot removed.") });
+  return Object.freeze({ removed: true, warningCode: value.warningCode });
 }
 
 export function validateCreationResult(value) {

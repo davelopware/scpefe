@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
-import { safeRendererErrorMessage } from "./error-boundary.mjs";
+import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
 
 type Profile = { name: string; email: string; deviceName: string };
@@ -257,7 +257,7 @@ function SlotAdministration({ opened, onUpdate, onRemove, onCompact }: {
   </aside>;
 }
 
-type LockResult = { locked: true; journalSaved: boolean; warning: string | null };
+type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
 declare global { interface Window { scpefe: {
   getProfile(): Promise<Profile | null>;
   saveProfile(profile: Profile): Promise<Profile>;
@@ -290,7 +290,7 @@ declare global { interface Window { scpefe: {
   compactDocument(request: { confirmed: true }): Promise<{ compacted: true; backupCreated: true;
     previousHead: string; head: string } | null>;
   migrateDocument(request?: { authorization?: string }): Promise<{
-    migrated: true; backupCreated: true; compatibilityWarning: string;
+    migrated: true; backupCreated: true; compatibilityCode: string;
     opened: DocumentOpened } | LeaseDecision | null>;
   changePassword(request: { currentPassword: string; newPassword: string;
     newPasswordConfirmation: string }): Promise<DocumentOpened>;
@@ -301,7 +301,7 @@ declare global { interface Window { scpefe: {
   cancelInvitationClaim(): Promise<boolean>;
   reconcileIdentity(): Promise<DocumentOpened>;
   updateSlotPermissions(request: object): Promise<DocumentOpened>;
-  removeSlot(slotId: string): Promise<{ removed: true; warning: string }>;
+  removeSlot(slotId: string): Promise<{ removed: true; warningCode: string }>;
   exportPlaintext(request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: true } | null>;
   updateWorkingCopy(value: { content: string; cursor: Cursor }): Promise<object>;
@@ -314,11 +314,11 @@ declare global { interface Window { scpefe: {
   closeDocument(): Promise<boolean>;
   exitApplication(): Promise<boolean>;
   resolveProtection(request: { token: string; decision: "cancel" | "save" | "discard" }):
-    Promise<{ completed: boolean; proceed: boolean; retryToken?: string; error?: string }>;
+    Promise<{ completed: boolean; proceed: boolean; retryToken?: string; errorCode?: string }>;
   lock(): Promise<LockResult>;
   onLockStarted?(listener: () => void): () => void;
   onLocked(listener: (result: LockResult) => void): () => void;
-  onJournalWarning(listener: (warning: string) => void): () => void;
+  onJournalWarning(listener: (warningCode: string) => void): () => void;
   onRegularSave(listener: (result: { published: true; provisional: true;
     content: string }) => void): () => void;
   onExternalOpenRequested(listener: (request: ExternalOpenRequest) => void): () => void;
@@ -416,10 +416,10 @@ function App() {
   const showError = (error: unknown) => setMessage(safeRendererErrorMessage(error));
   useEffect(() => {
     const stopLockStarted = window.scpefe.onLockStarted?.(() => showLockedResult({
-      locked: true, journalSaved: true, warning: null,
+      locked: true, journalSaved: true, warningCode: null,
     })) ?? (() => {});
     const stopLocked = window.scpefe.onLocked(showLockedResult);
-    const stopWarning = window.scpefe.onJournalWarning(setMessage);
+    const stopWarning = window.scpefe.onJournalWarning((code) => setMessage(catalogText(code)));
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
       setSaveState("provisional");
       manualBaselineValid.current = false;
@@ -449,8 +449,7 @@ function App() {
       setProtectionError(""); setProtection(request);
     }) ?? (() => {});
     const stopClosed = window.scpefe.onDocumentClosed?.(() => {
-      showLockedResult({ locked: true, journalSaved: true,
-        warning: "Document closed. Use File → New or File → Open." });
+      showLockedResult({ locked: true, journalSaved: true, warningCode: null });
       targetNameRef.current = null; setTargetName(null); setLocked(false);
     }) ?? (() => {});
     const activity = () => { void window.scpefe.activity(); };
@@ -616,7 +615,7 @@ function App() {
       if (!result.completed) {
         setProtection((current) => current && result.retryToken
           ? { ...current, token: result.retryToken } : current);
-        setProtectionError(result.error ?? "The decision failed safely; retry or cancel.");
+        setProtectionError(catalogText(result.errorCode ?? "LIFECYCLE_FAILED"));
         return;
       }
       setProtection(null);
@@ -802,7 +801,7 @@ function App() {
       setLeaseDecision(null);
       setOpened(result.opened);
       setWorkingText(result.opened.content);
-      setMessage(result.compatibilityWarning);
+      setMessage(catalogText(result.compatibilityCode));
     } catch (error) {
       const value = safeRendererErrorMessage(error);
       if (request.authorization !== undefined) leaveConsumedTakeover("migration", value);
@@ -996,7 +995,7 @@ function App() {
       setOpened((current) => isDocumentOpened(current) ? { ...current,
         managedSlots: current.managedSlots?.filter(
           (candidate) => candidate.slotId !== slot.slotId) } : current);
-      setMessage(result.warning);
+      setMessage(catalogText(result.warningCode));
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
     }
@@ -1116,7 +1115,8 @@ function App() {
       setProtectionError("");
       setResolvingConflict(false);
       setLocked(targetNameRef.current !== null);
-      setMessage(result.warning ?? "Document locked. Use Security → Unlock to continue.");
+      setMessage(result.warningCode ? catalogText(result.warningCode)
+        : "Document locked. Use Security → Unlock to continue.");
     });
     dialogReturnFocus.current = null;
   }
@@ -1598,7 +1598,7 @@ function App() {
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Older container"
       initialFocus={openedDialogError ? migrationRetryAction : undefined}>
-      <div className="warning" role="alert"><p>{opened.migrationWarning}</p>
+      <div className="warning" role="alert"><p>Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first.</p>
         <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Keep read-only and close</button>
         {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}

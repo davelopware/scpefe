@@ -16,7 +16,7 @@ import { validateCreateFormRequest, validateCreationResult,
   validateInvitationResult, validateInvitationClaimRequest,
   validateSlotPermissionsRequest,
   validateSlotId, validateRegularSaveResult, validateSlotRemovalResult } from "./contracts.mjs";
-import { decodeBoundaryError, safeRendererErrorMessage } from "./error-boundary.mjs";
+import { decodeBoundaryError, isCatalogCode } from "./error-boundary.mjs";
 
 const ipcRenderer = Object.freeze({
   async invoke(channel, ...args) {
@@ -198,11 +198,12 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
       { token: request.token, decision: request.decision });
     if (!value || typeof value !== "object" || typeof value.proceed !== "boolean"
         || (value.completed !== true && (value.completed !== false
-          || typeof value.retryToken !== "string" || typeof value.error !== "string"))) {
+          || typeof value.retryToken !== "string" || !isCatalogCode(value.errorCode)))) {
       throw new TypeError("host returned invalid protection result");
     }
     return Object.freeze({ completed: value.completed, proceed: value.proceed,
-      ...(value.completed === false ? { retryToken: value.retryToken, error: value.error } : {}) });
+      ...(value.completed === false ? { retryToken: value.retryToken,
+        errorCode: value.errorCode } : {}) });
   },
   lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
   onLockStarted: (listener) => {
@@ -220,9 +221,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   onJournalWarning: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     const handler = (_event, value) => {
-      if (typeof value === "string" && value.length <= 4096) {
-        listener(safeRendererErrorMessage(value));
-      }
+      if (value && typeof value === "object" && isCatalogCode(value.code)) {
+        listener(value.code);
+      } else listener("JOURNAL_WARNING");
     };
     ipcRenderer.on("document:journal-warning", handler);
     return () => ipcRenderer.removeListener("document:journal-warning", handler);

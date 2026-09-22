@@ -125,7 +125,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       removeSlot: async (value) => { removalAttempts += 1;
         if (removalAttempts === 1) throw new Error("Removal publication failed safely");
         calls.push(["remove", value]);
-        return { removed: true, warning: "removed safely" }; },
+        return { removed: true, warningCode: "SLOT_REMOVED" }; },
       reconcileIdentity: async () => { reconcileAttempts += 1;
         if (reconcileAttempts === 1) throw new Error("Reconciliation publication failed safely");
         calls.push(["reconcile"]); serviceOpened = {
@@ -185,7 +185,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       "replacement password words");
     await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /Password publication failed safely/);
+      /operation could not be completed safely/i);
     assert.equal(ui.getByLabelText(dialog, "Current password").value,
       "current password words", "failed password publication retains a recoverable input");
     await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
@@ -203,7 +203,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByLabelText(invitationForm, "May edit"));
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
     assert.match((await ui.findByRole(invitationForm, "alert")).textContent,
-      /Invitation publication failed safely/);
+      /operation could not be completed safely/i);
     assert.equal(ui.getByLabelText(invitationForm, "Temporary label").value,
       "New colleague");
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
@@ -213,7 +213,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       /generated invitation secret/);
     await user.click(ui.getByRole(dialog, "button", { name: "Copy" }));
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /Clipboard unavailable/);
+      /operation could not be completed safely/i);
     assert.equal(ui.getByLabelText(dialog, "One-time temporary passphrase").value,
       "generated invitation secret", "copy failure keeps the one-time result recoverable");
     await user.click(ui.getByRole(dialog, "button", { name: "Copy" }));
@@ -227,7 +227,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(permissionGroup, "button",
       { name: "Publish permission changes" }));
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /Permission publication failed safely/);
+      /operation could not be completed safely/i);
     await user.click(ui.getByRole(permissionGroup, "button",
       { name: "Publish permission changes" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "permissions"), true));
@@ -235,7 +235,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     const removalAlert = ui.getByRole(dialog, "alert");
     await user.click(ui.getByRole(removalAlert, "button", { name: "Confirm slot removal" }));
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /Removal publication failed safely/);
+      /operation could not be completed safely/i);
     await user.click(ui.getByRole(dialog, "button", { name: "Remove this password slot…" }));
     const retryRemovalAlert = ui.getByText(dialog,
       /Removal blocks this password only in the updated document/).closest("[role='alert']");
@@ -260,7 +260,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.ok(await ui.findByRole(dialog, "alert"));
     await user.click(ui.getByRole(dialog, "button", { name: "Save identity change" }));
     await ui.waitFor(() => assert.match(ui.getByRole(dialog, "alert").textContent,
-      /Leave edit mode/));
+      /operation could not be completed safely/i));
     assert.equal(document.activeElement ===
       ui.getByRole(dialog, "button", { name: "Save identity change" }), true,
       "failed identity save focuses its retry action");
@@ -286,7 +286,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       "authoritative mismatch blocks password administration");
     await user.click(ui.getByRole(dialog, "button", { name: "Reconcile identity and publish" }));
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /Reconciliation publication failed safely/);
+      /operation could not be completed safely/i);
     await user.click(ui.getByRole(dialog, "button", { name: "Reconcile identity and publish" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "reconcile"), true));
 
@@ -348,7 +348,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
     const migration = await ui.findByRole(document.body, "dialog", { name: "Older container" });
     assert.match(ui.getByRole(migration, "alert").textContent,
-      /verified backup before migration/);
+      /verified exact backup is required/i);
     assert.ok(ui.getByRole(migration, "button",
       { name: "Create verified backup and migrate…" }));
     await user.click(ui.getByRole(migration, "button", { name: "Keep read-only and close" }));

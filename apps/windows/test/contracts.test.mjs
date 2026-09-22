@@ -142,8 +142,10 @@ test("accepts only validated read-only native results", () => {
   assert.equal(narrowed.content, "secret\n");
   assert.deepEqual(Object.keys(narrowed.lease).sort(), ["active", "deviceName", "durationMs",
     "holderEmail", "holderName", "holderUtcMs"]);
-  assert.deepEqual(narrowed.headMismatch, { kind: "rollback", title: "Rollback",
-    explanation: "Review it.", editingBlocked: true });
+  assert.deepEqual(narrowed.headMismatch, { kind: "rollback",
+    title: "Authenticated rollback detected",
+    explanation: "The authenticated head is an ancestor of the last head seen by this client. This may be a stale replica; inspect it read-only and explicitly accept it only if the rollback is intended.",
+    editingBlocked: true });
   assert.equal(JSON.stringify(narrowed).includes("must not cross"), false);
   assert.deepEqual(validateOpenedDocument(narrowed), narrowed,
     "canonical boundary results remain safe to revalidate inside the service");
@@ -156,11 +158,11 @@ test("push and administration results are canonical and narrowly projected", () 
     published: true, provisional: true, content: "exact\ntext",
   });
   assert.deepEqual(validateSlotRemovalResult({ removed: true,
-    warning: "Password slot removed." }), {
-    removed: true, warning: "Password slot removed.",
+    warningCode: "SLOT_REMOVED" }), {
+    removed: true, warningCode: "SLOT_REMOVED",
   });
   assert.throws(() => validateSlotRemovalResult({ removed: true,
-    warning: "Password slot removed.", targetPath: "C:\\private\\notes.scpefe" }),
+    warningCode: "SLOT_REMOVED", targetPath: "C:\\private\\notes.scpefe" }),
   /invalid slot-removal result/);
 });
 

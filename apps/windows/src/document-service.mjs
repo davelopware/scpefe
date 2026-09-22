@@ -305,7 +305,7 @@ export class DocumentService {
         nativeOpened = this.#validateNativeOpened(this.native.openDocument(
           await this.fs.readFile(target), activePassword));
         recoveredPublication = true;
-        this.onJournalWarning("Interrupted publication was completed and verified.");
+        this.onJournalWarning("PUBLICATION_RECOVERED");
       } finally {
         baseOpened?.journalKey.fill(0);
       }
@@ -342,16 +342,14 @@ export class DocumentService {
           nativeOpened = this.#validateNativeOpened(
             this.native.openDocument(published, reopenPassword));
           activePassword = reopenPassword;
-          this.onJournalWarning("Interrupted publication was completed and verified.");
+          this.onJournalWarning("PUBLICATION_RECOVERED");
         } else if (resumed.reason === "changed") {
           pendingRecord = await this.publications.markDiverged(
             nativeOpened.documentId, nativeOpened.journalKey, journal);
           publicationState = "conflict";
-          this.onJournalWarning(
-            "The target changed while publication was pending; divergence must be resolved.");
+          this.onJournalWarning("PUBLICATION_CONFLICT");
         } else if (resumed.reason === "ambiguous") {
-          this.onJournalWarning(
-            "Interrupted publication needs confirmation; recovery data was preserved.");
+          this.onJournalWarning("PUBLICATION_CONFIRMATION_REQUIRED");
         }
       }
       if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved"
@@ -376,7 +374,7 @@ export class DocumentService {
       if (publicationCompleted) throw error;
       unresolvedJournal = true;
       unreadableJournal = true;
-      this.onJournalWarning(`Recovered work could not be read: ${error.message}`);
+      this.onJournalWarning("RECOVERY_READ_FAILED");
     }
     const targetOpened = nativeOpened.opened;
     const { headMismatch } = await this.#observeHead(target, nativeOpened);
@@ -749,7 +747,7 @@ export class DocumentService {
     await this.#publishSlotAdministration((current) =>
       this.native.removeSlot(current, active.password, targetSlot));
     return Object.freeze({ removed: true,
-      warning: "Removal blocks this password only in the updated document; it cannot revoke plaintext, keys already obtained, or older replicas." });
+      warningCode: "SLOT_REMOVED" });
   }
 
   async #publishSlotAdministration(createCandidate) {
@@ -1132,7 +1130,7 @@ export class DocumentService {
   lock(reason = "app-lock") {
     const active = this.active;
     if (!active) return Promise.resolve(
-      { locked: true, journalSaved: true, warning: null });
+      { locked: true, journalSaved: true, warningCode: null });
     if (this.lockOperation) return this.lockOperation;
     let resolveLock; let rejectLock;
     const tracked = new Promise((resolve, reject) => {
@@ -1160,12 +1158,12 @@ export class DocumentService {
     this.inactivityTimer = null;
     await this.#stopHeartbeat();
     let journalSaved = true;
-    let warning = null;
+    let warningCode = null;
     try {
       await this.#flushActive(active);
     } catch (error) {
       journalSaved = false;
-      warning = `Latest changes could not be checkpointed: ${error.message}`;
+      warningCode = "LOCK_CHECKPOINT_FAILED";
     } finally {
       if (active.leaseSessionId) {
         this.suspendedLeases.set(active.documentId, {
@@ -1179,7 +1177,7 @@ export class DocumentService {
       active.password = "";
       this.active = null;
     }
-    const result = Object.freeze({ locked: true, journalSaved, warning, reason });
+    const result = Object.freeze({ locked: true, journalSaved, warningCode, reason });
     this.onLocked(result);
     return result;
   }
@@ -1295,8 +1293,7 @@ export class DocumentService {
         }
       }
       if (targetUnavailable(error)) {
-        this.onJournalWarning(
-          "The target is unavailable; regular save was skipped and work remains unsaved locally.");
+        this.onJournalWarning("REGULAR_SAVE_TARGET_UNAVAILABLE");
         return Object.freeze({ published: false });
       }
       throw error;
@@ -1711,7 +1708,7 @@ export class DocumentService {
     this.#scheduleHeartbeat(this.leaseGeneration);
     await this.witnesses.observe(active.target, active.observation);
     return Object.freeze({ migrated: true, backupCreated: true,
-      compatibilityWarning: "Older SCPEFE clients may not open the migrated document.",
+      compatibilityCode: "MIGRATION_COMPATIBILITY",
       opened: active.opened });
   }
 
@@ -1900,7 +1897,7 @@ export class DocumentService {
       void operation.catch((error) => {
         if (error?.code === "STALE_HEARTBEAT"
             || generation !== this.leaseGeneration) return;
-        this.onJournalWarning(`Editing lease refresh failed: ${error.message}`);
+        this.onJournalWarning("LEASE_REFRESH_FAILED");
         void this.lock("lease-refresh-failed");
       }).finally(() => {
         if (this.heartbeatOperation === operation) this.heartbeatOperation = null;
@@ -2051,8 +2048,7 @@ export class DocumentService {
           baseOpened.documentId, baseOpened.journalKey, record);
       }
       publicationState = "conflict";
-      this.onJournalWarning(
-        "The target was replaced or failed authentication; the pending candidate was preserved as a conflict.");
+      this.onJournalWarning("PUBLICATION_AUTH_CONFLICT");
     } else if (!unavailable && record.state !== "conflict") {
       let resumed;
       try {
@@ -2094,7 +2090,7 @@ export class DocumentService {
           unresolvedJournal: recovery !== null,
           continuousDue: null, journalWarning: null };
         reopened.journalKey.fill(0);
-        this.onJournalWarning("Interrupted publication was completed and verified.");
+        this.onJournalWarning("PUBLICATION_RECOVERED");
         this.notifyActivity();
         return opened;
       }
@@ -2105,8 +2101,7 @@ export class DocumentService {
       }
     }
     if (unavailable) {
-      this.onJournalWarning(
-        "The target is unavailable; the manual save remains pending locally.");
+      this.onJournalWarning("PUBLICATION_PENDING_TARGET_UNAVAILABLE");
     }
 
     const currentOpened = targetOpened && !invalidTarget ? targetOpened : baseOpened;
@@ -2281,8 +2276,7 @@ export class DocumentService {
     active.unresolvedJournal = true;
     active.opened = validateOpenedDocument({ ...active.opened,
       content: canonical, publicationState: "conflict" });
-    this.onJournalWarning(
-      "The target changed before regular save; unsaved work was preserved for divergence resolution.");
+    this.onJournalWarning("REGULAR_SAVE_CONFLICT");
     return Object.freeze({ published: false, conflict: true, content: canonical });
   }
 
@@ -2331,7 +2325,7 @@ export class DocumentService {
     this.checkpointTimer = this.setTimer(() => {
       this.checkpointTimer = null;
       void this.#flushActive(active).catch((error) => {
-        active.journalWarning = `Recovery checkpoint failed: ${error.message}`;
+        active.journalWarning = "RECOVERY_CHECKPOINT_FAILED";
         this.onJournalWarning(active.journalWarning);
       });
     }, Math.max(0, due - now));
@@ -2380,7 +2374,7 @@ export class DocumentService {
     this.regularSaveTimer = this.setTimer(() => {
       this.regularSaveTimer = null;
       void this.regularSaveDocument().catch((error) => {
-        this.onJournalWarning(`Regular save failed: ${error.message}`);
+        this.onJournalWarning("REGULAR_SAVE_FAILED");
       }).finally(() => {
         if (active === this.active && active.editMode) this.#scheduleRegularSave();
       });

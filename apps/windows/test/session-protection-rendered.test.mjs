@@ -93,12 +93,12 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       if (request.decision === "save" && failedSave) {
         failedSave = false; return { completed: false, proceed: false,
           retryToken: "20000000-0000-4000-8000-000000000000",
-          error: "publication retry failed safely" };
+          errorCode: "LIFECYCLE_FAILED" };
       }
       if (request.decision === "discard" && failedDiscard) {
         failedDiscard = false; return { completed: false, proceed: false,
           retryToken: "40000000-0000-4000-8000-000000000000",
-          error: "discard cleanup failed safely" };
+          errorCode: "LIFECYCLE_FAILED" };
       }
       if (request.decision === "cancel" && pendingHost) {
         const pending = pendingHost; pendingHost = null;
@@ -234,7 +234,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       const retry = ui.getByRole(dialog, "button", { name: "Retry publication and continue" });
       await user.click(retry);
       await ui.waitFor(() => assert.ok(ui.getByText(dialog,
-        /publication retry failed safely/)));
+        /document protection choice could not be completed/i)));
       assert.equal(document.activeElement === retry, true);
       assert.equal(editor.value, "",
         "a failed publication decision keeps protected plaintext masked");
@@ -262,7 +262,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       dialog = await ui.findByRole(document.body, "dialog", { name: /before Close/ });
       const discard = ui.getByRole(dialog, "button", { name: "Discard and continue" });
       await user.click(discard);
-      await ui.waitFor(() => assert.ok(ui.getByText(dialog, /discard cleanup failed safely/)));
+      await ui.waitFor(() => assert.ok(ui.getByText(dialog,
+        /document protection choice could not be completed/i)));
       assert.equal(document.activeElement, discard);
       assert.equal(editor.value, "",
         "a failed discard decision keeps protected plaintext masked");

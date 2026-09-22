@@ -182,7 +182,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         if (migrationAttempts === 3) return null;
         if (migrationAttempts === 5) throw new Error("alternate backup verification failed");
         return { migrated: true, backupCreated: true,
-          compatibilityWarning: "Migration published after a verified backup.",
+          compatibilityCode: "MIGRATION_COMPATIBILITY",
           opened: { ...base, content: "legacy private text", readOnly: false } };
       },
       cancelLeaseTakeover: async (authorization) => {
@@ -193,7 +193,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         temporaryPassword: "temporary words" }), copyInvitationPassphrase: async () => true,
       claimInvitation: async () => base, cancelInvitationClaim: async () => true,
       reconcileIdentity: async () => base, updateSlotPermissions: async () => base,
-      removeSlot: async () => ({ removed: true, warning: "removed" }),
+      removeSlot: async () => ({ removed: true, warningCode: "SLOT_REMOVED" }),
       updateWorkingCopy: async () => ({}), activity: async () => ({}),
       lock: async () => ({ locked: true, journalSaved: true, warning: null }),
       onLocked: (listener) => listen("locked", listener),
@@ -230,7 +230,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       "Discard recovered work"));
     let action = ui.getByRole(dialog, "button", { name: "Discard recovered work" });
     await user.click(action);
-    assert.match((await ui.findByRole(dialog, "alert")).textContent, /journal cleanup failed/);
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /operation could not be completed safely/i);
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     await ui.waitFor(() => assert.equal(status("Document state"), "Read-only"));
@@ -246,7 +247,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     action = ui.getByRole(dialog, "button", { name: "Restore unsaved work" });
     await user.click(action);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /recovery journal read failed/);
+      /operation could not be completed safely/i);
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     dialog = await ui.findByRole(document.body, "dialog",
@@ -260,7 +261,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
     dialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
-    assert.ok(await ui.findByText(dialog, /recovery lease write failed/));
+    assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
     action = ui.getByRole(dialog, "button", { name: "Restore unsaved work" });
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
@@ -273,7 +274,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     editor.focus();
     await user.keyboard("{Control>}s{/Control}");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Manual save failed" });
-    assert.match(ui.getByRole(dialog, "alert").textContent, /flush failed/);
+    assert.match(ui.getByRole(dialog, "alert").textContent,
+      /operation could not be completed safely/i);
     assert.equal(editor.value, "");
     await user.click(ui.getByRole(dialog, "button", { name: "Retry manual save" }));
     await ui.waitFor(() => assert.equal(status("Working copy state"), "Clean"));
@@ -293,7 +295,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Permanently compact document history?" });
     await user.click(ui.getByRole(dialog, "button",
       { name: "Create verified backup and compact" }));
-    assert.ok(await ui.findByText(dialog, "backup verification failed"));
+    assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
     await user.click(ui.getByRole(dialog, "button",
       { name: "Create verified backup and compact" }));
     await ui.findByRole(document.body, "dialog", { name: "Passwords" });
@@ -320,7 +322,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
     dialog = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
-    assert.match(ui.getByRole(dialog, "alert").textContent, /lease publication flush failed/);
+    assert.match(ui.getByRole(dialog, "alert").textContent,
+      /operation could not be completed safely/i);
     action = ui.getByRole(dialog, "button", { name: "Retry editing" });
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
@@ -342,7 +345,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     action = ui.getByRole(dialog, "button", { name: "Discard pending save" });
     await user.click(action);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /pending journal cleanup failed/);
+      /operation could not be completed safely/i);
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     await ui.waitFor(() => assert.equal(status("Publication state"), "Published"));
@@ -356,7 +359,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     action = ui.getByRole(dialog, "button", { name: "Retry publication" });
     await user.click(action);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /provider is still offline/);
+      /operation could not be completed safely/i);
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     assert.ok(await ui.findByRole(document.body, "dialog",
@@ -378,7 +381,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     action = ui.getByRole(dialog, "button", { name: "Retry publication" });
     await user.click(action);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
-      /merge ancestor unavailable/);
+      /operation could not be completed safely/i);
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     dialog = await ui.findByRole(document.body, "dialog",
@@ -393,7 +396,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Divergence needs resolution" });
-    assert.ok(await ui.findByText(dialog, /merge lease publication failed/));
+    assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
     action = ui.getByRole(dialog, "button", { name: "Retry publication" });
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
@@ -405,7 +408,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.equal(status("Publication state"), "Publication conflict");
     await command("File", /Save/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Manual save failed" });
-    assert.match(ui.getByRole(dialog, "alert").textContent, /merge publication failed/);
+    assert.match(ui.getByRole(dialog, "alert").textContent,
+      /operation could not be completed safely/i);
     await user.click(ui.getByRole(dialog, "button", { name: "Retry manual save" }));
     await ui.waitFor(() => assert.equal(status("Publication state"), "Published"));
     assert.match(ui.getByRole(document.body, "status").textContent,
@@ -426,7 +430,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.equal(document.body.textContent.includes("authenticated private text"), false);
     action = ui.getByRole(dialog, "button", { name: "Accept current authenticated head" });
     await user.click(action);
-    assert.match((await ui.findByRole(dialog, "alert")).textContent, /witness write failed/);
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /operation could not be completed safely/i);
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     await ui.waitFor(() => assert.equal(headAccepts, 2));
@@ -480,7 +485,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
     dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    assert.ok(await ui.findByText(dialog, /alternate backup verification failed/));
+    assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
     action = ui.getByRole(dialog, "button", { name: "Create verified backup and migrate…" });
     await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
