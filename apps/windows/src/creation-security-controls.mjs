@@ -8,7 +8,7 @@ export function PasswordConfirmationFields({ kind, label, confirmationLabel,
   revealed, required, onToggle, value, confirmationValue, onValueChange,
   onConfirmationChange, inputRef, confirmationRef, autoFocus = false,
   comparePassword = "", compareMessage = "", invalidPassword = false,
-  invalidConfirmation = false }) {
+  invalidConfirmation = false, errorDescriptionId = "" }) {
   const passwordId = `${kind}-password`;
   const confirmationId = `${kind}-password-confirmation`;
   const fieldType = revealed ? "text" : "password";
@@ -19,14 +19,17 @@ export function PasswordConfirmationFields({ kind, label, confirmationLabel,
     h("label", { htmlFor: passwordId }, label,
       h("input", { id: passwordId, name: `${kind}Password`, type: fieldType,
         minLength: 12, required, autoComplete: "new-password", value,
-        "aria-describedby": statusId,
+        "aria-describedby": invalidPassword && errorDescriptionId
+          ? `${statusId} ${errorDescriptionId}` : statusId,
         "aria-invalid": invalidPassword ? "true" : undefined,
         ref: inputRef, autoFocus,
         onChange: onValueChange && ((event) => onValueChange(event.target.value)) })),
     h("label", { htmlFor: confirmationId }, confirmationLabel,
       h("input", { id: confirmationId, name: `${kind}PasswordConfirmation`,
         type: fieldType, minLength: 12, required, autoComplete: "new-password",
-        value: confirmationValue, ref: confirmationRef, "aria-describedby": statusId,
+        value: confirmationValue, ref: confirmationRef,
+        "aria-describedby": invalidConfirmation && errorDescriptionId
+          ? `${statusId} ${errorDescriptionId}` : statusId,
         "aria-invalid": invalidConfirmation ? "true" : undefined,
         onChange: onConfirmationChange
           && ((event) => onConfirmationChange(event.target.value)) })),

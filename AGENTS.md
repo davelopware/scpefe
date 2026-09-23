@@ -39,7 +39,7 @@ For a ticket implemented with subagents:
 
 1. Assign the issue before changing code.
 2. Create one `codex/issue-N` implementer branch in an isolated `/tmp` worktree, based on the intended integration branch or commit.
-3. Give one implementation subagent ownership of diagnosis, regression tests, the fix, focused resource-contained tests, and cohesive commits.
+3. Give one implementation subagent ownership of diagnosis, a tight deterministic feedback loop that reproduces the reported failure, a red regression test before the fix, the fix, focused resource-contained tests, and cohesive commits. If the reported failure cannot be reproduced, stop before hypothesizing or fixing it and report the evidence and required environment or artifact.
 4. Give a separate verification subagent the issue criteria and resulting commit. Return findings to the implementer for remediation and repeat independent verification until it passes.
 5. Use a separate integration subagent to apply the verified commit to the intended integration branch and run the required integration gate against the exact resulting SHA.
 6. Push the tested integration commit and either open its pull request or add it to the parent feature pull request, as appropriate.

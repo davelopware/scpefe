@@ -15,7 +15,7 @@ import { registerWindowFocusProtection } from "../src/window-focus-protection.mj
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
 
-export async function runMountedLock(t, origin) {
+export async function runMountedLock(t, origin, nativeOverride = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   t.after(() => fs.rm(directory,
     { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }));
@@ -108,7 +108,7 @@ export async function runMountedLock(t, origin) {
     : bytes.toString().startsWith("new:") ? bytes.toString().slice(4)
     : /^(saved|provisional):/.test(bytes.toString())
       ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
-  const native = { openDocument(bytes, password) {
+  const fakeNative = { openDocument(bytes, password) {
     if (password === "wrong password") throw new Error("authentication failed");
     const revision = createHash("sha256").update(bytes).digest("hex");
     const initialRevision = createHash("sha256").update(Buffer.from("container")).digest("hex");
@@ -178,6 +178,7 @@ export async function runMountedLock(t, origin) {
     if (provisionalDiscardFault) throw new Error("injected provisional discard failure");
     return Buffer.from("saved:original plaintext");
   } };
+  const native = nativeOverride ?? fakeNative;
   const serviceOptions = (callbacks = {}) => ({ native, fs: serviceFs, profilePath,
     publicationCapabilities: capabilities,
     journalDirectory: path.join(directory, "journals"),
@@ -318,7 +319,8 @@ export async function runMountedLock(t, origin) {
   dom.window[Symbol.for("scpefe.renderer.mount")] = (root) => { mountedRoot = root; };
   const assets = await fs.readdir(new URL("../dist/assets/", import.meta.url));
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
-  await import(`${pathToFileURL(path.resolve("dist/assets", script)).href}?real-lock-${origin}`);
+  const rendererUrl = new URL(`../dist/assets/${script}`, import.meta.url);
+  await import(`${rendererUrl.href}?real-lock-${origin}`);
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
@@ -428,7 +430,7 @@ export async function runMountedLock(t, origin) {
       ? "new-document\\.scpefe" : "other\\.scpefe");
     await waitScalar(() => titlePattern.test(document.title), `${entry} safe document title`);
     assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
-    if (entry === "new" && origin === "s0-new") {
+    if (entry === "new" && origin === "s0-new" && nativeOverride === null) {
       assert.equal(createdInput.ownerPassword, "defenistration is the root of");
       assert.equal(createdInput.recoveryPassword,
         "01a0bf20-2424-73e9-a572-f2eded90be3e");

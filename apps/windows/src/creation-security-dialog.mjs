@@ -4,41 +4,65 @@ import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
 
 const h = React.createElement;
+const ERROR_ID = "creation-security-error";
+const ATTRIBUTED_BOUNDARY_FIELDS = Object.freeze({
+  OWNER_PASSWORD_WEAK: "owner",
+  RECOVERY_PASSWORD_WEAK: "recovery",
+});
+const SAFE_BOUNDARY_DIAGNOSTICS = new Set([
+  "OWNER_PASSWORD_WEAK", "RECOVERY_PASSWORD_WEAK", "CREATE_FAILED",
+]);
 const VALIDATION_DETAILS = new Map([
-  ["owner password must be text", ["Owner password is invalid.", "owner"]],
-  ["owner password is required", ["Owner password is required.", "owner"]],
-  ["owner password is too long", ["Owner password is too long.", "owner"]],
+  ["owner password must be text", ["Owner password is invalid.", "owner", "OWNER_TYPE"]],
+  ["owner password is required", ["Owner password is required.", "owner", "OWNER_REQUIRED"]],
+  ["owner password is too long", ["Owner password is too long.", "owner", "OWNER_LENGTH"]],
   ["owner password must contain at least 12 characters",
-    ["Owner password must contain at least 12 characters.", "owner"]],
+    ["Owner password must contain at least 12 characters.", "owner", "OWNER_LENGTH"]],
   ["owner password confirmation must be text",
-    ["Owner password confirmation is invalid.", "ownerConfirmation"]],
+    ["Owner password confirmation is invalid.", "ownerConfirmation", "OWNER_CONFIRM_TYPE"]],
   ["owner password confirmation is required",
-    ["Owner password confirmation is required.", "ownerConfirmation"]],
+    ["Owner password confirmation is required.", "ownerConfirmation",
+      "OWNER_CONFIRM_REQUIRED"]],
   ["owner password confirmation is too long",
-    ["Owner password confirmation is too long.", "ownerConfirmation"]],
+    ["Owner password confirmation is too long.", "ownerConfirmation",
+      "OWNER_CONFIRM_LENGTH"]],
   ["owner passwords do not match",
-    ["owner passwords do not match.", "ownerConfirmation"]],
-  ["recovery password must be text", ["Recovery password is invalid.", "recovery"]],
-  ["recovery password is required", ["Recovery password is required.", "recovery"]],
-  ["recovery password is too long", ["Recovery password is too long.", "recovery"]],
+    ["owner passwords do not match.", "ownerConfirmation", "OWNER_CONFIRM_MISMATCH"]],
+  ["recovery password must be text",
+    ["Recovery password is invalid.", "recovery", "RECOVERY_TYPE"]],
+  ["recovery password is required",
+    ["Recovery password is required.", "recovery", "RECOVERY_REQUIRED"]],
+  ["recovery password is too long",
+    ["Recovery password is too long.", "recovery", "RECOVERY_LENGTH"]],
   ["recovery password must contain at least 12 characters",
-    ["Recovery password must contain at least 12 characters.", "recovery"]],
+    ["Recovery password must contain at least 12 characters.", "recovery",
+      "RECOVERY_LENGTH"]],
   ["recovery password confirmation must be text",
-    ["Recovery password confirmation is invalid.", "recoveryConfirmation"]],
+    ["Recovery password confirmation is invalid.", "recoveryConfirmation",
+      "RECOVERY_CONFIRM_TYPE"]],
   ["recovery password confirmation is required",
-    ["Recovery password confirmation is required.", "recoveryConfirmation"]],
+    ["Recovery password confirmation is required.", "recoveryConfirmation",
+      "RECOVERY_CONFIRM_REQUIRED"]],
   ["recovery password confirmation is too long",
-    ["Recovery password confirmation is too long.", "recoveryConfirmation"]],
+    ["Recovery password confirmation is too long.", "recoveryConfirmation",
+      "RECOVERY_CONFIRM_LENGTH"]],
   ["recovery passwords do not match",
-    ["recovery passwords do not match.", "recoveryConfirmation"]],
+    ["recovery passwords do not match.", "recoveryConfirmation",
+      "RECOVERY_CONFIRM_MISMATCH"]],
   ["recovery password must be independent from the owner password",
-    ["Recovery password must be independent from the owner password.", "recovery"]],
+    ["Recovery password must be independent from the owner password.", "recovery",
+      "RECOVERY_NOT_INDEPENDENT"]],
   ["irrecoverability must be acknowledged",
-    ["Confirm that lost passwords cannot be recovered.", "irrecoverability"]],
+    ["Confirm that lost passwords cannot be recovered.", "irrecoverability",
+      "IRRECOVERABILITY_ACK"]],
   ["recovery password storage must be acknowledged",
     ["Confirm that the recovery password will be stored independently.",
-      "recoveryStorage"]],
+      "recoveryStorage", "RECOVERY_STORAGE_ACK"]],
 ]);
+
+function reportCreationDiagnostic(layer, rule) {
+  globalThis.console?.warn?.("SCPEFE creation rejection", Object.freeze({ layer, rule }));
+}
 
 /* Collects and validates creation secrets after a target has been selected. */
 export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
@@ -51,6 +75,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
   const [understandsIrrecoverable, setUnderstandsIrrecoverable] = useState(false);
   const [storedRecoverySeparately, setStoredRecoverySeparately] = useState(false);
   const [error, setError] = useState("");
+  const [errorDiagnostic, setErrorDiagnostic] = useState(null);
   const [invalidField, setInvalidField] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const ownerConfirmationRef = useRef(null);
@@ -86,12 +111,14 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     if (invalidField === field) {
       setInvalidField("");
       setError("");
+      setErrorDiagnostic(null);
     }
   }
 
   async function submit(event) {
     event.preventDefault();
     setError("");
+    setErrorDiagnostic(null);
     setInvalidField("");
     let request;
     try {
@@ -103,14 +130,18 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     } catch (submissionError) {
       const source = submissionError instanceof Error ? submissionError.message : "";
       const details = VALIDATION_DETAILS.get(source);
-      const [message, field] = details
-        ?? ["The security details are invalid. Review the form and try again.", "owner"];
+      const [message, field, rule] = details
+        ?? ["The security details are invalid. Review the form and try again.",
+          "", "FORM_UNATTRIBUTED"];
       setError(message);
       setInvalidField(field);
-      ({ owner: ownerRef, ownerConfirmation: ownerConfirmationRef,
+      setErrorDiagnostic({ layer: "renderer-form", rule });
+      reportCreationDiagnostic("renderer-form", rule);
+      const fieldRef = { owner: ownerRef, ownerConfirmation: ownerConfirmationRef,
         recovery: recoveryRef, recoveryConfirmation: recoveryConfirmationRef,
         irrecoverability: irrecoverabilityRef,
-        recoveryStorage: recoveryStorageRef }[field] ?? ownerRef).current?.focus();
+        recoveryStorage: recoveryStorageRef }[field];
+      fieldRef?.current?.focus();
       return;
     }
     setSubmitting(true);
@@ -119,10 +150,13 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       completedRef.current = true;
     } catch (submissionError) {
       setError(safeRendererErrorMessage(submissionError));
-      const field = submissionError?.code === "RECOVERY_PASSWORD_WEAK"
-        ? "recovery" : "owner";
+      const safeCode = SAFE_BOUNDARY_DIAGNOSTICS.has(submissionError?.code)
+        ? submissionError.code : "OPERATION_UNATTRIBUTED";
+      const field = ATTRIBUTED_BOUNDARY_FIELDS[safeCode] ?? "";
       setInvalidField(field);
-      (field === "recovery" ? recoveryRef : ownerRef).current?.focus();
+      setErrorDiagnostic({ layer: "creation-boundary", rule: safeCode });
+      reportCreationDiagnostic("creation-boundary", safeCode);
+      if (field) (field === "recovery" ? recoveryRef : ownerRef).current?.focus();
     } finally {
       setSubmitting(false);
     }
@@ -162,6 +196,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       inputRef: ownerRef, confirmationRef: ownerConfirmationRef,
       invalidPassword: invalidField === "owner",
       invalidConfirmation: invalidField === "ownerConfirmation",
+      errorDescriptionId: ERROR_ID,
       onValueChange: (value) => updateField("owner", setOwnerPassword, value),
       onConfirmationChange: (value) => updateField(
         "ownerConfirmation", setOwnerConfirmation, value),
@@ -175,6 +210,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       confirmationRef: recoveryConfirmationRef,
       invalidPassword: invalidField === "recovery",
       invalidConfirmation: invalidField === "recoveryConfirmation",
+      errorDescriptionId: ERROR_ID,
       comparePassword: ownerPassword,
       compareMessage: "Recovery password must differ from the owner password.",
       onValueChange: (value) => updateField("recovery", setRecoveryPassword, value),
@@ -186,6 +222,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       h("input", { name: "understandsIrrecoverable", type: "checkbox",
         ref: irrecoverabilityRef,
         "aria-invalid": invalidField === "irrecoverability" ? "true" : undefined,
+        "aria-describedby": invalidField === "irrecoverability" ? ERROR_ID : undefined,
         checked: understandsIrrecoverable,
         onChange: (event) => updateField("irrecoverability",
           setUnderstandsIrrecoverable, event.target.checked) }),
@@ -194,11 +231,14 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       h("input", { name: "storedRecoverySeparately", type: "checkbox",
         ref: recoveryStorageRef,
         "aria-invalid": invalidField === "recoveryStorage" ? "true" : undefined,
+        "aria-describedby": invalidField === "recoveryStorage" ? ERROR_ID : undefined,
         checked: storedRecoverySeparately,
         onChange: (event) => updateField("recoveryStorage",
           setStoredRecoverySeparately, event.target.checked) }),
       "I will store the recovery password independently."),
-    error && h("p", { className: "dialog-error", role: "alert" }, error),
+    error && h("p", { id: ERROR_ID, className: "dialog-error", role: "alert",
+      "data-error-layer": errorDiagnostic?.layer,
+      "data-error-rule": errorDiagnostic?.rule }, error),
     h("div", { className: "toolbar dialog-actions" },
       h("button", { type: "button", disabled: submitting, onClick: cancel }, "Cancel"),
       h("button", { type: "submit", disabled: submitting },

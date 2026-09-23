@@ -18,6 +18,7 @@ const { cleanup, render, waitFor, within } = await import("@testing-library/reac
 const userEvent = (await import("@testing-library/user-event")).default;
 const { CreateDocumentControl, CreationSecurityDialog } = await import(
   "../src/creation-security-dialog.mjs");
+const { SafeBoundaryError } = await import("../src/error-boundary.mjs");
 
 function mountedDialog(t, onCreate = async () => {}, onCancel = () => {}) {
   t.after(cleanup);
@@ -138,7 +139,24 @@ test("locally knowable creation failures identify their affected control", async
   assert.match(ui.getByRole("alert").textContent, /owner password is required/i);
   assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
     true);
-  assert.equal(ui.getByLabelText("Owner password").getAttribute("aria-invalid"), "true");
+  const owner = ui.getByLabelText("Owner password");
+  const alert = ui.getByRole("alert");
+  assert.equal(owner.getAttribute("aria-invalid"), "true");
+  assert.equal(alert.id, "creation-security-error");
+  assert.match(owner.getAttribute("aria-describedby"), /owner-password-policy/);
+  assert.match(owner.getAttribute("aria-describedby"), /creation-security-error/);
+  assert.equal(alert.dataset.errorLayer, "renderer-form");
+  assert.equal(alert.dataset.errorRule, "OWNER_REQUIRED");
+
+  await user.type(owner, "owner password words");
+  await user.type(ui.getByLabelText("Confirm owner password"), "owner password words");
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  const acknowledgement = ui.getByLabelText(
+    "I understand that lost passwords cannot be recovered.");
+  assert.equal(acknowledgement.getAttribute("aria-invalid"), "true");
+  assert.equal(acknowledgement.getAttribute("aria-describedby"),
+    "creation-security-error");
+  assert.equal(ui.getByRole("alert").dataset.errorRule, "IRRECOVERABILITY_ACK");
 });
 
 test("recovery mismatch never invokes creation and keeps both pairs recoverable",
@@ -191,11 +209,37 @@ test("creation failure remains inline with retained secrets and can be retried",
   await user.click(ui.getByRole("button", { name: "Create" }));
   assert.match(ui.getByRole("alert").textContent, /operation could not be completed safely/i);
   assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
-  assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
-    true, "creation failure returns focus to the owner password");
+  assert.equal(ui.getByLabelText("Owner password").getAttribute("aria-invalid"), null,
+    "operational failures remain form-level rather than blaming the owner password");
+  assert.equal(ui.getByRole("alert").dataset.errorLayer, "creation-boundary");
+  assert.equal(ui.getByRole("alert").dataset.errorRule, "OPERATION_UNATTRIBUTED");
   await user.click(ui.getByRole("button", { name: "Create" }));
   assert.equal(createCalls, 2);
 });
+
+test("only explicit boundary password failures are attributed to a password field",
+  async (t) => {
+    const { user, ui } = mountedDialog(t, async () => {
+      throw new SafeBoundaryError("RECOVERY_PASSWORD_WEAK", "document:create");
+    });
+    await enterOwner(ui, user);
+    await user.type(ui.getByLabelText(
+      "Independent recovery password (strongly recommended)"),
+    "independent recovery words");
+    await user.type(ui.getByLabelText("Confirm recovery password"),
+      "independent recovery words");
+    await user.click(ui.getByLabelText(
+      "I will store the recovery password independently."));
+    await user.click(ui.getByRole("button", { name: "Create" }));
+    const recovery = ui.getByLabelText(
+      "Independent recovery password (strongly recommended)");
+    assert.equal(recovery.getAttribute("aria-invalid"), "true");
+    assert.match(recovery.getAttribute("aria-describedby"), /recovery-password-policy/);
+    assert.match(recovery.getAttribute("aria-describedby"), /creation-security-error/);
+    assert.equal(ui.getByLabelText("Owner password").getAttribute("aria-invalid"), null);
+    assert.equal(dom.window.document.activeElement === recovery, true);
+    assert.equal(ui.getByRole("alert").dataset.errorRule, "RECOVERY_PASSWORD_WEAK");
+  });
 
 test("Cancel and Escape are keyboard-operable without invoking creation", async (t) => {
   let createCalls = 0;
