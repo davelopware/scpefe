@@ -24,10 +24,7 @@ Treat every Node/Electron renderer test or build process tree as host-risky from
 
 ### Actual Electron screenshots
 
-- Capture only synthetic inputs from the real production renderer and native addon. Run Electron under Xvfb and use CDP `Page.captureScreenshot`; never substitute a mockup.
-- When required host libraries cannot be installed, use `apt download` and extract the exact packages into a temporary user-owned directory, then supply that directory through `LD_LIBRARY_PATH` without changing the OS.
-- Apply the resource-safety limits above to the entire build/Electron/screenshot process tree, serially and with timing and timeout measurement. Remove temporary symlinks and assets afterward.
-- Record native picker or automation limitations with the evidence. See `docs/review/issue-50/README.md` for a worked example.
+Before capturing UI review evidence, read and follow `docs/agents/ui-screenshots.md`.
 
 ## C++ header documentation
 
