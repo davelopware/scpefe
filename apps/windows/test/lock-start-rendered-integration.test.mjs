@@ -11,14 +11,16 @@ import { JSDOM } from "jsdom";
 import { DocumentService } from "../src/document-service.mjs";
 import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 import { registerWindowFocusProtection } from "../src/window-focus-protection.mjs";
+import { cleanupMountedLifecycleHarness } from "./mounted-lifecycle-cleanup.mjs";
 
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
 
 export async function runMountedLock(t, origin) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
-  t.after(() => fs.rm(directory,
-    { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }));
+  let teardown = () => fs.rm(directory,
+    { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  t.after(() => teardown());
   const target = path.join(directory, "document.scpefe");
   const otherTarget = path.join(directory, "other.scpefe");
   const newTarget = path.join(directory, "new-document.scpefe");
@@ -287,9 +289,16 @@ export async function runMountedLock(t, origin) {
       queueMicrotask(() => { const pending = frames.get(id);
         if (pending) { frames.delete(id); pending(performance.now()); } }); return id; },
     cancelAnimationFrame: (id) => frames.delete(id), IS_REACT_ACT_ENVIRONMENT: true });
-  t.after(async () => { mountedRoot?.unmount(); await Promise.resolve(); frames.clear();
-    dom.window.close(); for (const [key, descriptor] of prior) descriptor
-      ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key]; });
+  teardown = () => cleanupMountedLifecycleHarness({
+    completion: dom.window[Symbol.for("scpefe.renderer.lifecycle-completion")],
+    drainRendererTasks: () => new Promise((resolve) => setImmediate(resolve)),
+    unmount: () => mountedRoot?.unmount(), clearFrames: () => frames.clear(),
+    closeDom: () => dom.window.close(),
+    restoreGlobals: () => { for (const [key, descriptor] of prior) descriptor
+      ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key]; },
+    removeTemporaryFiles: () => fs.rm(directory,
+      { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
+  });
   const invoke = async (channel, value) => {
     const handler = ipcHandlers.get(channel);
     if (!handler) return null;
@@ -329,6 +338,13 @@ export async function runMountedLock(t, origin) {
   const command = async (menu, name) => { await user.click(ui.getByRole(document.body,
     "menuitem", { name: menu })); await user.click(ui.getByRole(
     ui.getByRole(document.body, "menu", { name: menu }), "menuitem", { name })); };
+  const awaitLifecycleCompletion = async (label) => {
+    const completion = dom.window[
+      Symbol.for("scpefe.renderer.lifecycle-completion")];
+    assert.equal(typeof completion?.waitForIdle, "function",
+      `renderer exposes lifecycle completion for ${label}`);
+    await completion.waitForIdle({ timeoutMs: 5_000 });
+  };
   const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
   const assertFocusPreserved = async (dialog, field) => {
     const focused = ui.getByLabelText(dialog, field);
@@ -749,6 +765,7 @@ export async function runMountedLock(t, origin) {
     await driveDirect(entry, "Read-only"); return;
   }
   await command("Edit", "Edit Contents");
+  await awaitLifecycleCompletion("entering edit mode");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Edit mode"));
   service = host.service;
@@ -1038,12 +1055,12 @@ export async function runMountedLock(t, origin) {
       assert.equal(document.activeElement,
         ui.getByRole(protection, "button", { name: "Manual save and continue" }));
       assert.equal(host.replacements.candidates.size, 1);
-      await user.click(ui.getByRole(protection, "button",
-        { name: "Keep current document open" }));
-      const returned = await ui.findByRole(document.body, "dialog", { name: "Open document" });
-      await ui.waitFor(() => assert.equal(host.replacements.candidates.size, 0));
-      await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     }
+    await user.click(ui.getByRole(protection, "button",
+      { name: "Keep current document open" }));
+    const returned = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    await ui.waitFor(() => assert.equal(host.replacements.candidates.size, 0));
+    await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     return;
   }
   if (origin.startsWith("rx-")) {
@@ -1174,6 +1191,9 @@ export async function runMountedLock(t, origin) {
       if (provisionalDecision) provisionalDiscardFault = true; else discardFault = true;
     }
     await user.click(ui.getByRole(protection, "button", { name: decision }));
+    if (outcome === "save" && entry !== "window") {
+      await awaitLifecycleCompletion(`dirty Save-and-${entry}`);
+    }
     if (outcome.endsWith("retry")) {
       const message = /document protection choice could not be completed/i;
       await ui.findByText(protection, message);

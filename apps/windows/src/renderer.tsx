@@ -4,8 +4,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
 import { PasswordPolicyStatus } from "./password-policy.mjs";
+import { RENDERER_LIFECYCLE_COMPLETION,
+  RendererLifecycleCompletion } from "./renderer-lifecycle-completion.mjs";
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
+
+const rendererLifecycleCompletion = new RendererLifecycleCompletion();
 
 type Profile = { name: string; email: string; deviceName: string };
 type Cursor = { start: number; end: number };
@@ -416,11 +420,13 @@ function App() {
       ? "replace" : "find";
   }
   useEffect(() => {
-    window.scpefe.getProfile().then((value) => {
+    void rendererLifecycleCompletion.track(() => window.scpefe.getProfile().then((value) => {
       setProfile(value); if (!value) setDialog("profile");
-    }).catch(showError);
-    window.scpefe.getClientSettings().then(setClientSettings).catch(showError);
-    window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError);
+    }).catch(showError));
+    void rendererLifecycleCompletion.track(() =>
+      window.scpefe.getClientSettings().then(setClientSettings).catch(showError));
+    void rendererLifecycleCompletion.track(() =>
+      window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError));
   }, []);
   const showError = (error: unknown) => setMessage(safeRendererErrorMessage(error));
   useEffect(() => {
@@ -644,7 +650,8 @@ function App() {
         w: "close", z: "undo", y: "redo", f: "find", h: "replace" };
       const command = commands[event.key.toLowerCase()];
       if (command && enabled[command]) { event.preventDefault();
-        void runCommand(command, document.activeElement as HTMLElement | null); }
+        void rendererLifecycleCompletion.track(() =>
+          runCommand(command, document.activeElement as HTMLElement | null)); }
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
@@ -1420,7 +1427,7 @@ function App() {
 
   return <main className="app-shell"><div className="shell-chrome">
     <MenuBar enabled={enabled} run={(command, returnFocus) =>
-      void runCommand(command, returnFocus)} />
+      void rendererLifecycleCompletion.track(() => runCommand(command, returnFocus))} />
     <section className="editor-surface" aria-label="Document workspace">
       {!activeDocument && <p className="editor-placeholder" role="note">
         {lockedDocument ? "Document locked. Use Security → Unlock to continue."
@@ -1494,16 +1501,17 @@ function App() {
       <div className="dialog-actions"><button onClick={() => setSaveError("")}>Continue editing</button>
         <button autoFocus onClick={() => void save()}>Retry manual save</button></div>
     </FocusedDialog>}
-    {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={async () => {
-      await window.scpefe.cancelCreateTarget(); setCreating(false);
-    }} onCreate={async (request: object) => {
+    {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={() =>
+      rendererLifecycleCompletion.track(async () => {
+        await window.scpefe.cancelCreateTarget(); setCreating(false);
+      })} onCreate={(request: object) => rendererLifecycleCompletion.track(async () => {
       const result = await window.scpefe.createDocument(request);
       if (result) {
         showOpenedResult({ ...result.opened, targetName: result.name });
         setCreating(false); setMessage("Encrypted blank document published successfully.");
         focusEditorAfterDialog();
       }
-    }} />}
+    })} />}
     {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title={profile ? "Profile" : "Set up this client"}
       close={profile ? closeDialog : undefined}><p>Name, email, and device name identify this client locally. This profile is self-asserted and is not an authenticated account.</p>
@@ -1534,15 +1542,17 @@ function App() {
       returnFocus={dialogReturnFocus.current}
       title={dialog === "unlock" ? "Unlock document"
         : externalOpenRequest ? "Open requested document" : "Open document"}
-      close={() => { void cancelOpen(); }} initialFocus={openPassword}>
+      close={() => { void rendererLifecycleCompletion.track(cancelOpen); }}
+      initialFocus={openPassword}>
       {pendingOpenName && <p>Selected target: <strong>{pendingOpenName}</strong></p>}
-      <form onSubmit={externalOpenRequest ? openExternal : open}><label>Password
+      <form onSubmit={(event) => { void rendererLifecycleCompletion.track(() =>
+        (externalOpenRequest ? openExternal : open)(event)); }}><label>Password
         <input ref={openPassword} name="password" type="password" required
           aria-describedby={openError ? "open-password-error" : undefined} /></label>
         {openError && <p id="open-password-error" className="dialog-error" role="alert">
           {openError}</p>}
         <div className="dialog-actions"><button type="button" onClick={() => {
-          void cancelOpen();
+          void rendererLifecycleCompletion.track(cancelOpen);
         }}>Cancel</button><button>{dialog === "unlock" ? "Unlock" : "Open"}</button>
         </div></form></FocusedDialog>}
     {dialog === "export" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
@@ -1713,11 +1723,14 @@ function App() {
       <div className="dialog-actions"><button ref={(node) => {
         if (node && !protectionError) node.focus();
       }}
-        onClick={() => void decideProtection("cancel")}>Keep current document open</button>
-        <button onClick={() => void decideProtection("save")}>
+        onClick={() => void rendererLifecycleCompletion.track(() =>
+          decideProtection("cancel"))}>Keep current document open</button>
+        <button onClick={() => void rendererLifecycleCompletion.track(() =>
+          decideProtection("save"))}>
           {protection.state.pendingPublication ? "Retry publication and continue"
             : "Manual save and continue"}</button>
-        <button onClick={() => void decideProtection("discard")}>Discard and continue</button>
+        <button onClick={() => void rendererLifecycleCompletion.track(() =>
+          decideProtection("discard"))}>Discard and continue</button>
       </div>
     </FocusedDialog>}
   </main>;
@@ -1731,6 +1744,8 @@ export function mountApp(host: HTMLElement): Root {
 
 const applicationHost = document.getElementById("root");
 if (applicationHost) {
+  (window as unknown as Record<symbol, RendererLifecycleCompletion>)[
+    RENDERER_LIFECYCLE_COMPLETION] = rendererLifecycleCompletion;
   const applicationRoot = mountApp(applicationHost);
   const mountObserver = (window as unknown as Record<symbol,
     ((root: Root) => void) | undefined>)[Symbol.for("scpefe.renderer.mount")];
