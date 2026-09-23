@@ -1149,10 +1149,15 @@ export async function runMountedLock(t, origin) {
       let completionSettled = false;
       replacementCompletion = awaitLifecycleCompletion(
         "provisional Save-and-open").then(() => { completionSettled = true; });
-      await Promise.resolve();
-      assert.equal(completionSettled, false,
+      let completionSettledBeforeRelease;
+      try {
+        await new Promise((resolve) => setImmediate(resolve));
+        completionSettledBeforeRelease = completionSettled;
+      } finally {
+        releaseMaintenance();
+      }
+      assert.equal(completionSettledBeforeRelease, false,
         "lifecycle completion waits for held provisional replacement publication");
-      releaseMaintenance();
     }
     if (outcome.endsWith("retry")) {
       await ui.findByText(protection,
