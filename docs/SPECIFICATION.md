@@ -127,6 +127,8 @@ New invitation slots use a strong temporary password and start with `mustBeChang
 
 The app generates a strong temporary invitation passphrase by default, with manual entry permitted only when it passes the normal strength check. A generated plaintext passphrase is displayed once for deliberate transfer and is not retained. A new or changed password is rejected if it already unlocks another slot in the same document.
 
+Every newly chosen password uses the same minimum length and local resistance-to-guessing policy. A canonical hyphenated version-4 UUID is accepted as a documented exception to the estimator, case-insensitively; because its text cannot prove how it was generated, users must obtain UUID passwords from a trusted random generator. Other UUID versions receive the normal strength assessment.
+
 ### 5.4 Slot identity and profile reconciliation
 
 An unclaimed invitation may have a temporary descriptive label. When it is claimed, its encrypted display identity becomes the claiming client's configured name and email; removal and other UI actions identify the slot by that display identity while using its immutable ID internally. The device name remains revision-specific. On later unlock, a mismatch between slot identity and local profile is prominently reported and never updated automatically. The user may reconcile the slot through the normal lease and atomic-save flow. Declining permits read-only access but blocks edit mode until the identities match. Slot-identity changes are retained in encrypted history, and revisions record slot ID, registered identity, current client profile, and device name. Changing the app-wide name or email warns that previously claimed documents will request reconciliation.

@@ -50,6 +50,8 @@ input, select, button { padding: .45rem .6rem; }
 .dialog-actions, .toolbar { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
 .warning { border-left: .3rem solid #b54708; padding-left: .8rem; }
 .dialog-error { color: #9b1c1c; font-weight: 600; }
+.password-policy { margin: 0; color: #7a2e0b; font-size: .92rem; }
+.password-policy.pass { color: #176b35; font-weight: 600; }
 .slot-administration { margin-top: 1rem; }
 .managed-slots { display: grid; gap: 1rem; padding: 0; list-style: none; }
 .managed-slot { display: grid; gap: .7rem; padding: .75rem 0; border-top: 1px solid GrayText; }

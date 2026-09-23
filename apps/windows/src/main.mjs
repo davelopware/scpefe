@@ -203,6 +203,8 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     validateAuthorization: leaseRequestAuthorization });
   safeIpcMain.handle("document:change-password", (_event, request) =>
     lifecycleHost.service.changePassword(validatePasswordChangeRequest(request)));
+  safeIpcMain.handle("security:password-meets-policy", (_event, password) =>
+    Boolean(lifecycleHost.service.native.passwordMeetsPolicy(validatePassword(password))));
   safeIpcMain.handle("document:create-invitation", (_event, request) =>
     lifecycleHost.service.createInvitation(validateInvitationCreateRequest(request)));
   safeIpcMain.handle("document:copy-invitation-passphrase", (_event, password) => {

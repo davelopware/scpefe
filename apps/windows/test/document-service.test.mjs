@@ -429,17 +429,20 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const profilePath = await writeProfile(directory, "Ada", "Desk PC");
   const calls = [];
+  const assessed = [];
   const service = new DocumentService({ fs, publicationCapabilities, profilePath,
-    native: { createDocument(input) {
+    native: { passwordMeetsPolicy(password) {
+      assessed.push(password); return !password.includes("predictable");
+    }, createDocument(input) {
       calls.push(input);
       return Buffer.from("container");
     }, openDocument: () => ({ content: "hello", readOnly: true, canEdit: true,
       documentId: "11".repeat(16), baseRevision: "22".repeat(32),
       journalKey: Buffer.alloc(32, 3) }) } });
-  const request = { ownerPassword: "owner password words",
-    ownerPasswordConfirmation: "owner password words",
-    recoveryPassword: "different recovery words", content: "hello",
-    recoveryPasswordConfirmation: "different recovery words",
+  const request = { ownerPassword: "owner words, spaces & punctuation! 42",
+    ownerPasswordConfirmation: "owner words, spaces & punctuation! 42",
+    recoveryPassword: "recovery-words; separate & offline! 73", content: "hello",
+    recoveryPasswordConfirmation: "recovery-words; separate & offline! 73",
     understandsIrrecoverable: true, storedRecoverySeparately: true };
 
   await assert.rejects(service.createDocument(path.join(directory, "missing.scpefe"),
@@ -449,9 +452,19 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
     { ...request, storedRecoverySeparately: false }),
   /recovery password storage must be acknowledged/);
   assert.equal(calls.length, 0);
+  const rejectedTarget = path.join(directory, "weak.scpefe");
+  await assert.rejects(service.createDocument(rejectedTarget, { ...request,
+    ownerPassword: "predictable password words",
+    ownerPasswordConfirmation: "predictable password words" }),
+  (error) => error.code === "OWNER_PASSWORD_WEAK");
+  await assert.rejects(fs.stat(rejectedTarget), (error) => error.code === "ENOENT");
+  assert.equal(calls.length, 0, "policy rejection reaches no native creation or target write");
   assert.deepEqual(await service.createDocument(path.join(directory, "safe.scpefe"),
     request), { created: true });
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].ownerPassword, request.ownerPassword);
+  assert.equal(calls[0].recoveryPassword, request.recoveryPassword);
+  assert.deepEqual(assessed.slice(-2), [request.ownerPassword, request.recoveryPassword]);
   assert.equal(calls[0].understandsIrrecoverable, true);
   assert.equal(calls[0].storedRecoverySeparately, true);
 });

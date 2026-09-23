@@ -179,6 +179,15 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const input = validateCreateRequest(request);
+    if (this.native.passwordMeetsPolicy?.(input.ownerPassword) === false) {
+      const error = new TypeError("Owner password does not meet policy");
+      error.code = "OWNER_PASSWORD_WEAK"; throw error;
+    }
+    if (input.recoveryPassword
+        && this.native.passwordMeetsPolicy?.(input.recoveryPassword) === false) {
+      const error = new TypeError("Recovery password does not meet policy");
+      error.code = "RECOVERY_PASSWORD_WEAK"; throw error;
+    }
     const candidate = this.native.createDocument({
       ...profile,
       ...input,

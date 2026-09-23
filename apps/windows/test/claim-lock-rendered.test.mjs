@@ -78,6 +78,7 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       },
       cancelInvitationClaim: async () => { disposedClaims += 1; return true; },
       enterEditMode: async () => ({ ...ordinary, readOnly: false }),
+      passwordMeetsPolicy: async (password) => password.length >= 20,
       updateWorkingCopy: async () => ({}), saveDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
       lock: async () => hostLock(),
@@ -114,6 +115,15 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
     };
 
     let claim = await openInvitation();
+    await user.clear(claim.confirmation);
+    await user.type(claim.confirmation, "private replacement typo");
+    await user.click(ui.getByRole(claim.dialog, "button",
+      { name: "Replace password and claim identity" }));
+    assert.match(ui.getByRole(claim.dialog, "alert").textContent, /do not match/i);
+    assert.equal(document.activeElement === claim.confirmation, true);
+    assert.equal(claimCalls, 0);
+    await user.clear(claim.confirmation);
+    await user.type(claim.confirmation, "private replacement words");
     await user.click(ui.getByRole(claim.dialog, "button",
       { name: "Replace password and claim identity" }));
     await ui.waitFor(() => assert.equal(claimCalls, 1));

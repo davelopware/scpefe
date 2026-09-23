@@ -110,8 +110,13 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       changePassword: async (value) => { passwordAttempts += 1;
         if (passwordAttempts === 1) throw new Error("Password publication failed safely");
         calls.push(["password", value]); return editable; },
+      passwordMeetsPolicy: async (password) => password.length >= 20,
       createInvitation: async (value) => { invitationAttempts += 1;
-        if (invitationAttempts === 1) throw new Error("Invitation publication failed safely");
+        if (invitationAttempts === 1) throw Object.assign(new Error("weak"),
+          { code: "WEAK_PASSWORD" });
+        if (invitationAttempts === 2) throw Object.assign(new Error("clash"),
+          { code: "PASSWORD_ALREADY_IN_USE" });
+        if (invitationAttempts === 3) throw new Error("Invitation publication failed safely");
         calls.push(["invitation", value]);
         return { created: true, temporaryPassword: "generated invitation secret" }; },
       copyInvitationPassphrase: async (value) => {
@@ -180,6 +185,13 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
     await user.type(ui.getByLabelText(dialog, "Current password"), "current password words");
+    await user.type(ui.getByLabelText(dialog, "New password"), "current password words");
+    await user.type(ui.getByLabelText(dialog, "Confirm new password"), "current password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
+    assert.match(ui.getByRole(dialog, "alert").textContent, /must differ from the current/i);
+    assert.equal(document.activeElement === ui.getByLabelText(dialog, "New password"), true);
+    await user.clear(ui.getByLabelText(dialog, "New password"));
+    await user.clear(ui.getByLabelText(dialog, "Confirm new password"));
     await user.type(ui.getByLabelText(dialog, "New password"), "replacement password words");
     await user.type(ui.getByLabelText(dialog, "Confirm new password"),
       "replacement password words");
@@ -200,12 +212,26 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.getByLabelText(invitationForm, "May remove passwords").checked, false,
       "new invitations begin with least-privilege permission defaults");
     await user.type(ui.getByLabelText(invitationForm, "Temporary label"), "New colleague");
+    await user.type(ui.getByLabelText(invitationForm,
+      "Temporary passphrase (leave blank to generate)"), "manual temporary phrase 2026!");
     await user.click(ui.getByLabelText(invitationForm, "May edit"));
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
-    assert.match((await ui.findByRole(invitationForm, "alert")).textContent,
-      /operation could not be completed safely/i);
+    await ui.waitFor(() => assert.equal(invitationAttempts, 1));
     assert.equal(ui.getByLabelText(invitationForm, "Temporary label").value,
       "New colleague");
+    const temporaryInput = ui.getByLabelText(invitationForm,
+      "Temporary passphrase (leave blank to generate)");
+    assert.equal(temporaryInput.value, "manual temporary phrase 2026!");
+    assert.equal(document.activeElement === temporaryInput, true);
+    assert.match(temporaryInput.getAttribute("aria-describedby"), /invitation-password-error/);
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
+    await ui.waitFor(() => assert.equal(invitationAttempts, 2));
+    assert.equal(document.activeElement === temporaryInput, true);
+    await user.clear(temporaryInput);
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
+    await ui.waitFor(() => assert.equal(invitationAttempts, 3));
+    await ui.waitFor(() => assert.equal(temporaryInput.getAttribute("aria-describedby"),
+      "temporary-password-policy", "generic publication errors remain form-level"));
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
     const once = await ui.findByLabelText(dialog, "One-time temporary passphrase");
     assert.equal(once.value, "generated invitation secret");

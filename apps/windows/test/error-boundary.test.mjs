@@ -71,3 +71,21 @@ test("forged envelopes cannot override catalog copy for known or unknown codes",
     assert.equal(decoded.code, "OPEN_FAILED");
   }
 });
+
+test("authoritative password preconditions retain specific safe correction guidance", async () => {
+  for (const [status, code, copy] of [[12, "WEAK_PASSWORD", /too predictable/],
+    [13, "PASSWORD_ALREADY_IN_USE", /already unlocks another slot/]]) {
+    const handlers = new Map();
+    const ipc = createSafeIpc({ handle(channel, handler) { handlers.set(channel, handler); } });
+    ipc.handle("document:create-invitation", () => {
+      throw new Error(`SCPEFE operation failed with status ${status}`);
+    });
+    let rejection;
+    try { await handlers.get("document:create-invitation")(); }
+    catch (error) { rejection = error; }
+    const decoded = decodeBoundaryError(rejection, "document:create-invitation");
+    assert.equal(decoded.code, code);
+    assert.match(safeRendererErrorMessage(decoded), copy);
+    assert.doesNotMatch(safeRendererErrorMessage(decoded), /status|SCPEFE operation/i);
+  }
+});

@@ -45,6 +45,20 @@ test("mounted post-picker dialog is focused and has no initial-text field", (t) 
   assert.match(dialog.textContent, /lost passwords cannot be recovered/i);
 });
 
+test("password fields expose requirements and live confirmation feedback", async (t) => {
+  const { user, ui } = mountedDialog(t);
+  assert.match(ui.getByLabelText("Owner password").ownerDocument
+    .getElementById("owner-password-policy").textContent, /at least 12 characters/i);
+  await user.type(ui.getByLabelText("Owner password"), "owner password words");
+  assert.match((await ui.findByText("Confirm the proposed password.")).textContent,
+    /confirm/i);
+  await user.type(ui.getByLabelText("Confirm owner password"), "owner password words");
+  assert.equal((await ui.findByText("Meets password requirements")).textContent,
+    "Meets password requirements");
+  assert.equal(ui.getByLabelText("Owner password").getAttribute("aria-describedby"),
+    "owner-password-policy");
+});
+
 test("owner mismatch stays open, retains input, focuses confirmation, and creates nothing",
   async (t) => {
     let createCalls = 0;
@@ -116,6 +130,21 @@ test("recovery mismatch never invokes creation and keeps both pairs recoverable"
       "Independent recovery password (strongly recommended)").value,
     "independent recovery words");
   });
+
+test("recovery independence rejection identifies and focuses the recovery field", async (t) => {
+  let createCalls = 0;
+  const { user, ui } = mountedDialog(t, async () => { createCalls += 1; });
+  await enterOwner(ui, user);
+  await user.type(ui.getByLabelText(
+    "Independent recovery password (strongly recommended)"), "owner password words");
+  await user.type(ui.getByLabelText("Confirm recovery password"), "owner password words");
+  await user.click(ui.getByLabelText("I will store the recovery password independently."));
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  assert.equal(createCalls, 0);
+  assert.match(ui.getByRole("alert").textContent, /independent from the owner/i);
+  assert.equal(dom.window.document.activeElement === ui.getByLabelText(
+    "Independent recovery password (strongly recommended)"), true);
+});
 
 test("creation failure remains inline with retained secrets and can be retried", async (t) => {
   let createCalls = 0;

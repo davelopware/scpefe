@@ -44,6 +44,12 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("settings:save", validateClientSettings(settings))),
   getUnresolvedJournalSummary: async () => validateUnresolvedJournalSummary(
     await ipcRenderer.invoke("journal:summary")),
+  passwordMeetsPolicy: async (password) => {
+    const value = await ipcRenderer.invoke("security:password-meets-policy",
+      validatePassword(password));
+    if (typeof value !== "boolean") throw new TypeError("host returned invalid password policy result");
+    return value;
+  },
   chooseCreateTarget: async () => {
     const value = await ipcRenderer.invoke("document:choose-create-target");
     return value === null ? null : validateCreationTargetResult(value);

@@ -275,6 +275,25 @@ napi_value create_document(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value password_meets_policy(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 1) throw std::runtime_error("passwordMeetsPolicy expects one password");
+        const SecretBytes password{env, args[0]};
+        napi_value result;
+        check(env, napi_get_boolean(env,
+            scpefe_password_meets_policy(password.data(), password.size()) != 0,
+            &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
 napi_value open_document(napi_env env, napi_callback_info info)
 {
     scpefe_unlocked_container *unlocked = nullptr;
@@ -928,6 +947,8 @@ napi_value initialize(napi_env env, napi_value exports)
     napi_property_descriptor methods[] = {
         {"createDocument", nullptr, create_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
+        {"passwordMeetsPolicy", nullptr, password_meets_policy, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
         {"openDocument", nullptr, open_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"saveDocument", nullptr, save_document, nullptr, nullptr, nullptr,
@@ -957,7 +978,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 15, methods));
+    check(env, napi_define_properties(env, exports, 16, methods));
     return exports;
 }
 

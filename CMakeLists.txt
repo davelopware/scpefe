@@ -152,6 +152,12 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-migration-addon.integration.mjs
                 $<TARGET_FILE:scpefe_electron_native>
         )
+        add_test(
+            NAME scpefe.native-addon-password-policy
+            COMMAND ${NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-password-policy-addon.integration.mjs
+                $<TARGET_FILE:scpefe_electron_native>
+        )
     endif()
 endif()
 

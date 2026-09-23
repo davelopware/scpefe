@@ -79,6 +79,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         }
         if (channel === "profile:save") return { ...request,
           nativeProfilePath: "C:\\private\\profile.json" };
+        if (channel === "security:password-meets-policy") return true;
         if (channel === "document:choose-create-target") {
           return { selected: true };
         }
@@ -133,7 +134,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "reconcileProfile", "getClientSettings", "saveClientSettings",
-    "getUnresolvedJournalSummary", "chooseCreateTarget", "cancelCreateTarget",
+    "getUnresolvedJournalSummary", "passwordMeetsPolicy", "chooseCreateTarget", "cancelCreateTarget",
     "createDocument", "chooseOpenTarget", "cancelOpenTarget",
     "openSelectedDocument", "unlockDocument",
     "openExternalDocument", "cancelExternalOpen",
