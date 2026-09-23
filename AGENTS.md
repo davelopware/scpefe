@@ -33,6 +33,20 @@ Before capturing UI review evidence, read and follow `docs/agents/ui-screenshots
 - Keep one internal class per clearly named `.hpp`/`.cpp` pair. Place C adapters in `_abi.cpp` files.
 - Add a cohesive, purpose-named subdirectory when another folder level keeps file counts navigable; avoid generic catch-all folders.
 
+## Single-issue implementation runs
+
+For a ticket implemented with subagents:
+
+1. Assign the issue before changing code.
+2. Create one `codex/issue-N` implementer branch in an isolated `/tmp` worktree, based on the intended integration branch or commit.
+3. Give one implementation subagent ownership of diagnosis, regression tests, the fix, focused resource-contained tests, and cohesive commits.
+4. Give a separate verification subagent the issue criteria and resulting commit. Return findings to the implementer for remediation and repeat independent verification until it passes.
+5. Use a separate integration subagent to apply the verified commit to the intended integration branch and run the required integration gate against the exact resulting SHA.
+6. Push the tested integration commit and either open its pull request or add it to the parent feature pull request, as appropriate.
+7. Close the issue with a comment naming the integrated commit, passing exact-SHA gate, and pull request.
+8. Remove the completed issue branch and worktree after successful integration. Preserve failed or incomplete work for diagnosis.
+9. Keep all Node/Electron commands globally serial across agents and worktrees, and run every one resource-contained from its first invocation as specified above.
+
 ## Multi-issue implementation runs
 
 For a blocker-linked issue range implemented with subagents:
