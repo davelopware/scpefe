@@ -196,10 +196,15 @@ export async function runMountedLock(t, origin) {
       const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
     }, clearTimer() {} } : {}), ...callbacks });
   const timers = []; const acks = [];
+  let protectionRequestSeen;
+  const protectionRequestObserved = new Promise((resolve) => {
+    protectionRequestSeen = resolve;
+  });
   const ipcListeners = new Map(); const ipcHandlers = new Map();
   const emittedChannels = [];
   const emit = (channel, value) => {
     emittedChannels.push(channel);
+    if (channel === "document:protection-requested") protectionRequestSeen();
     for (const listener of ipcListeners.get(channel) ?? []) listener({}, value);
   };
   let lockStarted; const starting = new Promise((resolve) => { lockStarted = resolve; });
@@ -355,6 +360,17 @@ export async function runMountedLock(t, origin) {
       `renderer exposes lifecycle completion for ${label}`);
     await completion.waitForIdle({ timeoutMs: 5_000 });
   };
+  const awaitHarnessPhase = async (phase, label) => {
+    let phaseTimeout;
+    try {
+      await Promise.race([phase, new Promise((_, reject) => {
+        phaseTimeout = setTimeout(() => reject(
+          new Error(`renderer did not reach ${label}`)), 5_000);
+      })]);
+    } finally {
+      clearTimeout(phaseTimeout);
+    }
+  };
   const awaitHeldLifecycleCompletion = async (entered, release, label) => {
     let completion;
     let completionSettledBeforeRelease;
@@ -476,6 +492,11 @@ export async function runMountedLock(t, origin) {
       await user.click(ui.getByLabelText(creation,
         "I understand that lost passwords cannot be recovered."));
       await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+      if (origin === "s5-new") {
+        await awaitHarnessPhase(protectionRequestObserved,
+          "provisional New protection request");
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     } else if (entry === "open") {
       await command("File", /Open/);
       const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
@@ -493,7 +514,9 @@ export async function runMountedLock(t, origin) {
     else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
     const title = entry === "new" ? /before New/ : ["open", "external"].includes(entry)
       ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/;
-    const protection = await ui.findByRole(document.body, "dialog", { name: title });
+    const protection = origin === "s5-new"
+      ? ui.getByRole(document.body, "dialog", { name: title })
+      : await ui.findByRole(document.body, "dialog", { name: title });
     const keep = ui.getByRole(protection, "button", { name: "Keep current document open" });
     assert.equal(document.activeElement, keep);
     if (externalRequest) keep.click();
@@ -509,6 +532,9 @@ export async function runMountedLock(t, origin) {
     if (returned) {
       const cancel = ui.queryByRole(returned, "button", { name: "Cancel" });
       if (cancel) await user.click(cancel);
+    }
+    if (origin === "s5-new") {
+      await awaitLifecycleCompletion("provisional New protection cancellation");
     }
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
   };
