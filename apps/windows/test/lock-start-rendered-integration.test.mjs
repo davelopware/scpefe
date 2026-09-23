@@ -1139,7 +1139,21 @@ export async function runMountedLock(t, origin) {
     if (outcome === "discard-retry") {
       if (provisionalDecision) provisionalDiscardFault = true; else discardFault = true;
     }
+    let replacementCompletion = null;
+    if (origin === "prr-open-save") holdMaintenance = true;
     await user.click(ui.getByRole(protection, "button", { name: decision }));
+    if (origin === "prr-open-save") {
+      await Promise.race([maintenanceEntered, new Promise((_, reject) => setTimeout(() =>
+        reject(new Error(`provisional replacement did not enter publication: ${
+          protection.textContent}`)), 1_000))]);
+      let completionSettled = false;
+      replacementCompletion = awaitLifecycleCompletion(
+        "provisional Save-and-open").then(() => { completionSettled = true; });
+      await Promise.resolve();
+      assert.equal(completionSettled, false,
+        "lifecycle completion waits for held provisional replacement publication");
+      releaseMaintenance();
+    }
     if (outcome.endsWith("retry")) {
       await ui.findByText(protection,
         /document protection choice could not be completed/i);
@@ -1160,6 +1174,9 @@ export async function runMountedLock(t, origin) {
         { name: entry === "new" ? /before New/ : /before Open/ });
       await user.click(ui.getByRole(protection, "button", { name: decision }));
     }
+    if (replacementCompletion) await replacementCompletion;
+    else await awaitLifecycleCompletion(
+      `${provisionalDecision ? "provisional" : "dirty"} ${decision} ${entry}`);
     await ui.waitFor(() => {
       assert.equal(document.querySelector("[role=dialog]") === null, true);
       assert.equal(host.service === service, false);
