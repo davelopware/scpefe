@@ -1622,18 +1622,24 @@ test("lock start is synchronous, once-only, and precedes awaited journal cleanup
   assert.equal(starts, 1, "inactive lock does not emit a false lock-start transition");
 });
 
-test("real inactivity timer starts lock before an awaited journal flush", async (t) => {
+test("inactivity timer starts lock before an awaited journal flush", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-inactivity-start-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe"); await fs.writeFile(target, "container");
   let startLock; const started = new Promise((resolve) => { startLock = resolve; });
   let release; let writeStarted; let final = false;
   const writing = new Promise((resolve) => { writeStarted = resolve; });
+  const timers = [];
   const service = new DocumentService({ fs, publicationCapabilities, inactivityMs: 100,
     profilePath: await writeProfile(directory, "Ada", "Desk"),
     native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
       canEdit: true, documentId: "46".repeat(16), baseRevision: "57".repeat(32),
       journalKey: Buffer.alloc(32, 11) }) }),
+    setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer); return timer;
+    },
+    clearTimer(timer) { timer.cleared = true; },
     onLockStart: ({ reason }) => { assert.equal(reason, "inactivity"); startLock(); },
     onLocked: () => { final = true; },
   });
@@ -1643,15 +1649,58 @@ test("real inactivity timer starts lock before an awaited journal flush", async 
   service.journals.write = async (...args) => {
     writeStarted();
     await new Promise((resolve) => { release = resolve; }); return write(...args); };
-  await Promise.race([started, new Promise((_, reject) => {
-    setTimeout(() => reject(new Error("inactivity lock did not start")), 750);
-  })]);
+  const inactivity = timers.filter(
+    (timer) => timer.delay === 100 && !timer.cleared).at(-1);
+  assert.ok(inactivity, "active inactivity timer is captured");
+  inactivity.callback();
+  await started;
   assert.equal(final, false); assert.equal(service.active.working.content, "timer plaintext");
   await writing;
   release();
   await new Promise((resolve) => { const poll = () => final ? resolve() : setImmediate(poll); poll(); });
   assert.equal(service.active, null);
 });
+
+test("inactivity lock safely invalidates awaited edit entry and preserves its lease",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-enter-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, "container");
+    const timers = [];
+    let lockStarted;
+    const started = new Promise((resolve) => { lockStarted = resolve; });
+    let lockFinished;
+    const locked = new Promise((resolve) => { lockFinished = resolve; });
+    const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "48".repeat(16), baseRevision: "59".repeat(32),
+      journalKey: Buffer.alloc(32, 12) }) });
+    const service = new DocumentService({ fs, publicationCapabilities, inactivityMs: 100,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native,
+      setTimer(callback, delay) {
+        const timer = { callback, delay, cleared: false };
+        timers.push(timer); return timer;
+      },
+      clearTimer(timer) { timer.cleared = true; },
+      onLockStart: ({ reason }) => { assert.equal(reason, "inactivity"); lockStarted(); },
+      onLocked: lockFinished,
+    });
+    await service.openDocument(target, "password words");
+    const delayed = delayNextTargetRead(service, target);
+    const editing = service.enterEditMode();
+    await delayed.readStarted;
+    timers.filter((timer) => timer.delay === 100 && !timer.cleared).at(-1).callback();
+    await started;
+    delayed.release();
+    await assert.rejects(editing, (error) => error.code === "SESSION_LOCKED");
+    await locked;
+    assert.equal(service.active, null);
+    const acquired = native.currentLease();
+    await service.openDocument(target, "password words");
+    await service.enterEditMode();
+    assert.equal(native.currentLease().sessionId, acquired.sessionId);
+  });
 
 test("verified save waits for an in-flight checkpoint before clearing its journal", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-save-race-"));
@@ -2227,7 +2276,7 @@ test("coordinates holders, heartbeats, lock suspension, resumption, and expiry",
   utc += 120_000;
   const heartbeat = timers.filter((timer) => timer.delay === 120_000).at(-1);
   heartbeat.callback();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await first.runLifecycleBarrier(() => {});
   assert.equal(native.currentLease().heartbeatCounter, 2);
   await first.lock("screen-lock");
   utc += 60_000;
