@@ -82,6 +82,16 @@ int main(void)
     uint8_t owner_journal_key[SCPEFE_WORK_JOURNAL_KEY_SIZE];
     uint8_t recovery_journal_key[SCPEFE_WORK_JOURNAL_KEY_SIZE];
 
+    CHECK(scpefe_password_meets_policy((const uint8_t *)owner, sizeof(owner) - 1));
+    CHECK(!scpefe_password_meets_policy((const uint8_t *)"passwordpassword", 16));
+    CHECK(!scpefe_password_meets_policy((const uint8_t *)"short", 5));
+    CHECK(scpefe_password_meets_policy(
+        (const uint8_t *)"550e8400-e29b-41d4-a716-446655440000", 36));
+    CHECK(scpefe_password_meets_policy(
+        (const uint8_t *)"550E8400-E29B-41D4-A716-446655440000", 36));
+    CHECK(!scpefe_password_meets_policy(
+        (const uint8_t *)"00000000-0000-1000-8000-000000000000", 36));
+
     CHECK(scpefe_new_document_create(&document, NULL, 0, &container_size)
         == SCPEFE_STATUS_BUFFER_TOO_SMALL);
     CHECK(container_size > 0);
@@ -119,6 +129,11 @@ int main(void)
     invalid.profile_name_size = 0;
     CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
+    invalid = document;
+    invalid.owner_password = (const uint8_t *)"passwordpassword";
+    invalid.owner_password_size = 16;
+    CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)
+        == SCPEFE_STATUS_WEAK_PASSWORD);
     invalid = document;
     invalid.recovery_password = invalid.owner_password;
     invalid.recovery_password_size = invalid.owner_password_size;

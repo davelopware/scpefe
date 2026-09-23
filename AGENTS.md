@@ -22,6 +22,10 @@ Treat every Node/Electron renderer test or build process tree as host-risky from
 - If a systemd user scope or any required limit is unavailable, stop and report the blocker. A bare or partially bounded run is not a fallback.
 - Keep every retry and broader follow-up gate contained. A passing isolated test does not authorize an unconstrained suite.
 
+### Actual Electron screenshots
+
+Before capturing UI review evidence, read and follow `docs/agents/ui-screenshots.md`.
+
 ## C++ header documentation
 
 - Give every class, struct, enum, function, and method declared in a `.h` or `.hpp` file a succinct purpose comment.

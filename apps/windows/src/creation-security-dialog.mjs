@@ -33,6 +33,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
   const [submitting, setSubmitting] = useState(false);
   const ownerConfirmationRef = useRef(null);
   const recoveryConfirmationRef = useRef(null);
+  const recoveryRef = useRef(null);
   const ownerRef = useRef(null);
   const dialogRef = useRef(null);
   const completedRef = useRef(false);
@@ -75,6 +76,8 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
         ownerConfirmationRef.current?.focus();
       } else if (source === "recovery passwords do not match") {
         recoveryConfirmationRef.current?.focus();
+      } else if (source === "recovery password must be independent from the owner password") {
+        recoveryRef.current?.focus();
       } else {
         ownerRef.current?.focus();
       }
@@ -86,7 +89,8 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       completedRef.current = true;
     } catch (submissionError) {
       setError(safeRendererErrorMessage(submissionError));
-      ownerRef.current?.focus();
+      if (submissionError?.code === "RECOVERY_PASSWORD_WEAK") recoveryRef.current?.focus();
+      else ownerRef.current?.focus();
     } finally {
       setSubmitting(false);
     }
@@ -130,8 +134,11 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       label: "Independent recovery password (strongly recommended)",
       confirmationLabel: "Confirm recovery password", revealed: recoveryRevealed,
       required: false, value: recoveryPassword,
+      inputRef: recoveryRef,
       confirmationValue: recoveryConfirmation,
       confirmationRef: recoveryConfirmationRef,
+      comparePassword: ownerPassword,
+      compareMessage: "Recovery password must differ from the owner password.",
       onValueChange: setRecoveryPassword,
       onConfirmationChange: setRecoveryConfirmation,
       onToggle: () => setRecoveryRevealed((visible) => !visible) }),

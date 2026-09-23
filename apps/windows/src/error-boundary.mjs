@@ -13,6 +13,10 @@ export const ERROR_CATALOG = Object.freeze({
   MIGRATION_FAILED: ["Document migration could not be completed.", "The original document remains available; retry or cancel."],
   EXPORT_FAILED: ["The plaintext copy could not be exported.", "Choose another destination or cancel."],
   PASSWORD_CHANGE_FAILED: ["The password operation could not be completed.", "Review the passwords and try again."],
+  WEAK_PASSWORD: ["The proposed password is too predictable.", "Choose a passphrase that is harder to guess."],
+  OWNER_PASSWORD_WEAK: ["The owner password is too predictable.", "Choose a passphrase that is harder to guess."],
+  RECOVERY_PASSWORD_WEAK: ["The recovery password is too predictable.", "Choose an independent passphrase that is harder to guess."],
+  PASSWORD_ALREADY_IN_USE: ["The proposed password already unlocks another slot in this document.", "Choose a different password."],
   INVITATION_FAILED: ["The invitation operation could not be completed.", "Review the details and try again, or cancel."],
   LIFECYCLE_FAILED: ["The document protection choice could not be completed.", "The current session remains open; retry or cancel."],
   JOURNAL_WARNING: ["Local recovery needs attention.", "Keep the document open and review its recovery state."],
@@ -47,6 +51,7 @@ const OPERATIONS = Object.freeze({
 });
 
 const INTERNAL_CODES = Object.freeze({
+  OWNER_PASSWORD_WEAK: "OWNER_PASSWORD_WEAK", RECOVERY_PASSWORD_WEAK: "RECOVERY_PASSWORD_WEAK",
   DOCUMENT_PROTECTION_BUSY: "LIFECYCLE_FAILED", DOCUMENT_PROTECTION_LOCKED: "LIFECYCLE_FAILED",
   DOCUMENT_PROTECTION_STALE: "LIFECYCLE_FAILED", DOCUMENT_SESSION_INVALIDATED: "LIFECYCLE_FAILED",
   DOCUMENT_REPLACEMENT_CANCELED: "LIFECYCLE_FAILED", DOCUMENT_REPLACEMENT_TARGET_CHANGED: "OPEN_FAILED",
@@ -88,8 +93,12 @@ export class SafeBoundaryError extends Error {
 }
 
 export function safeErrorDetails(error, operation = "operation") {
+  const nativeStatus = typeof error?.message === "string"
+    ? /status (12|13)\b/.exec(error.message)?.[1] : undefined;
   const code = error instanceof SafeBoundaryError && isCatalogCode(error.code)
-    ? error.code : INTERNAL_CODES[error?.code] ?? operationErrorCode(operation);
+    ? error.code : nativeStatus === "12" ? "WEAK_PASSWORD"
+      : nativeStatus === "13" ? "PASSWORD_ALREADY_IN_USE"
+      : INTERNAL_CODES[error?.code] ?? operationErrorCode(operation);
   return catalogDetails(code, operation);
 }
 

@@ -13,6 +13,7 @@
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 #include "format/revision_limits.hpp"
+#include "security/password_strength.hpp"
 
 #include <algorithm>
 #include <array>
@@ -165,6 +166,13 @@ scpefe_status scpefe_new_document_create(
                 document->owner_password_size) == 0)) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
+    if (!scpefe::security::password_is_strong(
+            document->owner_password, document->owner_password_size)
+        || (document->recovery_password != nullptr
+            && !scpefe::security::password_is_strong(
+                document->recovery_password, document->recovery_password_size))) {
+        return SCPEFE_STATUS_WEAK_PASSWORD;
+    }
     try {
         const std::size_t required_size = scpefe::document::NewDocument::encoded_size(
             {document->profile_name, document->profile_name_size},
@@ -198,6 +206,16 @@ scpefe_status scpefe_new_document_create(
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
+}
+
+int scpefe_password_meets_policy(
+    const std::uint8_t *password,
+    std::size_t password_size
+)
+{
+    return scpefe::format::span_is_valid(password, password_size)
+        && password_size >= 12
+        && scpefe::security::password_is_strong(password, password_size);
 }
 
 scpefe_status scpefe_password_container_unlock(

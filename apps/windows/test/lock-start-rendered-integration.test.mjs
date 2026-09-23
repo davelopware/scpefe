@@ -417,6 +417,7 @@ export async function runMountedLock(t, origin) {
     }
   };
   const driveProtectedCancel = async (entry) => {
+    let externalRequest = null;
     if (entry === "new") {
       await command("File", /New/);
       const creation = await ui.findByRole(document.body, "dialog",
@@ -433,7 +434,8 @@ export async function runMountedLock(t, origin) {
       await user.type(ui.getByLabelText(opened, "Password"), "password words");
       await user.click(ui.getByRole(opened, "button", { name: "Open" }));
     } else if (entry === "external") {
-      await host.setReady(); host.enqueueExternal({ target, source: "second-instance" });
+      await host.setReady(); externalRequest = host.enqueueExternal({ target: otherTarget,
+        source: "second-instance" });
       const opened = await ui.findByRole(document.body, "dialog",
         { name: "Open requested document" });
       await user.type(ui.getByLabelText(opened, "Password"), "password words");
@@ -445,10 +447,17 @@ export async function runMountedLock(t, origin) {
       ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/;
     const protection = await ui.findByRole(document.body, "dialog", { name: title });
     const keep = ui.getByRole(protection, "button", { name: "Keep current document open" });
-    assert.equal(document.activeElement, keep); await user.click(keep);
+    assert.equal(document.activeElement, keep);
+    if (externalRequest) keep.click();
+    else await user.click(keep);
+    if (externalRequest) await waitScalar(() =>
+      host.externalRequests.current(externalRequest.token) === null,
+    "external request cancellation after keeping the current document");
     await ui.waitFor(() => assert.equal(
       ui.queryByRole(document.body, "dialog", { name: title }), null));
-    const returned = ui.queryByRole(document.body, "dialog");
+    const returned = ["new", "open"].includes(entry)
+      ? await ui.findByRole(document.body, "dialog")
+      : entry === "external" ? null : ui.queryByRole(document.body, "dialog");
     if (returned) {
       const cancel = ui.queryByRole(returned, "button", { name: "Cancel" });
       if (cancel) await user.click(cancel);

@@ -448,6 +448,12 @@ SCPEFE_API scpefe_status scpefe_new_document_create(
     size_t *output_size
 );
 
+/* Reports whether candidate bytes satisfy the policy for newly chosen passwords. */
+SCPEFE_API int scpefe_password_meets_policy(
+    const uint8_t *password,
+    size_t password_size
+);
+
 /* Seals a child revision and returns a replacement self-contained container. */
 SCPEFE_API scpefe_status scpefe_manual_save(
     const scpefe_manual_save_v1 *save,
