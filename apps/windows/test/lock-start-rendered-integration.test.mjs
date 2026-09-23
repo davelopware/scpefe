@@ -37,6 +37,7 @@ export async function runMountedLock(t, origin) {
   let publicationFailureAfter = null;
   let createFault = false;
   let createdCandidate = false;
+  let createdInput = null;
   let createdLeaseFault = false;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const revisionGraphs = new Map();
@@ -140,8 +141,10 @@ export async function runMountedLock(t, origin) {
     else lease = { ...next };
     return Buffer.from(bytes);
   },
-  createDocument() {
+  passwordMeetsPolicy(password) { return password.length >= 12; },
+  createDocument(input) {
     if (createFault) throw new Error("injected native create failure");
+    createdInput = input;
     createdCandidate = true;
     newLease = { active: false, sessionId: "0".repeat(32),
     heartbeatCounter: 0, holderUtcMs: 0, durationMs: 600_000,
@@ -291,6 +294,9 @@ export async function runMountedLock(t, origin) {
     dom.window.close(); for (const [key, descriptor] of prior) descriptor
       ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key]; });
   const invoke = async (channel, value) => {
+    if (channel === "security:password-meets-policy") {
+      return native.passwordMeetsPolicy(value);
+    }
     const handler = ipcHandlers.get(channel);
     if (!handler) return null;
     return handler({}, value);
@@ -372,14 +378,28 @@ export async function runMountedLock(t, origin) {
     const priorService = host.service;
     let request = null;
     if (entry === "new") {
+      const issue53 = origin === "s0-new";
+      const ownerPassword = issue53
+        ? "defenistration is the root of" : "owner password words";
       await command("File", /New/);
       await waitScalar(() => ui.queryByRole(document.body, "dialog",
         { name: "Secure new document" }) !== null, "New security dialog");
       const creation = ui.getByRole(document.body, "dialog",
         { name: "Secure new document" });
-      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Owner password"), ownerPassword);
       await user.type(ui.getByLabelText(creation, "Confirm owner password"),
-        "owner password words");
+        ownerPassword);
+      if (issue53) {
+        await user.type(ui.getByLabelText(creation,
+          "Independent recovery password (strongly recommended)"),
+        "01a0bf20-2424-73e9-a572-f2eded90be3e");
+        await user.type(ui.getByLabelText(creation, "Confirm recovery password"),
+          "01a0bf20-2424-73e9-a572-f2eded90be3e");
+        await ui.waitFor(() => assert.equal(
+          ui.getAllByText(creation, "Meets password requirements").length, 2));
+        await user.click(ui.getByLabelText(creation,
+          "I will store the recovery password independently."));
+      }
       await user.click(ui.getByLabelText(creation,
         "I understand that lost passwords cannot be recovered."));
       await user.click(ui.getByRole(creation, "button", { name: "Create" }));
@@ -408,6 +428,11 @@ export async function runMountedLock(t, origin) {
       ? "new-document\\.scpefe" : "other\\.scpefe");
     await waitScalar(() => titlePattern.test(document.title), `${entry} safe document title`);
     assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
+    if (entry === "new" && origin === "s0-new") {
+      assert.equal(createdInput.ownerPassword, "defenistration is the root of");
+      assert.equal(createdInput.recoveryPassword,
+        "01a0bf20-2424-73e9-a572-f2eded90be3e");
+    }
     await waitScalar(() => document.activeElement === editor,
       "successful replacement focus on the document editor");
     if (request) {

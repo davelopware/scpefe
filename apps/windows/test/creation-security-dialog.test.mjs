@@ -14,7 +14,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 globalThis.requestAnimationFrame = (callback) => callback();
 
 const React = (await import("react")).default;
-const { cleanup, render, within } = await import("@testing-library/react");
+const { cleanup, render, waitFor, within } = await import("@testing-library/react");
 const userEvent = (await import("@testing-library/user-event")).default;
 const { CreateDocumentControl, CreationSecurityDialog } = await import(
   "../src/creation-security-dialog.mjs");
@@ -105,6 +105,41 @@ test("optional recovery acknowledgement is conditional and matching values cross
       storedRecoverySeparately: true,
     });
   });
+
+test("reported UUIDv7 recovery value reaches creation when both live statuses pass",
+  async (t) => {
+    const requests = [];
+    const { user, ui } = mountedDialog(t, async (request) => {
+      requests.push(request);
+    });
+    await user.type(ui.getByLabelText("Owner password"),
+      "defenistration is the root of");
+    await user.type(ui.getByLabelText("Confirm owner password"),
+      "defenistration is the root of");
+    await user.type(ui.getByLabelText(
+      "Independent recovery password (strongly recommended)"),
+    "01a0bf20-2424-73e9-a572-f2eded90be3e");
+    await user.type(ui.getByLabelText("Confirm recovery password"),
+      "01a0bf20-2424-73e9-a572-f2eded90be3e");
+    await waitFor(() => assert.equal(
+      ui.getAllByText("Meets password requirements").length, 2));
+    await user.click(ui.getByLabelText(
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByLabelText(
+      "I will store the recovery password independently."));
+    await user.click(ui.getByRole("button", { name: "Create" }));
+    assert.equal(requests.length, 1);
+    assert.equal(ui.queryByRole("alert"), null);
+  });
+
+test("locally knowable creation failures identify their affected control", async (t) => {
+  const { user, ui } = mountedDialog(t);
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  assert.match(ui.getByRole("alert").textContent, /owner password is required/i);
+  assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
+    true);
+  assert.equal(ui.getByLabelText("Owner password").getAttribute("aria-invalid"), "true");
+});
 
 test("recovery mismatch never invokes creation and keeps both pairs recoverable",
   async (t) => {
