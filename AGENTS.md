@@ -22,6 +22,13 @@ Treat every Node/Electron renderer test or build process tree as host-risky from
 - If a systemd user scope or any required limit is unavailable, stop and report the blocker. A bare or partially bounded run is not a fallback.
 - Keep every retry and broader follow-up gate contained. A passing isolated test does not authorize an unconstrained suite.
 
+### Actual Electron screenshots
+
+- Capture only synthetic inputs from the real production renderer and native addon. Run Electron under Xvfb and use CDP `Page.captureScreenshot`; never substitute a mockup.
+- When required host libraries cannot be installed, use `apt download` and extract the exact packages into a temporary user-owned directory, then supply that directory through `LD_LIBRARY_PATH` without changing the OS.
+- Apply the resource-safety limits above to the entire build/Electron/screenshot process tree, serially and with timing and timeout measurement. Remove temporary symlinks and assets afterward.
+- Record native picker or automation limitations with the evidence. See `docs/review/issue-50/README.md` for a worked example.
+
 ## C++ header documentation
 
 - Give every class, struct, enum, function, and method declared in a `.h` or `.hpp` file a succinct purpose comment.
