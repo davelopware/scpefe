@@ -41,17 +41,27 @@ export async function runMountedLock(t, origin) {
   let createdCandidate = false;
   let createdLeaseFault = false;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
+  const maintenanceReleased = new Promise((resolve) => { releaseMaintenance = resolve; });
   const revisionGraphs = new Map();
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
   let holdDiscard = false; let releaseDiscard; let discardStarted;
+  const discardReleased = new Promise((resolve) => { releaseDiscard = resolve; });
   const discardEntered = new Promise((resolve) => { discardStarted = resolve; });
   let holdNewLink = false; let releaseNewLink; let newLinkStarted;
   const newLinkEntered = new Promise((resolve) => { newLinkStarted = resolve; });
   let holdOtherReadAt = 0; let otherReadCount = 0; let releaseOtherRead; let otherReadStarted;
+  let holdInitialRead = false; let releaseInitialRead; let initialReadStarted;
+  const initialReadReleased = new Promise((resolve) => { releaseInitialRead = resolve; });
+  const initialReadEntered = new Promise((resolve) => { initialReadStarted = resolve; });
   let postAuthorizationFaultTarget = null;
   let postAuthorizationFaultArmed = false;
   const otherReadEntered = new Promise((resolve) => { otherReadStarted = resolve; });
   const serviceFs = { ...fs, async readFile(file, ...args) {
+    if (holdInitialRead && file === target) {
+      initialReadStarted();
+      await initialReadReleased;
+      holdInitialRead = false;
+    }
     if (postAuthorizationFaultArmed && file === postAuthorizationFaultTarget) {
       postAuthorizationFaultArmed = false;
       return Buffer.from("post-authorization-revalidation-fault");
@@ -85,7 +95,7 @@ export async function runMountedLock(t, origin) {
     }
     if (holdMaintenance && destination === target) {
       maintenanceStarted();
-      await new Promise((resolve) => { releaseMaintenance = resolve; });
+      await maintenanceReleased;
       holdMaintenance = false;
     }
     const renamed = await fs.rename(source, destination);
@@ -96,7 +106,7 @@ export async function runMountedLock(t, origin) {
   }, async unlink(file) {
     if (holdDiscard && file.startsWith(path.join(directory, "journals"))) {
       discardStarted();
-      await new Promise((resolve) => { releaseDiscard = resolve; });
+      await discardReleased;
       holdDiscard = false;
     }
     if (discardFault && file.startsWith(path.join(directory, "journals"))) {
@@ -345,6 +355,28 @@ export async function runMountedLock(t, origin) {
       `renderer exposes lifecycle completion for ${label}`);
     await completion.waitForIdle({ timeoutMs: 5_000 });
   };
+  const awaitHeldLifecycleCompletion = async (entered, release, label) => {
+    let completion;
+    let completionSettledBeforeRelease;
+    let entryTimeout;
+    try {
+      await Promise.race([entered, new Promise((_, reject) => {
+        entryTimeout = setTimeout(() => reject(
+          new Error(`${label} did not reach its held operation`)), 5_000);
+      })]);
+      let completionSettled = false;
+      completion = awaitLifecycleCompletion(label)
+        .then(() => { completionSettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      completionSettledBeforeRelease = completionSettled;
+    } finally {
+      clearTimeout(entryTimeout);
+      release();
+    }
+    assert.equal(completionSettledBeforeRelease, false,
+      `lifecycle completion waits for held ${label}`);
+    await completion;
+  };
   const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
   const assertFocusPreserved = async (dialog, field) => {
     const focused = ui.getByLabelText(dialog, field);
@@ -549,7 +581,12 @@ export async function runMountedLock(t, origin) {
   await command("File", /Open/);
   let dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.type(ui.getByLabelText(dialog, "Password"), "password words");
+  if (origin === "s8-close") holdInitialRead = true;
   await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
+  if (origin === "s8-close") {
+    await awaitHeldLifecycleCompletion(initialReadEntered, () => releaseInitialRead(),
+      "initial document Open");
+  } else await awaitLifecycleCompletion("initial document Open");
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Read-only"));
   if (origin === "focus-active") {
@@ -1202,6 +1239,7 @@ export async function runMountedLock(t, origin) {
     if (outcome === "cancel") {
       await user.click(ui.getByRole(protection, "button",
         { name: "Keep current document open" }));
+      await awaitLifecycleCompletion(`dirty Cancel ${entry}`);
       await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
       assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
       return;
@@ -1212,10 +1250,8 @@ export async function runMountedLock(t, origin) {
     if (outcome === "discard-retry") {
       if (provisionalDecision) provisionalDiscardFault = true; else discardFault = true;
     }
+    if (origin === "dc-exit-discard") holdDiscard = true;
     await user.click(ui.getByRole(protection, "button", { name: decision }));
-    if (outcome === "save" && entry !== "window") {
-      await awaitLifecycleCompletion(`dirty Save-and-${entry}`);
-    }
     if (outcome.endsWith("retry")) {
       const message = /document protection choice could not be completed/i;
       await ui.findByText(protection, message);
@@ -1225,6 +1261,7 @@ export async function runMountedLock(t, origin) {
           { name: entry === "close" ? /before Close/ : /before Exit/ });
         await user.click(ui.getByRole(protection, "button",
           { name: "Keep current document open" }));
+        await awaitLifecycleCompletion(`provisional retry Cancel ${entry}`);
         await ui.waitFor(() => assert.equal(
           document.querySelector("[role=dialog]") === null, true));
         assert.equal(fakeWindow.closed, 0); return;
@@ -1232,8 +1269,16 @@ export async function runMountedLock(t, origin) {
       saveFault = false; discardFault = false; provisionalDiscardFault = false;
       protection = ui.getByRole(document.body, "dialog",
         { name: entry === "close" ? /before Close/ : /before Exit/ });
+      if (origin === "dc-exit-save-retry") holdMaintenance = true;
       await user.click(ui.getByRole(protection, "button", { name: decision }));
     }
+    if (origin === "dc-exit-save-retry") {
+      await awaitHeldLifecycleCompletion(maintenanceEntered, () => releaseMaintenance(),
+        "dirty Exit save retry");
+    } else if (origin === "dc-exit-discard") {
+      await awaitHeldLifecycleCompletion(discardEntered, () => releaseDiscard(),
+        "dirty Exit discard");
+    } else await awaitLifecycleCompletion(`dirty ${decision} ${entry}`);
     if (entry === "close") await ui.waitFor(() => assert.equal(
       ui.getByLabelText(document.body, "Document state").textContent, "No document"));
     else await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
@@ -1544,7 +1589,9 @@ export async function runMountedLock(t, origin) {
     /document protection choice could not be completed/i));
     assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "");
     assert.equal(document.activeElement, save);
-    saveFault = false; await user.click(save);
+    saveFault = false; holdMaintenance = true; await user.click(save);
+    await awaitHeldLifecycleCompletion(maintenanceEntered, () => releaseMaintenance(),
+      "native window Exit save retry");
     await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
     assert.equal(host.service.active.editMode, false);
     assert.equal(await fs.readFile(target, "utf8"), "saved:mounted secret plaintext");
