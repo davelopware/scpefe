@@ -19,7 +19,8 @@ test("all new-password workflows expose the shared policy and live authoritative
         .test(password) };
     const React = (await import("react")).default;
     const { cleanup, render, within } = await import("@testing-library/react");
-    const { PasswordPolicyStatus } = await import("../src/password-policy.mjs");
+    const { assessProposedPassword, PasswordPolicyStatus } = await import(
+      "../src/password-policy.mjs");
     t.after(() => {
       cleanup(); dom.window.close();
       for (const [key, descriptor] of prior) {
@@ -39,10 +40,29 @@ test("all new-password workflows expose the shared policy and live authoritative
       rendered.unmount();
     }
 
+    assert.deepEqual(await assessProposedPassword("   "), { status: "empty" });
+    assert.deepEqual(await assessProposedPassword("short"), {
+      status: "rejected", reason: "minimum-length",
+    });
+    assert.deepEqual(await assessProposedPassword("  passwordpassword  "), {
+      status: "rejected", reason: "native-policy",
+    });
+    assert.deepEqual(await assessProposedPassword(
+      "  strong passphrase with unrelated private words 2026!  "), {
+      status: "accepted",
+      password: "strong passphrase with unrelated private words 2026!",
+    });
+    const authoritative = dom.window.scpefe.passwordMeetsPolicy;
+    dom.window.scpefe.passwordMeetsPolicy = async () => { throw new Error("offline"); };
+    assert.deepEqual(await assessProposedPassword("strong passphrase words"), {
+      status: "unavailable",
+    });
+    dom.window.scpefe.passwordMeetsPolicy = authoritative;
+
     const cases = [
       ["short", /at least 12/],
-      ["passwordpassword", /less predictable/],
-      ["00000000-0000-1000-8000-000000000000", /less predictable/],
+      ["passwordpassword", /too predictable/],
+      ["00000000-0000-1000-8000-000000000000", /too predictable/],
       ["550E8400-E29B-41D4-A716-446655440000", /Meets password requirements/],
       ["strong passphrase with unrelated private words 2026!", /Meets password requirements/],
     ];

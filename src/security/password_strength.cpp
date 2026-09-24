@@ -61,9 +61,9 @@ bool consists_only_of_repeat_matches(const ZxcMatch_t *match)
 
 } // namespace
 
-bool password_is_strong(const std::uint8_t *password, std::size_t password_size)
+bool password_meets_policy(const std::uint8_t *password, std::size_t password_size)
 {
-    if (password == nullptr || password_size == 0
+    if (password == nullptr || password_size < 12
         || password_size == std::numeric_limits<std::size_t>::max()
         || contains_nul(password, password_size)) return false;
 

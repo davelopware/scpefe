@@ -166,10 +166,10 @@ scpefe_status scpefe_new_document_create(
                 document->owner_password_size) == 0)) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
-    if (!scpefe::security::password_is_strong(
+    if (!scpefe::security::password_meets_policy(
             document->owner_password, document->owner_password_size)
         || (document->recovery_password != nullptr
-            && !scpefe::security::password_is_strong(
+            && !scpefe::security::password_meets_policy(
                 document->recovery_password, document->recovery_password_size))) {
         return SCPEFE_STATUS_WEAK_PASSWORD;
     }
@@ -214,8 +214,7 @@ int scpefe_password_meets_policy(
 )
 {
     return scpefe::format::span_is_valid(password, password_size)
-        && password_size >= 12
-        && scpefe::security::password_is_strong(password, password_size);
+        && scpefe::security::password_meets_policy(password, password_size);
 }
 
 scpefe_status scpefe_password_container_unlock(

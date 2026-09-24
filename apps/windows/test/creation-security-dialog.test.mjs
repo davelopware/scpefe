@@ -27,6 +27,7 @@ globalThis.requestAnimationFrame = (callback) => {
   return frame;
 };
 globalThis.cancelAnimationFrame = (frame) => frames.delete(frame);
+dom.window.scpefe = { passwordMeetsPolicy: async () => true };
 
 const React = (await import("react")).default;
 const { cleanup, render, waitFor, within } = await import("@testing-library/react");
@@ -147,6 +148,14 @@ test("optional recovery acknowledgement is conditional and matching values cross
 
 test("reported UUIDv7 recovery value reaches creation when both live statuses pass",
   async (t) => {
+    const priorBuffer = Object.getOwnPropertyDescriptor(globalThis, "Buffer");
+    delete globalThis.Buffer;
+    t.after(() => {
+      if (priorBuffer) Object.defineProperty(globalThis, "Buffer", priorBuffer);
+      else delete globalThis.Buffer;
+    });
+    assert.equal(typeof globalThis.Buffer, "undefined",
+      "the mounted renderer has no Node Buffer global");
     const requests = [];
     const { user, ui } = mountedDialog(t, async (request) => {
       requests.push(request);
@@ -168,6 +177,8 @@ test("reported UUIDv7 recovery value reaches creation when both live statuses pa
       "I will store the recovery password independently."));
     await user.click(ui.getByRole("button", { name: "Create" }));
     assert.equal(requests.length, 1);
+    assert.equal(ui.queryByText(
+      "The security details are invalid. Review the form and try again."), null);
     assert.equal(ui.queryByRole("alert"), null);
   });
 

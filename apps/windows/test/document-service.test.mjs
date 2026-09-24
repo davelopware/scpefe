@@ -1237,7 +1237,8 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
   const target = path.join(directory, "document.scpefe");
   const profilePath = await writeProfile(directory, "Grace", "Private PC");
   await fs.writeFile(target, "container");
-  const native = { openDocument: () => ({
+  const native = { passwordMeetsPolicy: (password) => password.length >= 12,
+    openDocument: () => ({
     content: "", readOnly: true, canEdit: false, canAddPasswords: false,
     mustBeChanged: true, slotIdentityName: "Temporary colleague label",
     slotIdentityEmail: "invited@example.test", profileName: "Document author",
@@ -1256,7 +1257,8 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
 
   assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
   assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
-  await assert.rejects(service.claimInvitation("short"), /at least 12/);
+  await assert.rejects(service.claimInvitation("short"),
+    (error) => error.code === "WEAK_PASSWORD");
 });
 
 test("restart finishes an interrupted invitation claim with its replacement credential",

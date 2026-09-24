@@ -179,8 +179,12 @@ int main(void)
     CHECK(container != NULL);
     CHECK(scpefe_new_document_create(&document, container, size, &size)
         == SCPEFE_STATUS_OK);
+    CHECK(add(container, size, owner, "short", 1, 0,
+        &extra, &extra_size) == SCPEFE_STATUS_WEAK_PASSWORD);
     CHECK(add(container, size, owner, temporary, 1, 0,
         &invited, &invited_size) == SCPEFE_STATUS_OK);
+    CHECK(claim(invited, invited_size, temporary, "short",
+        &extra, &extra_size) == SCPEFE_STATUS_WEAK_PASSWORD);
     CHECK(access(invited, invited_size, temporary, &slot) == 0);
     CHECK(slot.can_edit == 1 && slot.can_add_passwords == 0
         && slot.must_be_changed == 1 && slot.recovery_slot == 0);

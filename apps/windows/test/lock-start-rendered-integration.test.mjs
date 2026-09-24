@@ -327,7 +327,7 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     return handler({}, value);
   };
   const preload = await fs.readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8");
-  vm.runInNewContext(preload, { Buffer, setTimeout,
+  vm.runInNewContext(preload, { Buffer, TextEncoder, setTimeout,
     require(identifier) {
       assert.equal(identifier, "electron");
       return { contextBridge: { exposeInMainWorld(name, api) { dom.window[name] = api; } },

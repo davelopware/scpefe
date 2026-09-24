@@ -130,6 +130,11 @@ int main(void)
     CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
     invalid = document;
+    invalid.owner_password = (const uint8_t *)"short";
+    invalid.owner_password_size = 5;
+    CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)
+        == SCPEFE_STATUS_WEAK_PASSWORD);
+    invalid = document;
     invalid.owner_password = (const uint8_t *)"passwordpassword";
     invalid.owner_password_size = 16;
     CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)

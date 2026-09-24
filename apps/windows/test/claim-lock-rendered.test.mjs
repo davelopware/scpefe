@@ -78,7 +78,8 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       },
       cancelInvitationClaim: async () => { disposedClaims += 1; return true; },
       enterEditMode: async () => ({ ...ordinary, readOnly: false }),
-      passwordMeetsPolicy: async (password) => password.length >= 20,
+      passwordMeetsPolicy: async (password) => password.length >= 20
+        && password !== "predictable proposed password",
       updateWorkingCopy: async () => ({}), saveDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
       lock: async () => hostLock(),
@@ -115,6 +116,19 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
     };
 
     let claim = await openInvitation();
+    await user.clear(claim.password);
+    await user.clear(claim.confirmation);
+    await user.type(claim.password, "predictable proposed password");
+    await user.type(claim.confirmation, "predictable proposed password");
+    await user.click(ui.getByRole(claim.dialog, "button",
+      { name: "Replace password and claim identity" }));
+    assert.match(ui.getByRole(claim.dialog, "alert").textContent, /too predictable/i);
+    assert.equal(claimCalls, 0,
+      "a rejected proposed password never reaches the claim boundary");
+    await user.clear(claim.password);
+    await user.clear(claim.confirmation);
+    await user.type(claim.password, "private replacement words");
+    await user.type(claim.confirmation, "private replacement words");
     await user.clear(claim.confirmation);
     await user.type(claim.confirmation, "private replacement typo");
     await user.click(ui.getByRole(claim.dialog, "button",

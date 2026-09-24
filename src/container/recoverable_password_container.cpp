@@ -1352,7 +1352,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
     std::size_t new_password_size
 )
 {
-    if (!security::password_is_strong(new_password, new_password_size))
+    if (!security::password_meets_policy(new_password, new_password_size))
         throw ContainerFailure{ContainerError::weak_password};
     if (!recognizes(container, container_size) || container_size < header_size)
         throw ContainerFailure{ContainerError::malformed_container};
@@ -1558,7 +1558,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     const std::uint8_t *temporary_password, std::size_t temporary_password_size,
     std::uint8_t permissions, const std::string &temporary_label)
 {
-    if (!security::password_is_strong(temporary_password, temporary_password_size))
+    if (!security::password_meets_policy(temporary_password, temporary_password_size))
         throw ContainerFailure{ContainerError::weak_password};
     if ((permissions & ~permission_mask) != 0
         || ((permissions & 6u) != 0 && (permissions & 1u) == 0)
@@ -1688,7 +1688,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     const std::uint8_t *new_password, std::size_t new_password_size,
     const std::string &profile_name, const std::string &profile_email)
 {
-    if (!security::password_is_strong(new_password, new_password_size))
+    if (!security::password_meets_policy(new_password, new_password_size))
         throw ContainerFailure{ContainerError::weak_password};
     if (profile_name.empty() || profile_email.empty()
         || profile_name.size() > max_holder_field_size

@@ -126,7 +126,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       } },
   };
   vm.runInNewContext(preload, {
-    Buffer,
+    Buffer, TextEncoder,
     require: (identifier) => {
       assert.equal(identifier, "electron");
       return electron;
@@ -327,8 +327,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(await exposed.copyInvitationPassphrase("generated secret words"), true);
   assert.deepEqual(invocations.at(-1), {
     channel: "document:copy-invitation-passphrase", request: "generated secret words" });
-  await assert.rejects(exposed.claimInvitation({ newPassword: "short",
-    newPasswordConfirmation: "short" }), /at least 12/);
+  assert.equal((await exposed.claimInvitation({ newPassword: "short",
+    newPasswordConfirmation: "short" })).content, "claimed",
+  "the preload transport does not duplicate proposed-password policy");
   await assert.rejects(exposed.claimInvitation({
     newPassword: "replacement password words",
     newPasswordConfirmation: "mismatched password words",

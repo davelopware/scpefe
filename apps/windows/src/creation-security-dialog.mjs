@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
+import { assessProposedPassword, proposedPasswordRejectionMessage }
+  from "./password-policy.mjs";
 
 const h = React.createElement;
 const ERROR_ID = "creation-security-error";
@@ -16,8 +18,6 @@ const VALIDATION_DETAILS = new Map([
   ["owner password must be text", ["Owner password is invalid.", "owner", "OWNER_TYPE"]],
   ["owner password is required", ["Owner password is required.", "owner", "OWNER_REQUIRED"]],
   ["owner password is too long", ["Owner password is too long.", "owner", "OWNER_LENGTH"]],
-  ["owner password must contain at least 12 characters",
-    ["Owner password must contain at least 12 characters.", "owner", "OWNER_LENGTH"]],
   ["owner password confirmation must be text",
     ["Owner password confirmation is invalid.", "ownerConfirmation", "OWNER_CONFIRM_TYPE"]],
   ["owner password confirmation is required",
@@ -34,9 +34,6 @@ const VALIDATION_DETAILS = new Map([
     ["Recovery password is required.", "recovery", "RECOVERY_REQUIRED"]],
   ["recovery password is too long",
     ["Recovery password is too long.", "recovery", "RECOVERY_LENGTH"]],
-  ["recovery password must contain at least 12 characters",
-    ["Recovery password must contain at least 12 characters.", "recovery",
-      "RECOVERY_LENGTH"]],
   ["recovery password confirmation must be text",
     ["Recovery password confirmation is invalid.", "recoveryConfirmation",
       "RECOVERY_CONFIRM_TYPE"]],
@@ -122,9 +119,35 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     setInvalidField("");
     let request;
     try {
-      request = validateCreateFormRequest({ ownerPassword,
+      const [ownerAssessment, recoveryAssessment] = await Promise.all([
+        assessProposedPassword(ownerPassword),
+        hasRecovery ? assessProposedPassword(recoveryPassword) : null,
+      ]);
+      const rejected = ownerAssessment.status !== "accepted"
+        ? { assessment: ownerAssessment, label: "Owner password", field: "owner",
+          rule: ownerAssessment.status === "empty" ? "OWNER_REQUIRED"
+            : ownerAssessment.reason === "maximum-size" ? "OWNER_LENGTH"
+            : ownerAssessment.status === "unavailable" ? "OWNER_POLICY_UNAVAILABLE"
+            : "OWNER_PASSWORD_WEAK" }
+        : recoveryAssessment && recoveryAssessment.status !== "accepted"
+          ? { assessment: recoveryAssessment, label: "Recovery password", field: "recovery",
+            rule: recoveryAssessment.status === "empty" ? "RECOVERY_REQUIRED"
+              : recoveryAssessment.reason === "maximum-size" ? "RECOVERY_LENGTH"
+              : recoveryAssessment.status === "unavailable"
+                ? "RECOVERY_POLICY_UNAVAILABLE" : "RECOVERY_PASSWORD_WEAK" }
+          : null;
+      if (rejected) {
+        setError(proposedPasswordRejectionMessage(rejected.assessment, rejected.label));
+        setInvalidField(rejected.field);
+        setErrorDiagnostic({ layer: "renderer-form", rule: rejected.rule });
+        reportCreationDiagnostic("renderer-form", rejected.rule);
+        (rejected.field === "owner" ? ownerRef : recoveryRef).current?.focus();
+        return;
+      }
+      request = validateCreateFormRequest({ ownerPassword: ownerAssessment.password,
         ownerPasswordConfirmation: ownerConfirmation,
-        recoveryPassword, recoveryPasswordConfirmation: recoveryConfirmation,
+        recoveryPassword: recoveryAssessment?.password ?? "",
+        recoveryPasswordConfirmation: recoveryConfirmation,
         content: "", understandsIrrecoverable,
         storedRecoverySeparately: hasRecovery && storedRecoverySeparately });
     } catch (submissionError) {

@@ -66,6 +66,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       regularSaveIntervalMs: 120000 }),
     getUnresolvedJournalSummary: async () => ({ total: 0, pendingPublications: 0 }),
     saveProfile: async (value) => value, saveClientSettings: async (value) => value,
+    passwordMeetsPolicy: async () => true,
     activity: async () => ({}), chooseOpenTarget: async () => ({ selected: true,
       name: "current.scpefe" }), cancelOpenTarget: async () => {},
     openSelectedDocument: async () => {

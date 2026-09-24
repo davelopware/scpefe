@@ -3,7 +3,8 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
-import { PasswordPolicyStatus } from "./password-policy.mjs";
+import { assessProposedPassword, PasswordPolicyStatus,
+  proposedPasswordRejectionMessage } from "./password-policy.mjs";
 import { RENDERER_LIFECYCLE_COMPLETION,
   RendererLifecycleCompletion } from "./renderer-lifecycle-completion.mjs";
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -896,8 +897,15 @@ function App() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const password = String(data.get("newPassword"));
-    if (password !== String(data.get("newPasswordConfirmation"))) {
+    const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (assessed.status !== "accepted") {
+      setClaimError(proposedPasswordRejectionMessage(assessed, "Replacement password"));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+      return;
+    }
+    const password = assessed.password;
+    if (password !== String(data.get("newPasswordConfirmation")).trim()) {
       setClaimError("Replacement passwords do not match.");
       requestAnimationFrame(() => form.elements.namedItem(
         "newPasswordConfirmation") instanceof HTMLElement
@@ -943,14 +951,21 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const currentPassword = String(data.get("currentPassword"));
-    const proposedPassword = String(data.get("newPassword"));
-    const confirmation = String(data.get("newPasswordConfirmation"));
+    const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (assessed.status !== "accepted") {
+      setPasswordError(proposedPasswordRejectionMessage(assessed, "New password"));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+      return;
+    }
+    const proposedPassword = assessed.password;
+    const confirmation = String(data.get("newPasswordConfirmation")).trim();
     if (proposedPassword !== confirmation) {
       setPasswordError("New passwords do not match.");
       requestAnimationFrame(() => (form.elements.namedItem("newPasswordConfirmation") as HTMLElement)?.focus());
       return;
     }
-    if (proposedPassword === currentPassword) {
+    if (proposedPassword === currentPassword.trim()) {
       setPasswordError("New password must differ from the current password.");
       requestAnimationFrame(() => (form.elements.namedItem("newPassword") as HTMLElement)?.focus());
       return;
@@ -982,10 +997,20 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const enteredTemporary = String(data.get("temporaryPassword"));
+    const assessed = enteredTemporary
+      ? await assessProposedPassword(enteredTemporary) : null;
+    if (assessed && assessed.status !== "accepted") {
+      setInvitationError(proposedPasswordRejectionMessage(
+        assessed, "Temporary passphrase"));
+      setInvitationPasswordError(true);
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "temporaryPassword") as HTMLElement | null)?.focus());
+      return;
+    }
     try {
       const result = await window.scpefe.createInvitation({
         temporaryLabel: String(data.get("temporaryLabel")),
-        temporaryPassword: enteredTemporary || undefined,
+        temporaryPassword: assessed?.password,
         canEdit: data.get("canEdit") === "on",
         canAddPasswords: data.get("canAddPasswords") === "on",
         canRemovePasswords: data.get("canRemovePasswords") === "on",
