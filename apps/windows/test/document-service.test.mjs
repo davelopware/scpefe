@@ -56,6 +56,23 @@ function delayNextTargetRead(service, target) {
   return { readStarted, release };
 }
 
+async function lockDuringNextLeaseAcquisition({ service, native, target, operation }) {
+  const active = service.active;
+  const delayed = delayNextTargetRead(service, target);
+  const rejected = assert.rejects(operation(), (error) => error.code === "SESSION_LOCKED");
+  await delayed.readStarted;
+  const locking = service.lock("inactivity");
+  delayed.release();
+  await rejected;
+  await locking;
+  assert.equal(service.active, null);
+  const acquired = native.currentLease();
+  const suspended = service.suspendedLeases.get(active.documentId);
+  assert.equal(acquired.active, true);
+  assert.equal(suspended.sessionId.toString("hex"), acquired.sessionId);
+  assert.equal(suspended.counter, acquired.heartbeatCounter);
+}
+
 async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -1701,6 +1718,95 @@ test("inactivity lock safely invalidates awaited edit entry and preserves its le
     await service.enterEditMode();
     assert.equal(native.currentLease().sessionId, acquired.sessionId);
   });
+
+test("inactivity lock fences every lease-acquiring session transition", async (t) => {
+  await t.test("identity reconciliation", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-identity-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, "base");
+    let reconciliations = 0;
+    const native = withLease({
+      openDocument() {
+        return { content: "secret", readOnly: true, canEdit: true,
+          slotIdentityName: "Old Ada", slotIdentityEmail: "old@example.test",
+          documentId: "49".repeat(16), baseRevision: "5a".repeat(32),
+          journalKey: Buffer.alloc(32, 13) };
+      },
+      reconcileIdentity() { reconciliations += 1; return Buffer.from("identity"); },
+    });
+    const service = new DocumentService({ native, fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk") });
+    await service.openDocument(target, "password words");
+    await lockDuringNextLeaseAcquisition({ service, native, target,
+      operation: () => service.reconcileIdentity() });
+    assert.equal(reconciliations, 0);
+  });
+
+  await t.test("recovered work restoration", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-restore-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, "container");
+    const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "4a".repeat(16), baseRevision: "5b".repeat(32),
+      journalKey: Buffer.alloc(32, 14) }) });
+    const service = new DocumentService({ native, fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk") });
+    await service.openDocument(target, "password words");
+    service.active.recovery = { text: "recovered", cursor: { start: 3, end: 3 } };
+    let activities = 0;
+    const notifyActivity = service.notifyActivity.bind(service);
+    service.notifyActivity = () => { activities += 1; return notifyActivity(); };
+    await lockDuringNextLeaseAcquisition({ service, native, target,
+      operation: () => service.restoreRecoveredWork() });
+    assert.equal(activities, 0,
+      "restoration does not resume activity after lock starts");
+  });
+
+  await t.test("divergence resolution", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-divergence-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await divergentService(directory);
+    await fixture.service.openDocument(fixture.target, "password words");
+    let writes = 0;
+    const write = fixture.service.journals.write.bind(fixture.service.journals);
+    fixture.service.journals.write = async (...args) => {
+      writes += 1; return write(...args);
+    };
+    await lockDuringNextLeaseAcquisition({ service: fixture.service,
+      native: fixture.options.native, target: fixture.target,
+      operation: () => fixture.service.beginDivergenceResolution() });
+    assert.equal(writes, 0, "no merge draft is persisted after lock starts");
+  });
+
+  await t.test("provisional discard", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-discard-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, JSON.stringify({ content: "provisional", sealed: false }));
+    let discards = 0;
+    const native = withLease({
+      openDocument(bytes) {
+        const value = JSON.parse(bytes.toString());
+        return { content: value.content, readOnly: true, canEdit: true,
+          manuallySealed: value.sealed, documentId: "4c".repeat(16),
+          baseRevision: "5d".repeat(32), journalKey: Buffer.alloc(32, 15) };
+      },
+      discardProvisional() {
+        discards += 1;
+        return Buffer.from(JSON.stringify({ content: "sealed", sealed: true }));
+      },
+    });
+    const service = new DocumentService({ native, fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk") });
+    await service.openDocument(target, "password words");
+    service.active.recovery = { text: "provisional", cursor: { start: 11, end: 11 } };
+    await lockDuringNextLeaseAcquisition({ service, native, target,
+      operation: () => service.discardRecoveredWork() });
+    assert.equal(discards, 0);
+  });
+});
 
 test("verified save waits for an in-flight checkpoint before clearing its journal", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-save-race-"));
