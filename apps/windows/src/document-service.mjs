@@ -66,6 +66,7 @@ export class DocumentService {
     this.inactivityTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatOperation = null;
+    this.leaseAcquisitionOperations = new Set();
     this.lockOperation = null;
     this.regularSaveTimer = null;
     this.clientSettings = validateClientSettings();
@@ -432,32 +433,39 @@ export class DocumentService {
   }
 
   async enterEditMode({ takeoverToken } = {}) {
-    if (!this.active) throw new Error("Open a document first");
-    if (this.active.pendingPublication) {
+    const active = this.active;
+    if (!active) throw new Error("Open a document first");
+    if (this.lockOperation) {
+      const error = new Error("The document is being locked");
+      error.code = "SESSION_LOCKED";
+      throw error;
+    }
+    if (active.pendingPublication) {
       throw new Error("Resolve the interrupted publication before editing");
     }
-    if (this.active.recovery) {
+    if (active.recovery) {
       throw new Error("Restore or discard recovered work before editing");
     }
-    if (this.active.headMismatch) {
+    if (active.headMismatch) {
       throw new Error("Accept or resolve the head mismatch before editing");
     }
-    if (this.active.profileMismatch) {
+    if (active.profileMismatch) {
       throw new Error("Reconcile the password-slot identity before editing");
     }
-    if (this.active.migrationRequired) {
+    if (active.migrationRequired) {
       throw new Error("This older container must be migrated before editing or saving");
     }
-    if (!this.active.opened.canEdit) {
+    if (!active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
-    await this.#acquireLease({ takeoverToken, issueTakeoverToken: true });
-    this.active.editMode = true;
-    this.active.working = { content: this.active.opened.content,
+    await this.#acquireActiveLease(active,
+      { takeoverToken, issueTakeoverToken: true });
+    active.editMode = true;
+    active.working = { content: active.opened.content,
       cursor: { start: 0, end: 0 } };
-    this.active.dirty = !this.active.manuallySealed;
+    active.dirty = !active.manuallySealed;
     this.#scheduleRegularSave();
-    return validateEditMode({ ...this.active.opened, readOnly: false });
+    return validateEditMode({ ...active.opened, readOnly: false });
   }
 
   async changePassword(request) {
@@ -666,7 +674,7 @@ export class DocumentService {
     }
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
-    await this.#acquireLease();
+    await this.#acquireActiveLease(active);
     active.editMode = true;
     active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
     let published;
@@ -795,25 +803,27 @@ export class DocumentService {
   }
 
   async restoreRecoveredWork({ takeoverToken } = {}) {
-    if (!this.active?.recovery) throw new Error("No recovered work is available");
-    if (this.active.pendingPublication) {
+    const active = this.active;
+    if (!active?.recovery) throw new Error("No recovered work is available");
+    if (active.pendingPublication) {
       throw new Error("Resolve the interrupted publication before editing");
     }
-    if (this.active.headMismatch) {
+    if (active.headMismatch) {
       throw new Error("Accept or resolve the head mismatch before editing");
     }
-    if (!this.active.opened.canEdit) {
+    if (!active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
     }
-    await this.#acquireLease({ takeoverToken, issueTakeoverToken: true });
-    this.active.editMode = true;
-    this.active.working = { content: this.active.recovery.text,
-      cursor: { ...this.active.recovery.cursor } };
-    this.active.dirty = true;
+    await this.#acquireActiveLease(active,
+      { takeoverToken, issueTakeoverToken: true });
+    active.editMode = true;
+    active.working = { content: active.recovery.text,
+      cursor: { ...active.recovery.cursor } };
+    active.dirty = true;
     this.notifyActivity();
-    return Object.freeze({ content: this.active.working.content, readOnly: false,
+    return Object.freeze({ content: active.working.content, readOnly: false,
       canEdit: true, recoveredUnsaved: true,
-      cursor: Object.freeze({ ...this.active.working.cursor }) });
+      cursor: Object.freeze({ ...active.working.cursor }) });
   }
 
   async discardRecoveredWork() {
@@ -920,7 +930,8 @@ export class DocumentService {
       throw new Error("The active password slot does not permit editing");
     }
     this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
-    await this.#acquireLease({ takeoverToken, issueTakeoverToken: true });
+    await this.#acquireActiveLease(active,
+      { takeoverToken, issueTakeoverToken: true });
     active.editMode = true;
     try {
       const currentBytes = await this.fs.readFile(active.target);
@@ -1165,6 +1176,9 @@ export class DocumentService {
     this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
     this.inactivityTimer = null;
+    while (this.leaseAcquisitionOperations.size > 0) {
+      await Promise.allSettled(this.leaseAcquisitionOperations);
+    }
     await this.#stopHeartbeat();
     let journalSaved = true;
     let warningCode = null;
@@ -1819,6 +1833,23 @@ export class DocumentService {
     this.#scheduleHeartbeat(this.leaseGeneration);
   }
 
+  async #acquireActiveLease(active, options = {}) {
+    if (this.active !== active || this.lockOperation) {
+      const error = new Error("The document was locked while acquiring its editing lease");
+      error.code = "SESSION_LOCKED";
+      throw error;
+    }
+    const acquisition = this.#acquireLease(options);
+    this.leaseAcquisitionOperations.add(acquisition);
+    try { await acquisition; }
+    finally { this.leaseAcquisitionOperations.delete(acquisition); }
+    if (this.active !== active || this.lockOperation) {
+      const error = new Error("The document was locked while acquiring its editing lease");
+      error.code = "SESSION_LOCKED";
+      throw error;
+    }
+  }
+
   #leaseAcquisition(active, lease, {
     takeoverToken, issueTakeoverToken = false,
     observedDocumentId = active.documentId } = {}) {
@@ -2176,7 +2207,7 @@ export class DocumentService {
       throw new Error("Resolve the head mismatch before discarding provisional work");
     }
     if (!active.editMode) {
-      await this.#acquireLease();
+      await this.#acquireActiveLease(active);
       active.editMode = true;
     }
     try {
