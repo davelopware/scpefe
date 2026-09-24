@@ -1,17 +1,32 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { JSDOM } from "jsdom";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://scpefe.invalid/",
 });
+const installedGlobals = ["window", "document", "HTMLElement", "Node",
+  "MutationObserver", "IS_REACT_ACT_ENVIRONMENT", "requestAnimationFrame",
+  "cancelAnimationFrame"];
+const priorGlobals = new Map(installedGlobals.map((key) =>
+  [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+let nextFrame = 1;
+const frames = new Set();
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
 globalThis.HTMLElement = dom.window.HTMLElement;
 globalThis.Node = dom.window.Node;
 globalThis.MutationObserver = dom.window.MutationObserver;
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-globalThis.requestAnimationFrame = (callback) => callback();
+globalThis.requestAnimationFrame = (callback) => {
+  const frame = nextFrame;
+  nextFrame += 1;
+  frames.add(frame);
+  callback();
+  frames.delete(frame);
+  return frame;
+};
+globalThis.cancelAnimationFrame = (frame) => frames.delete(frame);
 
 const React = (await import("react")).default;
 const { cleanup, render, waitFor, within } = await import("@testing-library/react");
@@ -20,11 +35,34 @@ const { CreateDocumentControl, CreationSecurityDialog } = await import(
   "../src/creation-security-dialog.mjs");
 const { SafeBoundaryError } = await import("../src/error-boundary.mjs");
 
+after(() => {
+  cleanup();
+  assert.equal(dom.window.document.body.children.length, 0,
+    "testing containers are removed");
+  assert.equal(frames.size, 0, "no animation frames remain registered");
+  dom.window.close();
+  for (const [key, descriptor] of priorGlobals) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+    else delete globalThis[key];
+    assert.equal(Object.hasOwn(globalThis, key), descriptor !== undefined,
+      `${key} global ownership is restored`);
+  }
+});
+
+function registerUnmount(t, rendered) {
+  const { container } = rendered;
+  t.after(() => {
+    rendered.unmount();
+    cleanup();
+    assert.equal(container.isConnected, false, "mounted React container is removed");
+  });
+}
+
 function mountedDialog(t, onCreate = async () => {}, onCancel = () => {}) {
-  t.after(cleanup);
   const user = userEvent.setup({ document: dom.window.document });
   const rendered = render(React.createElement(CreationSecurityDialog,
     { onCreate, onCancel }));
+  registerUnmount(t, rendered);
   return { user, ui: within(rendered.container), ...rendered };
 }
 
@@ -217,10 +255,16 @@ test("creation failure remains inline with retained secrets and can be retried",
   assert.equal(createCalls, 2);
 });
 
-test("only explicit boundary password failures are attributed to a password field",
-  async (t) => {
+for (const [code, label, otherLabel] of [
+  ["OWNER_PASSWORD_WEAK", "Owner password",
+    "Independent recovery password (strongly recommended)"],
+  ["RECOVERY_PASSWORD_WEAK", "Independent recovery password (strongly recommended)",
+    "Owner password"],
+]) {
+  test(`${code} replaces the successful live status and attributes its password field`,
+    async (t) => {
     const { user, ui } = mountedDialog(t, async () => {
-      throw new SafeBoundaryError("RECOVERY_PASSWORD_WEAK", "document:create");
+      throw new SafeBoundaryError(code, "document:create");
     });
     await enterOwner(ui, user);
     await user.type(ui.getByLabelText(
@@ -228,18 +272,25 @@ test("only explicit boundary password failures are attributed to a password fiel
     "independent recovery words");
     await user.type(ui.getByLabelText("Confirm recovery password"),
       "independent recovery words");
+    await waitFor(() => assert.equal(
+      ui.getAllByText("Meets password requirements").length, 2));
     await user.click(ui.getByLabelText(
       "I will store the recovery password independently."));
     await user.click(ui.getByRole("button", { name: "Create" }));
-    const recovery = ui.getByLabelText(
-      "Independent recovery password (strongly recommended)");
-    assert.equal(recovery.getAttribute("aria-invalid"), "true");
-    assert.match(recovery.getAttribute("aria-describedby"), /recovery-password-policy/);
-    assert.match(recovery.getAttribute("aria-describedby"), /creation-security-error/);
-    assert.equal(ui.getByLabelText("Owner password").getAttribute("aria-invalid"), null);
-    assert.equal(dom.window.document.activeElement === recovery, true);
-    assert.equal(ui.getByRole("alert").dataset.errorRule, "RECOVERY_PASSWORD_WEAK");
+    const rejected = ui.getByLabelText(label);
+    assert.equal(rejected.getAttribute("aria-invalid"), "true");
+    assert.match(rejected.getAttribute("aria-describedby"), /password-policy/);
+    assert.match(rejected.getAttribute("aria-describedby"), /creation-security-error/);
+    assert.equal(ui.getByLabelText(otherLabel).getAttribute("aria-invalid"), null);
+    assert.equal(dom.window.document.activeElement === rejected, true);
+    assert.equal(ui.getByRole("alert").dataset.errorRule, code);
+    assert.equal(ui.queryAllByText("Meets password requirements").length, 1,
+      "the rejected field no longer reports a successful policy result");
+    assert.match(rejected.ownerDocument.getElementById(
+      rejected.getAttribute("aria-describedby").split(" ")[0]).textContent,
+    /too predictable/i);
   });
+}
 
 test("Cancel and Escape are keyboard-operable without invoking creation", async (t) => {
   let createCalls = 0;
@@ -256,7 +307,6 @@ test("Cancel and Escape are keyboard-operable without invoking creation", async 
 
 test("mounted creation control runs picker first and picker cancellation opens no dialog",
   async (t) => {
-    t.after(cleanup);
     let selected = false;
     let pickerCalls = 0;
     let createCalls = 0;
@@ -272,6 +322,8 @@ test("mounted creation control runs picker first and picker cancellation opens n
     const user = userEvent.setup({ document: dom.window.document });
     const rendered = render(React.createElement(CreateDocumentControl,
       { onCreated: () => {}, onError: (error) => { throw error; } }));
+    registerUnmount(t, rendered);
+    t.after(() => { delete dom.window.scpefe; });
     const ui = within(rendered.container);
     const launcher = ui.getByRole("button", { name: "Create encrypted document…" });
     await user.click(launcher);

@@ -197,6 +197,8 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       invalidPassword: invalidField === "owner",
       invalidConfirmation: invalidField === "ownerConfirmation",
       errorDescriptionId: ERROR_ID,
+      passwordError: errorDiagnostic?.layer === "creation-boundary"
+        && errorDiagnostic.rule === "OWNER_PASSWORD_WEAK" ? error : "",
       onValueChange: (value) => updateField("owner", setOwnerPassword, value),
       onConfirmationChange: (value) => updateField(
         "ownerConfirmation", setOwnerConfirmation, value),
@@ -211,6 +213,8 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       invalidPassword: invalidField === "recovery",
       invalidConfirmation: invalidField === "recoveryConfirmation",
       errorDescriptionId: ERROR_ID,
+      passwordError: errorDiagnostic?.layer === "creation-boundary"
+        && errorDiagnostic.rule === "RECOVERY_PASSWORD_WEAK" ? error : "",
       comparePassword: ownerPassword,
       compareMessage: "Recovery password must differ from the owner password.",
       onValueChange: (value) => updateField("recovery", setRecoveryPassword, value),

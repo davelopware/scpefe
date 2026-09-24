@@ -8,7 +8,7 @@ export function PasswordConfirmationFields({ kind, label, confirmationLabel,
   revealed, required, onToggle, value, confirmationValue, onValueChange,
   onConfirmationChange, inputRef, confirmationRef, autoFocus = false,
   comparePassword = "", compareMessage = "", invalidPassword = false,
-  invalidConfirmation = false, errorDescriptionId = "" }) {
+  invalidConfirmation = false, errorDescriptionId = "", passwordError = "" }) {
   const passwordId = `${kind}-password`;
   const confirmationId = `${kind}-password-confirmation`;
   const fieldType = revealed ? "text" : "password";
@@ -33,8 +33,11 @@ export function PasswordConfirmationFields({ kind, label, confirmationLabel,
         "aria-invalid": invalidConfirmation ? "true" : undefined,
         onChange: onConfirmationChange
           && ((event) => onConfirmationChange(event.target.value)) })),
-    h(PasswordPolicyStatus, { id: statusId, password: value,
-      confirmation: confirmationValue, comparePassword, compareMessage }),
+    passwordError
+      ? h("p", { id: statusId, className: "password-policy", "aria-live": "polite",
+        "aria-atomic": "true" }, passwordError)
+      : h(PasswordPolicyStatus, { id: statusId, password: value,
+        confirmation: confirmationValue, comparePassword, compareMessage }),
     h("button", { type: "button", "aria-pressed": revealed,
       "aria-controls": `${passwordId} ${confirmationId}`,
       onClick: onToggle }, `${action} ${kind} passwords`));
