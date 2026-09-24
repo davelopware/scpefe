@@ -241,6 +241,10 @@ if (-not $SkipTests) {
             (Join-Path $PackageRoot "SCPEFE.exe") `
             (Join-Path $WindowsRoot "test\native-invitation-addon.integration.mjs") `
             (Join-Path $AppRoot "native\scpefe_electron_native.node")
+        Invoke-PackagedTest `
+            (Join-Path $PackageRoot "SCPEFE.exe") `
+            (Join-Path $WindowsRoot "test\native-creation-renderer-addon.integration.mjs") `
+            (Join-Path $AppRoot "native\scpefe_electron_native.node")
     } finally {
         $env:ELECTRON_RUN_AS_NODE = $PreviousRunAsNode
         if (Test-Path $AdjacentNode) { Remove-Item $AdjacentNode -Force }

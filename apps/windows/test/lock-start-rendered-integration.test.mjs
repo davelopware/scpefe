@@ -16,7 +16,7 @@ import { cleanupMountedLifecycleHarness } from "./mounted-lifecycle-cleanup.mjs"
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
 
-export async function runMountedLock(t, origin) {
+export async function runMountedLock(t, origin, nativeOverride = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   let teardown = () => fs.rm(directory,
     { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
@@ -39,6 +39,7 @@ export async function runMountedLock(t, origin) {
   let publicationFailureAfter = null;
   let createFault = false;
   let createdCandidate = false;
+  let createdInput = null;
   let createdLeaseFault = false;
   let holdMaintenance = false; let releaseMaintenance; let maintenanceStarted;
   const maintenanceReleased = new Promise((resolve) => { releaseMaintenance = resolve; });
@@ -119,7 +120,7 @@ export async function runMountedLock(t, origin) {
     : bytes.toString().startsWith("new:") ? bytes.toString().slice(4)
     : /^(saved|provisional):/.test(bytes.toString())
       ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
-  const native = { openDocument(bytes, password) {
+  const fakeNative = { openDocument(bytes, password) {
     if (password === "wrong password") throw new Error("authentication failed");
     const revision = createHash("sha256").update(bytes).digest("hex");
     const initialRevision = createHash("sha256").update(Buffer.from("container")).digest("hex");
@@ -152,8 +153,10 @@ export async function runMountedLock(t, origin) {
     else lease = { ...next };
     return Buffer.from(bytes);
   },
-  createDocument() {
+  passwordMeetsPolicy(password) { return password.length >= 12; },
+  createDocument(input) {
     if (createFault) throw new Error("injected native create failure");
+    createdInput = input;
     createdCandidate = true;
     newLease = { active: false, sessionId: "0".repeat(32),
     heartbeatCounter: 0, holderUtcMs: 0, durationMs: 600_000,
@@ -187,6 +190,7 @@ export async function runMountedLock(t, origin) {
     if (provisionalDiscardFault) throw new Error("injected provisional discard failure");
     return Buffer.from("saved:original plaintext");
   } };
+  const native = nativeOverride ?? fakeNative;
   const serviceOptions = (callbacks = {}) => ({ native, fs: serviceFs, profilePath,
     publicationCapabilities: capabilities,
     journalDirectory: path.join(directory, "journals"),
@@ -315,6 +319,9 @@ export async function runMountedLock(t, origin) {
       { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
   });
   const invoke = async (channel, value) => {
+    if (channel === "security:password-meets-policy") {
+      return native.passwordMeetsPolicy(value);
+    }
     const handler = ipcHandlers.get(channel);
     if (!handler) return null;
     return handler({}, value);
@@ -336,7 +343,8 @@ export async function runMountedLock(t, origin) {
   dom.window[Symbol.for("scpefe.renderer.mount")] = (root) => { mountedRoot = root; };
   const assets = await fs.readdir(new URL("../dist/assets/", import.meta.url));
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
-  await import(`${pathToFileURL(path.resolve("dist/assets", script)).href}?real-lock-${origin}`);
+  const rendererUrl = new URL(`../dist/assets/${script}`, import.meta.url);
+  await import(`${rendererUrl.href}?real-lock-${origin}`);
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
@@ -436,14 +444,28 @@ export async function runMountedLock(t, origin) {
     const priorService = host.service;
     let request = null;
     if (entry === "new") {
+      const issue53 = origin === "s0-new";
+      const ownerPassword = issue53
+        ? "defenistration is the root of" : "owner password words";
       await command("File", /New/);
       await waitScalar(() => ui.queryByRole(document.body, "dialog",
         { name: "Secure new document" }) !== null, "New security dialog");
       const creation = ui.getByRole(document.body, "dialog",
         { name: "Secure new document" });
-      await user.type(ui.getByLabelText(creation, "Owner password"), "owner password words");
+      await user.type(ui.getByLabelText(creation, "Owner password"), ownerPassword);
       await user.type(ui.getByLabelText(creation, "Confirm owner password"),
-        "owner password words");
+        ownerPassword);
+      if (issue53) {
+        await user.type(ui.getByLabelText(creation,
+          "Independent recovery password (strongly recommended)"),
+        "01a0bf20-2424-73e9-a572-f2eded90be3e");
+        await user.type(ui.getByLabelText(creation, "Confirm recovery password"),
+          "01a0bf20-2424-73e9-a572-f2eded90be3e");
+        await ui.waitFor(() => assert.equal(
+          ui.getAllByText(creation, "Meets password requirements").length, 2));
+        await user.click(ui.getByLabelText(creation,
+          "I will store the recovery password independently."));
+      }
       await user.click(ui.getByLabelText(creation,
         "I understand that lost passwords cannot be recovered."));
       await user.click(ui.getByRole(creation, "button", { name: "Create" }));
@@ -472,6 +494,11 @@ export async function runMountedLock(t, origin) {
       ? "new-document\\.scpefe" : "other\\.scpefe");
     await waitScalar(() => titlePattern.test(document.title), `${entry} safe document title`);
     assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
+    if (entry === "new" && origin === "s0-new" && nativeOverride === null) {
+      assert.equal(createdInput.ownerPassword, "defenistration is the root of");
+      assert.equal(createdInput.recoveryPassword,
+        "01a0bf20-2424-73e9-a572-f2eded90be3e");
+    }
     await waitScalar(() => document.activeElement === editor,
       "successful replacement focus on the document editor");
     if (request) {
