@@ -79,7 +79,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         }
         if (channel === "profile:save") return { ...request,
           nativeProfilePath: "C:\\private\\profile.json" };
-        if (channel === "security:password-meets-policy") return true;
+        if (channel === "security:assess-password-policy") return "accepted";
         if (channel === "document:choose-create-target") {
           return { selected: true };
         }
@@ -126,7 +126,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
       } },
   };
   vm.runInNewContext(preload, {
-    Buffer,
+    Buffer, TextEncoder,
     require: (identifier) => {
       assert.equal(identifier, "electron");
       return electron;
@@ -134,7 +134,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   assert.deepEqual(Object.keys(exposed), [
     "getProfile", "saveProfile", "reconcileProfile", "getClientSettings", "saveClientSettings",
-    "getUnresolvedJournalSummary", "passwordMeetsPolicy", "chooseCreateTarget", "cancelCreateTarget",
+    "getUnresolvedJournalSummary", "assessPasswordPolicy", "chooseCreateTarget", "cancelCreateTarget",
     "createDocument", "chooseOpenTarget", "cancelOpenTarget",
     "openSelectedDocument", "unlockDocument",
     "openExternalDocument", "cancelExternalOpen",
@@ -327,8 +327,9 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(await exposed.copyInvitationPassphrase("generated secret words"), true);
   assert.deepEqual(invocations.at(-1), {
     channel: "document:copy-invitation-passphrase", request: "generated secret words" });
-  await assert.rejects(exposed.claimInvitation({ newPassword: "short",
-    newPasswordConfirmation: "short" }), /at least 12/);
+  assert.equal((await exposed.claimInvitation({ newPassword: "short",
+    newPasswordConfirmation: "short" })).content, "claimed",
+  "the preload transport does not duplicate proposed-password policy");
   await assert.rejects(exposed.claimInvitation({
     newPassword: "replacement password words",
     newPasswordConfirmation: "mismatched password words",

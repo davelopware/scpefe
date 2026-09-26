@@ -4,6 +4,11 @@ const MAX_TEXT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
 const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
 const MAX_REGULAR_SAVE_INTERVAL_MS = 86_400_000;
+const utf8Encoder = new TextEncoder();
+
+function utf8ByteLength(value) {
+  return utf8Encoder.encode(value).byteLength;
+}
 
 const HEAD_MISMATCH_COPY = Object.freeze({
   rollback: ["Authenticated rollback detected",
@@ -34,7 +39,7 @@ export function canonicalizeDocumentText(value) {
   }
   const withoutBom = value.startsWith("\ufeff") ? value.slice(1) : value;
   const canonical = withoutBom.replace(/\r\n?/g, "\n");
-  if (Buffer.byteLength(canonical, "utf8") > MAX_TEXT_BYTES) {
+  if (utf8ByteLength(canonical) > MAX_TEXT_BYTES) {
     throw new TypeError("content must be UTF-8 text within the size limit");
   }
   return canonical;
@@ -44,7 +49,7 @@ function requiredText(value, field, maximum = 512) {
   if (typeof value !== "string") throw new TypeError(`${field} must be text`);
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} is required`);
-  if (Buffer.byteLength(normalized, "utf8") > maximum) {
+  if (utf8ByteLength(normalized) > maximum) {
     throw new TypeError(`${field} is too long`);
   }
   return normalized;
@@ -53,7 +58,7 @@ function requiredText(value, field, maximum = 512) {
 function optionalBoundedText(value, field, maximum = 4096) {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string" || hasUnpairedSurrogate(value)
-      || Buffer.byteLength(value, "utf8") > maximum) {
+      || utf8ByteLength(value) > maximum) {
     throw new TypeError(`${field} must be bounded text`);
   }
   return value;
@@ -126,14 +131,8 @@ export function validateCreateRequest(value) {
     throw new TypeError("create request must be an object");
   }
   const ownerPassword = requiredText(value.ownerPassword, "owner password", 4096);
-  if (ownerPassword.length < 12) {
-    throw new TypeError("owner password must contain at least 12 characters");
-  }
   const recoveryPassword = value.recoveryPassword
     ? requiredText(value.recoveryPassword, "recovery password", 4096) : null;
-  if (recoveryPassword && recoveryPassword.length < 12) {
-    throw new TypeError("recovery password must contain at least 12 characters");
-  }
   if (recoveryPassword === ownerPassword) {
     throw new TypeError("recovery password must be independent from the owner password");
   }
@@ -207,9 +206,6 @@ export function validatePasswordChangeRequest(value) {
   const currentPassword = validatePassword(value.currentPassword);
   const newPassword = validatePassword(value.newPassword);
   const newPasswordConfirmation = validatePassword(value.newPasswordConfirmation);
-  if (newPassword.length < 12) {
-    throw new TypeError("new password must contain at least 12 characters");
-  }
   if (newPassword !== newPasswordConfirmation) {
     throw new TypeError("new passwords do not match");
   }
@@ -227,9 +223,6 @@ export function validateInvitationCreateRequest(value) {
   const temporaryPassword = value.temporaryPassword === undefined
     || value.temporaryPassword === "" ? undefined
     : validatePassword(value.temporaryPassword);
-  if (temporaryPassword !== undefined && temporaryPassword.length < 12) {
-    throw new TypeError("temporary password must contain at least 12 characters");
-  }
   for (const permission of ["canEdit", "canAddPasswords", "canRemovePasswords"]) {
     if (typeof value[permission] !== "boolean") {
       throw new TypeError(`${permission} must be a boolean`);
@@ -261,9 +254,6 @@ export function validateInvitationClaimRequest(value) {
   }
   const newPassword = validatePassword(value.newPassword);
   const confirmation = validatePassword(value.newPasswordConfirmation);
-  if (newPassword.length < 12) {
-    throw new TypeError("replacement password must contain at least 12 characters");
-  }
   if (newPassword !== confirmation) {
     throw new TypeError("replacement passwords do not match");
   }

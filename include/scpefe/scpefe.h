@@ -37,6 +37,14 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE = 13
 } scpefe_status;
 
+/* Stable reasons returned when assessing a newly proposed password. */
+typedef enum scpefe_password_policy_assessment {
+    SCPEFE_PASSWORD_POLICY_INVALID = 0,
+    SCPEFE_PASSWORD_POLICY_ACCEPTED = 1,
+    SCPEFE_PASSWORD_POLICY_MINIMUM_LENGTH = 2,
+    SCPEFE_PASSWORD_POLICY_PREDICTABLE = 3
+} scpefe_password_policy_assessment;
+
 #define SCPEFE_REVISION_FORMAT_VERSION 1u
 #define SCPEFE_REVISION_ID_SIZE 32u
 #define SCPEFE_SLOT_ID_SIZE 16u
@@ -450,6 +458,12 @@ SCPEFE_API scpefe_status scpefe_new_document_create(
 
 /* Reports whether candidate bytes satisfy the policy for newly chosen passwords. */
 SCPEFE_API int scpefe_password_meets_policy(
+    const uint8_t *password,
+    size_t password_size
+);
+
+/* Classifies candidate bytes under the policy for newly chosen passwords. */
+SCPEFE_API scpefe_password_policy_assessment scpefe_assess_password_policy(
     const uint8_t *password,
     size_t password_size
 );

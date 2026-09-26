@@ -3,9 +3,14 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
-import { PasswordPolicyStatus } from "./password-policy.mjs";
+import { assessProposedPassword, PasswordPolicyStatus,
+  proposedPasswordRejectionMessage } from "./password-policy.mjs";
+import { RENDERER_LIFECYCLE_COMPLETION,
+  RendererLifecycleCompletion } from "./renderer-lifecycle-completion.mjs";
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
+
+const rendererLifecycleCompletion = new RendererLifecycleCompletion();
 
 type Profile = { name: string; email: string; deviceName: string };
 type Cursor = { start: number; end: number };
@@ -266,7 +271,8 @@ declare global { interface Window { scpefe: {
   getClientSettings(): Promise<ClientSettings>;
   saveClientSettings(settings: ClientSettings): Promise<ClientSettings>;
   getUnresolvedJournalSummary(): Promise<JournalSummary>;
-  passwordMeetsPolicy(password: string): Promise<boolean>;
+  assessPasswordPolicy(password: string): Promise<
+    "accepted" | "minimum-length" | "predictable" | "invalid">;
   chooseCreateTarget(): Promise<{ selected: true } | null>;
   cancelCreateTarget(): Promise<void>;
   createDocument(request: object): Promise<{ created: true; opened: DocumentOpened;
@@ -416,11 +422,13 @@ function App() {
       ? "replace" : "find";
   }
   useEffect(() => {
-    window.scpefe.getProfile().then((value) => {
+    void rendererLifecycleCompletion.track(() => window.scpefe.getProfile().then((value) => {
       setProfile(value); if (!value) setDialog("profile");
-    }).catch(showError);
-    window.scpefe.getClientSettings().then(setClientSettings).catch(showError);
-    window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError);
+    }).catch(showError));
+    void rendererLifecycleCompletion.track(() =>
+      window.scpefe.getClientSettings().then(setClientSettings).catch(showError));
+    void rendererLifecycleCompletion.track(() =>
+      window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError));
   }, []);
   const showError = (error: unknown) => setMessage(safeRendererErrorMessage(error));
   useEffect(() => {
@@ -644,7 +652,8 @@ function App() {
         w: "close", z: "undo", y: "redo", f: "find", h: "replace" };
       const command = commands[event.key.toLowerCase()];
       if (command && enabled[command]) { event.preventDefault();
-        void runCommand(command, document.activeElement as HTMLElement | null); }
+        void rendererLifecycleCompletion.track(() =>
+          runCommand(command, document.activeElement as HTMLElement | null)); }
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
@@ -889,8 +898,15 @@ function App() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const password = String(data.get("newPassword"));
-    if (password !== String(data.get("newPasswordConfirmation"))) {
+    const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (assessed.status !== "accepted") {
+      setClaimError(proposedPasswordRejectionMessage(assessed, "Replacement password"));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+      return;
+    }
+    const password = assessed.password;
+    if (password !== String(data.get("newPasswordConfirmation")).trim()) {
       setClaimError("Replacement passwords do not match.");
       requestAnimationFrame(() => form.elements.namedItem(
         "newPasswordConfirmation") instanceof HTMLElement
@@ -936,14 +952,21 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const currentPassword = String(data.get("currentPassword"));
-    const proposedPassword = String(data.get("newPassword"));
-    const confirmation = String(data.get("newPasswordConfirmation"));
+    const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (assessed.status !== "accepted") {
+      setPasswordError(proposedPasswordRejectionMessage(assessed, "New password"));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+      return;
+    }
+    const proposedPassword = assessed.password;
+    const confirmation = String(data.get("newPasswordConfirmation")).trim();
     if (proposedPassword !== confirmation) {
       setPasswordError("New passwords do not match.");
       requestAnimationFrame(() => (form.elements.namedItem("newPasswordConfirmation") as HTMLElement)?.focus());
       return;
     }
-    if (proposedPassword === currentPassword) {
+    if (proposedPassword === currentPassword.trim()) {
       setPasswordError("New password must differ from the current password.");
       requestAnimationFrame(() => (form.elements.namedItem("newPassword") as HTMLElement)?.focus());
       return;
@@ -975,10 +998,20 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const enteredTemporary = String(data.get("temporaryPassword"));
+    const assessed = enteredTemporary
+      ? await assessProposedPassword(enteredTemporary) : null;
+    if (assessed && assessed.status !== "accepted") {
+      setInvitationError(proposedPasswordRejectionMessage(
+        assessed, "Temporary passphrase"));
+      setInvitationPasswordError(true);
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "temporaryPassword") as HTMLElement | null)?.focus());
+      return;
+    }
     try {
       const result = await window.scpefe.createInvitation({
         temporaryLabel: String(data.get("temporaryLabel")),
-        temporaryPassword: enteredTemporary || undefined,
+        temporaryPassword: assessed?.password,
         canEdit: data.get("canEdit") === "on",
         canAddPasswords: data.get("canAddPasswords") === "on",
         canRemovePasswords: data.get("canRemovePasswords") === "on",
@@ -1420,7 +1453,7 @@ function App() {
 
   return <main className="app-shell"><div className="shell-chrome">
     <MenuBar enabled={enabled} run={(command, returnFocus) =>
-      void runCommand(command, returnFocus)} />
+      void rendererLifecycleCompletion.track(() => runCommand(command, returnFocus))} />
     <section className="editor-surface" aria-label="Document workspace">
       {!activeDocument && <p className="editor-placeholder" role="note">
         {lockedDocument ? "Document locked. Use Security → Unlock to continue."
@@ -1494,16 +1527,17 @@ function App() {
       <div className="dialog-actions"><button onClick={() => setSaveError("")}>Continue editing</button>
         <button autoFocus onClick={() => void save()}>Retry manual save</button></div>
     </FocusedDialog>}
-    {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={async () => {
-      await window.scpefe.cancelCreateTarget(); setCreating(false);
-    }} onCreate={async (request: object) => {
+    {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={() =>
+      rendererLifecycleCompletion.track(async () => {
+        await window.scpefe.cancelCreateTarget(); setCreating(false);
+      })} onCreate={(request: object) => rendererLifecycleCompletion.track(async () => {
       const result = await window.scpefe.createDocument(request);
       if (result) {
         showOpenedResult({ ...result.opened, targetName: result.name });
         setCreating(false); setMessage("Encrypted blank document published successfully.");
         focusEditorAfterDialog();
       }
-    }} />}
+    })} />}
     {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title={profile ? "Profile" : "Set up this client"}
       close={profile ? closeDialog : undefined}><p>Name, email, and device name identify this client locally. This profile is self-asserted and is not an authenticated account.</p>
@@ -1534,15 +1568,17 @@ function App() {
       returnFocus={dialogReturnFocus.current}
       title={dialog === "unlock" ? "Unlock document"
         : externalOpenRequest ? "Open requested document" : "Open document"}
-      close={() => { void cancelOpen(); }} initialFocus={openPassword}>
+      close={() => { void rendererLifecycleCompletion.track(cancelOpen); }}
+      initialFocus={openPassword}>
       {pendingOpenName && <p>Selected target: <strong>{pendingOpenName}</strong></p>}
-      <form onSubmit={externalOpenRequest ? openExternal : open}><label>Password
+      <form onSubmit={(event) => { void rendererLifecycleCompletion.track(() =>
+        (externalOpenRequest ? openExternal : open)(event)); }}><label>Password
         <input ref={openPassword} name="password" type="password" required
           aria-describedby={openError ? "open-password-error" : undefined} /></label>
         {openError && <p id="open-password-error" className="dialog-error" role="alert">
           {openError}</p>}
         <div className="dialog-actions"><button type="button" onClick={() => {
-          void cancelOpen();
+          void rendererLifecycleCompletion.track(cancelOpen);
         }}>Cancel</button><button>{dialog === "unlock" ? "Unlock" : "Open"}</button>
         </div></form></FocusedDialog>}
     {dialog === "export" && activeDocument && <FocusedDialog returnFocus={dialogReturnFocus.current}
@@ -1589,10 +1625,10 @@ function App() {
             : "Changing this password re-wraps the existing document key; it does not rotate a possibly compromised document key."}</p>
           <label>Current password<input name="currentPassword" type="password" required autoFocus
             value={currentPasswordDraft} onChange={(event) => setCurrentPasswordDraft(event.target.value)} /></label>
-          <label>New password<input name="newPassword" type="password" minLength={12} required
+          <label>New password<input name="newPassword" type="password" required
             aria-describedby="change-password-policy" value={newPasswordDraft}
             onChange={(event) => setNewPasswordDraft(event.target.value)} /></label>
-          <label>Confirm new password<input name="newPasswordConfirmation" type="password" minLength={12} required
+          <label>Confirm new password<input name="newPasswordConfirmation" type="password" required
             aria-describedby="change-password-policy" value={newPasswordConfirmationDraft}
             onChange={(event) => setNewPasswordConfirmationDraft(event.target.value)} /></label>
           <PasswordPolicyStatus id="change-password-policy" password={newPasswordDraft}
@@ -1641,10 +1677,10 @@ function App() {
       title="Claim invitation">
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
       <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
-        minLength={12} required autoFocus aria-describedby="claim-password-policy"
+        required autoFocus aria-describedby="claim-password-policy"
         value={claimPasswordDraft} onChange={(event) => setClaimPasswordDraft(event.target.value)} /></label>
         <label>Confirm new password<input name="newPasswordConfirmation" type="password"
-          minLength={12} required aria-describedby="claim-password-policy"
+          required aria-describedby="claim-password-policy"
           value={claimConfirmationDraft} onChange={(event) => setClaimConfirmationDraft(event.target.value)} /></label>
         <PasswordPolicyStatus id="claim-password-policy" password={claimPasswordDraft}
           confirmation={claimConfirmationDraft} />
@@ -1713,11 +1749,14 @@ function App() {
       <div className="dialog-actions"><button ref={(node) => {
         if (node && !protectionError) node.focus();
       }}
-        onClick={() => void decideProtection("cancel")}>Keep current document open</button>
-        <button onClick={() => void decideProtection("save")}>
+        onClick={() => void rendererLifecycleCompletion.track(() =>
+          decideProtection("cancel"))}>Keep current document open</button>
+        <button onClick={() => void rendererLifecycleCompletion.track(() =>
+          decideProtection("save"))}>
           {protection.state.pendingPublication ? "Retry publication and continue"
             : "Manual save and continue"}</button>
-        <button onClick={() => void decideProtection("discard")}>Discard and continue</button>
+        <button onClick={() => void rendererLifecycleCompletion.track(() =>
+          decideProtection("discard"))}>Discard and continue</button>
       </div>
     </FocusedDialog>}
   </main>;
@@ -1731,6 +1770,8 @@ export function mountApp(host: HTMLElement): Root {
 
 const applicationHost = document.getElementById("root");
 if (applicationHost) {
+  (window as unknown as Record<symbol, RendererLifecycleCompletion>)[
+    RENDERER_LIFECYCLE_COMPLETION] = rendererLifecycleCompletion;
   const applicationRoot = mountApp(applicationHost);
   const mountObserver = (window as unknown as Record<symbol,
     ((root: Root) => void) | undefined>)[Symbol.for("scpefe.renderer.mount")];

@@ -22,7 +22,8 @@ function withLease(native) {
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
     deviceName: "" };
-  return { ...native, currentLease: () => ({ ...lease }),
+  return { assessPasswordPolicy: () => "accepted", ...native,
+    currentLease: () => ({ ...lease }),
     openDocument(...args) { return { ...native.openDocument(...args), lease }; },
     updateLease(bytes, _password, value) {
       lease = { ...value };
@@ -54,6 +55,23 @@ function delayNextTargetRead(service, target) {
     return readFile(file, ...args);
   } };
   return { readStarted, release };
+}
+
+async function lockDuringNextLeaseAcquisition({ service, native, target, operation }) {
+  const active = service.active;
+  const delayed = delayNextTargetRead(service, target);
+  const rejected = assert.rejects(operation(), (error) => error.code === "SESSION_LOCKED");
+  await delayed.readStarted;
+  const locking = service.lock("inactivity");
+  delayed.release();
+  await rejected;
+  await locking;
+  assert.equal(service.active, null);
+  const acquired = native.currentLease();
+  const suspended = service.suspendedLeases.get(active.documentId);
+  assert.equal(acquired.active, true);
+  assert.equal(suspended.sessionId.toString("hex"), acquired.sessionId);
+  assert.equal(suspended.counter, acquired.heartbeatCounter);
 }
 
 async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
@@ -431,8 +449,9 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   const calls = [];
   const assessed = [];
   const service = new DocumentService({ fs, publicationCapabilities, profilePath,
-    native: { passwordMeetsPolicy(password) {
-      assessed.push(password); return !password.includes("predictable");
+    native: { assessPasswordPolicy(password) {
+      assessed.push(password);
+      return password.includes("predictable") ? "predictable" : "accepted";
     }, createDocument(input) {
       calls.push(input);
       return Buffer.from("container");
@@ -467,6 +486,29 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   assert.deepEqual(assessed.slice(-2), [request.ownerPassword, request.recoveryPassword]);
   assert.equal(calls[0].understandsIrrecoverable, true);
   assert.equal(calls[0].storedRecoverySeparately, true);
+});
+
+test("creation fails closed when the native password assessor is unavailable", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-create-policy-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  let createCalls = 0;
+  const service = new DocumentService({ fs, publicationCapabilities,
+    profilePath: await writeProfile(directory, "Ada", "Desk PC"),
+    native: { createDocument() {
+      createCalls += 1;
+      return Buffer.from("container");
+    } } });
+  const password = "owner words, spaces & punctuation! 42";
+
+  await assert.rejects(service.createDocument(target, {
+    ownerPassword: password, ownerPasswordConfirmation: password,
+    recoveryPassword: "", recoveryPasswordConfirmation: "", content: "",
+    understandsIrrecoverable: true, storedRecoverySeparately: false,
+  }), (error) => error.code === "OWNER_PASSWORD_WEAK");
+  assert.equal(createCalls, 0,
+    "an incomplete native adapter cannot bypass authoritative assessment");
+  await assert.rejects(fs.stat(target), (error) => error.code === "ENOENT");
 });
 
 test("authenticated switch discard removes only the active unreadable journal", async (t) => {
@@ -1220,7 +1262,9 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
   const target = path.join(directory, "document.scpefe");
   const profilePath = await writeProfile(directory, "Grace", "Private PC");
   await fs.writeFile(target, "container");
-  const native = { openDocument: () => ({
+  const native = { assessPasswordPolicy: (password) => password.length >= 12
+    ? "accepted" : "minimum-length",
+    openDocument: () => ({
     content: "", readOnly: true, canEdit: false, canAddPasswords: false,
     mustBeChanged: true, slotIdentityName: "Temporary colleague label",
     slotIdentityEmail: "invited@example.test", profileName: "Document author",
@@ -1239,7 +1283,8 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
 
   assert.deepEqual(opened, { readOnly: true, invitationRequired: true });
   assert.deepEqual(Object.keys(opened).sort(), ["invitationRequired", "readOnly"]);
-  await assert.rejects(service.claimInvitation("short"), /at least 12/);
+  await assert.rejects(service.claimInvitation("short"),
+    (error) => error.code === "WEAK_PASSWORD");
 });
 
 test("restart finishes an interrupted invitation claim with its replacement credential",
@@ -1254,6 +1299,7 @@ test("restart finishes an interrupted invitation claim with its replacement cred
     const common = { readOnly: true, documentId: "31".repeat(16),
       baseRevision: "42".repeat(32) };
     const native = {
+      assessPasswordPolicy: () => "accepted",
       openDocument(bytes, password) {
         if (bytes.toString() === "invited" && password === temporary) {
           return { ...common, journalKey: Buffer.alloc(32, 7),
@@ -1325,6 +1371,7 @@ test("claim cleanup is restart-safe at every removal boundary", async (t) => {
       const common = { readOnly: true, documentId,
         baseRevision: "62".repeat(32) };
       const native = {
+        assessPasswordPolicy: () => "accepted",
         openDocument(bytes, password) {
           if (bytes.toString() === "invited" && password === temporary) {
             return { ...common, journalKey: Buffer.from(journalKey), content: "",
@@ -1422,7 +1469,7 @@ test("generates a one-time invitation secret and publishes it under the held lea
     lease: { active: true, sessionId, heartbeatCounter: 4, holderUtcMs: 1,
       durationMs: 600_000, holderName: "Ada", holderEmail: "ada@example.test",
       deviceName: "Desk PC" } });
-  const native = { openDocument: opened,
+  const native = { assessPasswordPolicy: () => "accepted", openDocument: opened,
     addInvitation(_bytes, password, request) {
       assert.equal(password, "owner password words"); received = request;
       return Buffer.from("candidate");
@@ -1622,18 +1669,24 @@ test("lock start is synchronous, once-only, and precedes awaited journal cleanup
   assert.equal(starts, 1, "inactive lock does not emit a false lock-start transition");
 });
 
-test("real inactivity timer starts lock before an awaited journal flush", async (t) => {
+test("inactivity timer starts lock before an awaited journal flush", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-inactivity-start-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe"); await fs.writeFile(target, "container");
   let startLock; const started = new Promise((resolve) => { startLock = resolve; });
   let release; let writeStarted; let final = false;
   const writing = new Promise((resolve) => { writeStarted = resolve; });
+  const timers = [];
   const service = new DocumentService({ fs, publicationCapabilities, inactivityMs: 100,
     profilePath: await writeProfile(directory, "Ada", "Desk"),
     native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
       canEdit: true, documentId: "46".repeat(16), baseRevision: "57".repeat(32),
       journalKey: Buffer.alloc(32, 11) }) }),
+    setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer); return timer;
+    },
+    clearTimer(timer) { timer.cleared = true; },
     onLockStart: ({ reason }) => { assert.equal(reason, "inactivity"); startLock(); },
     onLocked: () => { final = true; },
   });
@@ -1643,14 +1696,146 @@ test("real inactivity timer starts lock before an awaited journal flush", async 
   service.journals.write = async (...args) => {
     writeStarted();
     await new Promise((resolve) => { release = resolve; }); return write(...args); };
-  await Promise.race([started, new Promise((_, reject) => {
-    setTimeout(() => reject(new Error("inactivity lock did not start")), 750);
-  })]);
+  const inactivity = timers.filter(
+    (timer) => timer.delay === 100 && !timer.cleared).at(-1);
+  assert.ok(inactivity, "active inactivity timer is captured");
+  inactivity.callback();
+  await started;
   assert.equal(final, false); assert.equal(service.active.working.content, "timer plaintext");
   await writing;
   release();
   await new Promise((resolve) => { const poll = () => final ? resolve() : setImmediate(poll); poll(); });
   assert.equal(service.active, null);
+});
+
+test("inactivity lock safely invalidates awaited edit entry and preserves its lease",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-enter-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, "container");
+    const timers = [];
+    let lockStarted;
+    const started = new Promise((resolve) => { lockStarted = resolve; });
+    let lockFinished;
+    const locked = new Promise((resolve) => { lockFinished = resolve; });
+    const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "48".repeat(16), baseRevision: "59".repeat(32),
+      journalKey: Buffer.alloc(32, 12) }) });
+    const service = new DocumentService({ fs, publicationCapabilities, inactivityMs: 100,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native,
+      setTimer(callback, delay) {
+        const timer = { callback, delay, cleared: false };
+        timers.push(timer); return timer;
+      },
+      clearTimer(timer) { timer.cleared = true; },
+      onLockStart: ({ reason }) => { assert.equal(reason, "inactivity"); lockStarted(); },
+      onLocked: lockFinished,
+    });
+    await service.openDocument(target, "password words");
+    const delayed = delayNextTargetRead(service, target);
+    const editing = service.enterEditMode();
+    await delayed.readStarted;
+    timers.filter((timer) => timer.delay === 100 && !timer.cleared).at(-1).callback();
+    await started;
+    delayed.release();
+    await assert.rejects(editing, (error) => error.code === "SESSION_LOCKED");
+    await locked;
+    assert.equal(service.active, null);
+    const acquired = native.currentLease();
+    await service.openDocument(target, "password words");
+    await service.enterEditMode();
+    assert.equal(native.currentLease().sessionId, acquired.sessionId);
+  });
+
+test("inactivity lock fences every lease-acquiring session transition", async (t) => {
+  await t.test("identity reconciliation", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-identity-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, "base");
+    let reconciliations = 0;
+    const native = withLease({
+      openDocument() {
+        return { content: "secret", readOnly: true, canEdit: true,
+          slotIdentityName: "Old Ada", slotIdentityEmail: "old@example.test",
+          documentId: "49".repeat(16), baseRevision: "5a".repeat(32),
+          journalKey: Buffer.alloc(32, 13) };
+      },
+      reconcileIdentity() { reconciliations += 1; return Buffer.from("identity"); },
+    });
+    const service = new DocumentService({ native, fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk") });
+    await service.openDocument(target, "password words");
+    await lockDuringNextLeaseAcquisition({ service, native, target,
+      operation: () => service.reconcileIdentity() });
+    assert.equal(reconciliations, 0);
+  });
+
+  await t.test("recovered work restoration", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-restore-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, "container");
+    const native = withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "4a".repeat(16), baseRevision: "5b".repeat(32),
+      journalKey: Buffer.alloc(32, 14) }) });
+    const service = new DocumentService({ native, fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk") });
+    await service.openDocument(target, "password words");
+    service.active.recovery = { text: "recovered", cursor: { start: 3, end: 3 } };
+    let activities = 0;
+    const notifyActivity = service.notifyActivity.bind(service);
+    service.notifyActivity = () => { activities += 1; return notifyActivity(); };
+    await lockDuringNextLeaseAcquisition({ service, native, target,
+      operation: () => service.restoreRecoveredWork() });
+    assert.equal(activities, 0,
+      "restoration does not resume activity after lock starts");
+  });
+
+  await t.test("divergence resolution", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-divergence-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await divergentService(directory);
+    await fixture.service.openDocument(fixture.target, "password words");
+    let writes = 0;
+    const write = fixture.service.journals.write.bind(fixture.service.journals);
+    fixture.service.journals.write = async (...args) => {
+      writes += 1; return write(...args);
+    };
+    await lockDuringNextLeaseAcquisition({ service: fixture.service,
+      native: fixture.options.native, target: fixture.target,
+      operation: () => fixture.service.beginDivergenceResolution() });
+    assert.equal(writes, 0, "no merge draft is persisted after lock starts");
+  });
+
+  await t.test("provisional discard", async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-discard-lock-race-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    await fs.writeFile(target, JSON.stringify({ content: "provisional", sealed: false }));
+    let discards = 0;
+    const native = withLease({
+      openDocument(bytes) {
+        const value = JSON.parse(bytes.toString());
+        return { content: value.content, readOnly: true, canEdit: true,
+          manuallySealed: value.sealed, documentId: "4c".repeat(16),
+          baseRevision: "5d".repeat(32), journalKey: Buffer.alloc(32, 15) };
+      },
+      discardProvisional() {
+        discards += 1;
+        return Buffer.from(JSON.stringify({ content: "sealed", sealed: true }));
+      },
+    });
+    const service = new DocumentService({ native, fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk") });
+    await service.openDocument(target, "password words");
+    service.active.recovery = { text: "provisional", cursor: { start: 11, end: 11 } };
+    await lockDuringNextLeaseAcquisition({ service, native, target,
+      operation: () => service.discardRecoveredWork() });
+    assert.equal(discards, 0);
+  });
 });
 
 test("verified save waits for an in-flight checkpoint before clearing its journal", async (t) => {
@@ -2227,7 +2412,7 @@ test("coordinates holders, heartbeats, lock suspension, resumption, and expiry",
   utc += 120_000;
   const heartbeat = timers.filter((timer) => timer.delay === 120_000).at(-1);
   heartbeat.callback();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await first.runLifecycleBarrier(() => {});
   assert.equal(native.currentLease().heartbeatCounter, 2);
   await first.lock("screen-lock");
   utc += 60_000;
@@ -2926,7 +3111,7 @@ test("real DocumentService New candidate faults, lock fencing, cleanup, and retr
   const makeCandidate = ({ createFault = false, editFault = false, gate = null } = {}) => {
     let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
       holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
-    const native = { createDocument() {
+    const native = { assessPasswordPolicy: () => "accepted", createDocument() {
       if (createFault) throw new Error("injected native create failure");
       return Buffer.from("real-created-container");
     }, openDocument(bytes, password) {
