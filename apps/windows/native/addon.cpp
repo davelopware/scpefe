@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1003,7 +1004,7 @@ napi_value initialize(napi_env env, napi_value exports)
         {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
-    check(env, napi_define_properties(env, exports, 16, methods));
+    check(env, napi_define_properties(env, exports, std::size(methods), methods));
     return exports;
 }
 

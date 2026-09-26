@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const native = createRequire(import.meta.url)(process.argv[2]);
+const expectedExports = [
+  "addInvitation", "assessPasswordPolicy", "changePassword", "claimInvitation",
+  "compactDocument", "createDocument", "discardProvisional", "mergeDocument",
+  "migrateDocument", "openDocument", "passwordMeetsPolicy", "reconcileIdentity",
+  "regularSaveDocument", "removeSlot", "saveDocument", "updateLease",
+  "updateSlotPermissions",
+];
+assert.deepEqual(Object.getOwnPropertyNames(native).sort(), expectedExports,
+  "the addon exports every declared operation");
 const cases = [
   ["strong passphrase with several unrelated private words 2026!", true],
   ["passwordpassword", false],
