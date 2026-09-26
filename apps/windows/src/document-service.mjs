@@ -29,7 +29,7 @@ function targetUnavailable(error) {
 
 function proposedPasswordAccepted(native, password) {
   const assess = native.assessPasswordPolicy;
-  return typeof assess !== "function" || assess.call(native, password) === "accepted";
+  return typeof assess === "function" && assess.call(native, password) === "accepted";
 }
 
 export class DocumentService {

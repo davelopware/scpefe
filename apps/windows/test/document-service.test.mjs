@@ -22,7 +22,8 @@ function withLease(native) {
   let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
     holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
     deviceName: "" };
-  return { ...native, currentLease: () => ({ ...lease }),
+  return { assessPasswordPolicy: () => "accepted", ...native,
+    currentLease: () => ({ ...lease }),
     openDocument(...args) { return { ...native.openDocument(...args), lease }; },
     updateLease(bytes, _password, value) {
       lease = { ...value };
@@ -485,6 +486,29 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   assert.deepEqual(assessed.slice(-2), [request.ownerPassword, request.recoveryPassword]);
   assert.equal(calls[0].understandsIrrecoverable, true);
   assert.equal(calls[0].storedRecoverySeparately, true);
+});
+
+test("creation fails closed when the native password assessor is unavailable", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-create-policy-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  let createCalls = 0;
+  const service = new DocumentService({ fs, publicationCapabilities,
+    profilePath: await writeProfile(directory, "Ada", "Desk PC"),
+    native: { createDocument() {
+      createCalls += 1;
+      return Buffer.from("container");
+    } } });
+  const password = "owner words, spaces & punctuation! 42";
+
+  await assert.rejects(service.createDocument(target, {
+    ownerPassword: password, ownerPasswordConfirmation: password,
+    recoveryPassword: "", recoveryPasswordConfirmation: "", content: "",
+    understandsIrrecoverable: true, storedRecoverySeparately: false,
+  }), (error) => error.code === "OWNER_PASSWORD_WEAK");
+  assert.equal(createCalls, 0,
+    "an incomplete native adapter cannot bypass authoritative assessment");
+  await assert.rejects(fs.stat(target), (error) => error.code === "ENOENT");
 });
 
 test("authenticated switch discard removes only the active unreadable journal", async (t) => {
@@ -1275,6 +1299,7 @@ test("restart finishes an interrupted invitation claim with its replacement cred
     const common = { readOnly: true, documentId: "31".repeat(16),
       baseRevision: "42".repeat(32) };
     const native = {
+      assessPasswordPolicy: () => "accepted",
       openDocument(bytes, password) {
         if (bytes.toString() === "invited" && password === temporary) {
           return { ...common, journalKey: Buffer.alloc(32, 7),
@@ -1346,6 +1371,7 @@ test("claim cleanup is restart-safe at every removal boundary", async (t) => {
       const common = { readOnly: true, documentId,
         baseRevision: "62".repeat(32) };
       const native = {
+        assessPasswordPolicy: () => "accepted",
         openDocument(bytes, password) {
           if (bytes.toString() === "invited" && password === temporary) {
             return { ...common, journalKey: Buffer.from(journalKey), content: "",
@@ -1443,7 +1469,7 @@ test("generates a one-time invitation secret and publishes it under the held lea
     lease: { active: true, sessionId, heartbeatCounter: 4, holderUtcMs: 1,
       durationMs: 600_000, holderName: "Ada", holderEmail: "ada@example.test",
       deviceName: "Desk PC" } });
-  const native = { openDocument: opened,
+  const native = { assessPasswordPolicy: () => "accepted", openDocument: opened,
     addInvitation(_bytes, password, request) {
       assert.equal(password, "owner password words"); received = request;
       return Buffer.from("candidate");
@@ -3085,7 +3111,7 @@ test("real DocumentService New candidate faults, lock fencing, cleanup, and retr
   const makeCandidate = ({ createFault = false, editFault = false, gate = null } = {}) => {
     let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
       holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
-    const native = { createDocument() {
+    const native = { assessPasswordPolicy: () => "accepted", createDocument() {
       if (createFault) throw new Error("injected native create failure");
       return Buffer.from("real-created-container");
     }, openDocument(bytes, password) {
