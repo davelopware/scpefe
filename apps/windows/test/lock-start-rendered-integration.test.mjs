@@ -18,6 +18,23 @@ const capabilities = Object.freeze({ sameFilesystemTransaction: true,
 
 export async function runMountedLock(t, origin, nativeOverride = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
+  const debugIdleEnabled = origin === "dc-close-save";
+  const debugIdleStarted = performance.now();
+  let debugIdleSequence = 0;
+  let debugTrackedPending = 0;
+  let debugOperationId = 0;
+  const debugRequestId = (value) => typeof value?.token === "string"
+    ? value.token.slice(-8) : null;
+  const debugErrorCode = (error) => typeof error?.code === "string"
+    ? error.code : typeof error?.name === "string" ? error.name : "unknown";
+  const debugIdle = (phase, fields = {}) => {
+    if (!debugIdleEnabled) return;
+    console.error(`[DEBUG-50-IDLE] ${JSON.stringify({
+      sequence: ++debugIdleSequence,
+      elapsedMs: Math.round((performance.now() - debugIdleStarted) * 10) / 10,
+      origin, phase, pendingCount: debugTrackedPending, ...fields,
+    })}`);
+  };
   let teardown = () => fs.rm(directory,
     { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   t.after(() => teardown());
@@ -210,6 +227,10 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   const emittedChannels = [];
   const emit = (channel, value) => {
     emittedChannels.push(channel);
+    if (channel === "document:protection-requested" || channel === "document:closed") {
+      debugIdle("host:emit", { ackState: channel,
+        requestId: debugRequestId(value) });
+    }
     if (channel === "document:protection-requested") protectionRequestSeen();
     for (const listener of ipcListeners.get(channel) ?? []) listener({}, value);
   };
@@ -290,6 +311,26 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     },
   }).start();
   let service = host.service;
+  if (debugIdleEnabled) {
+    for (const boundary of ["saveDocument", "exitEditMode", "lock"]) {
+      const operation = service[boundary].bind(service);
+      service[boundary] = async (...args) => {
+        debugIdle("service:start", { boundary, generation: host.generation.capture(),
+          coordinatorState: host.protections.pending?.state ?? null });
+        try {
+          const result = await operation(...args);
+          debugIdle("service:settle", { boundary, generation: host.generation.capture(),
+            coordinatorState: host.protections.pending?.state ?? null });
+          return result;
+        } catch (error) {
+          debugIdle("service:reject", { boundary, errorCode: debugErrorCode(error),
+            generation: host.generation.capture(),
+            coordinatorState: host.protections.pending?.state ?? null });
+          throw error;
+        }
+      };
+    }
+  }
   const powerMonitor = new EventEmitter();
   registerWindowFocusProtection({ window: fakeWindow, powerMonitor,
     activity: () => host.notifyActivity(), lock: (reason) => host.lockActive(reason) });
@@ -326,7 +367,30 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     }
     const handler = ipcHandlers.get(channel);
     if (!handler) return null;
-    return handler({}, value);
+    const traced = channel === "document:close"
+      || channel === "document:resolve-protection";
+    if (!traced) return handler({}, value);
+    if (traced) debugIdle("ipc:start", { channel,
+      requestId: debugRequestId(value), decision: value?.decision ?? null,
+      generation: host.generation.capture(),
+      coordinatorState: host.protections.pending?.state ?? null,
+      ackState: acks.at(-1)?.status ?? null });
+    try {
+      const result = await handler({}, value);
+      if (traced) debugIdle("ipc:settle", { channel,
+        requestId: debugRequestId(value), decision: value?.decision ?? null,
+        generation: host.generation.capture(),
+        coordinatorState: host.protections.pending?.state ?? null,
+        ackState: acks.at(-1)?.status ?? null });
+      return result;
+    } catch (error) {
+      if (traced) debugIdle("ipc:reject", { channel,
+        requestId: debugRequestId(value), decision: value?.decision ?? null,
+        errorCode: debugErrorCode(error), generation: host.generation.capture(),
+        coordinatorState: host.protections.pending?.state ?? null,
+        ackState: acks.at(-1)?.status ?? null });
+      throw error;
+    }
   };
   const preload = await fs.readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8");
   vm.runInNewContext(preload, { Buffer, TextEncoder, setTimeout,
@@ -347,6 +411,45 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
   const rendererUrl = new URL(`../dist/assets/${script}`, import.meta.url);
   await import(`${rendererUrl.href}?real-lock-${origin}`);
+  const debugCompletion = dom.window[
+    Symbol.for("scpefe.renderer.lifecycle-completion")];
+  if (debugIdleEnabled) {
+    const track = debugCompletion.track.bind(debugCompletion);
+    debugCompletion.track = (operation) => {
+      const opId = ++debugOperationId;
+      debugTrackedPending += 1;
+      debugIdle("tracker:start", { opId, generation: host.generation.capture() });
+      const tracked = track(operation);
+      void tracked.then(() => debugIdle("tracker:settle", { opId,
+        generation: host.generation.capture() }),
+      (error) => debugIdle("tracker:reject", { opId,
+        errorCode: debugErrorCode(error), generation: host.generation.capture() }))
+        .finally(() => {
+          debugTrackedPending -= 1;
+          debugIdle("tracker:released", { opId, generation: host.generation.capture() });
+        });
+      return tracked;
+    };
+    const waitForIdle = debugCompletion.waitForIdle.bind(debugCompletion);
+    debugCompletion.waitForIdle = async (options) => {
+      debugIdle("idle:start", { timeoutMs: options?.timeoutMs ?? 5_000,
+        generation: host.generation.capture(),
+        coordinatorState: host.protections.pending?.state ?? null,
+        ackState: acks.at(-1)?.status ?? null });
+      try {
+        await waitForIdle(options);
+        debugIdle("idle:settle", { generation: host.generation.capture(),
+          coordinatorState: host.protections.pending?.state ?? null,
+          ackState: acks.at(-1)?.status ?? null });
+      } catch (error) {
+        debugIdle("idle:reject", { errorCode: debugErrorCode(error),
+          generation: host.generation.capture(),
+          coordinatorState: host.protections.pending?.state ?? null,
+          ackState: acks.at(-1)?.status ?? null });
+        throw error;
+      }
+    };
+  }
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
@@ -368,7 +471,13 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       Symbol.for("scpefe.renderer.lifecycle-completion")];
     assert.equal(typeof completion?.waitForIdle, "function",
       `renderer exposes lifecycle completion for ${label}`);
+    debugIdle("harness:wait", { label, generation: host.generation.capture(),
+      coordinatorState: host.protections.pending?.state ?? null,
+      ackState: acks.at(-1)?.status ?? null });
     await completion.waitForIdle({ timeoutMs: 5_000 });
+    debugIdle("harness:idle", { label, generation: host.generation.capture(),
+      coordinatorState: host.protections.pending?.state ?? null,
+      ackState: acks.at(-1)?.status ?? null });
   };
   const awaitHarnessPhase = async (phase, label) => {
     let phaseTimeout;
@@ -1286,9 +1395,14 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   if (origin.startsWith("dc-") || origin.startsWith("prc-")) {
     const [, entry, ...outcomeParts] = origin.split("-");
     const outcome = outcomeParts.join("-");
+    debugIdle("scenario:command:start", { entry, outcome,
+      generation: host.generation.capture() });
     if (entry === "close") await command("File", /Close/);
     else if (entry === "exit") await command("File", "Exit");
     else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
+    debugIdle("scenario:command:settle", { entry, outcome,
+      generation: host.generation.capture(),
+      coordinatorState: host.protections.pending?.state ?? null });
     let protection = await ui.findByRole(document.body, "dialog",
       { name: entry === "close" ? /before Close/ : /before Exit/ });
     if (outcome === "cancel") {
@@ -1306,7 +1420,15 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       if (provisionalDecision) provisionalDiscardFault = true; else discardFault = true;
     }
     if (origin === "dc-exit-discard") holdDiscard = true;
+    debugIdle("scenario:decision:start", { decision,
+      requestId: debugRequestId(host.protections.pending),
+      generation: host.generation.capture(),
+      coordinatorState: host.protections.pending?.state ?? null });
     await user.click(ui.getByRole(protection, "button", { name: decision }));
+    debugIdle("scenario:decision:settle", { decision,
+      requestId: debugRequestId(host.protections.pending),
+      generation: host.generation.capture(),
+      coordinatorState: host.protections.pending?.state ?? null });
     if (outcome.endsWith("retry")) {
       const message = /document protection choice could not be completed/i;
       await ui.findByText(protection, message);
