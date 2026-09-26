@@ -3,7 +3,8 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
-import { PasswordPolicyStatus } from "./password-policy.mjs";
+import { assessProposedPassword, PasswordPolicyStatus,
+  proposedPasswordRejectionMessage } from "./password-policy.mjs";
 import { RENDERER_LIFECYCLE_COMPLETION,
   RendererLifecycleCompletion } from "./renderer-lifecycle-completion.mjs";
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -270,7 +271,8 @@ declare global { interface Window { scpefe: {
   getClientSettings(): Promise<ClientSettings>;
   saveClientSettings(settings: ClientSettings): Promise<ClientSettings>;
   getUnresolvedJournalSummary(): Promise<JournalSummary>;
-  passwordMeetsPolicy(password: string): Promise<boolean>;
+  assessPasswordPolicy(password: string): Promise<
+    "accepted" | "minimum-length" | "predictable" | "invalid">;
   chooseCreateTarget(): Promise<{ selected: true } | null>;
   cancelCreateTarget(): Promise<void>;
   createDocument(request: object): Promise<{ created: true; opened: DocumentOpened;
@@ -896,8 +898,15 @@ function App() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const password = String(data.get("newPassword"));
-    if (password !== String(data.get("newPasswordConfirmation"))) {
+    const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (assessed.status !== "accepted") {
+      setClaimError(proposedPasswordRejectionMessage(assessed, "Replacement password"));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+      return;
+    }
+    const password = assessed.password;
+    if (password !== String(data.get("newPasswordConfirmation")).trim()) {
       setClaimError("Replacement passwords do not match.");
       requestAnimationFrame(() => form.elements.namedItem(
         "newPasswordConfirmation") instanceof HTMLElement
@@ -943,14 +952,21 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const currentPassword = String(data.get("currentPassword"));
-    const proposedPassword = String(data.get("newPassword"));
-    const confirmation = String(data.get("newPasswordConfirmation"));
+    const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (assessed.status !== "accepted") {
+      setPasswordError(proposedPasswordRejectionMessage(assessed, "New password"));
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "newPassword") as HTMLElement | null)?.focus());
+      return;
+    }
+    const proposedPassword = assessed.password;
+    const confirmation = String(data.get("newPasswordConfirmation")).trim();
     if (proposedPassword !== confirmation) {
       setPasswordError("New passwords do not match.");
       requestAnimationFrame(() => (form.elements.namedItem("newPasswordConfirmation") as HTMLElement)?.focus());
       return;
     }
-    if (proposedPassword === currentPassword) {
+    if (proposedPassword === currentPassword.trim()) {
       setPasswordError("New password must differ from the current password.");
       requestAnimationFrame(() => (form.elements.namedItem("newPassword") as HTMLElement)?.focus());
       return;
@@ -982,10 +998,20 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const enteredTemporary = String(data.get("temporaryPassword"));
+    const assessed = enteredTemporary
+      ? await assessProposedPassword(enteredTemporary) : null;
+    if (assessed && assessed.status !== "accepted") {
+      setInvitationError(proposedPasswordRejectionMessage(
+        assessed, "Temporary passphrase"));
+      setInvitationPasswordError(true);
+      requestAnimationFrame(() => (form.elements.namedItem(
+        "temporaryPassword") as HTMLElement | null)?.focus());
+      return;
+    }
     try {
       const result = await window.scpefe.createInvitation({
         temporaryLabel: String(data.get("temporaryLabel")),
-        temporaryPassword: enteredTemporary || undefined,
+        temporaryPassword: assessed?.password,
         canEdit: data.get("canEdit") === "on",
         canAddPasswords: data.get("canAddPasswords") === "on",
         canRemovePasswords: data.get("canRemovePasswords") === "on",
@@ -1599,10 +1625,10 @@ function App() {
             : "Changing this password re-wraps the existing document key; it does not rotate a possibly compromised document key."}</p>
           <label>Current password<input name="currentPassword" type="password" required autoFocus
             value={currentPasswordDraft} onChange={(event) => setCurrentPasswordDraft(event.target.value)} /></label>
-          <label>New password<input name="newPassword" type="password" minLength={12} required
+          <label>New password<input name="newPassword" type="password" required
             aria-describedby="change-password-policy" value={newPasswordDraft}
             onChange={(event) => setNewPasswordDraft(event.target.value)} /></label>
-          <label>Confirm new password<input name="newPasswordConfirmation" type="password" minLength={12} required
+          <label>Confirm new password<input name="newPasswordConfirmation" type="password" required
             aria-describedby="change-password-policy" value={newPasswordConfirmationDraft}
             onChange={(event) => setNewPasswordConfirmationDraft(event.target.value)} /></label>
           <PasswordPolicyStatus id="change-password-policy" password={newPasswordDraft}
@@ -1651,10 +1677,10 @@ function App() {
       title="Claim invitation">
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
       <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
-        minLength={12} required autoFocus aria-describedby="claim-password-policy"
+        required autoFocus aria-describedby="claim-password-policy"
         value={claimPasswordDraft} onChange={(event) => setClaimPasswordDraft(event.target.value)} /></label>
         <label>Confirm new password<input name="newPasswordConfirmation" type="password"
-          minLength={12} required aria-describedby="claim-password-policy"
+          required aria-describedby="claim-password-policy"
           value={claimConfirmationDraft} onChange={(event) => setClaimConfirmationDraft(event.target.value)} /></label>
         <PasswordPolicyStatus id="claim-password-policy" password={claimPasswordDraft}
           confirmation={claimConfirmationDraft} />

@@ -46,9 +46,9 @@ test("password administration requests are narrow and enforce confirmations", ()
     newPassword: "replacement password words",
     newPasswordConfirmation: "replacement password words", ignored: "private",
   }), { newPassword: "replacement password words" });
-  assert.throws(() => validateInvitationClaimRequest({
+  assert.deepEqual(validateInvitationClaimRequest({
     newPassword: "short", newPasswordConfirmation: "short",
-  }), /at least 12/);
+  }), { newPassword: "short" });
   assert.throws(() => validateInvitationClaimRequest({
     newPassword: "replacement password words",
     newPasswordConfirmation: "mismatched password words",

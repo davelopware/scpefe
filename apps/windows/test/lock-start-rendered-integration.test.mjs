@@ -153,7 +153,9 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     else lease = { ...next };
     return Buffer.from(bytes);
   },
-  passwordMeetsPolicy(password) { return password.length >= 12; },
+  assessPasswordPolicy(password) {
+    return password.length >= 12 ? "accepted" : "minimum-length";
+  },
   createDocument(input) {
     if (createFault) throw new Error("injected native create failure");
     createdInput = input;
@@ -319,15 +321,15 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
   });
   const invoke = async (channel, value) => {
-    if (channel === "security:password-meets-policy") {
-      return native.passwordMeetsPolicy(value);
+    if (channel === "security:assess-password-policy") {
+      return native.assessPasswordPolicy(value);
     }
     const handler = ipcHandlers.get(channel);
     if (!handler) return null;
     return handler({}, value);
   };
   const preload = await fs.readFile(new URL("../dist/preload.cjs", import.meta.url), "utf8");
-  vm.runInNewContext(preload, { Buffer, setTimeout,
+  vm.runInNewContext(preload, { Buffer, TextEncoder, setTimeout,
     require(identifier) {
       assert.equal(identifier, "electron");
       return { contextBridge: { exposeInMainWorld(name, api) { dom.window[name] = api; } },

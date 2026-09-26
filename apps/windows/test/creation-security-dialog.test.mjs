@@ -27,6 +27,7 @@ globalThis.requestAnimationFrame = (callback) => {
   return frame;
 };
 globalThis.cancelAnimationFrame = (frame) => frames.delete(frame);
+dom.window.scpefe = { assessPasswordPolicy: async () => "accepted" };
 
 const React = (await import("react")).default;
 const { cleanup, render, waitFor, within } = await import("@testing-library/react");
@@ -87,7 +88,7 @@ test("mounted post-picker dialog is focused and has no initial-text field", (t) 
 test("password fields expose requirements and live confirmation feedback", async (t) => {
   const { user, ui } = mountedDialog(t);
   assert.match(ui.getByLabelText("Owner password").ownerDocument
-    .getElementById("owner-password-policy").textContent, /at least 12 characters/i);
+    .getElementById("owner-password-policy").textContent, /sufficiently long/i);
   await user.type(ui.getByLabelText("Owner password"), "owner password words");
   assert.match((await ui.findByText("Confirm the proposed password.")).textContent,
     /confirm/i);
@@ -147,6 +148,14 @@ test("optional recovery acknowledgement is conditional and matching values cross
 
 test("reported UUIDv7 recovery value reaches creation when both live statuses pass",
   async (t) => {
+    const priorBuffer = Object.getOwnPropertyDescriptor(globalThis, "Buffer");
+    delete globalThis.Buffer;
+    t.after(() => {
+      if (priorBuffer) Object.defineProperty(globalThis, "Buffer", priorBuffer);
+      else delete globalThis.Buffer;
+    });
+    assert.equal(typeof globalThis.Buffer, "undefined",
+      "the mounted renderer has no Node Buffer global");
     const requests = [];
     const { user, ui } = mountedDialog(t, async (request) => {
       requests.push(request);
@@ -168,7 +177,42 @@ test("reported UUIDv7 recovery value reaches creation when both live statuses pa
       "I will store the recovery password independently."));
     await user.click(ui.getByRole("button", { name: "Create" }));
     assert.equal(requests.length, 1);
+    assert.equal(ui.queryByText(
+      "The security details are invalid. Review the form and try again."), null);
     assert.equal(ui.queryByRole("alert"), null);
+  });
+
+test("native-accepted multibyte passwords shorter than twelve code units reach creation",
+  async (t) => {
+    const created = [];
+    const { user, ui } = mountedDialog(t, async (request) => { created.push(request); });
+    const owner = "界界界界";
+    const recovery = "語語語語";
+    const ownerInput = ui.getByLabelText("Owner password");
+    const ownerConfirmation = ui.getByLabelText("Confirm owner password");
+    const recoveryInput = ui.getByLabelText(
+      "Independent recovery password (strongly recommended)");
+    const recoveryConfirmation = ui.getByLabelText("Confirm recovery password");
+    for (const input of [ownerInput, ownerConfirmation, recoveryInput,
+      recoveryConfirmation]) {
+      assert.equal(input.getAttribute("minlength"), null,
+        "no HTML minimum competes with the native policy assessment");
+    }
+    await user.type(ownerInput, owner);
+    await user.type(ownerConfirmation, owner);
+    await user.type(recoveryInput, recovery);
+    await user.type(recoveryConfirmation, recovery);
+    await ui.findAllByText("Meets password requirements");
+    await user.click(ui.getByLabelText(
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByLabelText(
+      "I will store the recovery password independently."));
+    await user.click(ui.getByRole("button", { name: "Create" }));
+
+    assert.equal(created.length, 1,
+      "browser constraints do not preempt the authoritative native assessment");
+    assert.equal(created[0].ownerPassword, owner);
+    assert.equal(created[0].recoveryPassword, recovery);
   });
 
 test("locally knowable creation failures identify their affected control", async (t) => {

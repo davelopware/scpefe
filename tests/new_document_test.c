@@ -63,6 +63,12 @@ static int opens_with(
 
 int main(void)
 {
+    static const uint8_t five_e_acute[] = {
+        0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9
+    };
+    static const uint8_t six_e_acute[] = {
+        0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9, 0xc3, 0xa9
+    };
     static const char owner[] = "owner passphrase with independent words";
     static const char recovery[] = "offline recovery passphrase is different";
     const scpefe_new_document_v1 document = {
@@ -85,6 +91,14 @@ int main(void)
     CHECK(scpefe_password_meets_policy((const uint8_t *)owner, sizeof(owner) - 1));
     CHECK(!scpefe_password_meets_policy((const uint8_t *)"passwordpassword", 16));
     CHECK(!scpefe_password_meets_policy((const uint8_t *)"short", 5));
+    CHECK(scpefe_assess_password_policy((const uint8_t *)"short", 5)
+        == SCPEFE_PASSWORD_POLICY_MINIMUM_LENGTH);
+    CHECK(scpefe_assess_password_policy(five_e_acute, sizeof(five_e_acute))
+        == SCPEFE_PASSWORD_POLICY_MINIMUM_LENGTH);
+    CHECK(scpefe_assess_password_policy(six_e_acute, sizeof(six_e_acute))
+        == SCPEFE_PASSWORD_POLICY_PREDICTABLE);
+    CHECK(scpefe_assess_password_policy(NULL, 0)
+        == SCPEFE_PASSWORD_POLICY_INVALID);
     CHECK(scpefe_password_meets_policy(
         (const uint8_t *)"550e8400-e29b-41d4-a716-446655440000", 36));
     CHECK(scpefe_password_meets_policy(
@@ -129,6 +143,11 @@ int main(void)
     invalid.profile_name_size = 0;
     CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
+    invalid = document;
+    invalid.owner_password = (const uint8_t *)"short";
+    invalid.owner_password_size = 5;
+    CHECK(scpefe_new_document_create(&invalid, NULL, 0, &container_size)
+        == SCPEFE_STATUS_WEAK_PASSWORD);
     invalid = document;
     invalid.owner_password = (const uint8_t *)"passwordpassword";
     invalid.owner_password_size = 16;

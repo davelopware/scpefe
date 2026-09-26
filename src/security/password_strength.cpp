@@ -61,13 +61,23 @@ bool consists_only_of_repeat_matches(const ZxcMatch_t *match)
 
 } // namespace
 
-bool password_is_strong(const std::uint8_t *password, std::size_t password_size)
+PasswordPolicyAssessment assess_password_policy(
+    const std::uint8_t *password,
+    std::size_t password_size
+)
 {
     if (password == nullptr || password_size == 0
-        || password_size == std::numeric_limits<std::size_t>::max()
-        || contains_nul(password, password_size)) return false;
+        || password_size == std::numeric_limits<std::size_t>::max()) {
+        return PasswordPolicyAssessment::invalid;
+    }
+    if (contains_nul(password, password_size)) {
+        return PasswordPolicyAssessment::invalid;
+    }
+    if (password_size < 12) return PasswordPolicyAssessment::minimum_length;
 
-    if (is_uuid_v4(password, password_size)) return true;
+    if (is_uuid_v4(password, password_size)) {
+        return PasswordPolicyAssessment::accepted;
+    }
 
     std::vector<char> terminated(password_size + 1, '\0');
     std::copy(password, password + password_size, terminated.begin());
@@ -78,7 +88,8 @@ bool password_is_strong(const std::uint8_t *password, std::size_t password_size)
         && !consists_only_of_repeat_matches(matches);
     ZxcvbnFreeInfo(matches);
     sodium_memzero(terminated.data(), terminated.size());
-    return strong;
+    return strong ? PasswordPolicyAssessment::accepted
+        : PasswordPolicyAssessment::predictable;
 }
 
 } // namespace scpefe::security

@@ -27,6 +27,11 @@ function targetUnavailable(error) {
   return UNAVAILABLE_CODES.has(error?.code);
 }
 
+function proposedPasswordAccepted(native, password) {
+  const assess = native.assessPasswordPolicy;
+  return typeof assess !== "function" || assess.call(native, password) === "accepted";
+}
+
 export class DocumentService {
   constructor({ native, fs, profilePath, settingsPath, journalDirectory,
     publicationCapabilities, witnessDirectory,
@@ -180,12 +185,12 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const input = validateCreateRequest(request);
-    if (this.native.passwordMeetsPolicy?.(input.ownerPassword) === false) {
+    if (!proposedPasswordAccepted(this.native, input.ownerPassword)) {
       const error = new TypeError("Owner password does not meet policy");
       error.code = "OWNER_PASSWORD_WEAK"; throw error;
     }
     if (input.recoveryPassword
-        && this.native.passwordMeetsPolicy?.(input.recoveryPassword) === false) {
+        && !proposedPasswordAccepted(this.native, input.recoveryPassword)) {
       const error = new TypeError("Recovery password does not meet policy");
       error.code = "RECOVERY_PASSWORD_WEAK"; throw error;
     }
@@ -485,8 +490,9 @@ export class DocumentService {
     if (currentPassword !== active.password) {
       throw new Error("Current password does not match the active password slot");
     }
-    if (newPassword.length < 12) {
-      throw new TypeError("new password must contain at least 12 characters");
+    if (!proposedPasswordAccepted(this.native, newPassword)) {
+      const error = new TypeError("New password does not meet policy");
+      error.code = "WEAK_PASSWORD"; throw error;
     }
     if (newPassword === currentPassword) {
       throw new TypeError("new password must differ from the current password");
@@ -568,6 +574,10 @@ export class DocumentService {
     const temporaryPassword = request.temporaryPassword
       ? validatePassword(request.temporaryPassword)
       : randomBytes(24).toString("base64url");
+    if (!proposedPasswordAccepted(this.native, temporaryPassword)) {
+      const error = new TypeError("Temporary password does not meet policy");
+      error.code = "WEAK_PASSWORD"; throw error;
+    }
     const input = { temporaryPassword,
       temporaryLabel: String(request.temporaryLabel ?? "").trim(),
       canEdit: request.canEdit === true,
@@ -611,8 +621,9 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const replacement = validatePassword(newPassword);
-    if (replacement.length < 12) {
-      throw new TypeError("replacement password must contain at least 12 characters");
+    if (!proposedPasswordAccepted(this.native, replacement)) {
+      const error = new TypeError("Replacement password does not meet policy");
+      error.code = "WEAK_PASSWORD"; throw error;
     }
     let reopened;
     let published;

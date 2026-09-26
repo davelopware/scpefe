@@ -14,7 +14,11 @@ const cases = [
 ];
 for (const [password, accepted] of cases) {
   assert.equal(native.passwordMeetsPolicy(password), accepted);
+  assert.equal(native.assessPasswordPolicy(password), accepted ? "accepted"
+    : Buffer.byteLength(password, "utf8") < 12 ? "minimum-length" : "predictable");
 }
+assert.equal(native.assessPasswordPolicy("ééééé"), "minimum-length");
+assert.equal(native.assessPasswordPolicy("éééééé"), "predictable");
 
 const owner = "owner passphrase with independent words and punctuation ! 42";
 const recovery = "offline recovery phrase: separate, durable, and private # 73";
