@@ -25,6 +25,7 @@ async function realInvitationCandidate(t) {
   const claimedHead = "43".repeat(32);
   const journalKey = Buffer.alloc(32, 7);
   const native = {
+    assessPasswordPolicy: () => "accepted",
     openDocument(bytes, password) {
       if (bytes.toString() === "invited" && password === temporary) {
         return { content: "", readOnly: true, canEdit: false,
