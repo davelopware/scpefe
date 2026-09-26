@@ -79,7 +79,8 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       cancelInvitationClaim: async () => { disposedClaims += 1; return true; },
       enterEditMode: async () => ({ ...ordinary, readOnly: false }),
       assessPasswordPolicy: async (password) =>
-        password === "predictable proposed password" ? "predictable"
+        password === "語語語語" ? "accepted"
+          : password === "predictable proposed password" ? "predictable"
           : password.length >= 20 ? "accepted" : "minimum-length",
       updateWorkingCopy: async () => ({}), saveDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
@@ -111,8 +112,10 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       dialog = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
       const password = ui.getByLabelText(dialog, "New password");
       const confirmation = ui.getByLabelText(dialog, "Confirm new password");
-      await user.type(password, "private replacement words");
-      await user.type(confirmation, "private replacement words");
+      assert.equal(password.getAttribute("minlength"), null);
+      assert.equal(confirmation.getAttribute("minlength"), null);
+      await user.type(password, "語語語語");
+      await user.type(confirmation, "語語語語");
       return { dialog, password, confirmation };
     };
 
@@ -128,8 +131,8 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       "a rejected proposed password never reaches the claim boundary");
     await user.clear(claim.password);
     await user.clear(claim.confirmation);
-    await user.type(claim.password, "private replacement words");
-    await user.type(claim.confirmation, "private replacement words");
+    await user.type(claim.password, "語語語語");
+    await user.type(claim.confirmation, "語語語語");
     await user.clear(claim.confirmation);
     await user.type(claim.confirmation, "private replacement typo");
     await user.click(ui.getByRole(claim.dialog, "button",
@@ -138,7 +141,7 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
     assert.equal(document.activeElement === claim.confirmation, true);
     assert.equal(claimCalls, 0);
     await user.clear(claim.confirmation);
-    await user.type(claim.confirmation, "private replacement words");
+    await user.type(claim.confirmation, "語語語語");
     await user.click(ui.getByRole(claim.dialog, "button",
       { name: "Replace password and claim identity" }));
     await ui.waitFor(() => assert.equal(claimCalls, 1));

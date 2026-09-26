@@ -111,7 +111,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
         if (passwordAttempts === 1) throw new Error("Password publication failed safely");
         calls.push(["password", value]); return editable; },
       assessPasswordPolicy: async (password) =>
-        password === "predictable proposed password" ? "predictable"
+        password === "界界界界" ? "accepted"
+          : password === "predictable proposed password" ? "predictable"
           : password.length >= 20 ? "accepted" : "minimum-length",
       createInvitation: async (value) => { invitationAttempts += 1;
         if (invitationAttempts === 1) throw Object.assign(new Error("weak"),
@@ -186,6 +187,9 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await command("Edit", "Edit Contents");
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    assert.equal(ui.getByLabelText(dialog, "New password").getAttribute("minlength"), null);
+    assert.equal(ui.getByLabelText(dialog, "Confirm new password")
+      .getAttribute("minlength"), null);
     await user.type(ui.getByLabelText(dialog, "Current password"), "current password words");
     await user.type(ui.getByLabelText(dialog, "New password"),
       "predictable proposed password");
@@ -204,9 +208,9 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(document.activeElement === ui.getByLabelText(dialog, "New password"), true);
     await user.clear(ui.getByLabelText(dialog, "New password"));
     await user.clear(ui.getByLabelText(dialog, "Confirm new password"));
-    await user.type(ui.getByLabelText(dialog, "New password"), "replacement password words");
+    await user.type(ui.getByLabelText(dialog, "New password"), "界界界界");
     await user.type(ui.getByLabelText(dialog, "Confirm new password"),
-      "replacement password words");
+      "界界界界");
     await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
       /operation could not be completed safely/i);
@@ -214,6 +218,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       "current password words", "failed password publication retains a recoverable input");
     await user.click(ui.getByRole(dialog, "button", { name: "Change password" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "password"), true));
+    assert.equal(calls.find(([name]) => name === "password")[1].newPassword, "界界界界",
+      "the native-accepted multibyte password reaches the change boundary");
     assert.equal(ui.getByLabelText(dialog, "Current password").value, "",
       "successful password change clears secrets immediately");
 

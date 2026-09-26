@@ -182,6 +182,39 @@ test("reported UUIDv7 recovery value reaches creation when both live statuses pa
     assert.equal(ui.queryByRole("alert"), null);
   });
 
+test("native-accepted multibyte passwords shorter than twelve code units reach creation",
+  async (t) => {
+    const created = [];
+    const { user, ui } = mountedDialog(t, async (request) => { created.push(request); });
+    const owner = "界界界界";
+    const recovery = "語語語語";
+    const ownerInput = ui.getByLabelText("Owner password");
+    const ownerConfirmation = ui.getByLabelText("Confirm owner password");
+    const recoveryInput = ui.getByLabelText(
+      "Independent recovery password (strongly recommended)");
+    const recoveryConfirmation = ui.getByLabelText("Confirm recovery password");
+    for (const input of [ownerInput, ownerConfirmation, recoveryInput,
+      recoveryConfirmation]) {
+      assert.equal(input.getAttribute("minlength"), null,
+        "no HTML minimum competes with the native policy assessment");
+    }
+    await user.type(ownerInput, owner);
+    await user.type(ownerConfirmation, owner);
+    await user.type(recoveryInput, recovery);
+    await user.type(recoveryConfirmation, recovery);
+    await ui.findAllByText("Meets password requirements");
+    await user.click(ui.getByLabelText(
+      "I understand that lost passwords cannot be recovered."));
+    await user.click(ui.getByLabelText(
+      "I will store the recovery password independently."));
+    await user.click(ui.getByRole("button", { name: "Create" }));
+
+    assert.equal(created.length, 1,
+      "browser constraints do not preempt the authoritative native assessment");
+    assert.equal(created[0].ownerPassword, owner);
+    assert.equal(created[0].recoveryPassword, recovery);
+  });
+
 test("locally knowable creation failures identify their affected control", async (t) => {
   const { user, ui } = mountedDialog(t);
   await user.click(ui.getByRole("button", { name: "Create" }));

@@ -1625,10 +1625,10 @@ function App() {
             : "Changing this password re-wraps the existing document key; it does not rotate a possibly compromised document key."}</p>
           <label>Current password<input name="currentPassword" type="password" required autoFocus
             value={currentPasswordDraft} onChange={(event) => setCurrentPasswordDraft(event.target.value)} /></label>
-          <label>New password<input name="newPassword" type="password" minLength={12} required
+          <label>New password<input name="newPassword" type="password" required
             aria-describedby="change-password-policy" value={newPasswordDraft}
             onChange={(event) => setNewPasswordDraft(event.target.value)} /></label>
-          <label>Confirm new password<input name="newPasswordConfirmation" type="password" minLength={12} required
+          <label>Confirm new password<input name="newPasswordConfirmation" type="password" required
             aria-describedby="change-password-policy" value={newPasswordConfirmationDraft}
             onChange={(event) => setNewPasswordConfirmationDraft(event.target.value)} /></label>
           <PasswordPolicyStatus id="change-password-policy" password={newPasswordDraft}
@@ -1677,10 +1677,10 @@ function App() {
       title="Claim invitation">
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
       <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
-        minLength={12} required autoFocus aria-describedby="claim-password-policy"
+        required autoFocus aria-describedby="claim-password-policy"
         value={claimPasswordDraft} onChange={(event) => setClaimPasswordDraft(event.target.value)} /></label>
         <label>Confirm new password<input name="newPasswordConfirmation" type="password"
-          minLength={12} required aria-describedby="claim-password-policy"
+          required aria-describedby="claim-password-policy"
           value={claimConfirmationDraft} onChange={(event) => setClaimConfirmationDraft(event.target.value)} /></label>
         <PasswordPolicyStatus id="claim-password-policy" password={claimPasswordDraft}
           confirmation={claimConfirmationDraft} />
