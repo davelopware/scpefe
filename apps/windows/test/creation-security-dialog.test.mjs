@@ -27,7 +27,7 @@ globalThis.requestAnimationFrame = (callback) => {
   return frame;
 };
 globalThis.cancelAnimationFrame = (frame) => frames.delete(frame);
-dom.window.scpefe = { passwordMeetsPolicy: async () => true };
+dom.window.scpefe = { assessPasswordPolicy: async () => "accepted" };
 
 const React = (await import("react")).default;
 const { cleanup, render, waitFor, within } = await import("@testing-library/react");
@@ -88,7 +88,7 @@ test("mounted post-picker dialog is focused and has no initial-text field", (t) 
 test("password fields expose requirements and live confirmation feedback", async (t) => {
   const { user, ui } = mountedDialog(t);
   assert.match(ui.getByLabelText("Owner password").ownerDocument
-    .getElementById("owner-password-policy").textContent, /at least 12 characters/i);
+    .getElementById("owner-password-policy").textContent, /sufficiently long/i);
   await user.type(ui.getByLabelText("Owner password"), "owner password words");
   assert.match((await ui.findByText("Confirm the proposed password.")).textContent,
     /confirm/i);

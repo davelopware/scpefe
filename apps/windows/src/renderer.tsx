@@ -271,7 +271,8 @@ declare global { interface Window { scpefe: {
   getClientSettings(): Promise<ClientSettings>;
   saveClientSettings(settings: ClientSettings): Promise<ClientSettings>;
   getUnresolvedJournalSummary(): Promise<JournalSummary>;
-  passwordMeetsPolicy(password: string): Promise<boolean>;
+  assessPasswordPolicy(password: string): Promise<
+    "accepted" | "minimum-length" | "predictable" | "invalid">;
   chooseCreateTarget(): Promise<{ selected: true } | null>;
   cancelCreateTarget(): Promise<void>;
   createDocument(request: object): Promise<{ created: true; opened: DocumentOpened;

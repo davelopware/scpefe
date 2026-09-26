@@ -100,7 +100,7 @@ test("mounted shell keeps the session through picker, password, creation, and un
         return createPickerCalls === 1 ? null : { selected: true };
       },
       cancelCreateTarget: async () => { cancelCreateCalls += 1; },
-      passwordMeetsPolicy: async () => true,
+      assessPasswordPolicy: async () => "accepted",
       createDocument: async () => {
         createCalls += 1;
         if (createCalls === 1) throw new Error(

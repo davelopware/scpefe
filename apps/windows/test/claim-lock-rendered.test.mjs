@@ -78,8 +78,9 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       },
       cancelInvitationClaim: async () => { disposedClaims += 1; return true; },
       enterEditMode: async () => ({ ...ordinary, readOnly: false }),
-      passwordMeetsPolicy: async (password) => password.length >= 20
-        && password !== "predictable proposed password",
+      assessPasswordPolicy: async (password) =>
+        password === "predictable proposed password" ? "predictable"
+          : password.length >= 20 ? "accepted" : "minimum-length",
       updateWorkingCopy: async () => ({}), saveDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
       lock: async () => hostLock(),

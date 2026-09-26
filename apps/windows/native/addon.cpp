@@ -294,6 +294,29 @@ napi_value password_meets_policy(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value assess_password_policy(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+        if (argc != 1) throw std::runtime_error("assessPasswordPolicy expects one password");
+        const SecretBytes password{env, args[0]};
+        const scpefe_password_policy_assessment assessment =
+            scpefe_assess_password_policy(password.data(), password.size());
+        const char *reason = assessment == SCPEFE_PASSWORD_POLICY_ACCEPTED
+            ? "accepted" : assessment == SCPEFE_PASSWORD_POLICY_MINIMUM_LENGTH
+                ? "minimum-length" : assessment == SCPEFE_PASSWORD_POLICY_PREDICTABLE
+                    ? "predictable" : "invalid";
+        napi_value result;
+        check(env, napi_create_string_utf8(env, reason, NAPI_AUTO_LENGTH, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
+        return nullptr;
+    }
+}
+
 napi_value open_document(napi_env env, napi_callback_info info)
 {
     scpefe_unlocked_container *unlocked = nullptr;
@@ -948,6 +971,8 @@ napi_value initialize(napi_env env, napi_value exports)
         {"createDocument", nullptr, create_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"passwordMeetsPolicy", nullptr, password_meets_policy, nullptr, nullptr, nullptr,
+            napi_default, nullptr},
+        {"assessPasswordPolicy", nullptr, assess_password_policy, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"openDocument", nullptr, open_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},

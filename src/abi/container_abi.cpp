@@ -79,6 +79,25 @@ bool read_limits(
     return true;
 }
 
+/* Maps the internal password-policy result to its stable C ABI value. */
+scpefe_password_policy_assessment external_password_policy_assessment(
+    scpefe::security::PasswordPolicyAssessment assessment
+)
+{
+    using scpefe::security::PasswordPolicyAssessment;
+    switch (assessment) {
+    case PasswordPolicyAssessment::accepted:
+        return SCPEFE_PASSWORD_POLICY_ACCEPTED;
+    case PasswordPolicyAssessment::minimum_length:
+        return SCPEFE_PASSWORD_POLICY_MINIMUM_LENGTH;
+    case PasswordPolicyAssessment::predictable:
+        return SCPEFE_PASSWORD_POLICY_PREDICTABLE;
+    case PasswordPolicyAssessment::invalid:
+        return SCPEFE_PASSWORD_POLICY_INVALID;
+    }
+    return SCPEFE_PASSWORD_POLICY_INVALID;
+}
+
 } // namespace
 
 struct scpefe_unlocked_container {
@@ -166,11 +185,13 @@ scpefe_status scpefe_new_document_create(
                 document->owner_password_size) == 0)) {
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     }
-    if (!scpefe::security::password_meets_policy(
+    if (scpefe::security::assess_password_policy(
             document->owner_password, document->owner_password_size)
+            != scpefe::security::PasswordPolicyAssessment::accepted
         || (document->recovery_password != nullptr
-            && !scpefe::security::password_meets_policy(
-                document->recovery_password, document->recovery_password_size))) {
+            && scpefe::security::assess_password_policy(
+                document->recovery_password, document->recovery_password_size)
+                != scpefe::security::PasswordPolicyAssessment::accepted)) {
         return SCPEFE_STATUS_WEAK_PASSWORD;
     }
     try {
@@ -213,8 +234,20 @@ int scpefe_password_meets_policy(
     std::size_t password_size
 )
 {
-    return scpefe::format::span_is_valid(password, password_size)
-        && scpefe::security::password_meets_policy(password, password_size);
+    return scpefe_assess_password_policy(password, password_size)
+        == SCPEFE_PASSWORD_POLICY_ACCEPTED;
+}
+
+scpefe_password_policy_assessment scpefe_assess_password_policy(
+    const std::uint8_t *password,
+    std::size_t password_size
+)
+{
+    if (!scpefe::format::span_is_valid(password, password_size)) {
+        return SCPEFE_PASSWORD_POLICY_INVALID;
+    }
+    return external_password_policy_assessment(
+        scpefe::security::assess_password_policy(password, password_size));
 }
 
 scpefe_status scpefe_password_container_unlock(

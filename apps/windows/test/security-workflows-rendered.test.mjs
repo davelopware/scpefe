@@ -110,8 +110,9 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       changePassword: async (value) => { passwordAttempts += 1;
         if (passwordAttempts === 1) throw new Error("Password publication failed safely");
         calls.push(["password", value]); return editable; },
-      passwordMeetsPolicy: async (password) => password.length >= 20
-        && password !== "predictable proposed password",
+      assessPasswordPolicy: async (password) =>
+        password === "predictable proposed password" ? "predictable"
+          : password.length >= 20 ? "accepted" : "minimum-length",
       createInvitation: async (value) => { invitationAttempts += 1;
         if (invitationAttempts === 1) throw Object.assign(new Error("weak"),
           { code: "WEAK_PASSWORD" });

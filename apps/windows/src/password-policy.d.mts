@@ -4,7 +4,7 @@ export const PASSWORD_REQUIREMENTS: string;
 export type ProposedPasswordOutcome =
   | Readonly<{ status: "empty" | "unavailable" }>
   | Readonly<{ status: "rejected"; reason: "invalid" | "minimum-length" |
-      "maximum-size" | "native-policy" }>
+      "maximum-size" | "predictable" }>
   | Readonly<{ status: "accepted"; password: string }>;
 export function assessProposedPassword(password: string): Promise<ProposedPasswordOutcome>;
 export function proposedPasswordRejectionMessage(

@@ -3,7 +3,7 @@ import { validatePassword } from "./contracts.mjs";
 
 const h = React.createElement;
 
-export const PASSWORD_REQUIREMENTS = "Use at least 12 characters and a passphrase resistant to guessing. Canonical UUIDv4 values are allowed; obtain UUIDs from a trusted random generator.";
+export const PASSWORD_REQUIREMENTS = "Use a sufficiently long passphrase resistant to guessing. Canonical UUIDv4 values are allowed; obtain UUIDs from a trusted random generator.";
 
 const outcome = (status, details = {}) => Object.freeze({ status, ...details });
 
@@ -19,15 +19,17 @@ export async function assessProposedPassword(password) {
   } catch {
     return outcome("rejected", { reason: "maximum-size" });
   }
-  const assess = window.scpefe?.passwordMeetsPolicy;
+  const assess = window.scpefe?.assessPasswordPolicy;
   if (!assess) return outcome("unavailable");
   try {
-    if (await assess(canonicalPassword)) {
+    const nativeAssessment = await assess(canonicalPassword);
+    if (nativeAssessment === "accepted") {
       return outcome("accepted", { password: canonicalPassword });
     }
-    const reason = new TextEncoder().encode(canonicalPassword).byteLength < 12
-      ? "minimum-length" : "native-policy";
-    return outcome("rejected", { reason });
+    if (["minimum-length", "predictable", "invalid"].includes(nativeAssessment)) {
+      return outcome("rejected", { reason: nativeAssessment });
+    }
+    return outcome("unavailable");
   } catch {
     return outcome("unavailable");
   }
@@ -39,9 +41,7 @@ export function proposedPasswordRejectionMessage(result, label = "Password") {
   if (result.status === "unavailable") {
     return `${label} requirements could not be checked. Try again.`;
   }
-  if (result.reason === "minimum-length") {
-    return `${label} must contain at least 12 UTF-8 bytes.`;
-  }
+  if (result.reason === "minimum-length") return `${label} is too short. Add more characters.`;
   if (result.reason === "maximum-size") return `${label} is too long.`;
   if (result.reason === "invalid") return `${label} is invalid.`;
   return `${label} is too predictable. Choose a passphrase that is harder to guess.`;

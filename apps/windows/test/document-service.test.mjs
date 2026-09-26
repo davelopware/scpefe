@@ -448,8 +448,9 @@ test("validates creation acknowledgements at the service boundary", async (t) =>
   const calls = [];
   const assessed = [];
   const service = new DocumentService({ fs, publicationCapabilities, profilePath,
-    native: { passwordMeetsPolicy(password) {
-      assessed.push(password); return !password.includes("predictable");
+    native: { assessPasswordPolicy(password) {
+      assessed.push(password);
+      return password.includes("predictable") ? "predictable" : "accepted";
     }, createDocument(input) {
       calls.push(input);
       return Buffer.from("container");
@@ -1237,7 +1238,8 @@ test("unclaimed invitations expose only the claim workflow", async (t) => {
   const target = path.join(directory, "document.scpefe");
   const profilePath = await writeProfile(directory, "Grace", "Private PC");
   await fs.writeFile(target, "container");
-  const native = { passwordMeetsPolicy: (password) => password.length >= 12,
+  const native = { assessPasswordPolicy: (password) => password.length >= 12
+    ? "accepted" : "minimum-length",
     openDocument: () => ({
     content: "", readOnly: true, canEdit: false, canAddPasswords: false,
     mustBeChanged: true, slotIdentityName: "Temporary colleague label",
