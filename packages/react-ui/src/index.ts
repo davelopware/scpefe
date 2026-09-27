@@ -6,3 +6,4 @@ export type { FocusDomCapability, FocusKeyEvent, FocusScope,
 export { browserFocusDom, browserFocusManager } from "./browser-focus-dom.ts";
 export { useModalFocus } from "./use-modal-focus.ts";
 export type { ModalFocusOptions } from "./use-modal-focus.ts";
+export { useSessionSnapshot } from "./use-session-snapshot.ts";
