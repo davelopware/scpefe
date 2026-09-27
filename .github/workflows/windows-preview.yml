@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/windows/package-lock.json
+          cache-dependency-path: package-lock.json
       - name: Test Windows process lifecycle barrier
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: powershell

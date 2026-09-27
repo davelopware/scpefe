@@ -68,13 +68,13 @@ if (-not (Test-Path $VcpkgToolchain)) {
     throw "The vcpkg CMake toolchain was not found at '$VcpkgToolchain'."
 }
 
-Push-Location $WindowsRoot
+Push-Location $RepositoryRoot
 try {
     Invoke-Checked "npm.cmd" @("ci")
     # Current Electron packages install their runtime lazily; fetch it now so
     # packaging never depends on a developer having launched Electron first.
     Invoke-Checked "node" @("node_modules/electron/install.js")
-    $Package = Get-Content "package.json" -Raw | ConvertFrom-Json
+    $Package = Get-Content (Join-Path $WindowsRoot "package.json") -Raw | ConvertFrom-Json
     $ElectronVersion = [string]$Package.dependencies.electron
     if ($ElectronVersion -notmatch '^\d+\.\d+\.\d+$') {
         throw "package.json must pin Electron to an exact version; found '$ElectronVersion'."
@@ -156,7 +156,7 @@ try {
 $ReleaseRoot = Join-Path $WindowsRoot "release"
 $PackageRoot = Join-Path $ReleaseRoot "SCPEFE-win32-x64"
 $Archive = "${PackageRoot}.zip"
-$ElectronDist = Join-Path $WindowsRoot "node_modules\electron\dist"
+$ElectronDist = Join-Path $RepositoryRoot "node_modules\electron\dist"
 if (-not (Test-Path (Join-Path $ElectronDist "electron.exe"))) {
     throw "npm did not install the Windows Electron runtime at '$ElectronDist'."
 }
