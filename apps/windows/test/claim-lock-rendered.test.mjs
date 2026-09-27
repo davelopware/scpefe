@@ -114,6 +114,8 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       const confirmation = ui.getByLabelText(dialog, "Confirm new password");
       assert.equal(password.getAttribute("minlength"), null);
       assert.equal(confirmation.getAttribute("minlength"), null);
+      assert.equal(password.value, "", "a remounted claim password starts empty");
+      assert.equal(confirmation.value, "", "a remounted claim confirmation starts empty");
       await user.type(password, "語語語語");
       await user.type(confirmation, "語語語語");
       return { dialog, password, confirmation };

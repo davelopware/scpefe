@@ -55,6 +55,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   const exportRequests = [];
   const workingCopyUpdates = [];
   const opened = { content: "first line\nsecond line", readOnly: true, canEdit: true,
+    canAddPasswords: true,
     publicationState: "target-published", targetName: "safe-notes.scpefe" };
   const listen = (name, listener) => {
     listeners[name] = listener;
@@ -100,6 +101,7 @@ test("mounted shell presents truthful document states, history, failures, and se
     },
     lock: async () => { lockCalls += 1;
       return { locked: true, journalSaved: true, warning: null }; },
+    onLockStarted: (listener) => listen("lockStarted", listener),
     onLocked: (listener) => listen("locked", listener),
     onJournalWarning: (listener) => listen("warning", listener),
     onRegularSave: (listener) => listen("regular-save", listener),
@@ -251,6 +253,37 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(savedContent, `${opened.content}!`);
   assert.equal(statusValue("Publication state"), "Published");
 
+  await command("Security", "Passwords…");
+  let passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+  const changePasswordLabels = ["Current password", "New password", "Confirm new password"];
+  for (const label of [...changePasswordLabels,
+    "Temporary passphrase (leave blank to generate)"]) {
+    await user.type(ui.getByLabelText(passwordsDialog, label), "private draft words");
+  }
+  listeners.lockStarted();
+  assert.equal(passwordsDialog.isConnected, false,
+    "lock start removes the mounted password dialog");
+  await command("Security", "Unlock");
+  const draftUnlock = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  await user.type(ui.getByLabelText(draftUnlock, "Password"), "correct password");
+  await user.click(ui.getByRole(draftUnlock, "button", { name: "Unlock" }));
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
+  await command("Security", "Passwords…");
+  passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+  for (const label of changePasswordLabels) {
+    assert.equal(ui.getByLabelText(passwordsDialog, label).value, "",
+      `${label} must not return when the dialog remounts after lock start`);
+  }
+  await user.click(ui.getByRole(passwordsDialog, "button", { name: "Close" }));
+  await command("Edit", "Edit Contents");
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
+  await command("Security", "Passwords…");
+  passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+  assert.equal(ui.getByLabelText(passwordsDialog,
+    "Temporary passphrase (leave blank to generate)").value, "",
+    "the temporary passphrase must not return after edit mode is reacquired");
+  await user.click(ui.getByRole(passwordsDialog, "button", { name: "Close" }));
+
   const beforeTransfer = editor.value;
   await command("File", /Backup/);
   assert.equal(editor.value, beforeTransfer);
@@ -348,7 +381,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   mountedRoot = null;
   await Promise.resolve();
   assert.equal(document.getElementById("root").childElementCount, 0);
-  assert.equal(stoppedListeners, 6);
+  assert.equal(stoppedListeners, 7);
   assert.equal(animationFrames.size, 0);
   dom.window.close(); closed = true;
 });

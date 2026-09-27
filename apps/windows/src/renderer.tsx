@@ -1207,6 +1207,12 @@ function App() {
       setOpenError("");
       setPendingOpenName("");
       setPasswordError("");
+      setCurrentPasswordDraft("");
+      setNewPasswordDraft("");
+      setNewPasswordConfirmationDraft("");
+      setTemporaryPasswordDraft("");
+      setClaimPasswordDraft("");
+      setClaimConfirmationDraft("");
       setInvitationPassphrase(null);
       setInvitationError("");
       setClaimError("");
