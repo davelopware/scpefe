@@ -89,8 +89,8 @@ directory from the Node/Electron SDK used for packaging:
 cmake -S . -B build -DSCPEFE_BUILD_NODE_ADDON=ON \
   -DNODE_API_INCLUDE_DIR=/path/to/node/include
 cmake --build build
-cd apps/windows
 npm install
+cd apps/windows
 npm test
 npm run build
 ```
@@ -98,6 +98,23 @@ npm run build
 On Windows, also pass `NODE_API_LIBRARY` for the matching SDK import library.
 Copy the resulting `scpefe_electron_native.node` beside `apps/windows/native`
 as part of packaging; production packaging details remain a release task.
+
+The repository root is an npm workspace. `packages/frontend-core` and
+`packages/react-ui` expose TypeScript source through public package entries;
+the Windows frontend consumes those entries directly after a root `npm ci`,
+without a package build. `npm run typecheck` at the root checks all three
+workspaces. The focused TypeScript package gate is `npm run test:frontend`.
+On Linux, run that gate inside the required bounded user scope:
+
+```bash
+systemd-run --user --scope \
+  -p MemoryHigh=768M -p MemoryMax=1G -p MemorySwapMax=0 -p TasksMax=256 \
+  /usr/bin/time -v timeout --signal=TERM --kill-after=2s 60s \
+  npm run test:frontend
+```
+
+The same scope limits apply to every Node/Electron renderer build and desktop
+test invocation. See `docs/agents/resource-safety.md`.
 
 For a repeatable, unsigned Windows preview build, see
 [`apps/windows/README.md`](apps/windows/README.md). From a Windows checkout with

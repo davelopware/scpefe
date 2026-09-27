@@ -163,6 +163,9 @@ working copy ──recovery checkpoint──> local work journal
 | Host-services interface | The public `libscpefe` function-table contract for document I/O, app-private storage, clocks, preferences, lifecycle input, and storage capabilities. |
 | Platform adapter | A Windows, POSIX/Linux, Android, test, or third-party implementation of the host-services interface. |
 | Frontend | The Electron, Capacitor, CLI, or embedding UI that creates an adapter and SCPEFE context and presents structured library results. |
+| Frontend application core | Portable TypeScript session and presentation-orchestration behavior shared by supported TypeScript frontends. It consumes narrow host capabilities and does not implement document, storage, cryptographic, or security policy. |
+| Shared React UI | Reusable React rendering and DOM interaction behavior for WebView-based graphical frontends. It presents frontend application-core state but does not own document-session policy. |
+| Platform frontend | The Electron, Capacitor, CLI, or embedding-specific composition and presentation of a Frontend, including its adapters to host capabilities. |
 | SCPEFE context | A non-global `libscpefe` instance created with one registered host-services implementation. |
 
 ## 9. Domain invariants

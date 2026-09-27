@@ -1,6 +1,9 @@
 /build/
 /apps/windows/dist/
 /apps/windows/node_modules/
+/node_modules/
+/packages/*/node_modules/
+/packages/*/dist/
 /apps/windows/native/*.dll
 /apps/windows/native/*.node
 /apps/windows/release/
