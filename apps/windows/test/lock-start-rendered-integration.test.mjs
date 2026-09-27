@@ -12,15 +12,26 @@ import { DocumentService } from "../src/document-service.mjs";
 import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 import { registerWindowFocusProtection } from "../src/window-focus-protection.mjs";
 import { cleanupMountedLifecycleHarness } from "./mounted-lifecycle-cleanup.mjs";
+import { MountedLifecycleCompletion } from "./mounted-lifecycle-completion.mjs";
 
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
 
 export async function runMountedLock(t, origin, nativeOverride = null) {
+  try { await runMountedLockScenario(t, origin, nativeOverride); }
+  catch (error) { scenarioFailures.set(t, error); throw error; }
+}
+
+const scenarioFailures = new WeakMap();
+
+async function runMountedLockScenario(t, origin, nativeOverride = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   let teardown = () => fs.rm(directory,
     { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-  t.after(() => teardown());
+  t.after(async () => {
+    try { await teardown(scenarioFailures.get(t)); }
+    finally { scenarioFailures.delete(t); }
+  });
   const target = path.join(directory, "document.scpefe");
   const otherTarget = path.join(directory, "other.scpefe");
   const newTarget = path.join(directory, "new-document.scpefe");
@@ -207,6 +218,13 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     protectionRequestSeen = resolve;
   });
   const ipcListeners = new Map(); const ipcHandlers = new Map();
+  const mountedServices = new Set(); let mountedCompletion;
+  const observeMethod = (owner, method, label) => {
+    const original = owner[method];
+    owner[method] = function (...args) {
+      return mountedCompletion.track(label, () => original.apply(this, args));
+    };
+  };
   const emittedChannels = [];
   const emit = (channel, value) => {
     emittedChannels.push(channel);
@@ -218,7 +236,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   class FakeWindow extends EventEmitter {
     constructor() { super(); this.webContents = { send: emit }; this.closed = 0; }
     close() { const event = { prevented: false, preventDefault() { this.prevented = true; } };
-      this.lastClose = Promise.all(this.listeners("close").map((listener) => listener(event)));
+      this.lastClose = mountedCompletion.track("native:close", () =>
+        Promise.all(this.listeners("close").map((listener) => listener(event))));
       if (!event.prevented) this.closed += 1; return event; }
     show() {} focus() {} isMinimized() { return false; }
   }
@@ -264,7 +283,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     restartCandidateHash = interrupted.active.pendingRecord.publication.candidateHash;
   }
   const host = await new DocumentLifecycleHost({
-    ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
+    ipc: { handle(channel, handler) { ipcHandlers.set(channel, (...args) =>
+      mountedCompletion.track(`ipc:${channel}`, () => handler(...args))); } },
     window: fakeWindow, picker: { chooseCreateTarget: async () => {
       createPickerCalls += 1; return origin.startsWith("new")
         || /^s[0-3]-new$/.test(origin)
@@ -284,11 +304,25 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
             ? (openPickerCalls++ === 0 ? target : otherTarget)
         : (origin.startsWith("dr-open-") || origin.startsWith("prr-open-"))
           && createPickerCalls++ > 0 ? otherTarget : target },
-    serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
+    serviceFactory: (callbacks) => {
+      const created = new DocumentService(serviceOptions(callbacks));
+      for (const method of ["saveDocument", "regularSaveDocument", "exitEditMode",
+        "lock", "revalidateTargetForReplacement"]) {
+        observeMethod(created, method, `service:${method}`);
+      }
+      mountedServices.add(created);
+      return created;
+    },
     acknowledge: async (request, status, sequence) => {
       acks.push({ token: request.token, status, sequence });
     },
   }).start();
+  for (const method of ["authorize", "decide"]) {
+    observeMethod(host.protections, method, `protection:${method}`);
+  }
+  for (const method of ["requestExit", "handleClose"]) {
+    observeMethod(host.lifecycle, method, `lifecycle:${method}`);
+  }
   let service = host.service;
   const powerMonitor = new EventEmitter();
   registerWindowFocusProtection({ window: fakeWindow, powerMonitor,
@@ -296,6 +330,9 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
 
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",
     { url: "https://scpefe.invalid/" });
+  mountedCompletion = new MountedLifecycleCompletion({
+    renderer: { waitForIdle: async () => {} }, services: mountedServices,
+  });
   const keys = ["window", "document", "HTMLElement", "Node", "MutationObserver",
     "FormData", "getComputedStyle", "requestAnimationFrame", "cancelAnimationFrame",
     "IS_REACT_ACT_ENVIRONMENT"];
@@ -310,8 +347,13 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       queueMicrotask(() => { const pending = frames.get(id);
         if (pending) { frames.delete(id); pending(performance.now()); } }); return id; },
     cancelAnimationFrame: (id) => frames.delete(id), IS_REACT_ACT_ENVIRONMENT: true });
-  teardown = () => cleanupMountedLifecycleHarness({
-    completion: dom.window[Symbol.for("scpefe.renderer.lifecycle-completion")],
+  teardown = (primaryError) => cleanupMountedLifecycleHarness({
+    completion: mountedCompletion,
+    primaryError,
+    cancelPendingWork: () => {
+      releaseMaintenance(); releaseDiscard(); releaseNewLink?.(); releaseInitialRead();
+      releaseOtherRead?.(); host.protections.cancelForLock();
+    },
     drainRendererTasks: () => new Promise((resolve) => setImmediate(resolve)),
     unmount: () => mountedRoot?.unmount(), clearFrames: () => frames.clear(),
     closeDom: () => dom.window.close(),
@@ -347,6 +389,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
   const rendererUrl = new URL(`../dist/assets/${script}`, import.meta.url);
   await import(`${rendererUrl.href}?real-lock-${origin}`);
+  mountedCompletion.renderer = dom.window[
+    Symbol.for("scpefe.renderer.lifecycle-completion")];
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
@@ -364,11 +408,9 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     "menuitem", { name: menu })); await user.click(ui.getByRole(
     ui.getByRole(document.body, "menu", { name: menu }), "menuitem", { name })); };
   const awaitLifecycleCompletion = async (label) => {
-    const completion = dom.window[
-      Symbol.for("scpefe.renderer.lifecycle-completion")];
-    assert.equal(typeof completion?.waitForIdle, "function",
-      `renderer exposes lifecycle completion for ${label}`);
-    await completion.waitForIdle({ timeoutMs: 5_000 });
+    assert.equal(typeof mountedCompletion?.waitForIdle, "function",
+      `mounted lifecycle completion is available for ${label}`);
+    await mountedCompletion.waitForIdle({ timeoutMs: 5_000 });
   };
   const awaitHarnessPhase = async (phase, label) => {
     let phaseTimeout;
@@ -918,6 +960,26 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   }
   await user.clear(editor);
   await user.type(editor, "mounted secret plaintext");
+  if (origin === "host-publication-idle") {
+    await service.saveClientSettings({ regularSaveEnabled: true,
+      regularSaveIntervalMs: 120_000 });
+    holdMaintenance = true;
+    const publishing = service.regularSaveDocument();
+    await maintenanceEntered;
+    let settled = false;
+    const idle = awaitLifecycleCompletion("held host publication")
+      .then(() => { settled = true; });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(settled, false,
+        "mounted lifecycle completion cannot report idle during host publication");
+    } finally {
+      releaseMaintenance();
+      await publishing;
+      await idle;
+    }
+    return;
+  }
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Working copy state").textContent, "Dirty"));
   const provisionalDecision = origin.startsWith("prr-") || origin.startsWith("prc-");

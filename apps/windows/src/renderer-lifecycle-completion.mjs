@@ -5,6 +5,8 @@ export const RENDERER_LIFECYCLE_COMPLETION =
 export class RendererLifecycleCompletion {
   #inFlight = new Set();
 
+  get pendingCount() { return this.#inFlight.size; }
+
   track(operation) {
     if (typeof operation !== "function") throw new TypeError("operation must be a function");
     let promise;
