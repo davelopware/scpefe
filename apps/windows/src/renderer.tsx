@@ -1,7 +1,8 @@
 import React, { FormEvent, KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { useModalFocus } from "@scpefe/react-ui";
+import { DocumentSession, type WorkingCopyJournalHost } from "@scpefe/frontend-core";
+import { useModalFocus, useSessionSnapshot } from "@scpefe/react-ui";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
@@ -321,12 +322,41 @@ declare global { interface Window { scpefe: {
 }; } }
 
 function App() {
+  const [sessionStore] = useState(() => {
+    let journalSequence = 0;
+    const journalPrefix = globalThis.crypto?.randomUUID?.()
+      ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const warningListeners = new Set<(code: string, scope: string | null) => void>();
+    const journal: WorkingCopyJournalHost = {
+      createJournalScope: () => `renderer-${journalPrefix}-${++journalSequence}`,
+      updateWorkingCopy: (update) => window.scpefe.updateWorkingCopy(update),
+      onJournalWarning: (listener) => {
+        warningListeners.add(listener);
+        return () => { warningListeners.delete(listener); };
+      },
+    };
+    return {
+      session: new DocumentSession<DocumentOpened, Extract<Opened,
+        { invitationRequired: true }>>(window.scpefe, journal),
+      forwardJournalWarning: (code: string, scope: string | null) => {
+        for (const listener of warningListeners) listener(code, scope);
+      },
+    };
+  });
+  const session = sessionStore.session;
+  const sessionSnapshot = useSessionSnapshot(session);
+  const opened: Opened | null = sessionSnapshot.kind === "read-only"
+    || sessionSnapshot.kind === "edit" ? sessionSnapshot.document : null;
+  const targetName = sessionSnapshot.kind === "closed" ? null
+    : sessionSnapshot.targetName;
+  const lockedDocument = sessionSnapshot.kind === "locked";
+  useEffect(() => () => session.dispose(), [session]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [clientSettings, setClientSettings] = useState<ClientSettings>({
     regularSaveEnabled: false, regularSaveIntervalMs: 120_000,
   });
-  const [opened, setOpened] = useState<Opened | null>(null);
   const [message, setMessage] = useState("");
+  const [editorAdoption, setEditorAdoption] = useState(0);
   const [workingText, setWorkingText] = useState("");
   const [manualSavedText, setManualSavedText] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -351,8 +381,6 @@ function App() {
   const [openError, setOpenError] = useState("");
   const [pendingOpenName, setPendingOpenName] = useState("");
   const [invitationStaged, setInvitationStaged] = useState(false);
-  const [targetName, setTargetName] = useState<string | null>(null);
-  const [locked, setLocked] = useState(false);
   const [editFailure, setEditFailure] = useState<string | null>(null);
   const [leaseDecision, setLeaseDecision] = useState<LeaseDecision | null>(null);
   const [decisionError, setDecisionError] = useState("");
@@ -392,7 +420,6 @@ function App() {
   const publicationRetryAction = useRef<HTMLButtonElement>(null);
   const migrationRetryAction = useRef<HTMLButtonElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
-  const targetNameRef = useRef<string | null>(null);
   const modalBusy = useRef(false);
   const openedDialog = openedDialogName(opened);
   const visibleOpenedDialog = !creating && dialog === null && !resolvingConflict
@@ -415,18 +442,27 @@ function App() {
       window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError));
   }, []);
   const showError = (error: unknown) => setMessage(safeRendererErrorMessage(error));
+  function reflectCurrent(update: (document: DocumentOpened) => DocumentOpened): void {
+    const current = session.getSnapshot();
+    if (current.kind === "read-only" || current.kind === "edit") {
+      session.refreshDocument(update(current.document));
+    }
+  }
   useEffect(() => {
     const stopLockStarted = window.scpefe.onLockStarted?.(() => showLockedResult({
       locked: true, journalSaved: true, warningCode: null,
     })) ?? (() => {});
     const stopLocked = window.scpefe.onLocked(showLockedResult);
-    const stopWarning = window.scpefe.onJournalWarning((code) => setMessage(catalogText(code)));
+    const stopWarning = window.scpefe.onJournalWarning((code, scope) => {
+      sessionStore.forwardJournalWarning(code, scope);
+      setMessage(catalogText(code));
+    });
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
       setSaveState("provisional");
       manualBaselineValid.current = false;
       setDirty(true);
-      setOpened((current) => isDocumentOpened(current) ? { ...current,
-        content: result.content, provisional: true } : current);
+      reflectCurrent((current) => ({ ...current,
+        content: result.content, provisional: true }));
       setMessage("Regular save published provisionally; changes remain unsaved until manual save.");
     });
     const stopExternalOpen = window.scpefe.onExternalOpenRequested((request) => {
@@ -450,8 +486,7 @@ function App() {
       setProtectionError(""); setProtection(request);
     }) ?? (() => {});
     const stopClosed = window.scpefe.onDocumentClosed?.(() => {
-      showLockedResult({ locked: true, journalSaved: true, warningCode: null });
-      targetNameRef.current = null; setTargetName(null); setLocked(false);
+      showLockedResult({ locked: true, journalSaved: true, warningCode: null }, true);
     }) ?? (() => {});
     const activity = () => { void window.scpefe.activity(); };
     window.addEventListener("keydown", activity);
@@ -474,27 +509,22 @@ function App() {
     }
   }, [creating, dialog, openedDialog, queuedExternalOpenRequest]);
 
-  function showOpenedResult(result: Opened | null) {
-    setOpened(result);
+  function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
+    if (!alreadyAdopted) session.adopt(result);
+    const adopted = session.getSnapshot();
+    if (adopted.kind === "read-only" || adopted.kind === "edit") {
+      setEditorAdoption(adopted.adoption);
+    }
     setLeaseDecision(null);
     setDecisionError("");
     setOpenedDialogError("");
-    const content = result && !result.invitationRequired ? result.content : "";
-    if (result) {
-      setLocked(false);
-      if (result.targetName) {
-        targetNameRef.current = result.targetName;
-        setTargetName(result.targetName);
-      }
-    }
+    const content = result.content;
     setWorkingText(content);
     setManualSavedText(content);
-    manualBaselineValid.current = !(result && !result.invitationRequired && result.provisional);
-    setDirty(Boolean(result && !result.invitationRequired && result.provisional));
-    setSaveState(result && !result.invitationRequired && result.provisional ? "provisional"
-      : result && !result.invitationRequired && result.recovery ? "unsaved"
-      : result && !result.invitationRequired
-        ? result.publicationState : "target-published");
+    manualBaselineValid.current = !result.provisional;
+    setDirty(Boolean(result.provisional));
+    setSaveState(result.provisional ? "provisional"
+      : result.recovery ? "unsaved" : result.publicationState);
     setHistory([content]);
     setHistoryIndex(0);
     editorSelection.current = { start: 0, end: 0 };
@@ -502,31 +532,32 @@ function App() {
     setFindText("");
     setReplaceText("");
     setFindStatus("");
-    if (result && !result.invitationRequired && result.recovery) {
+    if (result.recovery) {
       const source = [result.recovery.authorName, result.recovery.deviceName]
         .filter(Boolean).join(" on ");
       setMessage(`Recovered unsaved work${source ? ` from ${source}` : ""}. Restore or discard it before editing.`);
-    } else if (result && !result.invitationRequired && result.lease?.active) {
+    } else if (result.lease?.active) {
       setMessage(`Editing lease held by ${result.lease.holderName || "another editor"} (${result.lease.holderEmail}) on ${result.lease.deviceName}.`);
     }
   }
 
-  function showReplacementResult(result: Opened) {
+  function showReplacementResult(result: Opened, alreadyAdopted = false) {
     if (result.invitationRequired) {
       setInvitationStaged(true);
       setMessage("Claim the invitation before its document replaces the current session.");
       return;
     }
     setInvitationStaged(false);
-    showOpenedResult(result);
+    showOpenedResult(result, alreadyAdopted);
   }
 
   function focusEditorAfterDialog() {
     replacementFocusPending.current = true;
   }
 
-  const activeDocument = isDocumentOpened(opened);
-  const lockedDocument = locked && targetName !== null;
+  const activeDocument = isDocumentOpened(opened)
+    && (sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit")
+    && sessionSnapshot.adoption === editorAdoption;
   useEffect(() => {
     const restoreSelection = wasModalBusy.current && !modalBusy.current && activeDocument;
     const restoreFindFocus = restoreSelection && findOpen && suspendedFindFocus.current !== null;
@@ -598,8 +629,11 @@ function App() {
       setOpenError(""); setDialog("unlock");
     }
     else if (command === "close") {
-      try { await window.scpefe.closeDocument(); }
-      catch (error) { showError(error); }
+      const outcome = await session.close();
+      if (outcome.status === "failed") setMessage(catalogText(outcome.code));
+      else if (outcome.status === "closed") showLockedResult({
+        locked: true, journalSaved: true, warningCode: null,
+      }, true);
     }
     else if (command === "exit") {
       try { await window.scpefe.exitApplication(); }
@@ -668,7 +702,7 @@ function App() {
       setProfile(saved);
       setPendingProfile(null);
       setProfileError("");
-      if (authoritative) setOpened(authoritative);
+      if (authoritative) session.refreshDocument(authoritative);
       setDialog(null);
       setMessage("Local profile saved.");
     } catch (error) {
@@ -694,14 +728,32 @@ function App() {
   async function open(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    let password = String(data.get("password"));
+    data.delete("password");
     try {
       setOpenError("");
-      const result = dialog === "unlock"
-        ? await window.scpefe.unlockDocument(String(data.get("password")))
-        : await window.scpefe.openSelectedDocument(String(data.get("password")));
-      showReplacementResult(result);
+      const pending = dialog === "unlock"
+        ? session.unlock(password) : session.openSelected(password);
+      password = "";
+      const outcome = await pending;
+      if (outcome.status === "failed") {
+        setOpenError(catalogText(outcome.code));
+        requestAnimationFrame(() => openPassword.current?.focus());
+        return;
+      }
+      if (outcome.status === "superseded") return;
+      if (outcome.status === "invitation") {
+        setInvitationStaged(true);
+        setMessage("Claim the invitation before its document replaces the current session.");
+      } else if (outcome.status === "opened") {
+        const adopted = session.getSnapshot();
+        if (adopted.kind !== "read-only" && adopted.kind !== "edit") return;
+        showReplacementResult(adopted.document, true);
+      } else return;
       setPendingOpenName(""); setDialog(null);
-      if (!result.invitationRequired && openedDialogName(result) === null) {
+      const adopted = session.getSnapshot();
+      if (outcome.status === "opened" && (adopted.kind === "read-only"
+          || adopted.kind === "edit") && openedDialogName(adopted.document) === null) {
         focusEditorAfterDialog();
       }
     }
@@ -756,7 +808,7 @@ function App() {
         setMessage("Editing requires a confirmed lease takeover.");
         return;
       }
-      setOpened(result);
+      session.refreshDocument(result);
       setMessage("Edit mode entered.");
     } catch (error) {
       setEditFailure(safeRendererErrorMessage(error));
@@ -801,7 +853,7 @@ function App() {
         return;
       }
       setLeaseDecision(null);
-      setOpened(result.opened);
+      session.refreshDocument(result.opened);
       setWorkingText(result.opened.content);
       setMessage(catalogText(result.compatibilityCode));
     } catch (error) {
@@ -854,7 +906,7 @@ function App() {
         setDecisionError("The lease changed. Review the current holder before trying again.");
         return;
       }
-      setOpened(result); setLeaseDecision(null);
+      session.refreshDocument(result); setLeaseDecision(null);
       setMessage("Edit mode entered after confirmed lease takeover.");
     } catch (error) {
       const value = safeRendererErrorMessage(error);
@@ -964,7 +1016,7 @@ function App() {
       form.reset();
       setCurrentPasswordDraft(""); setNewPasswordDraft("");
       setNewPasswordConfirmationDraft("");
-      setOpened(result);
+      session.refreshDocument(result);
       setMessage("Password changed and the updated document was published safely.");
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
@@ -1021,7 +1073,7 @@ function App() {
     try {
       setPasswordError("");
       const result = await window.scpefe.reconcileIdentity();
-      setOpened(result);
+      session.refreshDocument(result);
       setMessage("Password-slot identity reconciled through a sealed publication.");
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
@@ -1034,7 +1086,7 @@ function App() {
       setPasswordError("");
       const result = await window.scpefe.updateSlotPermissions({ slotId: slot.slotId,
         canEdit, canAddPasswords, canRemovePasswords });
-      setOpened(result);
+      session.refreshDocument(result);
       setMessage("Slot permissions published.");
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
@@ -1045,9 +1097,9 @@ function App() {
     try {
       setPasswordError("");
       const result = await window.scpefe.removeSlot(slot.slotId);
-      setOpened((current) => isDocumentOpened(current) ? { ...current,
+      reflectCurrent((current) => ({ ...current,
         managedSlots: current.managedSlots?.filter(
-          (candidate) => candidate.slotId !== slot.slotId) } : current);
+          (candidate) => candidate.slotId !== slot.slotId) }));
       setMessage(catalogText(result.warningCode));
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
@@ -1056,7 +1108,7 @@ function App() {
 
   function applyRecoveredWork(result: DocumentOpened & {
     recoveredUnsaved: true; cursor: Cursor }) {
-    setOpened(result);
+    session.refreshDocument(result);
     setWorkingText(result.content);
     setHistory([result.content]);
     setHistoryIndex(0);
@@ -1099,7 +1151,7 @@ function App() {
     try {
       setOpenedDialogError("");
       const result = await window.scpefe.discardRecoveredWork();
-      setOpened(result);
+      session.refreshDocument(result);
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);
@@ -1117,7 +1169,7 @@ function App() {
     try {
       setOpenedDialogError("");
       const result = await window.scpefe.acceptHeadMismatch();
-      setOpened(result);
+      session.refreshDocument(result);
       setMessage("Current authenticated head accepted. Editing may now be enabled.");
     } catch (error) {
       openedActionFailure(error, action, "Authenticated-head acceptance needs attention");
@@ -1125,16 +1177,21 @@ function App() {
   }
 
   async function lock() {
-    try { showLockedResult(await window.scpefe.lock()); }
-    catch (error) { showError(error); }
+    const outcome = await session.lock();
+    if (outcome.status === "locked") showLockedResult({
+      locked: true, journalSaved: true, warningCode: outcome.warningCode,
+    });
+    else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
   }
 
-  function showLockedResult(result: LockResult) {
+  function showLockedResult(result: LockResult, closed = false) {
     document.querySelectorAll<HTMLInputElement>(
       "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
-      setOpened(null);
+      if (closed) session.closed();
+      else session.lockStarted();
+      setEditorAdoption(0);
       setWorkingText("");
       setManualSavedText("");
       setHistory([""]);
@@ -1167,7 +1224,6 @@ function App() {
       setProtection(null);
       setProtectionError("");
       setResolvingConflict(false);
-      setLocked(targetNameRef.current !== null);
       setMessage(result.warningCode ? catalogText(result.warningCode)
         : "Document locked. Use Security → Unlock to continue.");
     });
@@ -1195,11 +1251,11 @@ function App() {
       setManualSavedText(result.content);
       setDirty(false);
       manualBaselineValid.current = true;
-      setOpened((current) => isDocumentOpened(current) ? { ...current,
+      reflectCurrent((current) => ({ ...current,
         content: result.content,
         readOnly: result.publicationState !== "target-published",
         publicationState: result.publicationState,
-        provisional: undefined } : current);
+        provisional: undefined }));
       setSaveState(result.publicationState);
       if (result.publicationState !== "conflict") setResolvingConflict(false);
       setMessage(result.publicationState === "pending-publication"
@@ -1219,8 +1275,8 @@ function App() {
     manualBaselineValid.current = false;
     setHistory([draft.content]);
     setHistoryIndex(0);
-    setOpened((current) => isDocumentOpened(current) ? { ...current,
-      content: draft.content, readOnly: false, canEdit: true } : current);
+    reflectCurrent((current) => ({ ...current,
+      content: draft.content, readOnly: false, canEdit: true }));
     setSaveState("conflict");
     setResolvingConflict(true);
     setOpenedDialogError("");
@@ -1257,9 +1313,9 @@ function App() {
         return;
       }
       const result = await window.scpefe.reconnectPendingPublication();
-      setOpened((current) => isDocumentOpened(current) ? { ...current,
+      reflectCurrent((current) => ({ ...current,
         content: result.content, readOnly: true,
-        publicationState: result.publicationState } : current);
+        publicationState: result.publicationState }));
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);
@@ -1282,7 +1338,7 @@ function App() {
     try {
       setOpenedDialogError("");
       const result = await window.scpefe.discardPendingPublication();
-      setOpened(result);
+      session.refreshDocument(result);
       setWorkingText(result.content);
       setManualSavedText(result.content);
       setDirty(false);

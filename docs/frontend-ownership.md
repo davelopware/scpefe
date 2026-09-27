@@ -8,7 +8,7 @@ own lifecycle barriers, durable publication, storage, and security policy.
 
 | Concern | Authoritative owner now | Owner after frontend migration | Boundary |
 | --- | --- | --- | --- |
-| Open, replacement, lock, unlock, and close presentation; active target identity in the UI | Windows React renderer | Frontend `DocumentSession` | Host services perform the actual document operation; the frontend presents its structured result. |
+| Open, replacement, lock, unlock, and close presentation; active target identity in the UI | Frontend `DocumentSession` | Frontend `DocumentSession` | Host services perform the actual document operation; the frontend presents its structured result. |
 | Working text, manual-save baseline, dirty state, edit history, selection, and find/replace | Windows React renderer | `WorkingCopy` owned by frontend `DocumentSession` | Journal writes use a narrow host capability. |
 | Command availability, semantic attention, and status shown to the user | Windows React renderer | Frontend `DocumentSession` | React maps attention and outcomes to dialogs and safe messages. |
 | Dialog rendering, focus, inert chrome, and form drafts | Windows React renderer and current dialog helpers | Shared React UI and platform frontend | These are presentation details, not document-session state. |
@@ -27,16 +27,18 @@ state, lifecycle phase, pending operation, or command eligibility. Derived
 rendering values may be calculated from the authoritative snapshot without
 becoming a second mutable source of truth.
 
-`DocumentSession` begins only after successful target adoption, survives Lock
-with target identity but without reachable plaintext or secrets, and ends at
-Close. It serializes frontend commands; the main process retains its own
-lifecycle barrier and durable safety guarantees. A locked snapshot cannot
-contain editable working state. A future CLI can present the same semantic
-attention as prompts without importing React or DOM behavior.
+`DocumentSession` now projects closed, locked, unlocked/read-only, and edit
+lifecycle states through an immutable external snapshot. It retains target
+identity after Lock but drops document and `WorkingCopy` references at lock
+start; Close drops the target identity. It serializes basic lifecycle commands,
+while the main process retains its own lifecycle barrier and durable safety
+guarantees. A future CLI can observe the same lifecycle snapshot without
+importing React or DOM behavior.
 
-The portable `WorkingCopy` implementation is present before the Windows
-cutover. Until `DocumentSession` adopts it, the Windows renderer remains the
-only authoritative owner of working text, baseline, history, and selection.
+`DocumentSession` creates a `WorkingCopy` at successful document adoption and
+disposes it at lock start. The Windows renderer remains the authoritative owner
+of active editor text, baseline, history, and selection until the editing
+cutover; this session does not publish working-copy edits yet.
 The class's journal drain waits for host update acknowledgements; the host
 retains durable checkpoint and failure policy, and can report a later
 checkpoint warning. The platform adapter supplies a fresh opaque journal
