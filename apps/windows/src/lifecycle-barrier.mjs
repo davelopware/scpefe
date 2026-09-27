@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export class LifecycleBarrier {
   constructor() {
     this.context = new AsyncLocalStorage();
+    this.activeOwner = null;
     this.queue = [];
     this.readers = 0;
     this.writer = false;
@@ -12,7 +13,7 @@ export class LifecycleBarrier {
   }
 
   runMaintenance(operation) {
-    if (this.context.getStore() === this) return Promise.resolve().then(operation);
+    if (this.#ownsExclusive()) return this.#runOwned(operation);
     this.maintenance += 1;
     this.generation += 1;
     return this.#enqueue("reader", operation).finally(() => {
@@ -22,13 +23,39 @@ export class LifecycleBarrier {
   }
 
   runExclusive(operation) {
-    if (this.context.getStore() === this) return Promise.resolve().then(operation);
+    if (this.#ownsExclusive()) return this.#runOwned(operation);
     this.generation += 1;
-    return this.#enqueue("writer", () => this.context.run(this, operation))
+    const owner = { pending: new Set() };
+    return this.#enqueue("writer", () => {
+      this.activeOwner = owner;
+      return this.context.run(owner, async () => {
+        try { return await operation(); }
+        finally {
+          // Reentrant work remains owned even when its caller did not await it.
+          while (owner.pending.size > 0) {
+            await Promise.allSettled([...owner.pending]);
+          }
+          if (this.activeOwner === owner) this.activeOwner = null;
+        }
+      });
+    })
       .finally(() => { this.generation += 1; });
   }
 
   get hasMaintenance() { return this.maintenance > 0; }
+
+  #ownsExclusive() {
+    return this.writer && this.activeOwner !== null
+      && this.context.getStore() === this.activeOwner;
+  }
+
+  #runOwned(operation) {
+    const owner = this.activeOwner;
+    const pending = Promise.resolve().then(operation);
+    owner.pending.add(pending);
+    void pending.finally(() => owner.pending.delete(pending)).catch(() => {});
+    return pending;
+  }
 
   #enqueue(kind, operation) {
     return new Promise((resolve, reject) => {

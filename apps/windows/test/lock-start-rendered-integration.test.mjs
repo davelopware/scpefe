@@ -12,15 +12,26 @@ import { DocumentService } from "../src/document-service.mjs";
 import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 import { registerWindowFocusProtection } from "../src/window-focus-protection.mjs";
 import { cleanupMountedLifecycleHarness } from "./mounted-lifecycle-cleanup.mjs";
+import { MountedLifecycleCompletion } from "./mounted-lifecycle-completion.mjs";
 
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
 
 export async function runMountedLock(t, origin, nativeOverride = null) {
+  try { await runMountedLockScenario(t, origin, nativeOverride); }
+  catch (error) { scenarioFailures.set(t, error); throw error; }
+}
+
+const scenarioFailures = new WeakMap();
+
+async function runMountedLockScenario(t, origin, nativeOverride = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   let teardown = () => fs.rm(directory,
     { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-  t.after(() => teardown());
+  t.after(async () => {
+    try { await teardown(scenarioFailures.get(t)); }
+    finally { scenarioFailures.delete(t); }
+  });
   const target = path.join(directory, "document.scpefe");
   const otherTarget = path.join(directory, "other.scpefe");
   const newTarget = path.join(directory, "new-document.scpefe");
@@ -37,6 +48,7 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   let provisionalDiscardFault = false;
   let publicationUnavailable = false;
   let publicationFailureAfter = null;
+  let delayPublicationOnce = false;
   let createFault = false;
   let createdCandidate = false;
   let createdInput = null;
@@ -98,6 +110,11 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       maintenanceStarted();
       await maintenanceReleased;
       holdMaintenance = false;
+    }
+    if (delayPublicationOnce && destination === target) {
+      delayPublicationOnce = false;
+      // Cross the DOM library's one-second polling deadline in this regression fixture.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
     }
     const renamed = await fs.rename(source, destination);
     if (destination === target && postAuthorizationFaultTarget) {
@@ -207,6 +224,15 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     protectionRequestSeen = resolve;
   });
   const ipcListeners = new Map(); const ipcHandlers = new Map();
+  const mountedCompletion = new MountedLifecycleCompletion({
+    renderer: { waitForIdle: async () => {} },
+  });
+  const observeMethod = (owner, method, label) => {
+    const original = owner[method];
+    owner[method] = function (...args) {
+      return mountedCompletion.track(label, () => original.apply(this, args));
+    };
+  };
   const emittedChannels = [];
   const emit = (channel, value) => {
     emittedChannels.push(channel);
@@ -218,7 +244,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   class FakeWindow extends EventEmitter {
     constructor() { super(); this.webContents = { send: emit }; this.closed = 0; }
     close() { const event = { prevented: false, preventDefault() { this.prevented = true; } };
-      this.lastClose = Promise.all(this.listeners("close").map((listener) => listener(event)));
+      this.lastClose = mountedCompletion.track("native:close", () =>
+        Promise.all(this.listeners("close").map((listener) => listener(event))));
       if (!event.prevented) this.closed += 1; return event; }
     show() {} focus() {} isMinimized() { return false; }
   }
@@ -264,7 +291,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     restartCandidateHash = interrupted.active.pendingRecord.publication.candidateHash;
   }
   const host = await new DocumentLifecycleHost({
-    ipc: { handle(channel, handler) { ipcHandlers.set(channel, handler); } },
+    ipc: { handle(channel, handler) { ipcHandlers.set(channel, (...args) =>
+      mountedCompletion.track(`ipc:${channel}`, () => handler(...args))); } },
     window: fakeWindow, picker: { chooseCreateTarget: async () => {
       createPickerCalls += 1; return origin.startsWith("new")
         || /^s[0-3]-new$/.test(origin)
@@ -284,11 +312,28 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
             ? (openPickerCalls++ === 0 ? target : otherTarget)
         : (origin.startsWith("dr-open-") || origin.startsWith("prr-open-"))
           && createPickerCalls++ > 0 ? otherTarget : target },
-    serviceFactory: (callbacks) => new DocumentService(serviceOptions(callbacks)),
+    serviceFactory: (callbacks) => {
+      const created = new DocumentService(serviceOptions(callbacks));
+      for (const method of ["saveDocument", "regularSaveDocument", "exitEditMode",
+        "lock", "revalidateTargetForReplacement"]) {
+        observeMethod(created, method, `service:${method}`);
+      }
+      observeMethod(created.lifecycle, "runMaintenance", "service:maintenance");
+      observeMethod(created.lifecycle, "runExclusive", "service:exclusive");
+      observeMethod(created.journals, "write", "journal:write");
+      return created;
+    },
     acknowledge: async (request, status, sequence) => {
       acks.push({ token: request.token, status, sequence });
     },
   }).start();
+  for (const method of ["authorize", "decide"]) {
+    observeMethod(host.protections, method, `protection:${method}`);
+  }
+  for (const method of ["requestExit", "handleClose"]) {
+    observeMethod(host.lifecycle, method, `lifecycle:${method}`);
+  }
+  observeMethod(host.secureLocks, "serviceLocked", "host:serviceLocked");
   let service = host.service;
   const powerMonitor = new EventEmitter();
   registerWindowFocusProtection({ window: fakeWindow, powerMonitor,
@@ -310,8 +355,13 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       queueMicrotask(() => { const pending = frames.get(id);
         if (pending) { frames.delete(id); pending(performance.now()); } }); return id; },
     cancelAnimationFrame: (id) => frames.delete(id), IS_REACT_ACT_ENVIRONMENT: true });
-  teardown = () => cleanupMountedLifecycleHarness({
-    completion: dom.window[Symbol.for("scpefe.renderer.lifecycle-completion")],
+  teardown = (primaryError) => cleanupMountedLifecycleHarness({
+    completion: mountedCompletion,
+    primaryError,
+    cancelPendingWork: () => {
+      releaseMaintenance(); releaseDiscard(); releaseNewLink?.(); releaseInitialRead();
+      releaseOtherRead?.(); host.protections.cancelForLock();
+    },
     drainRendererTasks: () => new Promise((resolve) => setImmediate(resolve)),
     unmount: () => mountedRoot?.unmount(), clearFrames: () => frames.clear(),
     closeDom: () => dom.window.close(),
@@ -347,6 +397,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
   const rendererUrl = new URL(`../dist/assets/${script}`, import.meta.url);
   await import(`${rendererUrl.href}?real-lock-${origin}`);
+  mountedCompletion.renderer = dom.window[
+    Symbol.for("scpefe.renderer.lifecycle-completion")];
   const ui = await import("@testing-library/dom");
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
@@ -364,11 +416,9 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     "menuitem", { name: menu })); await user.click(ui.getByRole(
     ui.getByRole(document.body, "menu", { name: menu }), "menuitem", { name })); };
   const awaitLifecycleCompletion = async (label) => {
-    const completion = dom.window[
-      Symbol.for("scpefe.renderer.lifecycle-completion")];
-    assert.equal(typeof completion?.waitForIdle, "function",
-      `renderer exposes lifecycle completion for ${label}`);
-    await completion.waitForIdle({ timeoutMs: 5_000 });
+    assert.equal(typeof mountedCompletion?.waitForIdle, "function",
+      `mounted lifecycle completion is available for ${label}`);
+    await mountedCompletion.waitForIdle({ timeoutMs: 5_000 });
   };
   const awaitHarnessPhase = async (phase, label) => {
     let phaseTimeout;
@@ -787,6 +837,7 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
         assert.equal(record.text, "restart recovered plaintext"); return;
       }
       const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      const closing = fakeWindow.lastClose;
       let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
       if (outcome === "cancel") {
         await user.click(ui.getByRole(protection, "button",
@@ -795,17 +846,21 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
         assert.equal(fakeWindow.closed, 0); return;
       }
       if (outcome === "save-retry") publicationFailureAfter = 1;
+      if (outcome === "save-delayed-publication") delayPublicationOnce = true;
       const decision = outcome === "discard" ? "Discard and continue"
         : "Manual save and continue";
       await user.click(ui.getByRole(protection, "button", { name: decision }));
       if (outcome === "save-retry") {
+        await dom.window[Symbol.for("scpefe.renderer.lifecycle-completion")]
+          .waitForIdle({ timeoutMs: 5_000 });
         await ui.findByText(protection,
           /document protection choice could not be completed/i);
         assert.equal(fakeWindow.closed, 0);
         protection = ui.getByRole(document.body, "dialog", { name: /before Exit/ });
         await user.click(ui.getByRole(protection, "button", { name: decision }));
       }
-      await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+      await closing;
+      assert.equal(fakeWindow.closed, 1);
       if (outcome !== "discard") assert.equal(await fs.readFile(target, "utf8"),
         "saved:restart recovered plaintext");
       return;
@@ -918,6 +973,26 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
   }
   await user.clear(editor);
   await user.type(editor, "mounted secret plaintext");
+  if (origin === "host-publication-idle") {
+    await service.saveClientSettings({ regularSaveEnabled: true,
+      regularSaveIntervalMs: 120_000 });
+    holdMaintenance = true;
+    const publishing = service.regularSaveDocument();
+    await maintenanceEntered;
+    let settled = false;
+    const idle = awaitLifecycleCompletion("held host publication")
+      .then(() => { settled = true; });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(settled, false,
+        "mounted lifecycle completion cannot report idle during host publication");
+    } finally {
+      releaseMaintenance();
+      await publishing;
+      await idle;
+    }
+    return;
+  }
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Working copy state").textContent, "Dirty"));
   const provisionalDecision = origin.startsWith("prr-") || origin.startsWith("prc-");
@@ -1076,6 +1151,8 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
       assert.equal(editor.value, ""); return;
     }
     if (origin === "rn-post-authorization-revalidation") {
+      await awaitHarnessPhase(protectionRequestObserved,
+        "New replacement protection request");
       const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
       postAuthorizationFaultTarget = newTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
@@ -1379,6 +1456,7 @@ export async function runMountedLock(t, origin, nativeOverride = null) {
     if (request) assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
     releaseMaintenance(); await publishing;
     if (stagedSubmit) await stagedSubmit;
+    if (entry === "new") await awaitLifecycleCompletion("held maintenance New replacement");
     if (entry === "new" || entry === "open" || entry === "external") {
       const expectedState = entry === "new" ? "Edit mode" : "Read-only";
       await ui.waitFor(() => assert.notEqual(host.service, priorService));
@@ -1720,6 +1798,7 @@ export function lifecycleCaseName(origin) {
   }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("rw-")) return `RW-${origin.slice(3)} recovered work ${{
     cancel: "window close Cancel", save: "window close Save and publish",
+    "save-delayed-publication": "window close Save and publish under delayed host publication",
     "save-retry": "window close Save failure then Retry", discard: "window close Discard",
     external: "queues external request; recovery resolution releases FIFO and opens it",
     restart: "restart preserves identical plaintext",
