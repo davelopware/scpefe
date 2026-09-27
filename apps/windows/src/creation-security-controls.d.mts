@@ -14,5 +14,10 @@ export function PasswordConfirmationFields(props: {
   onConfirmationChange?(value: string): void;
   inputRef?: RefObject<HTMLInputElement | null>;
   confirmationRef?: RefObject<HTMLInputElement | null>;
-  autoFocus?: boolean;
+  comparePassword?: string;
+  compareMessage?: string;
+  invalidPassword?: boolean;
+  invalidConfirmation?: boolean;
+  errorDescriptionId?: string;
+  passwordError?: string;
 }): ReactElement;

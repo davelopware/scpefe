@@ -1,20 +1,50 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useRef, useState, type Dispatch, type FormEvent,
+  type SetStateAction } from "react";
+import { useModalFocus } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
-import { assessProposedPassword, proposedPasswordRejectionMessage }
+import { assessProposedPassword, proposedPasswordRejectionMessage,
+  type ProposedPasswordOutcome }
   from "./password-policy.mjs";
+
+export type CreationFormRequest = {
+  ownerPassword: string;
+  ownerPasswordConfirmation: string;
+  recoveryPassword: string;
+  recoveryPasswordConfirmation: string;
+  content: "";
+  understandsIrrecoverable: true;
+  storedRecoverySeparately: boolean;
+};
+
+type ValidationField = "owner" | "ownerConfirmation" | "recovery"
+  | "recoveryConfirmation" | "irrecoverability" | "recoveryStorage" | "";
+type Diagnostic = { layer: "renderer-form" | "creation-boundary"; rule: string };
+type RejectedPassword = Exclude<ProposedPasswordOutcome, { status: "accepted" }>;
+
+interface CreationSecurityDialogProps {
+  onCreate(request: CreationFormRequest): Promise<void>;
+  onCancel(): void | Promise<void>;
+  returnFocus?: HTMLElement | null;
+}
+
+interface CreateDocumentControlProps {
+  onCreated(): void;
+  onError(error: unknown): void;
+}
 
 const h = React.createElement;
 const ERROR_ID = "creation-security-error";
-const ATTRIBUTED_BOUNDARY_FIELDS = Object.freeze({
+const ATTRIBUTED_BOUNDARY_FIELDS: Readonly<Record<string, "owner" | "recovery" | undefined>> = Object.freeze({
   OWNER_PASSWORD_WEAK: "owner",
   RECOVERY_PASSWORD_WEAK: "recovery",
 });
 const SAFE_BOUNDARY_DIAGNOSTICS = new Set([
   "OWNER_PASSWORD_WEAK", "RECOVERY_PASSWORD_WEAK", "CREATE_FAILED",
 ]);
-const VALIDATION_DETAILS = new Map([
+const VALIDATION_DETAILS = new Map<string,
+  readonly [message: string, field: ValidationField, rule: string]>([
   ["owner password must be text", ["Owner password is invalid.", "owner", "OWNER_TYPE"]],
   ["owner password is required", ["Owner password is required.", "owner", "OWNER_REQUIRED"]],
   ["owner password is too long", ["Owner password is too long.", "owner", "OWNER_LENGTH"]],
@@ -57,12 +87,13 @@ const VALIDATION_DETAILS = new Map([
       "recoveryStorage", "RECOVERY_STORAGE_ACK"]],
 ]);
 
-function reportCreationDiagnostic(layer, rule) {
+function reportCreationDiagnostic(layer: Diagnostic["layer"], rule: string): void {
   globalThis.console?.warn?.("SCPEFE creation rejection", Object.freeze({ layer, rule }));
 }
 
 /* Collects and validates creation secrets after a target has been selected. */
-export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
+export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
+  CreationSecurityDialogProps): React.ReactElement {
   const [ownerPassword, setOwnerPassword] = useState("");
   const [ownerConfirmation, setOwnerConfirmation] = useState("");
   const [recoveryPassword, setRecoveryPassword] = useState("");
@@ -72,38 +103,27 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
   const [understandsIrrecoverable, setUnderstandsIrrecoverable] = useState(false);
   const [storedRecoverySeparately, setStoredRecoverySeparately] = useState(false);
   const [error, setError] = useState("");
-  const [errorDiagnostic, setErrorDiagnostic] = useState(null);
+  const [errorDiagnostic, setErrorDiagnostic] = useState<Diagnostic | null>(null);
   const [invalidField, setInvalidField] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const ownerConfirmationRef = useRef(null);
-  const recoveryConfirmationRef = useRef(null);
-  const recoveryRef = useRef(null);
-  const ownerRef = useRef(null);
-  const irrecoverabilityRef = useRef(null);
-  const recoveryStorageRef = useRef(null);
-  const dialogRef = useRef(null);
+  const ownerConfirmationRef = useRef<HTMLInputElement>(null);
+  const recoveryConfirmationRef = useRef<HTMLInputElement>(null);
+  const recoveryRef = useRef<HTMLInputElement>(null);
+  const ownerRef = useRef<HTMLInputElement>(null);
+  const irrecoverabilityRef = useRef<HTMLInputElement>(null);
+  const recoveryStorageRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const completedRef = useRef(false);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
 
-  useEffect(() => {
-    const prior = returnFocus ?? document.activeElement;
-    const chrome = document.querySelector(".shell-chrome");
-    chrome?.setAttribute("inert", "");
-    ownerRef.current?.focus();
-    return () => {
-      if (completedRef.current) {
-        chrome?.removeAttribute("inert");
-        return;
-      }
-      globalThis.requestAnimationFrame?.(() => {
-        if (document.querySelector('[aria-modal="true"]')) return;
-        chrome?.removeAttribute("inert");
-        if (prior?.isConnected) prior.focus();
-      });
-    };
-  }, []);
+  const focus = useModalFocus({ scopeRef: dialogRef, initialFocusRef: ownerRef,
+    returnFocus, onEscape: submitting ? undefined : cancel,
+    shouldRestoreFocus: () => !completedRef.current,
+    fallbackFocus: () => document.querySelector<HTMLElement>(
+      '[role="menubar"] > .menu > [role="menuitem"]') });
 
-  function updateField(field, setter, value) {
+  function updateField<T>(field: ValidationField,
+    setter: Dispatch<SetStateAction<T>>, value: T): void {
     setter(value);
     if (invalidField === field) {
       setInvalidField("");
@@ -112,36 +132,37 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     }
   }
 
-  async function submit(event) {
+  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError("");
     setErrorDiagnostic(null);
     setInvalidField("");
-    let request;
+    let request: CreationFormRequest;
     try {
       const [ownerAssessment, recoveryAssessment] = await Promise.all([
         assessProposedPassword(ownerPassword),
         hasRecovery ? assessProposedPassword(recoveryPassword) : null,
       ]);
-      const rejected = ownerAssessment.status !== "accepted"
-        ? { assessment: ownerAssessment, label: "Owner password", field: "owner",
-          rule: ownerAssessment.status === "empty" ? "OWNER_REQUIRED"
-            : ownerAssessment.reason === "maximum-size" ? "OWNER_LENGTH"
-            : ownerAssessment.status === "unavailable" ? "OWNER_POLICY_UNAVAILABLE"
-            : "OWNER_PASSWORD_WEAK" }
-        : recoveryAssessment && recoveryAssessment.status !== "accepted"
-          ? { assessment: recoveryAssessment, label: "Recovery password", field: "recovery",
-            rule: recoveryAssessment.status === "empty" ? "RECOVERY_REQUIRED"
-              : recoveryAssessment.reason === "maximum-size" ? "RECOVERY_LENGTH"
-              : recoveryAssessment.status === "unavailable"
-                ? "RECOVERY_POLICY_UNAVAILABLE" : "RECOVERY_PASSWORD_WEAK" }
-          : null;
-      if (rejected) {
-        setError(proposedPasswordRejectionMessage(rejected.assessment, rejected.label));
-        setInvalidField(rejected.field);
-        setErrorDiagnostic({ layer: "renderer-form", rule: rejected.rule });
-        reportCreationDiagnostic("renderer-form", rejected.rule);
-        (rejected.field === "owner" ? ownerRef : recoveryRef).current?.focus();
+      const reportRejection = (assessment: RejectedPassword,
+        label: string, field: "owner" | "recovery") => {
+        const prefix = field === "owner" ? "OWNER" : "RECOVERY";
+        const rule = assessment.status === "empty" ? `${prefix}_REQUIRED`
+          : assessment.status === "unavailable" ? `${prefix}_POLICY_UNAVAILABLE`
+          : assessment.status === "rejected" && assessment.reason === "maximum-size"
+            ? `${prefix}_LENGTH`
+          : `${prefix}_PASSWORD_WEAK`;
+        setError(proposedPasswordRejectionMessage(assessment, label));
+        setInvalidField(field);
+        setErrorDiagnostic({ layer: "renderer-form", rule });
+        reportCreationDiagnostic("renderer-form", rule);
+        (field === "owner" ? ownerRef : recoveryRef).current?.focus();
+      };
+      if (ownerAssessment.status !== "accepted") {
+        reportRejection(ownerAssessment, "Owner password", "owner");
+        return;
+      }
+      if (recoveryAssessment && recoveryAssessment.status !== "accepted") {
+        reportRejection(recoveryAssessment, "Recovery password", "recovery");
         return;
       }
       request = validateCreateFormRequest({ ownerPassword: ownerAssessment.password,
@@ -160,11 +181,11 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       setInvalidField(field);
       setErrorDiagnostic({ layer: "renderer-form", rule });
       reportCreationDiagnostic("renderer-form", rule);
-      const fieldRef = { owner: ownerRef, ownerConfirmation: ownerConfirmationRef,
+      const fieldRefs = { owner: ownerRef, ownerConfirmation: ownerConfirmationRef,
         recovery: recoveryRef, recoveryConfirmation: recoveryConfirmationRef,
         irrecoverability: irrecoverabilityRef,
-        recoveryStorage: recoveryStorageRef }[field];
-      fieldRef?.current?.focus();
+        recoveryStorage: recoveryStorageRef };
+      if (field) fieldRefs[field].current?.focus();
       return;
     }
     setSubmitting(true);
@@ -173,8 +194,10 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       completedRef.current = true;
     } catch (submissionError) {
       setError(safeRendererErrorMessage(submissionError));
-      const safeCode = SAFE_BOUNDARY_DIAGNOSTICS.has(submissionError?.code)
-        ? submissionError.code : "OPERATION_UNATTRIBUTED";
+      const code = typeof submissionError === "object" && submissionError !== null
+        && "code" in submissionError ? submissionError.code : undefined;
+      const safeCode = typeof code === "string" && SAFE_BOUNDARY_DIAGNOSTICS.has(code)
+        ? code : "OPERATION_UNATTRIBUTED";
       const field = ATTRIBUTED_BOUNDARY_FIELDS[safeCode] ?? "";
       setInvalidField(field);
       setErrorDiagnostic({ layer: "creation-boundary", rule: safeCode });
@@ -185,28 +208,13 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
     }
   }
 
-  function cancel() {
+  function cancel(): void {
     if (!submitting) void onCancel();
   }
 
-  return h("div", { className: "dialog-backdrop",
-    onKeyDown: (event) => {
-      if (event.key === "Escape" && !submitting) {
-        event.preventDefault();
-        cancel();
-      } else if (event.key === "Tab" && dialogRef.current) {
-        const controls = [...dialogRef.current.querySelectorAll(
-          "button:not(:disabled), input:not(:disabled)")];
-        if (!controls.length) return;
-        const at = controls.indexOf(document.activeElement);
-        const next = event.shiftKey
-          ? (at <= 0 ? controls.length - 1 : at - 1)
-          : (at >= controls.length - 1 ? 0 : at + 1);
-        event.preventDefault();
-        controls[next].focus();
-      }
-    } },
+  return h("div", { className: "dialog-backdrop", onKeyDown: focus.onKeyDown },
   h("section", { ref: dialogRef, className: "security-dialog", role: "dialog", "aria-modal": "true",
+    tabIndex: -1,
     "aria-labelledby": "creation-security-title",
     "aria-describedby": "creation-security-warning", "aria-busy": submitting },
   h("h2", { id: "creation-security-title" }, "Secure new document"),
@@ -225,7 +233,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
       onValueChange: (value) => updateField("owner", setOwnerPassword, value),
       onConfirmationChange: (value) => updateField(
         "ownerConfirmation", setOwnerConfirmation, value),
-      onToggle: () => setOwnerRevealed((visible) => !visible), autoFocus: true }),
+      onToggle: () => setOwnerRevealed((visible) => !visible) }),
     h(PasswordConfirmationFields, { kind: "recovery",
       label: "Independent recovery password (strongly recommended)",
       confirmationLabel: "Confirm recovery password", revealed: recoveryRevealed,
@@ -273,15 +281,16 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }) {
 }
 
 /* Starts target selection and mounts the security dialog only after selection. */
-export function CreateDocumentControl({ onCreated, onError }) {
+export function CreateDocumentControl({ onCreated, onError }:
+  CreateDocumentControlProps): React.ReactElement {
   const [creating, setCreating] = useState(false);
-  const launcherRef = useRef(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
 
-  function restoreLauncherFocus() {
+  function restoreLauncherFocus(): void {
     globalThis.requestAnimationFrame?.(() => launcherRef.current?.focus());
   }
 
-  async function chooseTarget() {
+  async function chooseTarget(): Promise<void> {
     try {
       const result = await window.scpefe.chooseCreateTarget();
       if (result) setCreating(true);
@@ -290,7 +299,7 @@ export function CreateDocumentControl({ onCreated, onError }) {
     }
   }
 
-  async function create(request) {
+  async function create(request: CreationFormRequest): Promise<void> {
     const result = await window.scpefe.createDocument(request);
     if (result) {
       setCreating(false);
@@ -299,11 +308,10 @@ export function CreateDocumentControl({ onCreated, onError }) {
     }
   }
 
-  async function cancel() {
+  async function cancel(): Promise<void> {
     try {
       await window.scpefe.cancelCreateTarget();
       setCreating(false);
-      restoreLauncherFocus();
     } catch (error) {
       onError(error);
     }
@@ -315,5 +323,6 @@ export function CreateDocumentControl({ onCreated, onError }) {
       "Choose where to save the encrypted document, then configure its password security."),
     h("button", { ref: launcherRef, type: "button", onClick: chooseTarget },
       "Create encrypted document…"),
-    creating && h(CreationSecurityDialog, { onCreate: create, onCancel: cancel }));
+    creating && h(CreationSecurityDialog, { onCreate: create, onCancel: cancel,
+      returnFocus: launcherRef.current }));
 }

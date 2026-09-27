@@ -6,7 +6,7 @@ const h = React.createElement;
 /* Renders a password and confirmation pair with one accessible visibility control. */
 export function PasswordConfirmationFields({ kind, label, confirmationLabel,
   revealed, required, onToggle, value, confirmationValue, onValueChange,
-  onConfirmationChange, inputRef, confirmationRef, autoFocus = false,
+  onConfirmationChange, inputRef, confirmationRef,
   comparePassword = "", compareMessage = "", invalidPassword = false,
   invalidConfirmation = false, errorDescriptionId = "", passwordError = "" }) {
   const passwordId = `${kind}-password`;
@@ -22,7 +22,7 @@ export function PasswordConfirmationFields({ kind, label, confirmationLabel,
         "aria-describedby": invalidPassword && errorDescriptionId
           ? `${statusId} ${errorDescriptionId}` : statusId,
         "aria-invalid": invalidPassword ? "true" : undefined,
-        ref: inputRef, autoFocus,
+        ref: inputRef,
         onChange: onValueChange && ((event) => onValueChange(event.target.value)) })),
     h("label", { htmlFor: confirmationId }, confirmationLabel,
       h("input", { id: confirmationId, name: `${kind}PasswordConfirmation`,

@@ -1,8 +1,9 @@
 import React, { FormEvent, KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
+import { useModalFocus } from "@scpefe/react-ui";
 import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
-import { CreationSecurityDialog } from "./creation-security-dialog.mjs";
+import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
   proposedPasswordRejectionMessage } from "./password-policy.mjs";
 import { RENDERER_LIFECYCLE_COMPLETION,
@@ -154,36 +155,17 @@ function MenuBar({ enabled, run }: { enabled: Record<string, boolean>;
     </div>)}</nav>;
 }
 
-let modalDepth = 0;
 function FocusedDialog({ title, children, close, initialFocus, returnFocus }: {
   title: string; children: React.ReactNode; close?: () => void;
   initialFocus?: React.RefObject<HTMLElement | null>; returnFocus?: HTMLElement | null }) {
   const dialog = useRef<HTMLElement>(null);
   const titleId = useId();
-  useEffect(() => {
-    const prior = returnFocus ?? document.activeElement as HTMLElement | null;
-    const chrome = document.querySelector<HTMLElement>(".shell-chrome");
-    modalDepth += 1; chrome?.setAttribute("inert", "");
-    (initialFocus?.current ?? dialog.current?.querySelector<HTMLElement>(
-      "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)"))?.focus();
-    return () => { modalDepth -= 1; if (modalDepth === 0) chrome?.removeAttribute("inert");
-      requestAnimationFrame(() => {
-        if (modalDepth !== 0 || document.querySelector('[aria-modal="true"]')) return;
-        if (prior?.isConnected) prior.focus();
-        else document.querySelector<HTMLElement>('[role="menubar"] > .menu > [role="menuitem"]')?.focus();
-      }); };
-  }, []);
-  return <div className="dialog-backdrop" onKeyDown={(event) => {
-    if (event.key === "Escape" && close) { event.preventDefault(); close(); return; }
-    if (event.key !== "Tab" || !dialog.current) return;
-    const controls = [...dialog.current.querySelectorAll<HTMLElement>(
-      "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")];
-    if (!controls.length) return;
-    const at = controls.indexOf(document.activeElement as HTMLElement);
-    const next = event.shiftKey ? (at <= 0 ? controls.length - 1 : at - 1)
-      : (at >= controls.length - 1 ? 0 : at + 1);
-    event.preventDefault(); controls[next].focus();
-  }}><section ref={dialog} className="app-dialog" role="dialog" aria-modal="true"
+  const focus = useModalFocus({ scopeRef: dialog, initialFocusRef: initialFocus,
+    returnFocus, onEscape: close,
+    fallbackFocus: () => document.querySelector<HTMLElement>(
+      '[role="menubar"] > .menu > [role="menuitem"]') });
+  return <div className="dialog-backdrop" onKeyDown={focus.onKeyDown}>
+    <section ref={dialog} className="app-dialog" role="dialog" tabIndex={-1} aria-modal="true"
     aria-labelledby={titleId}><h2 id={titleId}>{title}</h2>
     {children}</section></div>;
 }

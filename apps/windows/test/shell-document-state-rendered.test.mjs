@@ -321,8 +321,16 @@ test("mounted shell presents truthful document states, history, failures, and se
 
   await command("Security", "Unlock");
   const reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
-  await user.type(ui.getByLabelText(reopenDialog, "Password"), "correct password");
-  await user.click(ui.getByRole(reopenDialog, "button", { name: "Unlock" }));
+  const unlockPassword = ui.getByLabelText(reopenDialog, "Password");
+  const unlockAction = ui.getByRole(reopenDialog, "button", { name: "Unlock" });
+  assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), true);
+  assert.equal(document.activeElement, unlockPassword,
+    "shared focus scope selects the unlock password");
+  unlockAction.focus(); await user.keyboard("{Tab}");
+  assert.equal(document.activeElement, unlockPassword,
+    "Tab wraps within the unlock dialog");
+  await user.type(unlockPassword, "correct password");
+  await user.click(unlockAction);
   editor.focus(); await user.keyboard("{Control>}f{/Control}");
   const protectedFind = await ui.findByRole(document.body, "dialog",
     { name: "Find and replace" });
