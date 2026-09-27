@@ -44,6 +44,11 @@ scope for each adoption and passes it with updates. The host echoes that
 scope on delayed checkpoint warnings, so a warning from an earlier document
 cannot fail the current working copy.
 
+Shared React UI now owns modal focus behavior through `FocusManager` and a
+small DOM capability. The Windows renderer and creation security dialog keep
+their markup and decide when dialogs open, while the shared manager owns
+modal depth, inert chrome, keyboard containment, and safe focus restoration.
+
 The npm workspace packages expose TypeScript source through explicit public entry
 points. Windows consumes them as workspace dependencies, so a clean install needs no
 prebuilt package output. New renderer-side production modules are strict
