@@ -10,3 +10,8 @@ export function isSnapshotSource(value: unknown): value is SnapshotSource<unknow
     && "getSnapshot" in value && typeof value.getSnapshot === "function"
     && "subscribe" in value && typeof value.subscribe === "function";
 }
+
+export { WorkingCopy } from "./working-copy.ts";
+export type { WorkingCopyFindResult, WorkingCopyJournalHost, WorkingCopySelection,
+  WorkingCopySnapshot,
+  WorkingCopyUpdate } from "./working-copy.ts";
