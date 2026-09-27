@@ -104,6 +104,10 @@ The repository root is an npm workspace. `packages/frontend-core` and
 the Windows frontend consumes those entries directly after a root `npm ci`,
 without a package build. `npm run typecheck` at the root checks all three
 workspaces. The focused TypeScript package gate is `npm run test:frontend`.
+Its runner discovers nested `.test.ts` and `.test.tsx` files in both packages
+and the Windows frontend, transforms them with the installed Vite Oxc
+transformer, and runs them serially with Node's test runner. Typechecking
+checks the same TypeScript implementation and test files separately.
 On Linux, run that gate inside the required bounded user scope:
 
 ```bash
