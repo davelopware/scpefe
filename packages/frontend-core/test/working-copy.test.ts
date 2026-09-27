@@ -6,7 +6,10 @@ import { WorkingCopy, type WorkingCopyJournalHost,
 class ControlledJournal implements WorkingCopyJournalHost {
   readonly calls: Array<{ update: WorkingCopyUpdate;
     accept: () => void; fail: () => void }> = [];
-  private readonly warnings = new Set<(code: string) => void>();
+  private readonly warnings = new Set<(code: string, journalScope: string | null) => void>();
+  private nextScope = 0;
+
+  createJournalScope(): string { return `test-scope-${++this.nextScope}`; }
 
   updateWorkingCopy(update: WorkingCopyUpdate): Promise<object> {
     return new Promise((resolve, reject) => {
@@ -16,13 +19,13 @@ class ControlledJournal implements WorkingCopyJournalHost {
     });
   }
 
-  onJournalWarning(listener: (code: string) => void): () => void {
+  onJournalWarning(listener: (code: string, journalScope: string | null) => void): () => void {
     this.warnings.add(listener);
     return () => { this.warnings.delete(listener); };
   }
 
-  warn(code: string): void {
-    for (const listener of this.warnings) listener(code);
+  warn(code: string, journalScope = this.calls.at(-1)?.update.journalScope ?? null): void {
+    for (const listener of this.warnings) listener(code, journalScope);
   }
 }
 
@@ -115,10 +118,10 @@ test("edits remain synchronous while reordered journal responses and failures ar
   assert.equal(ready(copy).text, "ABC");
   assert.equal(ready(copy).journal.pending, 2);
   const drained = copy.drainJournal();
-  journal.calls[1].accept();
+  journal.calls[1].fail();
   await Promise.resolve();
   assert.equal(ready(copy).journal.pending, 1);
-  journal.calls[0].fail();
+  journal.calls[0].accept();
   assert.equal((await drained).status, "failed");
   assert.equal(ready(copy).journal.failed, true);
 
@@ -208,4 +211,39 @@ test("a failed recovery checkpoint remains visible after an update acknowledgeme
   copy.lock();
   journal.warn("RECOVERY_CHECKPOINT_FAILED");
   assert.equal(copy.getSnapshot().kind, "empty");
+});
+
+test("a delayed checkpoint warning from the previous adoption cannot fail a new document", () => {
+  const journal = new ControlledJournal();
+  const copy = new WorkingCopy(journal);
+  copy.adoptOpen("first");
+  copy.edit("first draft");
+  const previousScope = journal.calls[0].update.journalScope;
+  copy.lock();
+  copy.adoptOpen("second");
+  copy.edit("second draft");
+
+  journal.warn("RECOVERY_CHECKPOINT_FAILED", previousScope);
+  assert.equal(ready(copy).journal.failed, false);
+  assert.equal(ready(copy).journal.pending, 1);
+  assert.equal(ready(copy).text, "second draft");
+});
+
+test("a newer journal acknowledgement supersedes an older failure in either completion order", async () => {
+  for (const order of ["newer-first", "older-first"]) {
+    const journal = new ControlledJournal();
+    const copy = new WorkingCopy(journal);
+    copy.adoptOpen("A");
+    copy.edit("AB");
+    copy.edit("ABC");
+    if (order === "newer-first") {
+      journal.calls[1].accept();
+      journal.calls[0].fail();
+    } else {
+      journal.calls[0].fail();
+      journal.calls[1].accept();
+    }
+    assert.equal((await copy.drainJournal()).status, "drained", order);
+    assert.equal(ready(copy).journal.failed, false, order);
+  }
 });

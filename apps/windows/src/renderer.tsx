@@ -312,7 +312,8 @@ declare global { interface Window { scpefe: {
   removeSlot(slotId: string): Promise<{ removed: true; warningCode: string }>;
   exportPlaintext(request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: true } | null>;
-  updateWorkingCopy(value: { content: string; cursor: Cursor }): Promise<object>;
+  updateWorkingCopy(value: { content: string; cursor: Cursor;
+    journalScope?: string }): Promise<object>;
   activity(): Promise<object>;
   restoreRecoveredWork(request?: { authorization?: string }):
     Promise<(DocumentOpened & { recoveredUnsaved: true; cursor: Cursor }) | LeaseDecision>;
@@ -326,7 +327,8 @@ declare global { interface Window { scpefe: {
   lock(): Promise<LockResult>;
   onLockStarted?(listener: () => void): () => void;
   onLocked(listener: (result: LockResult) => void): () => void;
-  onJournalWarning(listener: (warningCode: string) => void): () => void;
+  onJournalWarning(listener: (warningCode: string,
+    journalScope: string | null) => void): () => void;
   onRegularSave(listener: (result: { published: true; provisional: true;
     content: string }) => void): () => void;
   onExternalOpenRequested(listener: (request: ExternalOpenRequest) => void): () => void;

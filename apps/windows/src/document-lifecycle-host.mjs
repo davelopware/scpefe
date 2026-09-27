@@ -199,8 +199,10 @@ export class DocumentLifecycleHost {
           this.lockStartedServices.delete(created);
         });
       },
-      onJournalWarning: (warning) => {
-        if (created === this.service) this.#emit("document:journal-warning", warning);
+      onJournalWarning: (warning, journalScope) => {
+        if (created === this.service) {
+          this.#emit("document:journal-warning", warning, journalScope);
+        }
       },
       onRegularSave: (result) => {
         if (created === this.service) this.#emit("document:regular-saved", result);
@@ -235,9 +237,11 @@ export class DocumentLifecycleHost {
     }
   }
 
-  #emit(channel, value) {
+  #emit(channel, value, journalScope = null) {
     const safeValue = channel === "document:journal-warning"
-      ? Object.freeze({ code: safeEventCode(value, "journal:summary") })
+      ? Object.freeze({ code: safeEventCode(value, "journal:summary"),
+        journalScope: typeof journalScope === "string"
+          && /^[A-Za-z0-9_-]{1,128}$/.test(journalScope) ? journalScope : null })
       : value;
     this.window.webContents.send(channel, safeValue);
   }

@@ -1534,6 +1534,38 @@ test("ordinary pending publications still require candidate plaintext to match",
   assert.equal(warnings.includes("RECOVERY_READ_FAILED"), true);
 });
 
+test("checkpoint failure reports the scope of the update that scheduled it", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-journal-scope-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  const timers = [];
+  const warnings = [];
+  const service = new DocumentService({ fs, profilePath, publicationCapabilities,
+    native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "ab".repeat(16), baseRevision: "cd".repeat(32),
+      journalKey: Buffer.alloc(32, 7) }) }),
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer);
+      return timer;
+    }, clearTimer: (timer) => { timer.cleared = true; },
+    onJournalWarning: (code, scope) => warnings.push([code, scope]) });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  service.journals.write = async () => { throw new Error("journal unavailable"); };
+  service.updateWorkingCopy({ content: "draft", cursor: { start: 5, end: 5 },
+    journalScope: "adoption_1" });
+  const checkpoint = timers.findLast((timer) => timer.delay === 10_000
+    && !timer.cleared);
+  assert.ok(checkpoint);
+  checkpoint.callback();
+  await service.flushChain.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(warnings, [["RECOVERY_CHECKPOINT_FAILED", "adoption_1"]]);
+});
+
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-journal-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

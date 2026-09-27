@@ -8,15 +8,18 @@ export interface WorkingCopySelection {
 export interface WorkingCopyUpdate {
   content: string;
   cursor: WorkingCopySelection;
+  journalScope: string;
 }
 
 /** Schedules recovery-journal work without making the frontend a storage owner. */
 export interface WorkingCopyJournalHost {
+  /** Returns a unique opaque scope for each adoption, including after lock or reset. */
+  createJournalScope(): string;
   /** Applies calls in invocation order, even if acknowledgements settle out of order.
    * An acknowledgement is not durable checkpoint proof. */
   updateWorkingCopy(update: WorkingCopyUpdate): Promise<unknown>;
-  /** Reports a later failure of the host's asynchronous checkpoint. */
-  onJournalWarning(listener: (code: string) => void): () => void;
+  /** Reports later checkpoint failures with the scope of the update that scheduled them. */
+  onJournalWarning(listener: (code: string, journalScope: string | null) => void): () => void;
 }
 
 /** The secret-free state before adoption and immediately after reset or lock. */
@@ -48,12 +51,14 @@ export type WorkingCopyFindResult =
 
 interface WorkingState {
   text: string;
+  journalScope: string;
   baseline: string | null;
   history: string[];
   index: number;
   selection: WorkingCopySelection;
   pending: Map<number, Promise<void>>;
   revision: number;
+  acceptedRevision: number;
   failedRevision: number;
   checkpointFailed: boolean;
 }
@@ -75,8 +80,9 @@ export class WorkingCopy {
     if (!Number.isSafeInteger(historyLimit) || historyLimit < 1) {
       throw new RangeError("history limit must be a positive integer");
     }
-    this.stopWarnings = journalHost.onJournalWarning((code) => {
-      if (code !== "RECOVERY_CHECKPOINT_FAILED" || !this.state) return;
+    this.stopWarnings = journalHost.onJournalWarning((code, journalScope) => {
+      if (code !== "RECOVERY_CHECKPOINT_FAILED" || !journalScope
+        || journalScope !== this.state?.journalScope) return;
       this.state.checkpointFailed = true;
       this.publish();
     });
@@ -112,11 +118,14 @@ export class WorkingCopy {
   /** Adopts canonical text returned by a successful manual publication. */
   adoptPublication(text: string): void {
     const state = this.requireReady();
+    const journalScope = this.journalHost.createJournalScope();
     this.startGeneration();
     state.pending.clear();
     state.revision = 0;
+    state.acceptedRevision = 0;
     state.failedRevision = 0;
     state.checkpointFailed = false;
+    state.journalScope = journalScope;
     state.text = text;
     state.baseline = text;
     state.history[state.index] = text;
@@ -142,11 +151,12 @@ export class WorkingCopy {
 
   private adopt(text: string, baseline: string | null,
     selection: WorkingCopySelection): void {
+    const journalScope = this.journalHost.createJournalScope();
     this.startGeneration();
     this.state = {
-      text, baseline,
+      text, baseline, journalScope,
       history: [text], index: 0, selection: this.normalizedSelection(text, selection),
-      pending: new Map(), revision: 0, failedRevision: 0,
+      pending: new Map(), revision: 0, acceptedRevision: 0, failedRevision: 0,
       checkpointFailed: false,
     };
     this.publish();
@@ -271,6 +281,7 @@ export class WorkingCopy {
     try {
       update = Promise.resolve(this.journalHost.updateWorkingCopy({
         content: state.text, cursor: state.selection,
+        journalScope: state.journalScope,
       }));
     } catch {
       update = Promise.reject(new Error("journal update failed"));
@@ -284,8 +295,11 @@ export class WorkingCopy {
     if (generation !== this.generation || !this.state) return;
     this.state.pending.delete(revision);
     if (accepted) {
-      if (revision > this.state.failedRevision) this.state.failedRevision = 0;
-    } else {
+      this.state.acceptedRevision = Math.max(this.state.acceptedRevision, revision);
+      if (this.state.failedRevision <= this.state.acceptedRevision) {
+        this.state.failedRevision = 0;
+      }
+    } else if (revision > this.state.acceptedRevision) {
       this.state.failedRevision = Math.max(this.state.failedRevision, revision);
     }
     this.publish();

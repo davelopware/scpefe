@@ -679,11 +679,17 @@ export function validateWorkingCopy(value) {
       || start < 0 || end < start || end > value.content.length) {
     throw new TypeError("cursor must be within the working copy");
   }
+  const journalScope = value.journalScope;
+  if (journalScope !== undefined
+      && (typeof journalScope !== "string"
+        || !/^[A-Za-z0-9_-]{1,128}$/.test(journalScope))) {
+    throw new TypeError("journal scope must be an opaque identifier");
+  }
   const content = canonicalizeDocumentText(value.content);
   return { content, cursor: {
     start: canonicalCursorOffset(value.content, start),
     end: canonicalCursorOffset(value.content, end),
-  } };
+  }, ...(journalScope === undefined ? {} : { journalScope }) };
 }
 
 export function validateLockResult(value) {

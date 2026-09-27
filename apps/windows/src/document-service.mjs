@@ -2367,6 +2367,7 @@ export class DocumentService {
 
   #scheduleCheckpoint() {
     const active = this.active;
+    const journalScope = active.working?.journalScope ?? null;
     const now = this.now();
     if (active.continuousDue === null) {
       active.continuousDue = now + this.checkpointContinuousMs;
@@ -2377,7 +2378,7 @@ export class DocumentService {
       this.checkpointTimer = null;
       void this.#flushActive(active).catch((error) => {
         active.journalWarning = "RECOVERY_CHECKPOINT_FAILED";
-        this.onJournalWarning(active.journalWarning);
+        this.onJournalWarning(active.journalWarning, journalScope);
       });
     }, Math.max(0, due - now));
     this.checkpointTimer?.unref?.();

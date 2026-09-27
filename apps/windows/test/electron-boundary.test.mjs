@@ -399,12 +399,16 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   rejectedChannel = null;
 
   const warnings = [];
-  const stopWarning = exposed.onJournalWarning((warning) => warnings.push(warning));
+  const stopWarning = exposed.onJournalWarning((warning, scope) =>
+    warnings.push({ warning, scope }));
   rendererListeners.get("document:journal-warning")({}, {
-    code: "PUBLICATION_RECOVERED", message: forgedSecret, nativeExtra: forgedSecret });
+    code: "PUBLICATION_RECOVERED", journalScope: "adoption_2",
+    message: forgedSecret, nativeExtra: forgedSecret });
   rendererListeners.get("document:journal-warning")({}, {
-    code: "UNKNOWN_WARNING", message: forgedSecret });
-  assert.deepEqual(warnings, ["PUBLICATION_RECOVERED", "JOURNAL_WARNING"]);
-  assert.doesNotMatch(warnings.join(" "), /owner recovery|Users|private-note|native\.cc/i);
+    code: "UNKNOWN_WARNING", journalScope: "../../private", message: forgedSecret });
+  assert.deepEqual(warnings, [
+    { warning: "PUBLICATION_RECOVERED", scope: "adoption_2" },
+    { warning: "JOURNAL_WARNING", scope: null }]);
+  assert.doesNotMatch(JSON.stringify(warnings), /owner recovery|Users|private-note|native\.cc/i);
   stopWarning();
 });
