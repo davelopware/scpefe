@@ -230,8 +230,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     const handler = (_event, value) => {
       if (value && typeof value === "object" && isCatalogCode(value.code)) {
-        listener(value.code);
-      } else listener("JOURNAL_WARNING");
+        listener(value.code, typeof value.journalScope === "string"
+          && /^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+          ? value.journalScope : null);
+      } else listener("JOURNAL_WARNING", null);
     };
     ipcRenderer.on("document:journal-warning", handler);
     return () => ipcRenderer.removeListener("document:journal-warning", handler);

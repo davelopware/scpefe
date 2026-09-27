@@ -5,6 +5,8 @@ import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 function fixture() {
   const handlers = new Map();
   const events = [];
+  const sent = [];
+  let reportJournalWarning;
   const timers = new Map();
   let nextTimer = 0;
   const service = {
@@ -20,13 +22,32 @@ function fixture() {
   };
   const host = new DocumentLifecycleHost({
     ipc: { handle: (name, handler) => handlers.set(name, handler) },
-    window: { on() {}, webContents: { send: (name) => events.push(name) } },
-    serviceFactory: () => service,
+    window: { on() {}, webContents: { send: (name, value) => {
+      events.push(name); sent.push({ name, value });
+    } } },
+    serviceFactory: (options) => {
+      reportJournalWarning = options.onJournalWarning;
+      return service;
+    },
     picker: { chooseCreateTarget: async () => "new.scpefe",
       chooseOpenTarget: async () => "old.scpefe" },
   });
-  return { host, handlers, events, timers, service };
+  return { host, handlers, events, sent, timers, service,
+    reportJournalWarning: (...args) => reportJournalWarning(...args) };
 }
+
+test("journal warning events carry a validated adoption scope", async () => {
+  const { host, sent, reportJournalWarning } = fixture();
+  await host.start();
+  reportJournalWarning("RECOVERY_CHECKPOINT_FAILED", "adoption_1");
+  reportJournalWarning("RECOVERY_CHECKPOINT_FAILED", "../../private");
+  assert.deepEqual(sent.filter((event) => event.name === "document:journal-warning"), [
+    { name: "document:journal-warning",
+      value: { code: "RECOVERY_CHECKPOINT_FAILED", journalScope: "adoption_1" } },
+    { name: "document:journal-warning",
+      value: { code: "RECOVERY_CHECKPOINT_FAILED", journalScope: null } },
+  ]);
+});
 
 test("new and open password entry time out without an active document", async () => {
   for (const channel of ["document:choose-create-target", "document:choose-open-target"]) {

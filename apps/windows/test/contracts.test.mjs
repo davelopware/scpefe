@@ -199,6 +199,12 @@ test("canonicalizes working-copy cursor offsets with pasted text", () => {
   assert.deepEqual(validateWorkingCopy({ content: "\ufeffa\r\nb",
     cursor: { start: 4, end: 5 } }),
   { content: "a\nb", cursor: { start: 2, end: 3 } });
+  assert.deepEqual(validateWorkingCopy({ content: "a", cursor: { start: 1, end: 1 },
+    journalScope: "adoption_2" }),
+  { content: "a", cursor: { start: 1, end: 1 }, journalScope: "adoption_2" });
+  assert.throws(() => validateWorkingCopy({ content: "a",
+    cursor: { start: 1, end: 1 }, journalScope: "../../private" }),
+  /journal scope/);
 });
 
 test("creation results expose only a safe name and validated blank edit session", () => {

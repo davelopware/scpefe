@@ -34,6 +34,16 @@ lifecycle barrier and durable safety guarantees. A locked snapshot cannot
 contain editable working state. A future CLI can present the same semantic
 attention as prompts without importing React or DOM behavior.
 
+The portable `WorkingCopy` implementation is present before the Windows
+cutover. Until `DocumentSession` adopts it, the Windows renderer remains the
+only authoritative owner of working text, baseline, history, and selection.
+The class's journal drain waits for host update acknowledgements; the host
+retains durable checkpoint and failure policy, and can report a later
+checkpoint warning. The platform adapter supplies a fresh opaque journal
+scope for each adoption and passes it with updates. The host echoes that
+scope on delayed checkpoint warnings, so a warning from an earlier document
+cannot fail the current working copy.
+
 The npm workspace packages expose TypeScript source through explicit public entry
 points. Windows consumes them as workspace dependencies, so a clean install needs no
 prebuilt package output. New renderer-side production modules are strict
