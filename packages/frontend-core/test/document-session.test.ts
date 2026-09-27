@@ -92,6 +92,7 @@ class Host implements DocumentSessionHost<OpenedDocument> {
   editResult: OpenedDocument | { decisionRequired: "lease-takeover";
     operation: "edit"; holderName: string; authorization: string } = opened("private text", false);
   editRequests: Array<{ authorization?: string }> = [];
+  saveRequests: string[] = [];
   async openSelectedDocument(_password: string): Promise<OpenedDocument | SessionInvitation> {
     return this.openResult;
   }
@@ -115,7 +116,7 @@ class Host implements DocumentSessionHost<OpenedDocument> {
       holderName: string; authorization: string }> {
     return { ...opened(), recoveredUnsaved: true, cursor: { start: 0, end: 0 } };
   }
-  async beginDivergenceResolution(_request: { authorization: string }): Promise<{
+  async beginDivergenceResolution(_request?: { authorization?: string }): Promise<{
     content: string; hasConflicts: boolean; ancestorRevision: string;
     localRevision: string; currentRevision: string }> {
     return { content: "merge", hasConflicts: false, ancestorRevision: "a",
@@ -125,7 +126,351 @@ class Host implements DocumentSessionHost<OpenedDocument> {
     opened: OpenedDocument; compatibilityCode: string }> {
     return { opened: opened(), compatibilityCode: "MIGRATED" };
   }
+  async saveDocument(content: string): Promise<{ saved: true; content: string;
+    publicationState: "target-published" | "pending-publication" | "conflict" }> {
+    this.saveRequests.push(content);
+    return { saved: true, content, publicationState: "target-published" };
+  }
+  async saveDivergenceResolution(content: string): Promise<{ saved: true; content: string;
+    publicationState: "target-published" | "pending-publication" | "conflict" }> {
+    return this.saveDocument(content);
+  }
+  async reconnectPendingPublication(): Promise<{ content: string;
+    publicationState: "target-published" | "pending-publication" | "conflict" }> {
+    return { content: "private text", publicationState: "target-published" };
+  }
+  async discardPendingPublication(): Promise<OpenedDocument> { return opened(); }
+  async backupDocument(): Promise<{ backedUp: true } | null> {
+    return { backedUp: true };
+  }
+  async exportPlaintext(_request: { content: string; lineEndings: "lf" | "native" }):
+    Promise<{ exported: true } | null> { return { exported: true }; }
 }
+
+test("manual save publishes active then sealed state through the session interface", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("draft");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  host.saveDocument = (content) => {
+    host.saveRequests.push(content);
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const saving = session.save();
+  await Promise.resolve();
+  const active = session.getSnapshot();
+  if (active.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(active.publication.state, "target-published");
+  assert.equal(active.pending, "save");
+  assert.equal(active.commands.save, false);
+  assert.equal(active.working.dirty, true);
+  assert.deepEqual(host.saveRequests, ["draft"]);
+  finish({ saved: true, content: "draft", publicationState: "target-published" });
+  assert.deepEqual(await saving, { status: "saved", publicationState: "target-published" });
+  const sealed = session.getSnapshot();
+  if (sealed.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(sealed.pending, undefined);
+  assert.equal(sealed.publication.state, "target-published");
+  assert.equal(sealed.working.baseline, "valid");
+  assert.equal(sealed.working.dirty, false);
+  assert.equal(sealed.commands.backup, true);
+  session.dispose();
+});
+
+test("a save acknowledgement cannot replace edits made while the host was busy", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("first draft");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  host.saveDocument = () => new Promise((resolve) => { finish = resolve; });
+  const saving = session.save();
+  await Promise.resolve();
+  assert.equal(session.edit("newer draft"), true,
+    "local editing remains synchronous during host publication");
+  finish({ saved: true, content: "first draft", publicationState: "target-published" });
+  assert.deepEqual(await saving, { status: "saved", publicationState: "target-published" });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.document.content, "first draft");
+  assert.equal(snapshot.working.text, "newer draft");
+  assert.equal(snapshot.working.dirty, true);
+  assert.equal(snapshot.commands.save, true);
+  session.dispose();
+});
+
+test("pending manual save becomes semantic attention with retry and discard commands", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("locally sealed");
+  host.saveDocument = async (content) => ({ saved: true, content,
+    publicationState: "pending-publication" });
+  assert.deepEqual(await session.save(),
+    { status: "saved", publicationState: "pending-publication" });
+  const pending = session.getSnapshot();
+  if (pending.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(pending.publication.state, "pending-publication");
+  assert.equal(pending.working.dirty, false);
+  assert.deepEqual(pending.attention,
+    { kind: "publication-decision", state: "pending-publication" });
+  assert.equal(pending.commands.save, false);
+  assert.equal(pending.commands.backup, false);
+  assert.equal(pending.commands.publicationRetry, true);
+  assert.equal(pending.commands.publicationDiscard, true);
+  host.reconnectPendingPublication = async () => ({ content: "locally sealed",
+    publicationState: "target-published" });
+  assert.deepEqual(await session.retryPublication(),
+    { status: "publication", publicationState: "target-published" });
+  const published = session.getSnapshot();
+  if (published.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(published.attention, undefined);
+  assert.equal(published.publication.state, "target-published");
+  assert.equal(published.commands.backup, true);
+  session.dispose();
+});
+
+test("backup and plaintext export preserve eligibility, cancellation, and current text", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  const exported: Array<{ content: string; lineEndings: "lf" | "native" }> = [];
+  let backupCalls = 0;
+  host.backupDocument = async () => { backupCalls += 1; return null; };
+  host.exportPlaintext = async (request) => {
+    exported.push(request);
+    return null;
+  };
+  session.adopt(opened("sealed", false));
+  assert.deepEqual(await session.backup(), { status: "backup", created: false });
+  assert.equal(backupCalls, 1);
+  session.edit("unsaved text");
+  assert.deepEqual(await session.backup(), { status: "unavailable" });
+  assert.equal(backupCalls, 1);
+  assert.deepEqual(await session.exportPlaintext("native"),
+    { status: "export", exported: false });
+  assert.deepEqual(exported, [{ content: "unsaved text", lineEndings: "native" }]);
+  host.exportPlaintext = async () => { throw new Error("private target path"); };
+  assert.deepEqual(await session.exportPlaintext("lf"),
+    { status: "failed", code: "OPERATION_FAILED" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("private target path"), false);
+  session.lockStarted();
+  assert.deepEqual(await session.exportPlaintext("lf"), { status: "unavailable" });
+  session.dispose();
+});
+
+test("regular publication stays provisional and cannot overwrite a newer local edit", () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.adopt(opened("base", false));
+  session.edit("first draft");
+  session.edit("newer draft");
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "first draft" }), true);
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.publication.state, "provisional");
+  assert.equal(snapshot.document.content, "first draft");
+  assert.equal(snapshot.working.text, "newer draft");
+  assert.equal(snapshot.working.baseline, "invalid");
+  assert.equal(snapshot.working.dirty, true);
+  assert.equal(snapshot.commands.backup, false);
+  session.lockStarted();
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "late old document" }), false);
+  session.dispose();
+});
+
+test("failed manual save retains dirty work and offers a safe retry", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("draft");
+  host.saveDocument = async () => { throw new Error("private target path"); };
+  assert.deepEqual(await session.save(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  const failed = session.getSnapshot();
+  if (failed.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(failed.working.text, "draft");
+  assert.equal(failed.working.dirty, true);
+  assert.deepEqual(failed.attention,
+    { kind: "save-failed", code: "OPERATION_FAILED" });
+  assert.equal(JSON.stringify(failed).includes("private target path"), false);
+  host.saveDocument = async (content) => ({ saved: true, content,
+    publicationState: "target-published" });
+  assert.equal((await session.save()).status, "saved");
+  const succeeded = session.getSnapshot();
+  if (succeeded.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(succeeded.attention, undefined);
+  assert.equal(succeeded.working.dirty, false);
+  session.dispose();
+});
+
+test("discard uses the host-returned target and late save cannot replace a new adoption", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("candidate", true), publicationState: "pending-publication" });
+  host.discardPendingPublication = async () => opened("verified target");
+  assert.deepEqual(await session.discardPublication(),
+    { status: "publication-discarded" });
+  const restored = session.getSnapshot();
+  if (restored.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(restored.working.text, "verified target");
+  assert.equal(restored.publication.state, "target-published");
+  session.adopt(opened("A", false));
+  session.edit("A draft");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.saveDocument = () => new Promise((resolve) => {
+    finish = resolve;
+    signalStarted();
+  });
+  const saving = session.save();
+  await started;
+  session.lockStarted();
+  session.adopt(opened("B"));
+  finish({ saved: true, content: "A draft", publicationState: "target-published" });
+  assert.deepEqual(await saving, { status: "superseded" });
+  const replacement = session.getSnapshot();
+  if (replacement.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(replacement.working.text, "B");
+  assert.equal(replacement.publication.state, "target-published");
+  session.dispose();
+});
+
+test("serialized duplicate saves publish only one backend candidate", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("draft");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.saveDocument = (content) => {
+    host.saveRequests.push(content);
+    return new Promise((resolve) => { finish = resolve; signalStarted(); });
+  };
+  const first = session.save();
+  const second = session.save();
+  await started;
+  finish({ saved: true, content: "draft", publicationState: "target-published" });
+  assert.deepEqual(await first, { status: "saved", publicationState: "target-published" });
+  assert.deepEqual(await second, { status: "unavailable" });
+  assert.deepEqual(host.saveRequests, ["draft"]);
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "draft" }), false, "a stale regular event cannot demote a sealed result");
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.publication.state, "target-published");
+  assert.equal(snapshot.working.dirty, false);
+  session.dispose();
+});
+
+test("failed publication retry and discard keep the candidate and safe decision", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("candidate", true), publicationState: "pending-publication" });
+  host.reconnectPendingPublication = async () => { throw new Error("private sync path"); };
+  assert.deepEqual(await session.retryPublication(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(snapshot.attention, { kind: "publication-decision",
+    state: "pending-publication", failureCode: "OPERATION_FAILED" });
+  assert.equal(snapshot.working.text, "candidate");
+  host.discardPendingPublication = async () => { throw new Error("private delete path"); };
+  assert.deepEqual(await session.discardPublication(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.publication.state, "pending-publication");
+  assert.equal(snapshot.working.text, "candidate");
+  assert.equal(JSON.stringify(snapshot).includes("private"), false);
+  session.dispose();
+});
+
+test("conflict retry routes divergence acquisition through the session queue", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("candidate", true), publicationState: "conflict" });
+  assert.deepEqual(await session.retryPublication(), { status: "divergence-required" });
+  let finish!: (draft: { content: string; hasConflicts: boolean;
+    ancestorRevision: string; localRevision: string;
+    currentRevision: string }) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.beginDivergenceResolution = () => new Promise((resolve) => {
+    finish = resolve; signalStarted();
+  });
+  const acquiring = session.beginDivergenceResolution();
+  await started;
+  const pending = session.getSnapshot();
+  if (pending.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(pending.pending, "divergence");
+  assert.equal(pending.commands.publicationRetry, false);
+  finish({ content: "merge draft", hasConflicts: false, ancestorRevision: "a",
+    localRevision: "l", currentRevision: "c" });
+  const outcome = await acquiring;
+  if (outcome.status !== "divergence") throw new Error("expected merge draft");
+  assert.equal(outcome.draft.content, "merge draft");
+  session.dispose();
+});
+
+test("discarding a pending candidate restores a provisional target as still unsaved", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("pending candidate", true),
+    publicationState: "pending-publication" });
+  host.discardPendingPublication = async () => ({ ...opened("prior provisional"),
+    provisional: true });
+  assert.deepEqual(await session.discardPublication(),
+    { status: "publication-discarded" });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.publication.state, "provisional");
+  assert.equal(snapshot.working.text, "prior provisional");
+  assert.equal(snapshot.working.baseline, "invalid");
+  assert.equal(snapshot.working.dirty, true);
+  assert.equal(snapshot.commands.backup, false);
+  session.dispose();
+});
+
+test("host-authorized document refresh updates publication attention", () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.adopt(opened("candidate"));
+  assert.equal(session.refreshDocument({ ...opened("candidate"),
+    publicationState: "pending-publication" }), true);
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.publication.state, "pending-publication");
+  assert.deepEqual(snapshot.attention,
+    { kind: "publication-decision", state: "pending-publication" });
+  session.dispose();
+});
+
+test("a merge draft hides the publication decision until save or discard", () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.adopt({ ...opened("candidate", true), publicationState: "conflict" });
+  assert.equal(session.adoptDivergence("merge draft"), true);
+  session.refreshDocument({ ...opened("candidate", false),
+    publicationState: "conflict" });
+  const merging = session.getSnapshot();
+  if (merging.kind !== "edit") throw new Error("expected edit merge session");
+  assert.equal(merging.publication.state, "conflict");
+  assert.equal(merging.publication.resolving, true);
+  assert.equal(merging.attention, undefined);
+  assert.equal(merging.working.text, "merge draft");
+  assert.equal(merging.commands.save, true);
+  session.lockStarted();
+  const locked = session.getSnapshot();
+  if (locked.kind !== "locked") throw new Error("expected locked");
+  assert.equal(locked.publication.resolving, false);
+  session.dispose();
+});
 
 test("edit lease attention is secret-free and one-shot confirmation enters edit mode", async () => {
   const host = new Host();

@@ -139,6 +139,17 @@ export class WorkingCopy {
     this.publish();
   }
 
+  /** Seals the submitted text while preserving edits made after submission. */
+  sealPublication(text: string, submittedText: string): void {
+    const state = this.requireReady();
+    if (state.text === submittedText) {
+      this.adoptPublication(text);
+      return;
+    }
+    state.baseline = text;
+    this.publish();
+  }
+
   reset(): void {
     this.startGeneration();
     this.state = null;
