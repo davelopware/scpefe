@@ -2,7 +2,7 @@ import React, { useRef, useState, type Dispatch, type FormEvent,
   type SetStateAction } from "react";
 import { useModalFocus } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
-import { PasswordConfirmationFields } from "./creation-security-controls.mjs";
+import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
 import { assessProposedPassword, proposedPasswordRejectionMessage,
   type ProposedPasswordOutcome }

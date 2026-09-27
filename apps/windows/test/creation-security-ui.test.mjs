@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import "../scripts/register-frontend-typescript.mjs";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://scpefe.invalid/",
@@ -18,7 +19,7 @@ const { Fragment, useState } = ReactModule;
 const { cleanup, render, within } = await import("@testing-library/react");
 const userEvent = (await import("@testing-library/user-event")).default;
 const { PasswordConfirmationFields } = await import(
-  "../src/creation-security-controls.mjs");
+  "../src/creation-security-controls.tsx");
 
 function CreationSecurityFields() {
   const [ownerRevealed, setOwnerRevealed] = useState(false);
