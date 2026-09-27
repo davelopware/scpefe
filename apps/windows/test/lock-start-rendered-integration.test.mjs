@@ -48,6 +48,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   let provisionalDiscardFault = false;
   let publicationUnavailable = false;
   let publicationFailureAfter = null;
+  let delayPublicationOnce = false;
   let createFault = false;
   let createdCandidate = false;
   let createdInput = null;
@@ -109,6 +110,11 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       maintenanceStarted();
       await maintenanceReleased;
       holdMaintenance = false;
+    }
+    if (delayPublicationOnce && destination === target) {
+      delayPublicationOnce = false;
+      // Cross the DOM library's one-second polling deadline in this regression fixture.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
     }
     const renamed = await fs.rename(source, destination);
     if (destination === target && postAuthorizationFaultTarget) {
@@ -218,7 +224,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     protectionRequestSeen = resolve;
   });
   const ipcListeners = new Map(); const ipcHandlers = new Map();
-  const mountedServices = new Set(); let mountedCompletion;
+  const mountedCompletion = new MountedLifecycleCompletion({
+    renderer: { waitForIdle: async () => {} },
+  });
   const observeMethod = (owner, method, label) => {
     const original = owner[method];
     owner[method] = function (...args) {
@@ -310,7 +318,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         "lock", "revalidateTargetForReplacement"]) {
         observeMethod(created, method, `service:${method}`);
       }
-      mountedServices.add(created);
+      observeMethod(created.lifecycle, "runMaintenance", "service:maintenance");
+      observeMethod(created.lifecycle, "runExclusive", "service:exclusive");
+      observeMethod(created.journals, "write", "journal:write");
       return created;
     },
     acknowledge: async (request, status, sequence) => {
@@ -323,6 +333,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   for (const method of ["requestExit", "handleClose"]) {
     observeMethod(host.lifecycle, method, `lifecycle:${method}`);
   }
+  observeMethod(host.secureLocks, "serviceLocked", "host:serviceLocked");
   let service = host.service;
   const powerMonitor = new EventEmitter();
   registerWindowFocusProtection({ window: fakeWindow, powerMonitor,
@@ -330,9 +341,6 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
 
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",
     { url: "https://scpefe.invalid/" });
-  mountedCompletion = new MountedLifecycleCompletion({
-    renderer: { waitForIdle: async () => {} }, services: mountedServices,
-  });
   const keys = ["window", "document", "HTMLElement", "Node", "MutationObserver",
     "FormData", "getComputedStyle", "requestAnimationFrame", "cancelAnimationFrame",
     "IS_REACT_ACT_ENVIRONMENT"];
@@ -829,6 +837,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         assert.equal(record.text, "restart recovered plaintext"); return;
       }
       const event = fakeWindow.close(); assert.equal(event.prevented, true);
+      const closing = fakeWindow.lastClose;
       let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
       if (outcome === "cancel") {
         await user.click(ui.getByRole(protection, "button",
@@ -837,17 +846,21 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         assert.equal(fakeWindow.closed, 0); return;
       }
       if (outcome === "save-retry") publicationFailureAfter = 1;
+      if (outcome === "save-delayed-publication") delayPublicationOnce = true;
       const decision = outcome === "discard" ? "Discard and continue"
         : "Manual save and continue";
       await user.click(ui.getByRole(protection, "button", { name: decision }));
       if (outcome === "save-retry") {
+        await dom.window[Symbol.for("scpefe.renderer.lifecycle-completion")]
+          .waitForIdle({ timeoutMs: 5_000 });
         await ui.findByText(protection,
           /document protection choice could not be completed/i);
         assert.equal(fakeWindow.closed, 0);
         protection = ui.getByRole(document.body, "dialog", { name: /before Exit/ });
         await user.click(ui.getByRole(protection, "button", { name: decision }));
       }
-      await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+      await closing;
+      assert.equal(fakeWindow.closed, 1);
       if (outcome !== "discard") assert.equal(await fs.readFile(target, "utf8"),
         "saved:restart recovered plaintext");
       return;
@@ -1138,6 +1151,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       assert.equal(editor.value, ""); return;
     }
     if (origin === "rn-post-authorization-revalidation") {
+      await awaitHarnessPhase(protectionRequestObserved,
+        "New replacement protection request");
       const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
       postAuthorizationFaultTarget = newTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
@@ -1441,6 +1456,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (request) assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
     releaseMaintenance(); await publishing;
     if (stagedSubmit) await stagedSubmit;
+    if (entry === "new") await awaitLifecycleCompletion("held maintenance New replacement");
     if (entry === "new" || entry === "open" || entry === "external") {
       const expectedState = entry === "new" ? "Edit mode" : "Read-only";
       await ui.waitFor(() => assert.notEqual(host.service, priorService));
@@ -1782,6 +1798,7 @@ export function lifecycleCaseName(origin) {
   }[origin.slice(3)] ?? ""}`;
   if (origin.startsWith("rw-")) return `RW-${origin.slice(3)} recovered work ${{
     cancel: "window close Cancel", save: "window close Save and publish",
+    "save-delayed-publication": "window close Save and publish under delayed host publication",
     "save-retry": "window close Save failure then Retry", discard: "window close Discard",
     external: "queues external request; recovery resolution releases FIFO and opens it",
     restart: "restart preserves identical plaintext",

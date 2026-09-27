@@ -1,15 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MountedLifecycleCompletion } from "./mounted-lifecycle-completion.mjs";
-import { LifecycleBarrier } from "../src/lifecycle-barrier.mjs";
 
 test("mounted lifecycle completion waits for host failure and retry to settle", async () => {
-  const barrier = new LifecycleBarrier();
-  const service = { lifecycle: barrier, flushChain: Promise.resolve(),
-    publicationChain: Promise.resolve(), hasActivePublication: () => barrier.hasMaintenance,
-    runLifecycleBarrier: (operation) => barrier.runExclusive(operation) };
   const completion = new MountedLifecycleCompletion({
-    renderer: { waitForIdle: async () => {} }, services: new Set([service]),
+    renderer: { waitForIdle: async () => {} },
   });
   let releaseFailure;
   const failure = completion.track("ipc:document:resolve-protection", () =>

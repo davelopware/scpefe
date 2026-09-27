@@ -125,3 +125,33 @@ test("mounted cleanup keeps a scenario assertion as the primary error", async ()
   assert.deepEqual(events, ["cancel-pending", "wait", "drain", "unmount", "drain",
     "clear-frames", "close-dom", "restore-globals", "remove-files"]);
 });
+
+test("mounted cleanup settles work after both scenario failure and idle timeout", async () => {
+  const primary = new Error("scenario assertion failed");
+  const timeout = Object.assign(new Error("idle timed out"),
+    { code: "RENDERER_LIFECYCLE_TIMEOUT" });
+  const events = [];
+  let canceled = false;
+  let waits = 0;
+  await cleanupMountedLifecycleHarness({
+    primaryError: primary,
+    completion: { waitForIdle: async () => {
+      events.push(`wait-${++waits}`);
+      if (!canceled) throw timeout;
+    } },
+    cancelPendingWork: () => {
+      events.push("cancel-pending");
+      if (waits > 0) canceled = true;
+    },
+    drainRendererTasks: () => events.push("drain"),
+    unmount: () => events.push("unmount"),
+    clearFrames: () => events.push("clear-frames"),
+    closeDom: () => events.push("close-dom"),
+    restoreGlobals: () => events.push("restore-globals"),
+    removeTemporaryFiles: () => events.push("remove-files"),
+  });
+  assert.deepEqual(events, ["cancel-pending", "wait-1", "cancel-pending", "wait-2",
+    "drain", "unmount", "drain", "clear-frames", "close-dom", "restore-globals",
+    "remove-files"]);
+  assert.equal(canceled, true, "tracked work is settled before DOM and file teardown");
+});
