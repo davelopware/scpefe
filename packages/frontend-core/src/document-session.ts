@@ -112,6 +112,7 @@ export interface ReadOnlySessionSnapshot<Doc extends SessionDocument> {
   readonly commands: SessionCommands;
   readonly attention?: SessionAttention;
   readonly pending?: SessionPendingOperation;
+  readonly queued?: "lease-confirm" | "lease-cancel";
 }
 
 /** Unlocked state after the host has granted edit authority. */
@@ -124,6 +125,7 @@ export interface EditSessionSnapshot<Doc extends SessionDocument> {
   readonly commands: SessionCommands;
   readonly attention?: SessionAttention;
   readonly pending?: SessionPendingOperation;
+  readonly queued?: "lease-confirm" | "lease-cancel";
 }
 
 /** The only lifecycle states visible to presentation adapters. */
@@ -188,6 +190,7 @@ export class DocumentSession<Doc extends SessionDocument,
   private workingCopy: WorkingCopy | null = null;
   private stopWorkingCopy: (() => void) | null = null;
   private leaseDecision: SessionLeaseDecision | null = null;
+  private queuedLeaseOperation: "lease-confirm" | "lease-cancel" | null = null;
   private editFailureCode: SessionFailureCode | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly queuedCommands: QueuedCommand<Doc>[] = [];
@@ -218,6 +221,7 @@ export class DocumentSession<Doc extends SessionDocument,
       ? null : this.snapshot.targetName);
     this.clearWorkingCopy();
     this.leaseDecision = null;
+    this.queuedLeaseOperation = null;
     this.editFailureCode = null;
     this.workingCopy = new WorkingCopy(this.journalHost);
     this.workingCopy.adoptOpen(document.content, Boolean(document.provisional));
@@ -241,12 +245,14 @@ export class DocumentSession<Doc extends SessionDocument,
   /** Requests host edit authority and represents a takeover challenge as safe attention. */
   enterEditMode(): Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
-    return this.enqueue(() => this.runEditOperation(generation));
+    const adoption = this.currentAdoption();
+    return this.enqueue(() => this.runEditOperation(generation, undefined, "edit", adoption));
   }
 
   /** Stages a challenge returned by another host operation for one-shot confirmation. */
-  stageLeaseDecision(decision: SessionLeaseDecision): boolean {
-    if (this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit") return false;
+  stageLeaseDecision(decision: SessionLeaseDecision, adoption: number): boolean {
+    if ((this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
+      || this.snapshot.adoption !== adoption) return false;
     this.leaseDecision = { ...decision };
     this.editFailureCode = null;
     this.publishWorkingCopy();
@@ -267,33 +273,35 @@ export class DocumentSession<Doc extends SessionDocument,
       return Promise.resolve(Object.freeze({ status: "unavailable" }));
     }
     this.leaseDecision = null;
+    this.queuedLeaseOperation = "lease-confirm";
+    this.publishWorkingCopy();
     const generation = this.generation;
+    const adoption = this.currentAdoption();
     const operation = decision.operation;
     let authorization = decision.authorization;
     return this.enqueue(() => {
       const used = authorization;
       authorization = "";
       return operation === "edit"
-        ? this.runEditOperation(generation, used, "lease-confirm")
-        : this.runOtherLeaseOperation(generation, operation, used);
+        ? this.runEditOperation(generation, used, "lease-confirm", adoption)
+        : this.runOtherLeaseOperation(generation, operation, used, adoption);
     });
   }
 
   private async runOtherLeaseOperation(generation: number,
     operation: Exclude<SessionLeaseDecision["operation"], "edit">,
-    authorization: string): Promise<DocumentSessionOutcome<Doc>> {
-    if (generation !== this.generation || (this.snapshot.kind !== "read-only"
-      && this.snapshot.kind !== "edit")) {
+    authorization: string, adoption: number | null): Promise<DocumentSessionOutcome<Doc>> {
+    if (!this.matchesAdoption(generation, adoption)) {
       return Object.freeze({ status: "superseded" });
     }
     this.publishPending("lease-confirm");
     try {
       if (operation === "recovery") {
         const result = await this.host.restoreRecoveredWork({ authorization });
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
         this.clearPending();
         if ("decisionRequired" in result) {
-          this.stageLeaseDecision(result);
+          this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
         this.publishWorkingCopy();
@@ -301,31 +309,31 @@ export class DocumentSession<Doc extends SessionDocument,
       }
       if (operation === "divergence") {
         const result = await this.host.beginDivergenceResolution({ authorization });
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
         this.clearPending();
         if ("decisionRequired" in result) {
-          this.stageLeaseDecision(result);
+          this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
         this.publishWorkingCopy();
         return Object.freeze({ status: "divergence", draft: frozenCopy(result) });
       }
       const result = await this.host.migrateDocument({ authorization });
-      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       this.clearPending();
       if (!result) {
         this.publishWorkingCopy();
         return Object.freeze({ status: "unavailable" });
       }
       if ("decisionRequired" in result) {
-        this.stageLeaseDecision(result);
+        this.stageLeaseDecision(result, adoption!);
         return Object.freeze({ status: "attention" });
       }
       this.publishWorkingCopy();
       return Object.freeze({ status: "migration", document: frozenCopy(result.opened),
         compatibilityCode: result.compatibilityCode });
     } catch (error) {
-      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       this.clearPending();
       this.publishWorkingCopy();
       return Object.freeze({ status: "failed", code: hostFailureCode(error) });
@@ -337,21 +345,24 @@ export class DocumentSession<Doc extends SessionDocument,
     const decision = this.leaseDecision;
     if (!decision) return Promise.resolve(Object.freeze({ status: "unavailable" }));
     this.leaseDecision = null;
+    this.queuedLeaseOperation = "lease-cancel";
+    this.publishWorkingCopy();
     const generation = this.generation;
+    const adoption = this.currentAdoption();
     let authorization = decision.authorization;
     return this.enqueue(async () => {
-      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       this.publishPending("lease-cancel");
       const used = authorization;
       authorization = "";
       try {
         const revoked = await this.host.cancelLeaseTakeover(used);
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
         this.clearPending();
         this.publishWorkingCopy();
         return Object.freeze({ status: "canceled" as const, revoked });
       } catch (error) {
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
         this.clearPending();
         this.publishWorkingCopy();
         return Object.freeze({ status: "failed" as const, code: hostFailureCode(error) });
@@ -360,8 +371,9 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   private async runEditOperation(generation: number, authorization?: string,
-    pending: SessionPendingOperation = "edit"): Promise<DocumentSessionOutcome<Doc>> {
-    if (generation !== this.generation || this.snapshot.kind !== "read-only") {
+    pending: SessionPendingOperation = "edit", adoption = this.currentAdoption()):
+    Promise<DocumentSessionOutcome<Doc>> {
+    if (!this.matchesAdoption(generation, adoption) || this.snapshot.kind !== "read-only") {
       return Object.freeze({ status: "superseded" });
     }
     this.editFailureCode = null;
@@ -369,10 +381,10 @@ export class DocumentSession<Doc extends SessionDocument,
     try {
       const result = await this.host.enterEditMode(authorization
         ? { authorization } : {});
-      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       this.clearPending();
       if ("decisionRequired" in result) {
-        this.stageLeaseDecision(result);
+        this.stageLeaseDecision(result, adoption!);
         return Object.freeze({ status: "attention" });
       }
       if (result.readOnly) {
@@ -383,7 +395,7 @@ export class DocumentSession<Doc extends SessionDocument,
       this.refreshDocument(result);
       return Object.freeze({ status: "edit-mode" });
     } catch (error) {
-      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       this.clearPending();
       const code = hostFailureCode(error);
       this.editFailureCode = code;
@@ -525,6 +537,7 @@ export class DocumentSession<Doc extends SessionDocument,
     if (this.disposed) return;
     this.generation += 1;
     this.leaseDecision = null;
+    this.queuedLeaseOperation = null;
     this.editFailureCode = null;
     this.cancelQueuedCommands();
     if (this.snapshot.kind === "closed") return;
@@ -540,6 +553,7 @@ export class DocumentSession<Doc extends SessionDocument,
     if (this.disposed) return;
     this.generation += 1;
     this.leaseDecision = null;
+    this.queuedLeaseOperation = null;
     this.editFailureCode = null;
     this.cancelQueuedCommands();
     this.snapshot = CLOSED;
@@ -617,23 +631,28 @@ export class DocumentSession<Doc extends SessionDocument,
     return document.readOnly
       ? Object.freeze({ kind: "read-only", adoption, targetName, working, commands,
         ...(attention ? { attention } : {}),
+        ...(this.queuedLeaseOperation ? { queued: this.queuedLeaseOperation } : {}),
         document: document as Doc & { readOnly: true } })
       : Object.freeze({ kind: "edit", adoption, targetName, working, commands,
         ...(attention ? { attention } : {}),
+        ...(this.queuedLeaseOperation ? { queued: this.queuedLeaseOperation } : {}),
         document: document as Doc & { readOnly: false } });
   }
 
   private publishWorkingCopy(): void {
     const current = this.snapshot;
     if (current.kind !== "read-only" && current.kind !== "edit") return;
-    this.snapshot = this.openSnapshot(current.document, current.adoption, current.targetName);
+    this.snapshot = Object.freeze({ ...this.openSnapshot(current.document, current.adoption,
+      current.targetName), ...(current.pending ? { pending: current.pending } : {}) });
     this.notify();
   }
 
   private notify(): void { for (const listener of this.listeners) listener(); }
 
   private publishPending(pending: SessionPendingOperation): void {
-    this.snapshot = Object.freeze({ ...this.snapshot, pending }) as DocumentSessionSnapshot<Doc>;
+    this.queuedLeaseOperation = null;
+    const { queued: _queued, ...state } = this.snapshot as ReadOnlySessionSnapshot<Doc>;
+    this.snapshot = Object.freeze({ ...state, pending }) as DocumentSessionSnapshot<Doc>;
     this.notify();
   }
 
@@ -649,6 +668,16 @@ export class DocumentSession<Doc extends SessionDocument,
     this.stopWorkingCopy = null;
     this.workingCopy?.dispose();
     this.workingCopy = null;
+  }
+
+  private currentAdoption(): number | null {
+    return this.snapshot.kind === "read-only" || this.snapshot.kind === "edit"
+      ? this.snapshot.adoption : null;
+  }
+
+  private matchesAdoption(generation: number, adoption: number | null): boolean {
+    return generation === this.generation && adoption !== null
+      && this.currentAdoption() === adoption;
   }
 
   private enqueue(run: () => Promise<DocumentSessionOutcome<Doc>>): Promise<DocumentSessionOutcome<Doc>> {

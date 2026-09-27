@@ -360,7 +360,9 @@ function App() {
   const editFailure = attention?.kind === "edit-unavailable"
     ? catalogText(attention.code) : null;
   const leaseBusy = sessionSnapshot.pending === "lease-confirm"
-    || sessionSnapshot.pending === "lease-cancel";
+    || sessionSnapshot.pending === "lease-cancel"
+    || ((sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit")
+      && sessionSnapshot.queued !== undefined);
   useEffect(() => () => session.dispose(), [session]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [clientSettings, setClientSettings] = useState<ClientSettings>({
@@ -819,11 +821,23 @@ function App() {
     });
   }
 
-  async function migrate(request: { authorization?: string } = {}) {
+  function currentAdoption(): number | null {
+    const current = session.getSnapshot();
+    return current.kind === "read-only" || current.kind === "edit"
+      ? current.adoption : null;
+  }
+
+  function stillAdopted(adoption: number | null): boolean {
+    return adoption !== null && currentAdoption() === adoption;
+  }
+
+  async function migrate() {
+    const adoption = currentAdoption();
     try {
       setDecisionError("");
       setOpenedDialogError("");
-      const result = await window.scpefe.migrateDocument(request);
+      const result = await window.scpefe.migrateDocument();
+      if (!stillAdopted(adoption)) return;
       if (!result) {
         setOpenedDialogError("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
         setMessage("Migration declined. The document remains read-only; saving requires migration.");
@@ -831,7 +845,7 @@ function App() {
         return;
       }
       if ("decisionRequired" in result) {
-        session.stageLeaseDecision(result);
+        session.stageLeaseDecision(result, adoption!);
         setMessage("Migration requires a confirmed lease takeover.");
         return;
       }
@@ -839,13 +853,11 @@ function App() {
       session.adoptPublication(result.opened.content);
       setMessage(catalogText(result.compatibilityCode));
     } catch (error) {
+      if (!stillAdopted(adoption)) return;
       const value = safeRendererErrorMessage(error);
-      if (request.authorization !== undefined) leaveConsumedTakeover("migration", value);
-      else {
-        setOpenedDialogError(value);
-        setMessage(`Migration needs attention: ${value}`);
-        requestAnimationFrame(() => migrationRetryAction.current?.focus());
-      }
+      setOpenedDialogError(value);
+      setMessage(`Migration needs attention: ${value}`);
+      requestAnimationFrame(() => migrationRetryAction.current?.focus());
     }
   }
 
@@ -1080,19 +1092,22 @@ function App() {
   }
 
   async function restoreRecovery() {
+    const adoption = currentAdoption();
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
     try {
       setOpenedDialogError("");
       const result = await window.scpefe.restoreRecoveredWork();
+      if (!stillAdopted(adoption)) return;
       if ("decisionRequired" in result) {
-        session.stageLeaseDecision(result);
+        session.stageLeaseDecision(result, adoption!);
         setDecisionError("");
         setMessage("Restoring recovered work requires a confirmed lease takeover.");
         return;
       }
       applyRecoveredWork(result);
     } catch (error) {
+      if (!stillAdopted(adoption)) return;
       openedActionFailure(error, action, "Recovery restore needs attention");
     }
   }
@@ -1223,19 +1238,22 @@ function App() {
   }
 
   async function beginDivergenceResolution() {
+    const adoption = currentAdoption();
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
     try {
       setOpenedDialogError("");
       const draft = await window.scpefe.beginDivergenceResolution();
+      if (!stillAdopted(adoption)) return;
       if ("decisionRequired" in draft) {
-        session.stageLeaseDecision(draft);
+        session.stageLeaseDecision(draft, adoption!);
         setDecisionError("");
         setMessage("Divergence resolution requires a confirmed lease takeover.");
         return;
       }
       applyDivergenceDraft(draft);
     } catch (error) {
+      if (!stillAdopted(adoption)) return;
       openedActionFailure(error, action, "Divergence resolution needs attention");
     }
   }

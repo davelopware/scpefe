@@ -190,7 +190,9 @@ test("other lease decisions consume each authority once across changed evidence 
   session.adopt(opened());
   const first = { decisionRequired: "lease-takeover" as const,
     operation: "recovery" as const, holderName: "Ada", authorization: "one-use token" };
-  assert.equal(session.stageLeaseDecision(first), true);
+  const initial = session.getSnapshot();
+  if (initial.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(session.stageLeaseDecision(first, initial.adoption), true);
   const requests: string[] = [];
   host.restoreRecoveredWork = async ({ authorization }) => {
     requests.push(authorization);
@@ -211,6 +213,84 @@ test("other lease decisions consume each authority once across changed evidence 
   assert.deepEqual(requests, ["one-use token", "changed-evidence token"]);
   assert.deepEqual(await session.cancelLeaseTakeover(), { status: "unavailable" });
   assert.equal(JSON.stringify(session.getSnapshot()).includes("token"), false);
+  session.dispose();
+});
+
+test("a late initial challenge cannot attach to a replacement adoption", async () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.adopt(opened("document A"));
+  const first = session.getSnapshot();
+  if (first.kind !== "read-only") throw new Error("expected read-only");
+  session.lockStarted();
+  session.adopt(opened("document B"));
+  const challenge = { decisionRequired: "lease-takeover" as const,
+    operation: "recovery" as const, holderName: "old holder",
+    authorization: "old token" };
+  assert.equal(session.stageLeaseDecision(challenge, first.adoption), false);
+  const current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(current.document.content, "document B");
+  assert.equal(current.attention, undefined);
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "unavailable" });
+  session.dispose();
+});
+
+test("queued confirmation consumes visible takeover before the host command starts", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  host.editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Ada", authorization: "one-use token" };
+  assert.deepEqual(await session.enterEditMode(), { status: "attention" });
+  let completeClose!: (completed: boolean) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.closeDocument = () => new Promise((resolve) => {
+    completeClose = resolve;
+    signalStarted();
+  });
+  const closing = session.close();
+  await started;
+  const confirming = session.confirmLeaseTakeover();
+  const queued = session.getSnapshot();
+  if (queued.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(queued.pending, "close");
+  assert.equal(queued.queued, "lease-confirm");
+  assert.equal(queued.attention, undefined);
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "unavailable" });
+  completeClose(false);
+  assert.deepEqual(await closing, { status: "pending" });
+  host.editResult = opened("private text", false);
+  assert.deepEqual(await confirming, { status: "edit-mode" });
+  session.dispose();
+});
+
+test("queued cancellation consumes visible takeover before host revocation starts", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  host.editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Ada", authorization: "one-use token" };
+  assert.deepEqual(await session.enterEditMode(), { status: "attention" });
+  let completeClose!: (completed: boolean) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.closeDocument = () => new Promise((resolve) => {
+    completeClose = resolve;
+    signalStarted();
+  });
+  const closing = session.close();
+  await started;
+  const canceling = session.cancelLeaseTakeover();
+  const queued = session.getSnapshot();
+  if (queued.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(queued.pending, "close");
+  assert.equal(queued.queued, "lease-cancel");
+  assert.equal(queued.attention, undefined);
+  assert.deepEqual(await session.cancelLeaseTakeover(), { status: "unavailable" });
+  completeClose(false);
+  assert.deepEqual(await closing, { status: "pending" });
+  assert.deepEqual(await canceling, { status: "canceled", revoked: true });
   session.dispose();
 });
 
