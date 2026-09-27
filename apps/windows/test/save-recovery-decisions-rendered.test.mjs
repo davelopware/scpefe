@@ -331,6 +331,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     assert.match(dialog.textContent, /Fresh remote editor/);
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
     assert.ok(await ui.findByText(dialog, /The lease changed/));
     assert.match(dialog.textContent, /Updated remote editor/);
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));

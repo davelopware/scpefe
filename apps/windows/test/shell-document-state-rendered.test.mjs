@@ -208,18 +208,24 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.deepEqual([editor.selectionStart, editor.selectionEnd],
     [editor.value.length, editor.value.length],
     "Replace all leaves the cursor at the end of the result");
-  assert.deepEqual(workingCopyUpdates.at(-1), {
+  const journalPayload = () => {
+    const { content, cursor } = workingCopyUpdates.at(-1);
+    return { content, cursor };
+  };
+  assert.match(workingCopyUpdates.at(-1).journalScope, /^renderer-/,
+    "working-copy writes carry their adoption scope to the host");
+  assert.deepEqual(journalPayload(), {
     content: "first row\nsecond row", cursor: { start: 20, end: 20 },
   }, "the end cursor crosses the working-copy boundary");
   assert.match(ui.getByRole(findDialog, "status").textContent, /1 match replaced/);
   editor.focus(); await user.keyboard("{Control>}z{/Control}");
   assert.equal(editor.value, "first row\nsecond line");
-  assert.deepEqual(workingCopyUpdates.at(-1), {
+  assert.deepEqual(journalPayload(), {
     content: "first row\nsecond line", cursor: { start: 21, end: 21 },
   });
   await user.keyboard("{Control>}y{/Control}");
   assert.equal(editor.value, "first row\nsecond row");
-  assert.deepEqual(workingCopyUpdates.at(-1), {
+  assert.deepEqual(journalPayload(), {
     content: "first row\nsecond row", cursor: { start: 20, end: 20 },
   });
   await user.keyboard("{Control>}z{/Control}{Control>}z{/Control}");

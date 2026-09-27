@@ -20,8 +20,10 @@ const opened = (content = "private text", readOnly = true): OpenedDocument => ({
 
 class Journal implements WorkingCopyJournalHost {
   private scope = 0;
+  readonly updates: WorkingCopyUpdate[] = [];
   createJournalScope(): string { return `scope-${++this.scope}`; }
-  updateWorkingCopy(_update: WorkingCopyUpdate): Promise<unknown> {
+  updateWorkingCopy(update: WorkingCopyUpdate): Promise<unknown> {
+    this.updates.push(update);
     return Promise.resolve({ checkpointScheduled: true });
   }
   onJournalWarning(_listener: (code: string, scope: string | null) => void): () => void {
@@ -29,8 +31,67 @@ class Journal implements WorkingCopyJournalHost {
   }
 }
 
+test("session owns synchronous editing, search, history, and journal projection", () => {
+  const journal = new Journal();
+  const session = new DocumentSession(new Host(), journal);
+  const current = () => {
+    const snapshot = session.getSnapshot();
+    assert.ok(snapshot.kind === "edit" || snapshot.kind === "read-only");
+    return snapshot;
+  };
+  session.adopt(opened("first line\nsecond line", false));
+  assert.equal(session.getSnapshot().kind, "edit");
+  assert.equal(current().working.text, "first line\nsecond line");
+  assert.equal(current().commands.write, true);
+  assert.equal(session.edit("first row\nsecond line", { start: 9, end: 9 }), true);
+  assert.equal(current().working.dirty, true);
+  assert.equal(current().working.canUndo, true);
+  assert.equal(journal.updates.at(-1)?.content, "first row\nsecond line");
+  assert.equal(session.undo(), true);
+  assert.equal(current().working.text, "first line\nsecond line");
+  assert.equal(session.redo(), true);
+  assert.equal(current().working.text, "first row\nsecond line");
+  assert.equal(session.setSelection({ start: 0, end: 0 }), true);
+  assert.deepEqual(session.findNext("second"), {
+    status: "selected", wrapped: false, selection: { start: 10, end: 16 },
+  });
+  assert.deepEqual(session.replaceSelection("second", "third"), { status: "replaced" });
+  assert.equal(current().working.text, "first row\nthird line");
+  session.lockStarted();
+  assert.equal("working" in session.getSnapshot(), false);
+  assert.equal(session.edit("late plaintext"), false);
+  session.dispose();
+});
+
+test("session projects in-flight journal work and a safe failure before lock clears it", async () => {
+  const journal = new Journal();
+  let rejectUpdate!: (reason: Error) => void;
+  journal.updateWorkingCopy = () => new Promise((_resolve, reject) => {
+    rejectUpdate = reject;
+  });
+  const session = new DocumentSession(new Host(), journal);
+  session.adopt(opened("original", false));
+  assert.equal(session.edit("changed"), true);
+  const pending = session.getSnapshot();
+  if (pending.kind !== "edit") throw new Error("expected edit session");
+  assert.deepEqual(pending.working.journal, { pending: 1, failed: false });
+  rejectUpdate(new Error("private journal path"));
+  await Promise.resolve();
+  await Promise.resolve();
+  const failed = session.getSnapshot();
+  if (failed.kind !== "edit") throw new Error("expected edit session");
+  assert.deepEqual(failed.working.journal, { pending: 0, failed: true });
+  assert.equal(JSON.stringify(failed).includes("private journal path"), false);
+  session.lockStarted();
+  assert.equal("working" in session.getSnapshot(), false);
+  session.dispose();
+});
+
 class Host implements DocumentSessionHost<OpenedDocument> {
   openResult: OpenedDocument | SessionInvitation = opened();
+  editResult: OpenedDocument | { decisionRequired: "lease-takeover";
+    operation: "edit"; holderName: string; authorization: string } = opened("private text", false);
+  editRequests: Array<{ authorization?: string }> = [];
   async openSelectedDocument(_password: string): Promise<OpenedDocument | SessionInvitation> {
     return this.openResult;
   }
@@ -41,7 +102,197 @@ class Host implements DocumentSessionHost<OpenedDocument> {
     return { locked: true, journalSaved: true, warningCode: null };
   }
   async closeDocument(): Promise<boolean> { return true; }
+  async enterEditMode(request: { authorization?: string } = {}): Promise<OpenedDocument
+    | { decisionRequired: "lease-takeover"; operation: "edit";
+      holderName: string; authorization: string }> {
+    this.editRequests.push(request);
+    return this.editResult;
+  }
+  async cancelLeaseTakeover(_authorization: string): Promise<boolean> { return true; }
+  async restoreRecoveredWork(_request: { authorization: string }): Promise<OpenedDocument & {
+    recoveredUnsaved: true; cursor: { start: number; end: number } } | {
+      decisionRequired: "lease-takeover"; operation: "recovery";
+      holderName: string; authorization: string }> {
+    return { ...opened(), recoveredUnsaved: true, cursor: { start: 0, end: 0 } };
+  }
+  async beginDivergenceResolution(_request: { authorization: string }): Promise<{
+    content: string; hasConflicts: boolean; ancestorRevision: string;
+    localRevision: string; currentRevision: string }> {
+    return { content: "merge", hasConflicts: false, ancestorRevision: "a",
+      localRevision: "l", currentRevision: "c" };
+  }
+  async migrateDocument(_request: { authorization: string }): Promise<{
+    opened: OpenedDocument; compatibilityCode: string }> {
+    return { opened: opened(), compatibilityCode: "MIGRATED" };
+  }
 }
+
+test("edit lease attention is secret-free and one-shot confirmation enters edit mode", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  host.editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Ada", authorization: "secret authorization" };
+  assert.deepEqual(await session.enterEditMode(), { status: "attention" });
+  const attention = session.getSnapshot();
+  assert.equal(attention.kind, "read-only");
+  if (attention.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(attention.attention,
+    { kind: "lease-takeover", operation: "edit", holderName: "Ada" });
+  assert.equal(JSON.stringify(attention).includes("secret authorization"), false);
+  host.editResult = opened("private text", false);
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "edit-mode" });
+  assert.equal(session.getSnapshot().kind, "edit");
+  assert.deepEqual(host.editRequests, [{}, { authorization: "secret authorization" }]);
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "unavailable" });
+  session.dispose();
+});
+
+test("lock start supersedes a late edit lease and removes one-shot authority", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  let resolveEdit!: (result: OpenedDocument) => void;
+  host.enterEditMode = () => new Promise((resolve) => { resolveEdit = resolve; });
+  const pending = session.enterEditMode();
+  await Promise.resolve();
+  session.lockStarted();
+  resolveEdit(opened("late text", false));
+  assert.deepEqual(await pending, { status: "superseded" });
+  assert.equal(session.getSnapshot().kind, "locked");
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("late text"), false);
+  session.dispose();
+});
+
+test("failed edit acquisition exposes safe retry attention until the next command", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  host.enterEditMode = async () => { throw new Error("private lease path"); };
+  assert.deepEqual(await session.enterEditMode(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  const failed = session.getSnapshot();
+  if (failed.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(failed.attention,
+    { kind: "edit-unavailable", code: "OPERATION_FAILED" });
+  assert.equal(JSON.stringify(failed).includes("private lease path"), false);
+  host.enterEditMode = async () => opened("private text", false);
+  assert.deepEqual(await session.enterEditMode(), { status: "edit-mode" });
+  const editing = session.getSnapshot();
+  if (editing.kind !== "edit") throw new Error("expected edit");
+  assert.equal(editing.attention, undefined);
+  session.dispose();
+});
+
+test("other lease decisions consume each authority once across changed evidence and faults", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  const first = { decisionRequired: "lease-takeover" as const,
+    operation: "recovery" as const, holderName: "Ada", authorization: "one-use token" };
+  const initial = session.getSnapshot();
+  if (initial.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(session.stageLeaseDecision(first, initial.adoption), true);
+  const requests: string[] = [];
+  host.restoreRecoveredWork = async ({ authorization }) => {
+    requests.push(authorization);
+    return { ...first, authorization: "changed-evidence token" };
+  };
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "attention" });
+  assert.deepEqual(requests, ["one-use token"]);
+  const changed = session.getSnapshot();
+  if (changed.kind === "read-only" && changed.attention?.kind === "lease-takeover") {
+    assert.equal(changed.attention.holderName, "Ada");
+  }
+  host.cancelLeaseTakeover = async (authorization) => {
+    requests.push(authorization);
+    throw new Error("private revocation failure");
+  };
+  assert.deepEqual(await session.cancelLeaseTakeover(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  assert.deepEqual(requests, ["one-use token", "changed-evidence token"]);
+  assert.deepEqual(await session.cancelLeaseTakeover(), { status: "unavailable" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("token"), false);
+  session.dispose();
+});
+
+test("a late initial challenge cannot attach to a replacement adoption", async () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.adopt(opened("document A"));
+  const first = session.getSnapshot();
+  if (first.kind !== "read-only") throw new Error("expected read-only");
+  session.lockStarted();
+  session.adopt(opened("document B"));
+  const challenge = { decisionRequired: "lease-takeover" as const,
+    operation: "recovery" as const, holderName: "old holder",
+    authorization: "old token" };
+  assert.equal(session.stageLeaseDecision(challenge, first.adoption), false);
+  const current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(current.document.content, "document B");
+  assert.equal(current.attention, undefined);
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "unavailable" });
+  session.dispose();
+});
+
+test("queued confirmation consumes visible takeover before the host command starts", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  host.editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Ada", authorization: "one-use token" };
+  assert.deepEqual(await session.enterEditMode(), { status: "attention" });
+  let completeClose!: (completed: boolean) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.closeDocument = () => new Promise((resolve) => {
+    completeClose = resolve;
+    signalStarted();
+  });
+  const closing = session.close();
+  await started;
+  const confirming = session.confirmLeaseTakeover();
+  const queued = session.getSnapshot();
+  if (queued.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(queued.pending, "close");
+  assert.equal(queued.queued, "lease-confirm");
+  assert.equal(queued.attention, undefined);
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "unavailable" });
+  completeClose(false);
+  assert.deepEqual(await closing, { status: "pending" });
+  host.editResult = opened("private text", false);
+  assert.deepEqual(await confirming, { status: "edit-mode" });
+  session.dispose();
+});
+
+test("queued cancellation consumes visible takeover before host revocation starts", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened());
+  host.editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Ada", authorization: "one-use token" };
+  assert.deepEqual(await session.enterEditMode(), { status: "attention" });
+  let completeClose!: (completed: boolean) => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  host.closeDocument = () => new Promise((resolve) => {
+    completeClose = resolve;
+    signalStarted();
+  });
+  const closing = session.close();
+  await started;
+  const canceling = session.cancelLeaseTakeover();
+  const queued = session.getSnapshot();
+  if (queued.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(queued.pending, "close");
+  assert.equal(queued.queued, "lease-cancel");
+  assert.equal(queued.attention, undefined);
+  assert.deepEqual(await session.cancelLeaseTakeover(), { status: "unavailable" });
+  completeClose(false);
+  assert.deepEqual(await closing, { status: "pending" });
+  assert.deepEqual(await canceling, { status: "canceled", revoked: true });
+  session.dispose();
+});
 
 test("successful adoption publishes one immutable read-only lifecycle snapshot", async () => {
   const host = new Host();
