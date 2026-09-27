@@ -186,6 +186,9 @@ test("provisional saves invalidate the baseline and selections stay within text"
   copy.markProvisional();
   assert.equal(ready(copy).dirty, true);
   assert.equal(ready(copy).baseline, "invalid");
+  copy.markProvisional("canonical\ntext");
+  assert.equal(ready(copy).text, "canonical\ntext",
+    "the host's canonical provisional text becomes the editor projection");
   copy.adoptRecovery("abc", { start: -5, end: 99 });
   assert.deepEqual(ready(copy).selection, { start: 0, end: 3 });
   copy.setSelection({ start: 20, end: 1 });

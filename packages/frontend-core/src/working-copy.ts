@@ -110,8 +110,14 @@ export class WorkingCopy {
     this.adopt(text, null, { start: 0, end: 0 });
   }
 
-  markProvisional(): void {
-    this.requireReady().baseline = null;
+  markProvisional(text?: string): void {
+    const state = this.requireReady();
+    state.baseline = null;
+    if (text !== undefined) {
+      state.text = text;
+      state.history[state.index] = text;
+      state.selection = this.normalizedSelection(text, state.selection);
+    }
     this.publish();
   }
 

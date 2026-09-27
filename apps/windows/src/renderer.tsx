@@ -350,6 +350,17 @@ function App() {
   const targetName = sessionSnapshot.kind === "closed" ? null
     : sessionSnapshot.targetName;
   const lockedDocument = sessionSnapshot.kind === "locked";
+  const working = sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit"
+    ? sessionSnapshot.working : null;
+  const workingText = working?.text ?? "";
+  const dirty = working?.dirty ?? false;
+  const attention = sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit"
+    ? sessionSnapshot.attention : undefined;
+  const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
+  const editFailure = attention?.kind === "edit-unavailable"
+    ? catalogText(attention.code) : null;
+  const leaseBusy = sessionSnapshot.pending === "lease-confirm"
+    || sessionSnapshot.pending === "lease-cancel";
   useEffect(() => () => session.dispose(), [session]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [clientSettings, setClientSettings] = useState<ClientSettings>({
@@ -357,12 +368,7 @@ function App() {
   });
   const [message, setMessage] = useState("");
   const [editorAdoption, setEditorAdoption] = useState(0);
-  const [workingText, setWorkingText] = useState("");
-  const [manualSavedText, setManualSavedText] = useState("");
-  const [dirty, setDirty] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("target-published");
-  const [history, setHistory] = useState<string[]>([""]);
-  const [historyIndex, setHistoryIndex] = useState(0);
   const [findText, setFindText] = useState("");
   const [replaceText, setReplaceText] = useState("");
   const [findOpen, setFindOpen] = useState(false);
@@ -381,8 +387,6 @@ function App() {
   const [openError, setOpenError] = useState("");
   const [pendingOpenName, setPendingOpenName] = useState("");
   const [invitationStaged, setInvitationStaged] = useState(false);
-  const [editFailure, setEditFailure] = useState<string | null>(null);
-  const [leaseDecision, setLeaseDecision] = useState<LeaseDecision | null>(null);
   const [decisionError, setDecisionError] = useState("");
   const [openedDialogError, setOpenedDialogError] = useState("");
   const [saveError, setSaveError] = useState("");
@@ -404,8 +408,6 @@ function App() {
   const [protection, setProtection] = useState<ProtectionRequest | null>(null);
   const [protectionError, setProtectionError] = useState("");
   const editor = useRef<HTMLTextAreaElement>(null);
-  const manualBaselineValid = useRef(true);
-  const editorSelection = useRef<Cursor>({ start: 0, end: 0 });
   const wasModalBusy = useRef(false);
   const replacementFocusPending = useRef(false);
   const findInput = useRef<HTMLInputElement>(null);
@@ -459,8 +461,7 @@ function App() {
     });
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
       setSaveState("provisional");
-      manualBaselineValid.current = false;
-      setDirty(true);
+      session.markProvisional(result.content);
       reflectCurrent((current) => ({ ...current,
         content: result.content, provisional: true }));
       setMessage("Regular save published provisionally; changes remain unsaved until manual save.");
@@ -515,19 +516,10 @@ function App() {
     if (adopted.kind === "read-only" || adopted.kind === "edit") {
       setEditorAdoption(adopted.adoption);
     }
-    setLeaseDecision(null);
     setDecisionError("");
     setOpenedDialogError("");
-    const content = result.content;
-    setWorkingText(content);
-    setManualSavedText(content);
-    manualBaselineValid.current = !result.provisional;
-    setDirty(Boolean(result.provisional));
     setSaveState(result.provisional ? "provisional"
       : result.recovery ? "unsaved" : result.publicationState);
-    setHistory([content]);
-    setHistoryIndex(0);
-    editorSelection.current = { start: 0, end: 0 };
     setFindOpen(false);
     setFindText("");
     setReplaceText("");
@@ -563,7 +555,7 @@ function App() {
     const restoreFindFocus = restoreSelection && findOpen && suspendedFindFocus.current !== null;
     wasModalBusy.current = modalBusy.current;
     if (!restoreSelection) return;
-    const { start, end } = editorSelection.current;
+    const { start, end } = working?.selection ?? { start: 0, end: 0 };
     requestAnimationFrame(() => {
       editor.current?.setSelectionRange(
         Math.min(start, workingText.length), Math.min(end, workingText.length));
@@ -582,16 +574,18 @@ function App() {
   }, [activeDocument, creating, dialog, protection, visibleOpenedDialog]);
   const enabled: Record<string, boolean> = {
     new: profile !== null, open: profile !== null,
-    save: activeDocument && !opened.readOnly && dirty,
+    save: activeDocument && sessionSnapshot.kind === "edit"
+      && sessionSnapshot.commands.write && dirty,
     backup: activeDocument && !dirty && saveState === "target-published"
       && !opened.provisional && !opened.recovery && !opened.headMismatch
       && !opened.profileMismatch && !opened.migrationRequired,
     export: activeDocument, close: activeDocument || lockedDocument, exit: true,
-    edit: activeDocument && opened.readOnly && opened.canEdit
-      && opened.publicationState === "target-published" && !opened.recovery
-      && !opened.headMismatch && !opened.profileMismatch && !opened.migrationRequired,
-    undo: activeDocument && !opened.readOnly && historyIndex > 0,
-    redo: activeDocument && !opened.readOnly && historyIndex < history.length - 1,
+    edit: activeDocument && sessionSnapshot.kind === "read-only"
+      && sessionSnapshot.commands.enterEdit,
+    undo: activeDocument && sessionSnapshot.kind === "edit"
+      && sessionSnapshot.commands.undo,
+    redo: activeDocument && sessionSnapshot.kind === "edit"
+      && sessionSnapshot.commands.redo,
     find: activeDocument, replace: activeDocument,
     lock: activeDocument, unlock: lockedDocument,
     passwords: activeDocument, profile: profile !== null,
@@ -800,26 +794,16 @@ function App() {
   }
 
   async function enterEditMode() {
-    try {
-      const result = await window.scpefe.enterEditMode();
-      if ("decisionRequired" in result) {
-        setLeaseDecision(result);
-        setDecisionError("");
-        setMessage("Editing requires a confirmed lease takeover.");
-        return;
-      }
-      session.refreshDocument(result);
-      setMessage("Edit mode entered.");
-    } catch (error) {
-      setEditFailure(safeRendererErrorMessage(error));
-    }
+    const outcome = await session.enterEditMode();
+    if (outcome.status === "attention") {
+      setDecisionError("");
+      setMessage("Editing requires a confirmed lease takeover.");
+    } else if (outcome.status === "edit-mode") setMessage("Edit mode entered.");
   }
 
   function leaveConsumedTakeover(operation: LeaseOperation, value: string) {
-    setLeaseDecision(null);
     setDecisionError("");
     if (operation === "edit") {
-      setEditFailure(value);
       setMessage(`Editing needs attention: ${value}`);
       requestAnimationFrame(() => editRetryAction.current?.focus());
       return;
@@ -841,20 +825,18 @@ function App() {
       setOpenedDialogError("");
       const result = await window.scpefe.migrateDocument(request);
       if (!result) {
-        setLeaseDecision(null);
         setOpenedDialogError("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
         setMessage("Migration declined. The document remains read-only; saving requires migration.");
         requestAnimationFrame(() => migrationRetryAction.current?.focus());
         return;
       }
       if ("decisionRequired" in result) {
-        setLeaseDecision(result);
+        session.stageLeaseDecision(result);
         setMessage("Migration requires a confirmed lease takeover.");
         return;
       }
-      setLeaseDecision(null);
       session.refreshDocument(result.opened);
-      setWorkingText(result.opened.content);
+      session.adoptPublication(result.opened.content);
       setMessage(catalogText(result.compatibilityCode));
     } catch (error) {
       const value = safeRendererErrorMessage(error);
@@ -869,63 +851,38 @@ function App() {
 
   async function confirmLeaseTakeover() {
     if (!leaseDecision) return;
-    try {
-      setDecisionError("");
-      if (leaseDecision.operation === "migration") {
-        await migrate({ authorization: leaseDecision.authorization });
-        return;
-      }
-      if (leaseDecision.operation === "recovery") {
-        const result = await window.scpefe.restoreRecoveredWork(
-          { authorization: leaseDecision.authorization });
-        if ("decisionRequired" in result) {
-          setLeaseDecision(result);
-          setDecisionError("The lease changed. Review the current holder before trying again.");
-          return;
-        }
-        applyRecoveredWork(result);
-        setLeaseDecision(null);
-        return;
-      }
-      if (leaseDecision.operation === "divergence") {
-        const result = await window.scpefe.beginDivergenceResolution(
-          { authorization: leaseDecision.authorization });
-        if ("decisionRequired" in result) {
-          setLeaseDecision(result);
-          setDecisionError("The lease changed. Review the current holder before trying again.");
-          return;
-        }
-        applyDivergenceDraft(result);
-        setLeaseDecision(null);
-        return;
-      }
-      const result = await window.scpefe.enterEditMode(
-        { authorization: leaseDecision.authorization });
-      if ("decisionRequired" in result) {
-        setLeaseDecision(result);
-        setDecisionError("The lease changed. Review the current holder before trying again.");
-        return;
-      }
-      session.refreshDocument(result); setLeaseDecision(null);
+    setDecisionError("");
+    const outcome = await session.confirmLeaseTakeover();
+    if (outcome.status === "attention") {
+      setDecisionError("The lease changed. Review the current holder before trying again.");
+    } else if (outcome.status === "recovery") {
+      applyRecoveredWork(outcome.document);
+    } else if (outcome.status === "divergence") {
+      applyDivergenceDraft(outcome.draft);
+    } else if (outcome.status === "migration") {
+      session.refreshDocument(outcome.document);
+      session.adoptPublication(outcome.document.content);
+      setMessage(catalogText(outcome.compatibilityCode));
+    } else if (outcome.status === "edit-mode") {
       setMessage("Edit mode entered after confirmed lease takeover.");
-    } catch (error) {
-      const value = safeRendererErrorMessage(error);
-      leaveConsumedTakeover(leaseDecision.operation, value);
+    } else if (outcome.status === "failed") {
+      leaveConsumedTakeover(leaseDecision.operation, catalogText(outcome.code));
+    } else if (outcome.status === "unavailable" && leaseDecision.operation === "migration") {
+      setOpenedDialogError("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
+      requestAnimationFrame(() => migrationRetryAction.current?.focus());
     }
   }
 
   async function cancelLeaseDecision() {
     if (!leaseDecision) return;
-    try {
-      setDecisionError("");
-      const revoked = await window.scpefe.cancelLeaseTakeover(leaseDecision.authorization);
-      setLeaseDecision(null);
-      setMessage(revoked
+    setDecisionError("");
+    const outcome = await session.cancelLeaseTakeover();
+    if (outcome.status === "canceled") {
+      setMessage(outcome.revoked
         ? "Lease takeover canceled; the document session is unchanged."
         : "Lease takeover was already inactive; the document session is unchanged.");
-    } catch (error) {
-      const value = safeRendererErrorMessage(error);
-      setDecisionError(value);
+    } else if (outcome.status === "failed") {
+      const value = catalogText(outcome.code);
       setMessage(`Lease takeover cancellation needs attention: ${value}`);
     }
   }
@@ -1109,12 +1066,7 @@ function App() {
   function applyRecoveredWork(result: DocumentOpened & {
     recoveredUnsaved: true; cursor: Cursor }) {
     session.refreshDocument(result);
-    setWorkingText(result.content);
-    setHistory([result.content]);
-    setHistoryIndex(0);
-    editorSelection.current = result.cursor;
-    setDirty(true);
-    manualBaselineValid.current = false;
+    session.adoptRecovery(result.content, result.cursor);
     setSaveState("unsaved");
     setOpenedDialogError("");
     setMessage("Recovered work restored as unsaved changes.");
@@ -1134,7 +1086,7 @@ function App() {
       setOpenedDialogError("");
       const result = await window.scpefe.restoreRecoveredWork();
       if ("decisionRequired" in result) {
-        setLeaseDecision(result);
+        session.stageLeaseDecision(result);
         setDecisionError("");
         setMessage("Restoring recovered work requires a confirmed lease takeover.");
         return;
@@ -1152,10 +1104,7 @@ function App() {
       setOpenedDialogError("");
       const result = await window.scpefe.discardRecoveredWork();
       session.refreshDocument(result);
-      setWorkingText(result.content);
-      setManualSavedText(result.content);
-      setDirty(false);
-      manualBaselineValid.current = true;
+      session.adoptPublication(result.content);
       setSaveState("target-published");
       setMessage("Recovered work discarded.");
     } catch (error) {
@@ -1192,11 +1141,6 @@ function App() {
       if (closed) session.closed();
       else session.lockStarted();
       setEditorAdoption(0);
-      setWorkingText("");
-      setManualSavedText("");
-      setHistory([""]);
-      setHistoryIndex(0);
-      manualBaselineValid.current = true;
       setFindText("");
       setReplaceText("");
       setFindOpen(false);
@@ -1221,8 +1165,6 @@ function App() {
       setQueuedExternalOpenRequest(null);
       setCreating(false);
       setDialog(null);
-      setEditFailure(null);
-      setLeaseDecision(null);
       setDecisionError("");
       setOpenedDialogError("");
       setSaveError("");
@@ -1237,14 +1179,10 @@ function App() {
   }
 
   function edit(content: string, cursor?: Cursor) {
-    setWorkingText(content);
-    setDirty(!manualBaselineValid.current || content !== manualSavedText);
-    setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
-    setHistory((current) => [...current.slice(0, historyIndex + 1), content]);
-    setHistoryIndex((current) => current + 1);
     const nextCursor = cursor ?? { start: content.length, end: content.length };
-    editorSelection.current = nextCursor;
-    void window.scpefe.updateWorkingCopy({ content, cursor: nextCursor }).catch(showError);
+    if (session.edit(content, nextCursor)) {
+      setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
+    }
   }
 
   async function save() {
@@ -1253,10 +1191,7 @@ function App() {
       const result = saveState === "conflict"
         ? await window.scpefe.saveDivergenceResolution(workingText)
         : await window.scpefe.saveDocument(workingText);
-      setWorkingText(result.content);
-      setManualSavedText(result.content);
-      setDirty(false);
-      manualBaselineValid.current = true;
+      session.adoptPublication(result.content);
       reflectCurrent((current) => ({ ...current,
         content: result.content,
         readOnly: result.publicationState !== "target-published",
@@ -1276,11 +1211,7 @@ function App() {
   }
 
   function applyDivergenceDraft(draft: MergeDraft) {
-    setWorkingText(draft.content);
-    setDirty(true);
-    manualBaselineValid.current = false;
-    setHistory([draft.content]);
-    setHistoryIndex(0);
+    session.adoptDivergence(draft.content);
     reflectCurrent((current) => ({ ...current,
       content: draft.content, readOnly: false, canEdit: true }));
     setSaveState("conflict");
@@ -1298,7 +1229,7 @@ function App() {
       setOpenedDialogError("");
       const draft = await window.scpefe.beginDivergenceResolution();
       if ("decisionRequired" in draft) {
-        setLeaseDecision(draft);
+        session.stageLeaseDecision(draft);
         setDecisionError("");
         setMessage("Divergence resolution requires a confirmed lease takeover.");
         return;
@@ -1322,10 +1253,7 @@ function App() {
       reflectCurrent((current) => ({ ...current,
         content: result.content, readOnly: true,
         publicationState: result.publicationState }));
-      setWorkingText(result.content);
-      setManualSavedText(result.content);
-      setDirty(false);
-      manualBaselineValid.current = true;
+      session.adoptPublication(result.content);
       setSaveState(result.publicationState);
       if (result.publicationState !== "conflict") setResolvingConflict(false);
       setMessage(result.publicationState === "target-published"
@@ -1345,10 +1273,7 @@ function App() {
       setOpenedDialogError("");
       const result = await window.scpefe.discardPendingPublication();
       session.refreshDocument(result);
-      setWorkingText(result.content);
-      setManualSavedText(result.content);
-      setDirty(false);
-      manualBaselineValid.current = true;
+      session.adoptPublication(result.content);
       setSaveState("target-published");
       setMessage("Pending manual save explicitly discarded.");
     } catch (error) {
@@ -1379,15 +1304,9 @@ function App() {
   }
 
   function moveHistory(offset: number) {
-    const next = historyIndex + offset;
-    if (next < 0 || next >= history.length) return;
-    const content = history[next];
-    setHistoryIndex(next);
-    setWorkingText(content);
-    setDirty(!manualBaselineValid.current || content !== manualSavedText);
-    editorSelection.current = { start: content.length, end: content.length };
-    void window.scpefe.updateWorkingCopy({ content,
-      cursor: { start: content.length, end: content.length } }).catch(showError);
+    if (offset < 0 ? session.undo() : session.redo()) {
+      setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
+    }
   }
 
   function findNext() {
@@ -1395,17 +1314,15 @@ function App() {
       setFindStatus("Enter text to find.");
       return;
     }
-    const start = editor.current.selectionEnd;
-    let match = workingText.indexOf(findText, start);
-    const wrapped = match < 0 && workingText.indexOf(findText) >= 0;
-    if (match < 0) match = workingText.indexOf(findText);
-    if (match < 0) {
+    session.setSelection({ start: editor.current.selectionStart,
+      end: editor.current.selectionEnd });
+    const found = session.findNext(findText);
+    if (!found || found.status !== "selected") {
       setFindStatus("Text not found."); setMessage("Text not found."); return;
     }
     editor.current.focus();
-    editor.current.setSelectionRange(match, match + findText.length);
-    editorSelection.current = { start: match, end: match + findText.length };
-    const status = wrapped ? "Match selected after wrapping to the start."
+    editor.current.setSelectionRange(found.selection.start, found.selection.end);
+    const status = found.wrapped ? "Match selected after wrapping to the start."
       : "Match selected.";
     setFindStatus(status); setMessage(status);
   }
@@ -1413,10 +1330,24 @@ function App() {
   function replaceSelection() {
     if (!findText || !editor.current || !activeDocument || opened.readOnly) return;
     const { selectionStart: start, selectionEnd: end } = editor.current;
-    if (workingText.slice(start, end) !== findText) { findNext(); return; }
-    const content = workingText.slice(0, start) + replaceText + workingText.slice(end);
-    const next = start + replaceText.length;
-    edit(content, { start: next, end: next });
+    session.setSelection({ start, end });
+    const result = session.replaceSelection(findText, replaceText);
+    if (!result) return;
+    if (result.status === "selected") {
+      editor.current.focus();
+      editor.current.setSelectionRange(result.selection.start, result.selection.end);
+      const status = result.wrapped ? "Match selected after wrapping to the start."
+        : "Match selected.";
+      setFindStatus(status); setMessage(status);
+      return;
+    }
+    if (result.status !== "replaced") {
+      setFindStatus("Text not found."); setMessage("Text not found."); return;
+    }
+    setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
+    const replaced = session.getSnapshot();
+    const next = replaced.kind === "edit"
+      ? replaced.working.selection.start : start + replaceText.length;
     setFindStatus("Selected match replaced.");
     setMessage("Selected match replaced.");
     requestAnimationFrame(() => {
@@ -1427,13 +1358,14 @@ function App() {
 
   function replaceAll() {
     if (!findText || !activeDocument || opened.readOnly) return;
-    const matches = workingText.split(findText).length - 1;
+    const result = session.replaceAll(findText, replaceText);
+    const matches = result?.replacements ?? 0;
     if (!matches) {
       setFindStatus("Text not found."); setMessage("Text not found."); return;
     }
-    const content = workingText.split(findText).join(replaceText);
-    const cursor = content.length;
-    edit(content, { start: cursor, end: cursor });
+    setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
+    const replaced = session.getSnapshot();
+    const cursor = replaced.kind === "edit" ? replaced.working.selection.start : 0;
     const status = `${matches} match${matches === 1 ? "" : "es"} replaced.`;
     setFindStatus(status); setMessage(status);
     requestAnimationFrame(() => editor.current?.setSelectionRange(cursor, cursor));
@@ -1507,10 +1439,14 @@ function App() {
       <textarea ref={editor} aria-label="Document text"
         value={activeDocument && !modalBusy.current
           ? workingText : ""}
-        disabled={!activeDocument} readOnly={!activeDocument || opened.readOnly}
-        onSelect={(event) => { editorSelection.current = {
-          start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd,
-        }; }}
+        disabled={!activeDocument} readOnly={!activeDocument
+          || sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.write}
+        onSelect={(event) => {
+          const selection = { start: event.currentTarget.selectionStart,
+            end: event.currentTarget.selectionEnd };
+          if (working && (selection.start !== working.selection.start
+              || selection.end !== working.selection.end)) session.setSelection(selection);
+        }}
         onKeyDown={editorKeyDown} onChange={(event) => edit(event.target.value,
           { start: event.target.selectionStart, end: event.target.selectionEnd })} />
       {findOpen && activeDocument && !modalBusy.current
@@ -1543,16 +1479,21 @@ function App() {
     <footer className="status-bar" role="status" aria-live="polite" aria-atomic="true">
       <span aria-label="Document state">{state}</span>
       <span aria-label="Working copy state">{cleanliness}</span>
+      {activeDocument && <span aria-label="Recovery journal state">
+        {working?.journal.failed ? "Checkpoint needs attention"
+          : working?.journal.pending ? "Checkpoint pending" : "Checkpoint ready"}
+      </span>}
       <span aria-label="Publication state">{publication}</span>
       <span>{journalSummary.total > 0 ? `${journalSummary.total} recovery item${journalSummary.total === 1 ? "" : "s"} need attention. ` : ""}{message}</span>
     </footer></div>
     {!protection && <>{editFailure && <FocusedDialog returnFocus={dialogReturnFocus.current}
-      title="Editing unavailable" close={() => setEditFailure(null)}>
+      title="Editing unavailable" initialFocus={editRetryAction}
+      close={() => session.dismissEditFailure()}>
       <div className="warning" role="alert"><p>{editFailure}</p>
         <p>The document remains read-only.</p></div>
-      <div className="dialog-actions"><button onClick={() => setEditFailure(null)}>
+      <div className="dialog-actions"><button onClick={() => session.dismissEditFailure()}>
         Continue read-only</button><button ref={editRetryAction} autoFocus onClick={() => {
-          setEditFailure(null); void enterEditMode();
+          session.dismissEditFailure(); void enterEditMode();
         }}>Retry editing</button></div>
     </FocusedDialog>}
     {leaseDecision && <FocusedDialog returnFocus={dialogReturnFocus.current}
@@ -1560,9 +1501,9 @@ function App() {
       <div className="warning" role="alert"><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
         <p>Force takeover only after confirming that no other client is editing this document.</p></div>
       {decisionError && <p className="dialog-error" role="alert">{decisionError}</p>}
-      <div className="dialog-actions"><button autoFocus
+      <div className="dialog-actions"><button autoFocus disabled={leaseBusy}
         onClick={() => void cancelLeaseDecision()}>Cancel</button>
-        <button onClick={() => void confirmLeaseTakeover()}>
+        <button disabled={leaseBusy} onClick={() => void confirmLeaseTakeover()}>
         {leaseDecision.operation === "migration" ? "Force takeover and migrate" : "Force takeover"}
       </button></div>
     </FocusedDialog>}

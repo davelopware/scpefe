@@ -1,4 +1,5 @@
-import { WorkingCopy, type WorkingCopyJournalHost } from "./working-copy.ts";
+import { WorkingCopy, type ReadyWorkingCopySnapshot, type WorkingCopyFindResult,
+  type WorkingCopyJournalHost, type WorkingCopySelection } from "./working-copy.ts";
 
 /** Host-validated document data required for frontend lifecycle projection. */
 export interface SessionDocument {
@@ -7,6 +8,20 @@ export interface SessionDocument {
   readonly targetName?: string;
   readonly provisional?: true;
   readonly invitationRequired?: false;
+  readonly canEdit?: boolean;
+  readonly publicationState?: "target-published" | "pending-publication" | "conflict";
+  readonly migrationRequired?: true;
+  readonly recovery?: object;
+  readonly headMismatch?: object;
+  readonly profileMismatch?: object;
+}
+
+/** Command eligibility projected from the same state as the editor. */
+export interface SessionCommands {
+  readonly enterEdit: boolean;
+  readonly write: boolean;
+  readonly undo: boolean;
+  readonly redo: boolean;
 }
 
 /** A target awaiting invitation claim before its document is adopted. */
@@ -14,6 +29,39 @@ export interface SessionInvitation {
   readonly readOnly: true;
   readonly invitationRequired: true;
   readonly targetName?: string;
+}
+
+/** Host-issued one-shot lease challenge; authorization stays inside the session. */
+export interface SessionLeaseDecision {
+  readonly decisionRequired: "lease-takeover";
+  readonly operation: "edit" | "recovery" | "divergence" | "migration";
+  readonly holderName: string;
+  readonly authorization: string;
+}
+
+/** Safe identity context a presentation adapter may show to its user. */
+export interface SessionLeaseAttention {
+  readonly kind: "lease-takeover";
+  readonly operation: SessionLeaseDecision["operation"];
+  readonly holderName: string;
+}
+
+/** A failed edit transition that can be retried without retaining host error text. */
+export interface SessionEditAttention {
+  readonly kind: "edit-unavailable";
+  readonly code: SessionFailureCode;
+}
+
+/** Semantic attention projected independently of a graphical dialog. */
+export type SessionAttention = SessionLeaseAttention | SessionEditAttention;
+
+/** A host-produced merge draft for the lease-gated divergence workflow. */
+export interface SessionMergeDraft {
+  readonly content: string;
+  readonly hasConflicts: boolean;
+  readonly ancestorRevision: string;
+  readonly localRevision: string;
+  readonly currentRevision: string;
 }
 
 /** The lifecycle operations delegated to the host without replacing its barriers. */
@@ -24,10 +72,22 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   lock(): Promise<{ readonly locked: true; readonly journalSaved: boolean;
     readonly warningCode: string | null }>;
   closeDocument(): Promise<boolean>;
+  enterEditMode(request?: { readonly authorization?: string }):
+    Promise<Doc | SessionLeaseDecision>;
+  cancelLeaseTakeover(authorization: string): Promise<boolean>;
+  restoreRecoveredWork(request: { readonly authorization: string }): Promise<
+    (Doc & { readonly recoveredUnsaved: true; readonly cursor: WorkingCopySelection })
+    | SessionLeaseDecision>;
+  beginDivergenceResolution(request: { readonly authorization: string }):
+    Promise<SessionMergeDraft | SessionLeaseDecision>;
+  migrateDocument(request: { readonly authorization: string }): Promise<
+    { readonly opened: Doc; readonly compatibilityCode: string }
+    | SessionLeaseDecision | null>;
 }
 
 /** The active frontend command, without arguments or secrets. */
-export type SessionPendingOperation = "open" | "unlock" | "lock" | "close";
+export type SessionPendingOperation = "open" | "unlock" | "lock" | "close"
+  | "edit" | "lease-confirm" | "lease-cancel";
 
 /** A secret-free closed application state. */
 export interface ClosedSessionSnapshot {
@@ -48,6 +108,9 @@ export interface ReadOnlySessionSnapshot<Doc extends SessionDocument> {
   readonly adoption: number;
   readonly targetName: string | null;
   readonly document: Readonly<Doc & { readonly readOnly: true }>;
+  readonly working: ReadyWorkingCopySnapshot;
+  readonly commands: SessionCommands;
+  readonly attention?: SessionAttention;
   readonly pending?: SessionPendingOperation;
 }
 
@@ -57,6 +120,9 @@ export interface EditSessionSnapshot<Doc extends SessionDocument> {
   readonly adoption: number;
   readonly targetName: string | null;
   readonly document: Readonly<Doc & { readonly readOnly: false }>;
+  readonly working: ReadyWorkingCopySnapshot;
+  readonly commands: SessionCommands;
+  readonly attention?: SessionAttention;
   readonly pending?: SessionPendingOperation;
 }
 
@@ -66,9 +132,15 @@ export type DocumentSessionSnapshot<Doc extends SessionDocument> =
   | ReadOnlySessionSnapshot<Doc> | EditSessionSnapshot<Doc>;
 
 /** Stable command result that never carries raw host errors or secrets. */
-export type DocumentSessionOutcome =
+export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument> =
   | Readonly<{ status: "opened" | "invitation" | "closed" | "pending"
-    | "superseded" }>
+    | "superseded" | "attention" | "edit-mode" | "unavailable" }>
+  | Readonly<{ status: "canceled"; revoked: boolean }>
+  | Readonly<{ status: "recovery"; document: Doc & {
+    readonly recoveredUnsaved: true; readonly cursor: WorkingCopySelection } }>
+  | Readonly<{ status: "divergence"; draft: SessionMergeDraft }>
+  | Readonly<{ status: "migration"; document: Doc;
+    compatibilityCode: string }>
   | Readonly<{ status: "locked"; warningCode: SessionLockWarningCode | null }>
   | Readonly<{ status: "failed"; code: SessionFailureCode }>;
 
@@ -95,9 +167,9 @@ function hostFailureCode(error: unknown): SessionFailureCode {
     ? code as SessionFailureCode : "OPERATION_FAILED";
 }
 
-interface QueuedCommand {
-  run(): Promise<DocumentSessionOutcome>;
-  resolve(outcome: DocumentSessionOutcome): void;
+interface QueuedCommand<Doc extends SessionDocument> {
+  run(): Promise<DocumentSessionOutcome<Doc>>;
+  resolve(outcome: DocumentSessionOutcome<Doc>): void;
 }
 
 function frozenCopy<T>(value: T): T {
@@ -114,8 +186,11 @@ export class DocumentSession<Doc extends SessionDocument,
   Invite extends SessionInvitation = SessionInvitation> {
   private snapshot: DocumentSessionSnapshot<Doc> = CLOSED;
   private workingCopy: WorkingCopy | null = null;
+  private stopWorkingCopy: (() => void) | null = null;
+  private leaseDecision: SessionLeaseDecision | null = null;
+  private editFailureCode: SessionFailureCode | null = null;
   private readonly listeners = new Set<() => void>();
-  private readonly queuedCommands: QueuedCommand[] = [];
+  private readonly queuedCommands: QueuedCommand<Doc>[] = [];
   private commandRunning = false;
   private generation = 0;
   private adoptionSequence = 0;
@@ -132,7 +207,7 @@ export class DocumentSession<Doc extends SessionDocument,
   };
 
   /** Adopts a host-validated open result, replacing the previous frontend session. */
-  adopt(result: Doc | Invite): DocumentSessionOutcome {
+  adopt(result: Doc | Invite): DocumentSessionOutcome<Doc> {
     if (this.disposed) return Object.freeze({ status: "superseded" });
     if (result.invitationRequired === true) {
       // The host stages an invitation without replacing the current document.
@@ -142,8 +217,11 @@ export class DocumentSession<Doc extends SessionDocument,
     const targetName = document.targetName ?? (this.snapshot.kind === "closed"
       ? null : this.snapshot.targetName);
     this.clearWorkingCopy();
+    this.leaseDecision = null;
+    this.editFailureCode = null;
     this.workingCopy = new WorkingCopy(this.journalHost);
     this.workingCopy.adoptOpen(document.content, Boolean(document.provisional));
+    this.stopWorkingCopy = this.workingCopy.subscribe(() => this.publishWorkingCopy());
     this.snapshot = this.openSnapshot(document, ++this.adoptionSequence, targetName);
     this.notify();
     return Object.freeze({ status: "opened" });
@@ -160,7 +238,223 @@ export class DocumentSession<Doc extends SessionDocument,
     return true;
   }
 
-  openSelected(password: string): Promise<DocumentSessionOutcome> {
+  /** Requests host edit authority and represents a takeover challenge as safe attention. */
+  enterEditMode(): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    return this.enqueue(() => this.runEditOperation(generation));
+  }
+
+  /** Stages a challenge returned by another host operation for one-shot confirmation. */
+  stageLeaseDecision(decision: SessionLeaseDecision): boolean {
+    if (this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit") return false;
+    this.leaseDecision = { ...decision };
+    this.editFailureCode = null;
+    this.publishWorkingCopy();
+    return true;
+  }
+
+  /** Dismisses edit failure attention without changing host edit authority. */
+  dismissEditFailure(): void {
+    if (!this.editFailureCode) return;
+    this.editFailureCode = null;
+    this.publishWorkingCopy();
+  }
+
+  /** Consumes the edit challenge before invoking the host, including on fault. */
+  confirmLeaseTakeover(): Promise<DocumentSessionOutcome<Doc>> {
+    const decision = this.leaseDecision;
+    if (!decision) {
+      return Promise.resolve(Object.freeze({ status: "unavailable" }));
+    }
+    this.leaseDecision = null;
+    const generation = this.generation;
+    const operation = decision.operation;
+    let authorization = decision.authorization;
+    return this.enqueue(() => {
+      const used = authorization;
+      authorization = "";
+      return operation === "edit"
+        ? this.runEditOperation(generation, used, "lease-confirm")
+        : this.runOtherLeaseOperation(generation, operation, used);
+    });
+  }
+
+  private async runOtherLeaseOperation(generation: number,
+    operation: Exclude<SessionLeaseDecision["operation"], "edit">,
+    authorization: string): Promise<DocumentSessionOutcome<Doc>> {
+    if (generation !== this.generation || (this.snapshot.kind !== "read-only"
+      && this.snapshot.kind !== "edit")) {
+      return Object.freeze({ status: "superseded" });
+    }
+    this.publishPending("lease-confirm");
+    try {
+      if (operation === "recovery") {
+        const result = await this.host.restoreRecoveredWork({ authorization });
+        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        this.clearPending();
+        if ("decisionRequired" in result) {
+          this.stageLeaseDecision(result);
+          return Object.freeze({ status: "attention" });
+        }
+        this.publishWorkingCopy();
+        return Object.freeze({ status: "recovery", document: frozenCopy(result) });
+      }
+      if (operation === "divergence") {
+        const result = await this.host.beginDivergenceResolution({ authorization });
+        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        this.clearPending();
+        if ("decisionRequired" in result) {
+          this.stageLeaseDecision(result);
+          return Object.freeze({ status: "attention" });
+        }
+        this.publishWorkingCopy();
+        return Object.freeze({ status: "divergence", draft: frozenCopy(result) });
+      }
+      const result = await this.host.migrateDocument({ authorization });
+      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      this.clearPending();
+      if (!result) {
+        this.publishWorkingCopy();
+        return Object.freeze({ status: "unavailable" });
+      }
+      if ("decisionRequired" in result) {
+        this.stageLeaseDecision(result);
+        return Object.freeze({ status: "attention" });
+      }
+      this.publishWorkingCopy();
+      return Object.freeze({ status: "migration", document: frozenCopy(result.opened),
+        compatibilityCode: result.compatibilityCode });
+    } catch (error) {
+      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      this.clearPending();
+      this.publishWorkingCopy();
+      return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+    }
+  }
+
+  /** Consumes a pending challenge even if host revocation fails. */
+  cancelLeaseTakeover(): Promise<DocumentSessionOutcome<Doc>> {
+    const decision = this.leaseDecision;
+    if (!decision) return Promise.resolve(Object.freeze({ status: "unavailable" }));
+    this.leaseDecision = null;
+    const generation = this.generation;
+    let authorization = decision.authorization;
+    return this.enqueue(async () => {
+      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      this.publishPending("lease-cancel");
+      const used = authorization;
+      authorization = "";
+      try {
+        const revoked = await this.host.cancelLeaseTakeover(used);
+        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        this.clearPending();
+        this.publishWorkingCopy();
+        return Object.freeze({ status: "canceled" as const, revoked });
+      } catch (error) {
+        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        this.clearPending();
+        this.publishWorkingCopy();
+        return Object.freeze({ status: "failed" as const, code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  private async runEditOperation(generation: number, authorization?: string,
+    pending: SessionPendingOperation = "edit"): Promise<DocumentSessionOutcome<Doc>> {
+    if (generation !== this.generation || this.snapshot.kind !== "read-only") {
+      return Object.freeze({ status: "superseded" });
+    }
+    this.editFailureCode = null;
+    this.publishPending(pending);
+    try {
+      const result = await this.host.enterEditMode(authorization
+        ? { authorization } : {});
+      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      this.clearPending();
+      if ("decisionRequired" in result) {
+        this.stageLeaseDecision(result);
+        return Object.freeze({ status: "attention" });
+      }
+      if (result.readOnly) {
+        this.editFailureCode = "LIFECYCLE_FAILED";
+        this.publishWorkingCopy();
+        return Object.freeze({ status: "failed", code: "LIFECYCLE_FAILED" });
+      }
+      this.refreshDocument(result);
+      return Object.freeze({ status: "edit-mode" });
+    } catch (error) {
+      if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+      this.clearPending();
+      const code = hostFailureCode(error);
+      this.editFailureCode = code;
+      this.publishWorkingCopy();
+      return Object.freeze({ status: "failed", code });
+    }
+  }
+
+  /** Applies an editor change before any asynchronous journal acknowledgement. */
+  edit(text: string, selection?: WorkingCopySelection): boolean {
+    if (this.snapshot.kind !== "edit" || !this.workingCopy) return false;
+    this.workingCopy.edit(text, selection);
+    return true;
+  }
+
+  setSelection(selection: WorkingCopySelection): boolean {
+    if ((this.snapshot.kind !== "edit" && this.snapshot.kind !== "read-only")
+      || !this.workingCopy) return false;
+    this.workingCopy.setSelection(selection);
+    return true;
+  }
+
+  undo(): boolean {
+    return this.snapshot.kind === "edit" && this.workingCopy?.undo() === true;
+  }
+
+  redo(): boolean {
+    return this.snapshot.kind === "edit" && this.workingCopy?.redo() === true;
+  }
+
+  findNext(query: string): WorkingCopyFindResult | null {
+    if (this.snapshot.kind !== "edit" && this.snapshot.kind !== "read-only") return null;
+    return this.workingCopy?.findNext(query) ?? null;
+  }
+
+  replaceSelection(query: string, replacement: string): WorkingCopyFindResult
+    | Readonly<{ status: "replaced" }> | null {
+    if (this.snapshot.kind !== "edit") return null;
+    return this.workingCopy?.replaceSelection(query, replacement) ?? null;
+  }
+
+  replaceAll(query: string, replacement: string): Readonly<{ replacements: number }> | null {
+    if (this.snapshot.kind !== "edit") return null;
+    return this.workingCopy?.replaceAll(query, replacement) ?? null;
+  }
+
+  markProvisional(text?: string): boolean {
+    if (!this.workingCopy) return false;
+    this.workingCopy.markProvisional(text);
+    return true;
+  }
+
+  adoptPublication(text: string): boolean {
+    if (!this.workingCopy) return false;
+    this.workingCopy.adoptPublication(text);
+    return true;
+  }
+
+  adoptRecovery(text: string, selection: WorkingCopySelection): boolean {
+    if (!this.workingCopy) return false;
+    this.workingCopy.adoptRecovery(text, selection);
+    return true;
+  }
+
+  adoptDivergence(text: string): boolean {
+    if (!this.workingCopy) return false;
+    this.workingCopy.adoptDivergence(text);
+    return true;
+  }
+
+  openSelected(password: string): Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
     return this.enqueue(() => {
       if (generation !== this.generation) {
@@ -193,7 +487,7 @@ export class DocumentSession<Doc extends SessionDocument,
     });
   }
 
-  unlock(password: string): Promise<DocumentSessionOutcome> {
+  unlock(password: string): Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
     return this.enqueue(() => {
       if (generation !== this.generation) {
@@ -230,6 +524,8 @@ export class DocumentSession<Doc extends SessionDocument,
   lockStarted(): void {
     if (this.disposed) return;
     this.generation += 1;
+    this.leaseDecision = null;
+    this.editFailureCode = null;
     this.cancelQueuedCommands();
     if (this.snapshot.kind === "closed") return;
     const targetName = this.snapshot.targetName;
@@ -243,6 +539,8 @@ export class DocumentSession<Doc extends SessionDocument,
   closed(): void {
     if (this.disposed) return;
     this.generation += 1;
+    this.leaseDecision = null;
+    this.editFailureCode = null;
     this.cancelQueuedCommands();
     this.snapshot = CLOSED;
     this.clearWorkingCopy();
@@ -297,11 +595,39 @@ export class DocumentSession<Doc extends SessionDocument,
   private openSnapshot(document: Doc, adoption: number,
     targetName: string | null): ReadOnlySessionSnapshot<Doc>
     | EditSessionSnapshot<Doc> {
+    const working = this.workingCopy?.getSnapshot();
+    if (!working || working.kind !== "ready") {
+      throw new Error("unlocked document requires a working copy");
+    }
+    const commands: SessionCommands = Object.freeze({
+      enterEdit: document.readOnly && document.canEdit === true
+        && (document.publicationState === undefined
+          || document.publicationState === "target-published")
+        && !document.recovery && !document.headMismatch && !document.profileMismatch
+        && !document.migrationRequired,
+      write: !document.readOnly,
+      undo: !document.readOnly && working.canUndo,
+      redo: !document.readOnly && working.canRedo,
+    });
+    const attention: SessionAttention | undefined = this.leaseDecision
+      ? Object.freeze({ kind: "lease-takeover", operation: this.leaseDecision.operation,
+        holderName: this.leaseDecision.holderName })
+      : this.editFailureCode ? Object.freeze({ kind: "edit-unavailable",
+        code: this.editFailureCode }) : undefined;
     return document.readOnly
-      ? Object.freeze({ kind: "read-only", adoption, targetName,
+      ? Object.freeze({ kind: "read-only", adoption, targetName, working, commands,
+        ...(attention ? { attention } : {}),
         document: document as Doc & { readOnly: true } })
-      : Object.freeze({ kind: "edit", adoption, targetName,
+      : Object.freeze({ kind: "edit", adoption, targetName, working, commands,
+        ...(attention ? { attention } : {}),
         document: document as Doc & { readOnly: false } });
+  }
+
+  private publishWorkingCopy(): void {
+    const current = this.snapshot;
+    if (current.kind !== "read-only" && current.kind !== "edit") return;
+    this.snapshot = this.openSnapshot(current.document, current.adoption, current.targetName);
+    this.notify();
   }
 
   private notify(): void { for (const listener of this.listeners) listener(); }
@@ -319,11 +645,13 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   private clearWorkingCopy(): void {
+    this.stopWorkingCopy?.();
+    this.stopWorkingCopy = null;
     this.workingCopy?.dispose();
     this.workingCopy = null;
   }
 
-  private enqueue(run: () => Promise<DocumentSessionOutcome>): Promise<DocumentSessionOutcome> {
+  private enqueue(run: () => Promise<DocumentSessionOutcome<Doc>>): Promise<DocumentSessionOutcome<Doc>> {
     if (this.disposed) return Promise.resolve(Object.freeze({ status: "superseded" }));
     return new Promise((resolve) => {
       this.queuedCommands.push({ run, resolve });
