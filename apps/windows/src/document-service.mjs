@@ -1255,7 +1255,8 @@ export class DocumentService {
     }
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
-    const canonical = canonicalizeDocumentText(active.working.content);
+    const source = active.working;
+    const canonical = canonicalizeDocumentText(source.content);
     const mergeAncestor = this.#regularSaveMergeAncestor(active);
     await this.#flushActive(active);
     let published;
@@ -1344,14 +1345,16 @@ export class DocumentService {
     active.manuallySealed = false;
     active.dirty = true;
     active.unresolvedJournal = true;
+    const latestWorking = active.working;
     await this.journals.write(active.documentId, active.journalKey, {
-      text: canonical, baseRevision: active.baseRevision,
-      cursor: { ...active.working.cursor }, target: active.target,
+      text: latestWorking.content, baseRevision: active.baseRevision,
+      cursor: { ...latestWorking.cursor }, target: active.target,
       state: "unsaved", updateTime: this.now(),
     });
     const result = Object.freeze({ published: true, provisional: true,
       content: canonical });
-    this.onRegularSave(result);
+    this.onRegularSave(Object.freeze({ ...result,
+      journalScope: source.journalScope ?? null, revision: source.revision ?? null }));
     return result;
   }
 
@@ -1466,14 +1469,18 @@ export class DocumentService {
     this.active.targetContent = canonical;
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
-    this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-    this.active.dirty = false;
+    const latestWorking = this.active.working;
+    const newerWork = latestWorking && latestWorking.content !== canonical;
+    this.active.working = newerWork
+      ? latestWorking : { content: canonical, cursor: { start: 0, end: 0 } };
+    this.active.dirty = Boolean(newerWork);
     this.active.manuallySealed = true;
     this.active.pendingPublication = false;
     this.active.pendingRecord = null;
     this.active.unresolvedJournal = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
+    if (newerWork) this.#scheduleCheckpoint();
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical,
       publicationState: "target-published" });

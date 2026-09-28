@@ -685,11 +685,17 @@ export function validateWorkingCopy(value) {
         || !/^[A-Za-z0-9_-]{1,128}$/.test(journalScope))) {
     throw new TypeError("journal scope must be an opaque identifier");
   }
+  const revision = value.revision;
+  if (revision !== undefined
+      && (!Number.isSafeInteger(revision) || revision < 1)) {
+    throw new TypeError("working-copy revision must be a positive integer");
+  }
   const content = canonicalizeDocumentText(value.content);
   return { content, cursor: {
     start: canonicalCursorOffset(value.content, start),
     end: canonicalCursorOffset(value.content, end),
-  }, ...(journalScope === undefined ? {} : { journalScope }) };
+  }, ...(journalScope === undefined ? {} : { journalScope }),
+  ...(revision === undefined ? {} : { revision }) };
 }
 
 export function validateLockResult(value) {
@@ -704,11 +710,15 @@ export function validateLockResult(value) {
 
 export function validateRegularSaveResult(value) {
   if (!value || typeof value !== "object" || value.published !== true
-      || value.provisional !== true || typeof value.content !== "string") {
+      || value.provisional !== true || typeof value.content !== "string"
+      || typeof value.journalScope !== "string"
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+      || !Number.isSafeInteger(value.revision) || value.revision < 1) {
     throw new TypeError("host returned an invalid regular-save result");
   }
   return Object.freeze({ published: true, provisional: true,
-    content: canonicalizeDocumentText(value.content) });
+    content: canonicalizeDocumentText(value.content),
+    journalScope: value.journalScope, revision: value.revision });
 }
 
 export function validateSlotRemovalResult(value) {

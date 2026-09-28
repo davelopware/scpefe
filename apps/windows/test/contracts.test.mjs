@@ -154,8 +154,9 @@ test("accepts only validated read-only native results", () => {
 test("push and administration results are canonical and narrowly projected", () => {
   assert.deepEqual(validateRegularSaveResult({ published: true, provisional: true,
     content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
-    password: "must not cross" }), {
+    password: "must not cross", journalScope: "adoption_2", revision: 4 }), {
     published: true, provisional: true, content: "exact\ntext",
+    journalScope: "adoption_2", revision: 4,
   });
   assert.deepEqual(validateSlotRemovalResult({ removed: true,
     warningCode: "SLOT_REMOVED" }), {
@@ -200,8 +201,12 @@ test("canonicalizes working-copy cursor offsets with pasted text", () => {
     cursor: { start: 4, end: 5 } }),
   { content: "a\nb", cursor: { start: 2, end: 3 } });
   assert.deepEqual(validateWorkingCopy({ content: "a", cursor: { start: 1, end: 1 },
-    journalScope: "adoption_2" }),
-  { content: "a", cursor: { start: 1, end: 1 }, journalScope: "adoption_2" });
+    journalScope: "adoption_2", revision: 4 }),
+  { content: "a", cursor: { start: 1, end: 1 }, journalScope: "adoption_2",
+    revision: 4 });
+  assert.throws(() => validateWorkingCopy({ content: "a",
+    cursor: { start: 1, end: 1 }, journalScope: "adoption_2", revision: 0 }),
+  /revision/);
   assert.throws(() => validateWorkingCopy({ content: "a",
     cursor: { start: 1, end: 1 }, journalScope: "../../private" }),
   /journal scope/);

@@ -9,6 +9,7 @@ export interface WorkingCopyUpdate {
   content: string;
   cursor: WorkingCopySelection;
   journalScope: string;
+  revision: number;
 }
 
 /** Schedules recovery-journal work without making the frontend a storage owner. */
@@ -90,6 +91,20 @@ export class WorkingCopy {
 
   getSnapshot(): WorkingCopySnapshot { return this.snapshot; }
 
+  /** Correlates a host publication notice with this adoption and edit revision. */
+  journalVersion(): Readonly<{ journalScope: string; revision: number }> | null {
+    return this.state ? Object.freeze({ journalScope: this.state.journalScope,
+      revision: this.state.revision }) : null;
+  }
+
+  /** Gives an adopted dirty copy a host origin before its first user edit. */
+  ensureJournalVersion(): void {
+    const state = this.requireReady();
+    if (state.revision > 0) return;
+    this.updateJournal(state);
+    this.publish();
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -136,6 +151,17 @@ export class WorkingCopy {
     state.baseline = text;
     state.history[state.index] = text;
     state.selection = this.normalizedSelection(text, state.selection);
+    this.publish();
+  }
+
+  /** Seals the submitted text while preserving edits made after submission. */
+  sealPublication(text: string, submittedText: string): void {
+    const state = this.requireReady();
+    if (state.text === submittedText) {
+      this.adoptPublication(text);
+      return;
+    }
+    state.baseline = text;
     this.publish();
   }
 
@@ -287,7 +313,7 @@ export class WorkingCopy {
     try {
       update = Promise.resolve(this.journalHost.updateWorkingCopy({
         content: state.text, cursor: state.selection,
-        journalScope: state.journalScope,
+        journalScope: state.journalScope, revision,
       }));
     } catch {
       update = Promise.reject(new Error("journal update failed"));

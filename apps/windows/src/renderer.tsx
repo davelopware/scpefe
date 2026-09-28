@@ -23,7 +23,6 @@ type Lease = { active: boolean; holderName: string; holderEmail: string;
 type HeadMismatch = { kind: "rollback" | "divergence" | "replacement" | "witness-error";
   title: string; explanation: string; editingBlocked: true };
 type PublicationState = "target-published" | "pending-publication" | "conflict";
-type SaveState = "unsaved" | "provisional" | PublicationState;
 type ClientSettings = { regularSaveEnabled: boolean; regularSaveIntervalMs: number };
 type JournalSummary = { total: number; pendingPublications: number };
 type ExternalOpenRequest = { token: string };
@@ -69,8 +68,6 @@ function openedDialogName(value: Opened | null): OpenedDialogName {
   if (value.profileMismatch) return "profile-mismatch";
   if (value.headMismatch) return "head";
   if (value.recovery) return "recovery";
-  if (value.publicationState === "pending-publication"
-    || value.publicationState === "conflict") return "publication";
   return null;
 }
 
@@ -313,7 +310,7 @@ declare global { interface Window { scpefe: {
   onJournalWarning(listener: (warningCode: string,
     journalScope: string | null) => void): () => void;
   onRegularSave(listener: (result: { published: true; provisional: true;
-    content: string }) => void): () => void;
+    content: string; journalScope: string; revision: number }) => void): () => void;
   onExternalOpenRequested(listener: (request: ExternalOpenRequest) => void): () => void;
   onUnresolvedJournalSummary(listener: (summary: JournalSummary) => void): () => void;
   onSwitchRetained(listener: (opened: DocumentOpened) => void): () => void;
@@ -359,6 +356,14 @@ function App() {
   const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
   const editFailure = attention?.kind === "edit-unavailable"
     ? catalogText(attention.code) : null;
+  const saveFailure = attention?.kind === "save-failed"
+    ? catalogText(attention.code) : null;
+  const publicationDecision = attention?.kind === "publication-decision"
+    ? attention : null;
+  const publicationState = sessionSnapshot.kind === "closed" ? null
+    : sessionSnapshot.publication.state;
+  const publicationResolving = sessionSnapshot.kind === "read-only"
+    || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
   const leaseBusy = sessionSnapshot.pending === "lease-confirm"
     || sessionSnapshot.pending === "lease-cancel"
     || ((sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit")
@@ -370,7 +375,6 @@ function App() {
   });
   const [message, setMessage] = useState("");
   const [editorAdoption, setEditorAdoption] = useState(0);
-  const [saveState, setSaveState] = useState<SaveState>("target-published");
   const [findText, setFindText] = useState("");
   const [replaceText, setReplaceText] = useState("");
   const [findOpen, setFindOpen] = useState(false);
@@ -391,9 +395,8 @@ function App() {
   const [invitationStaged, setInvitationStaged] = useState(false);
   const [decisionError, setDecisionError] = useState("");
   const [openedDialogError, setOpenedDialogError] = useState("");
-  const [saveError, setSaveError] = useState("");
+  const [confirmDivergenceDiscard, setConfirmDivergenceDiscard] = useState(false);
   const [compactionError, setCompactionError] = useState("");
-  const [resolvingConflict, setResolvingConflict] = useState(false);
   const [pendingProfile, setPendingProfile] = useState<Profile | null>(null);
   const [profileError, setProfileError] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -425,13 +428,13 @@ function App() {
   const migrationRetryAction = useRef<HTMLButtonElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
-  const openedDialog = openedDialogName(opened);
-  const visibleOpenedDialog = !creating && dialog === null && !resolvingConflict
-    && leaseDecision === null && saveError === ""
+  const openedDialog = publicationDecision ? "publication" : openedDialogName(opened);
+  const visibleOpenedDialog = !creating && dialog === null && !confirmDivergenceDiscard
+    && leaseDecision === null && saveFailure === null
     ? invitationStaged ? "claim" : openedDialog : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
-    || invitationStaged
-    || editFailure !== null || leaseDecision !== null || saveError !== "";
+    || invitationStaged || confirmDivergenceDiscard
+    || editFailure !== null || leaseDecision !== null || saveFailure !== null;
   if (modalBusy.current && !wasModalBusy.current && findOpen) {
     suspendedFindFocus.current = document.activeElement === replaceInput.current
       ? "replace" : "find";
@@ -462,14 +465,14 @@ function App() {
       setMessage(catalogText(code));
     });
     const stopRegularSave = window.scpefe.onRegularSave((result) => {
-      setSaveState("provisional");
-      session.markProvisional(result.content);
-      reflectCurrent((current) => ({ ...current,
-        content: result.content, provisional: true }));
-      setMessage("Regular save published provisionally; changes remain unsaved until manual save.");
+      if (session.regularSavePublished(result)) {
+        setMessage("Regular save published provisionally; changes remain unsaved until manual save.");
+      }
     });
     const stopExternalOpen = window.scpefe.onExternalOpenRequested((request) => {
-      if (modalBusy.current) {
+      const current = session.getSnapshot();
+      if (modalBusy.current || (current.kind === "read-only" || current.kind === "edit")
+        && current.publication.resolving) {
         setQueuedExternalOpenRequest(request);
         setMessage("Another open request is waiting for the current dialog.");
       } else {
@@ -503,14 +506,15 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    if (!creating && dialog === null && openedDialog === null && queuedExternalOpenRequest) {
+    if (!creating && dialog === null && openedDialog === null
+      && !publicationResolving && queuedExternalOpenRequest) {
       dialogReturnFocus.current = document.activeElement as HTMLElement | null;
       setExternalOpenRequest(queuedExternalOpenRequest);
       setQueuedExternalOpenRequest(null);
       setDialog("open");
       setMessage("Another open request is waiting. Enter its document password to continue.");
     }
-  }, [creating, dialog, openedDialog, queuedExternalOpenRequest]);
+  }, [creating, dialog, openedDialog, publicationResolving, queuedExternalOpenRequest]);
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
     if (!alreadyAdopted) session.adopt(result);
@@ -520,8 +524,7 @@ function App() {
     }
     setDecisionError("");
     setOpenedDialogError("");
-    setSaveState(result.provisional ? "provisional"
-      : result.recovery ? "unsaved" : result.publicationState);
+    setConfirmDivergenceDiscard(false);
     setFindOpen(false);
     setFindText("");
     setReplaceText("");
@@ -577,11 +580,12 @@ function App() {
   const enabled: Record<string, boolean> = {
     new: profile !== null, open: profile !== null,
     save: activeDocument && sessionSnapshot.kind === "edit"
-      && sessionSnapshot.commands.write && dirty,
-    backup: activeDocument && !dirty && saveState === "target-published"
-      && !opened.provisional && !opened.recovery && !opened.headMismatch
-      && !opened.profileMismatch && !opened.migrationRequired,
-    export: activeDocument, close: activeDocument || lockedDocument, exit: true,
+      && sessionSnapshot.commands.save,
+    backup: activeDocument && (sessionSnapshot.kind === "read-only"
+      || sessionSnapshot.kind === "edit") && sessionSnapshot.commands.backup,
+    export: activeDocument && (sessionSnapshot.kind === "read-only"
+      || sessionSnapshot.kind === "edit") && sessionSnapshot.commands.export,
+    close: activeDocument || lockedDocument, exit: true,
     edit: activeDocument && sessionSnapshot.kind === "read-only"
       && sessionSnapshot.commands.enterEdit,
     undo: activeDocument && sessionSnapshot.kind === "edit"
@@ -1079,7 +1083,6 @@ function App() {
     recoveredUnsaved: true; cursor: Cursor }) {
     session.refreshDocument(result);
     session.adoptRecovery(result.content, result.cursor);
-    setSaveState("unsaved");
     setOpenedDialogError("");
     setMessage("Recovered work restored as unsaved changes.");
   }
@@ -1120,7 +1123,6 @@ function App() {
       const result = await window.scpefe.discardRecoveredWork();
       session.refreshDocument(result);
       session.adoptPublication(result.content);
-      setSaveState("target-published");
       setMessage("Recovered work discarded.");
     } catch (error) {
       openedActionFailure(error, action, "Recovery discard needs attention");
@@ -1182,11 +1184,10 @@ function App() {
       setDialog(null);
       setDecisionError("");
       setOpenedDialogError("");
-      setSaveError("");
+      setConfirmDivergenceDiscard(false);
       setCompactionError("");
       setProtection(null);
       setProtectionError("");
-      setResolvingConflict(false);
       setMessage(result.warningCode ? catalogText(result.warningCode)
         : "Document locked. Use Security → Unlock to continue.");
     });
@@ -1195,33 +1196,19 @@ function App() {
 
   function edit(content: string, cursor?: Cursor) {
     const nextCursor = cursor ?? { start: content.length, end: content.length };
-    if (session.edit(content, nextCursor)) {
-      setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
-    }
+    session.edit(content, nextCursor);
   }
 
   async function save() {
-    try {
-      setSaveError("");
-      const result = saveState === "conflict"
-        ? await window.scpefe.saveDivergenceResolution(workingText)
-        : await window.scpefe.saveDocument(workingText);
-      session.adoptPublication(result.content);
-      reflectCurrent((current) => ({ ...current,
-        content: result.content,
-        readOnly: result.publicationState !== "target-published",
-        publicationState: result.publicationState,
-        provisional: undefined }));
-      setSaveState(result.publicationState);
-      if (result.publicationState !== "conflict") setResolvingConflict(false);
-      setMessage(result.publicationState === "pending-publication"
+    const outcome = await session.save();
+    if (outcome.status === "saved") {
+      setMessage(outcome.publicationState === "pending-publication"
         ? "Manual save is pending publication; its exact candidate is stored locally."
-        : result.publicationState === "conflict"
+        : outcome.publicationState === "conflict"
           ? "Manual save is local, but the target changed; divergence must be resolved."
           : "Manual save published and verified.");
-    } catch (error) {
-      const value = safeRendererErrorMessage(error);
-      setSaveError(value); setMessage(`Manual save failed; changes remain recoverable: ${value}`);
+    } else if (outcome.status === "failed") {
+      setMessage(`Manual save failed; changes remain recoverable: ${catalogText(outcome.code)}`);
     }
   }
 
@@ -1229,82 +1216,69 @@ function App() {
     session.adoptDivergence(draft.content);
     reflectCurrent((current) => ({ ...current,
       content: draft.content, readOnly: false, canEdit: true }));
-    setSaveState("conflict");
-    setResolvingConflict(true);
     setOpenedDialogError("");
     setMessage(draft.hasConflicts
       ? "Resolve every local/current marker, then save the merge."
       : "The three-way merge is clean. Review it, then save the merge.");
   }
 
-  async function beginDivergenceResolution() {
-    const adoption = currentAdoption();
+  async function beginDivergenceResolution(discardUnsaved = false) {
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
-    try {
-      setOpenedDialogError("");
-      const draft = await window.scpefe.beginDivergenceResolution();
-      if (!stillAdopted(adoption)) return;
-      if ("decisionRequired" in draft) {
-        session.stageLeaseDecision(draft, adoption!);
-        setDecisionError("");
-        setMessage("Divergence resolution requires a confirmed lease takeover.");
-        return;
-      }
-      applyDivergenceDraft(draft);
-    } catch (error) {
-      if (!stillAdopted(adoption)) return;
-      openedActionFailure(error, action, "Divergence resolution needs attention");
+    setOpenedDialogError("");
+    const outcome = await session.beginDivergenceResolution({ discardUnsaved });
+    if (outcome.status === "attention") {
+      setConfirmDivergenceDiscard(false);
+      setDecisionError("");
+      setMessage("Divergence resolution requires a confirmed lease takeover.");
+    } else if (outcome.status === "divergence") {
+      setConfirmDivergenceDiscard(false);
+      applyDivergenceDraft(outcome.draft);
+    } else if (outcome.status === "unsaved-work") {
+      setConfirmDivergenceDiscard(true);
+    } else if (outcome.status === "failed") {
+      setConfirmDivergenceDiscard(false);
+      setMessage(`Divergence resolution needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
     }
   }
 
   async function reconnectPublication() {
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
-    try {
-      setOpenedDialogError("");
-      if (isDocumentOpened(opened) && opened.publicationState === "conflict") {
-        await beginDivergenceResolution();
-        return;
-      }
-      const result = await window.scpefe.reconnectPendingPublication();
-      reflectCurrent((current) => ({ ...current,
-        content: result.content, readOnly: true,
-        publicationState: result.publicationState }));
-      session.adoptPublication(result.content);
-      setSaveState(result.publicationState);
-      if (result.publicationState !== "conflict") setResolvingConflict(false);
-      setMessage(result.publicationState === "target-published"
+    const outcome = await session.retryPublication();
+    if (outcome.status === "divergence-required") {
+      await beginDivergenceResolution();
+    } else if (outcome.status === "publication") {
+      setMessage(outcome.publicationState === "target-published"
         ? "Pending manual save published and verified."
-        : result.publicationState === "conflict"
+        : outcome.publicationState === "conflict"
           ? "The target changed; divergence must be resolved without overwriting it."
           : "The target is still unavailable; publication remains pending.");
-    } catch (error) {
-      openedActionFailure(error, action, "Publication retry needs attention");
+    } else if (outcome.status === "failed") {
+      setMessage(`Publication retry needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
     }
   }
 
   async function discardPublication() {
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
-    try {
-      setOpenedDialogError("");
-      const result = await window.scpefe.discardPendingPublication();
-      session.refreshDocument(result);
-      session.adoptPublication(result.content);
-      setSaveState("target-published");
+    const outcome = await session.discardPublication();
+    if (outcome.status === "publication-discarded") {
       setMessage("Pending manual save explicitly discarded.");
-    } catch (error) {
-      openedActionFailure(error, action, "Publication discard needs attention");
+    } else if (outcome.status === "failed") {
+      setMessage(`Publication discard needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
     }
   }
 
   async function backup() {
-    try {
-      const result = await window.scpefe.backupDocument();
-      if (result) setMessage("Verified byte-identical backup replica created.");
-      else setMessage("Backup canceled; the document and destination are unchanged.");
-    } catch (error) { showError(error); }
+    const outcome = await session.backup();
+    if (outcome.status === "backup") setMessage(outcome.created
+      ? "Verified byte-identical backup replica created."
+      : "Backup canceled; the document and destination are unchanged.");
+    else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
   }
 
   async function compact() {
@@ -1322,9 +1296,8 @@ function App() {
   }
 
   function moveHistory(offset: number) {
-    if (offset < 0 ? session.undo() : session.redo()) {
-      setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
-    }
+    if (offset < 0) session.undo();
+    else session.redo();
   }
 
   function findNext() {
@@ -1362,7 +1335,6 @@ function App() {
     if (result.status !== "replaced") {
       setFindStatus("Text not found."); setMessage("Text not found."); return;
     }
-    setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
     const replaced = session.getSnapshot();
     const next = replaced.kind === "edit"
       ? replaced.working.selection.start : start + replaceText.length;
@@ -1381,7 +1353,6 @@ function App() {
     if (!matches) {
       setFindStatus("Text not found."); setMessage("Text not found."); return;
     }
-    setSaveState((current) => current === "conflict" ? "conflict" : "unsaved");
     const replaced = session.getSnapshot();
     const cursor = replaced.kind === "edit" ? replaced.working.selection.start : 0;
     const status = `${matches} match${matches === 1 ? "" : "es"} replaced.`;
@@ -1405,20 +1376,14 @@ function App() {
   }
 
   async function exportPlaintext() {
-    try {
-      setExportError("");
-      const result = await window.scpefe.exportPlaintext({
-        content: workingText, lineEndings,
-      });
-      if (result) {
-        setMessage("Unprotected plaintext exported.");
-        setDialog(null);
-      } else {
-        setMessage("Plaintext export canceled; the document and destination are unchanged.");
-        setDialog(null);
-      }
-    } catch (error) {
-      const value = safeRendererErrorMessage(error);
+    setExportError("");
+    const outcome = await session.exportPlaintext(lineEndings);
+    if (outcome.status === "export") {
+      setMessage(outcome.exported ? "Unprotected plaintext exported."
+        : "Plaintext export canceled; the document and destination are unchanged.");
+      setDialog(null);
+    } else if (outcome.status === "failed") {
+      const value = catalogText(outcome.code);
       setExportError(value);
       setMessage(`Plaintext export failed; the document and destination are unchanged: ${value}`);
       requestAnimationFrame(() => exportAction.current?.focus());
@@ -1429,9 +1394,9 @@ function App() {
     : !activeDocument ? "No document" : opened.readOnly ? "Read-only" : "Edit mode";
   const cleanliness = !activeDocument && !lockedDocument ? "—" : dirty ? "Dirty" : "Clean";
   const publication = !activeDocument && !lockedDocument ? "—"
-    : saveState === "pending-publication" ? "Pending publication"
-      : saveState === "conflict" ? "Publication conflict"
-        : saveState === "provisional" ? "Provisional publication" : "Published";
+    : publicationState === "pending-publication" ? "Pending publication"
+      : publicationState === "conflict" ? "Publication conflict"
+        : publicationState === "provisional" ? "Provisional publication" : "Published";
   const closeDialog = () => {
     setPendingProfile(null);
     setProfileError("");
@@ -1525,12 +1490,23 @@ function App() {
         {leaseDecision.operation === "migration" ? "Force takeover and migrate" : "Force takeover"}
       </button></div>
     </FocusedDialog>}
-    {saveError && <FocusedDialog returnFocus={dialogReturnFocus.current}
-      title="Manual save failed" close={() => setSaveError("")}>
-      <p className="dialog-error" role="alert">{saveError}</p>
+    {saveFailure && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Manual save failed" close={() => session.dismissSaveFailure()}>
+      <p className="dialog-error" role="alert">{saveFailure}</p>
       <p>The working copy and recovery journal remain available. No successful publication is being reported.</p>
-      <div className="dialog-actions"><button onClick={() => setSaveError("")}>Continue editing</button>
+      <div className="dialog-actions"><button onClick={() => session.dismissSaveFailure()}>Continue editing</button>
         <button autoFocus onClick={() => void save()}>Retry manual save</button></div>
+    </FocusedDialog>}
+    {confirmDivergenceDiscard && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Discard newer unsaved edits?" close={() => setConfirmDivergenceDiscard(false)}>
+      <p>The working copy has edits made after the locally saved candidate. Starting divergence resolution replaces those edits with a merge draft.</p>
+      <div className="dialog-actions">
+        <button onClick={() => setConfirmDivergenceDiscard(false)}>Keep newer edits</button>
+        <button onClick={() => { setConfirmDivergenceDiscard(false); setDialog("export"); }}>
+          Export newer edits…</button>
+        <button autoFocus onClick={() => void beginDivergenceResolution(true)}>
+          Discard newer edits and resolve</button>
+      </div>
     </FocusedDialog>}
     {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={() =>
       rendererLifecycleCompletion.track(async () => {
@@ -1721,14 +1697,21 @@ function App() {
       <div className="dialog-actions"><button onClick={discardRecovery}>Discard recovered work</button>
         <button ref={recoveryRestoreAction} disabled={!opened.canEdit}
           onClick={restoreRecovery}>Restore unsaved work</button></div></FocusedDialog>}
-    {visibleOpenedDialog === "publication" && activeDocument
+    {visibleOpenedDialog === "publication" && activeDocument && publicationDecision
       && <FocusedDialog returnFocus={dialogReturnFocus.current}
-        initialFocus={openedDialogError ? publicationRetryAction : undefined}
-        title={opened.publicationState === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
-        <p>{opened.publicationState === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
-        {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
-        <div className="dialog-actions"><button onClick={discardPublication}>Discard pending save</button>
-          <button ref={publicationRetryAction}
+        initialFocus={publicationDecision.failureCode || openedDialogError
+          ? publicationRetryAction : undefined}
+        title={publicationDecision.state === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
+        <p>{publicationDecision.state === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
+        {(publicationDecision.failureCode || openedDialogError)
+          && <p className="dialog-error" role="alert">
+            {publicationDecision.failureCode
+              ? catalogText(publicationDecision.failureCode) : openedDialogError}</p>}
+        <div className="dialog-actions"><button disabled={sessionSnapshot.kind !== "read-only"
+          && sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.publicationDiscard}
+          onClick={discardPublication}>Discard pending save</button>
+          <button ref={publicationRetryAction} disabled={sessionSnapshot.kind !== "read-only"
+            && sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.publicationRetry}
             onClick={reconnectPublication}>Retry publication</button></div></FocusedDialog>}
     </>}
     {protection && <FocusedDialog returnFocus={dialogReturnFocus.current}

@@ -11,7 +11,8 @@ own lifecycle barriers, durable publication, storage, and security policy.
 | Open, replacement, lock, unlock, and close presentation; active target identity in the UI | Frontend `DocumentSession` | Frontend `DocumentSession` | Host services perform the actual document operation; the frontend presents its structured result. |
 | Working text, manual-save baseline, dirty state, edit history, selection, and find/replace | `WorkingCopy` owned by frontend `DocumentSession` | `WorkingCopy` owned by frontend `DocumentSession` | Journal writes use a narrow host capability. |
 | Editing and lease command availability and takeover attention | Frontend `DocumentSession` | Frontend `DocumentSession` | React maps attention and outcomes to dialogs and safe messages. |
-| Publication and recovery command availability and status shown to the user | Windows React renderer | Frontend `DocumentSession` | Later session cutovers retain the main-process publication authority. |
+| Save and publication command availability, status, and semantic attention | Frontend `DocumentSession` | Frontend `DocumentSession` | The session serializes commands and projects host results; main-process services retain publication authority. |
+| Recovery decisions other than publication | Windows React renderer and frontend `DocumentSession` | Frontend `DocumentSession` | Recovery presentation continues its incremental cutover. |
 | Dialog rendering, focus, inert chrome, and form drafts | Windows React renderer and current dialog helpers | Shared React UI and platform frontend | These are presentation details, not document-session state. |
 | State-changing frontend command order and pending UI operations | Windows React renderer | Frontend `DocumentSession` | This ordering complements the main-process lifecycle barrier. |
 | Main-process lifecycle barrier, generation, and native work completion | Windows main-process lifecycle services | Windows main-process lifecycle services | A frontend command cannot declare native work complete. |
@@ -42,8 +43,15 @@ working-copy projection and sends synchronous edit, history, selection, and
 search commands to the session. React does not retain a second text, baseline,
 dirty, history, or selection state. The session also owns edit-lease attention
 and consumes one-shot takeover authorization; React receives only the holder
-identity and operation needed to present that decision. Publication and other
-recovery policy cutovers remain separate work.
+identity and operation needed to present that decision.
+Manual save, regular provisional save notifications, pending-publication
+retry and discard, backup, and plaintext export now flow through the session.
+React uses its publication snapshot and command eligibility for status, menus,
+and dialogs; it does not retain a second publication state. The host still owns
+the exact candidate, publication transaction, backup destination, and export
+policy. Regular-save notices carry the originating working-copy scope and edit
+revision so a late notice cannot attach to another adoption or demote a newer
+manual save. Recovery decisions outside publication remain separate work.
 The class's journal drain waits for host update acknowledgements; the host
 retains durable checkpoint and failure policy, and can report a later
 checkpoint warning. The platform adapter supplies a fresh opaque journal
