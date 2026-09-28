@@ -239,6 +239,37 @@ test("head and recovery evidence reveal one actionable decision at a time", asyn
   session.dispose();
 });
 
+test("accepting a head still requires unreadable-journal discard before edit", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("target"), canEdit: false, unreadableJournal: true,
+    headMismatch: { kind: "divergence", title: "host title",
+      explanation: "private head prose", editingBlocked: true } });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention?.kind, "head-mismatch");
+  assert.equal(snapshot.commands.unreadableDiscard, false);
+  host.acceptHeadMismatch = async () => ({ ...opened("target"), canEdit: false,
+    unreadableJournal: true });
+  assert.deepEqual(await session.acceptHeadMismatch(), { status: "head-accepted" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(snapshot.attention, { kind: "unreadable-journal" });
+  assert.equal(snapshot.commands.unreadableDiscard, true);
+  assert.equal(snapshot.commands.enterEdit, false);
+  assert.deepEqual(await session.enterEditMode(), { status: "unavailable" });
+  host.discardUnreadableJournal = async () => opened("target");
+  assert.deepEqual(await session.discardUnreadableJournal(),
+    { status: "unreadable-discarded" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention, undefined);
+  assert.equal(snapshot.commands.enterEdit, true);
+  assert.deepEqual(await session.enterEditMode(), { status: "edit-mode" });
+  assert.equal(session.getSnapshot().kind, "edit");
+  session.dispose();
+});
+
 test("discarding recovery invalidates an outstanding one-shot lease challenge", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());

@@ -703,6 +703,9 @@ export class DocumentSession<Doc extends SessionDocument,
     if (!this.matchesAdoption(generation, adoption) || this.snapshot.kind !== "read-only") {
       return Object.freeze({ status: "superseded" });
     }
+    if (!this.snapshot.commands.enterEdit) {
+      return Object.freeze({ status: "unavailable" });
+    }
     this.editFailureCode = null;
     this.publishPending(pending);
     try {

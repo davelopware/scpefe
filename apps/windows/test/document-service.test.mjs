@@ -559,6 +559,55 @@ test("authenticated switch discard removes only the active unreadable journal", 
   assert.equal(service.active.opened.canEdit, true);
 });
 
+test("accepting a head mismatch preserves an unreadable journal decision until explicit discard", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-head-unreadable-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const journalDirectory = path.join(directory, "journals");
+  const documentId = "95".repeat(16);
+  const ancestor = "96".repeat(32);
+  const initialHead = "97".repeat(32);
+  const divergedHead = "98".repeat(32);
+  let diverged = false;
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument() {
+    return { content: diverged ? "diverged text" : "initial text",
+      readOnly: true, canEdit: true, documentId,
+      baseRevision: diverged ? divergedHead : initialHead,
+      revisionGraph: diverged
+        ? [{ revisionId: divergedHead, parentRevisionIds: [ancestor] }]
+        : [{ revisionId: ancestor, parentRevisionIds: [] },
+          { revisionId: initialHead, parentRevisionIds: [ancestor] }],
+      journalKey: Buffer.alloc(32, 0x99), manuallySealed: true };
+  } });
+  const options = { native, fs, publicationCapabilities, journalDirectory,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    witnessDirectory: path.join(directory, "witnesses") };
+  const first = new DocumentService(options);
+  await first.openDocument(target, "password words");
+  await first.lock();
+  await fs.mkdir(journalDirectory, { recursive: true });
+  await fs.writeFile(path.join(journalDirectory, `${documentId}.work-journal`),
+    "unreadable authenticated envelope");
+  diverged = true;
+  const service = new DocumentService(options);
+  const opened = await service.openDocument(target, "password words");
+  assert.equal(opened.headMismatch.kind, "divergence");
+  assert.equal(opened.unreadableJournal, true);
+  assert.equal(opened.canEdit, false);
+  const accepted = await service.acceptHeadMismatch();
+  assert.equal(accepted.headMismatch, undefined);
+  assert.equal(accepted.unreadableJournal, true);
+  assert.equal(accepted.canEdit, false);
+  await assert.rejects(service.enterEditMode(), /unreadable journal/);
+  await service.discardUnreadableJournalForSwitch(
+    DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
+  assert.equal(service.active.opened.unreadableJournal, undefined);
+  assert.equal(service.active.opened.canEdit, true);
+  assert.equal((await service.enterEditMode()).readOnly, false);
+  await service.lock();
+});
+
 test("older containers remain read-only until verified-backup migration", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-migration-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

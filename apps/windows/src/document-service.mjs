@@ -874,17 +874,15 @@ export class DocumentService {
   }
 
   async acceptHeadMismatch() {
-    if (!this.active?.headMismatch) throw new Error("No head mismatch is available");
-    await this.witnesses.accept(this.active.target, this.active.observation);
-    this.active.headMismatch = null;
-    this.active.opened = validateOpenedDocument({
-      content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.slotCanEdit,
-      publicationState: this.active.opened.publicationState,
-      ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
-      ...(this.active.opened.recovery ? { recovery: this.active.opened.recovery } : {}),
-    });
-    return this.active.opened;
+    const active = this.active;
+    if (!active?.headMismatch) throw new Error("No head mismatch is available");
+    await this.witnesses.accept(active.target, active.observation);
+    active.headMismatch = null;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      headMismatch: undefined, readOnly: true,
+      canEdit: active.profileMismatch || active.migrationRequired
+        || active.unreadableJournal ? false : active.slotCanEdit });
+    return active.opened;
   }
 
   async reconnectPendingPublication() {
