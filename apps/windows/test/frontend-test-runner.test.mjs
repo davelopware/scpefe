@@ -41,7 +41,8 @@ test("frontend gate discovers nested TSX and reports an individual failure", asy
     };
 
     const passing = run(false);
-    assert.equal(passing.status, 0, passing.stderr);
+    assert.equal(passing.status, 0,
+      `Nested frontend gate failed.\nstdout:\n${passing.stdout}\nstderr:\n${passing.stderr}`);
     assert.equal(existsSync(marker), true);
     assert.equal(await readFile(marker, "utf8"), "ran");
     const failing = run(true);

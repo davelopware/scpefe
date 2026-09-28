@@ -92,6 +92,41 @@ test("mounted post-picker dialog is focused and has no initial-text field", asyn
     true, "Tab wraps back to the first creation field");
 });
 
+test("mounted creation dialog reveals password pairs independently without changing drafts",
+  async (t) => {
+    const { user, ui } = mountedDialog(t);
+    const owner = ui.getByLabelText("Owner password");
+    const ownerConfirmation = ui.getByLabelText("Confirm owner password");
+    const recovery = ui.getByLabelText(/Independent recovery password/);
+    const recoveryConfirmation = ui.getByLabelText("Confirm recovery password");
+    const inputs = [owner, ownerConfirmation, recovery, recoveryConfirmation];
+    await user.type(owner, "owner secret words");
+    await user.type(ownerConfirmation, "owner secret words");
+    await user.type(recovery, "recovery secret words");
+    await user.type(recoveryConfirmation, "recovery secret words");
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["password", "password", "password", "password"]);
+
+    const ownerToggle = ui.getByRole("button", { name: "Show owner passwords" });
+    ownerToggle.focus();
+    await user.keyboard("{Enter}");
+    assert.equal(ui.getByRole("button", { name: "Hide owner passwords" })
+      .getAttribute("aria-pressed"), "true");
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["text", "text", "password", "password"]);
+
+    await user.click(ui.getByRole("button", { name: "Show recovery passwords" }));
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["text", "text", "text", "text"]);
+    await user.click(ui.getByRole("button", { name: "Hide owner passwords" }));
+    await user.click(ui.getByRole("button", { name: "Hide recovery passwords" }));
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["password", "password", "password", "password"]);
+    assert.deepEqual(inputs.map((input) => input.value),
+      ["owner secret words", "owner secret words",
+        "recovery secret words", "recovery secret words"]);
+  });
+
 test("password fields expose requirements and live confirmation feedback", async (t) => {
   const { user, ui } = mountedDialog(t);
   assert.match(ui.getByLabelText("Owner password").ownerDocument

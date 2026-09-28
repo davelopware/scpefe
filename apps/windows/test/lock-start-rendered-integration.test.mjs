@@ -575,6 +575,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         await awaitHarnessPhase(protectionRequestObserved,
           "provisional New protection request");
         await new Promise((resolve) => setImmediate(resolve));
+      } else {
+        await awaitHarnessPhase(protectionRequestObserved,
+          "New protection request after candidate creation");
       }
     } else if (entry === "open") {
       await command("File", /Open/);
@@ -1418,6 +1421,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     return;
   }
   if (origin.startsWith("s9-")) {
+    // This matrix exercises a held regular publication, not overlapping
+    // keystroke journal writes. Wait for all typed revisions before it starts.
+    await awaitLifecycleCompletion("typed journal before held publication");
     await service.saveClientSettings({ regularSaveEnabled: true,
       regularSaveIntervalMs: 120_000 });
     holdMaintenance = true;
