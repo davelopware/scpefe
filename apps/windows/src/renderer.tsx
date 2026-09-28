@@ -310,7 +310,7 @@ declare global { interface Window { scpefe: {
   onJournalWarning(listener: (warningCode: string,
     journalScope: string | null) => void): () => void;
   onRegularSave(listener: (result: { published: true; provisional: true;
-    content: string }) => void): () => void;
+    content: string; journalScope: string; revision: number }) => void): () => void;
   onExternalOpenRequested(listener: (request: ExternalOpenRequest) => void): () => void;
   onUnresolvedJournalSummary(listener: (summary: JournalSummary) => void): () => void;
   onSwitchRetained(listener: (opened: DocumentOpened) => void): () => void;
@@ -395,6 +395,7 @@ function App() {
   const [invitationStaged, setInvitationStaged] = useState(false);
   const [decisionError, setDecisionError] = useState("");
   const [openedDialogError, setOpenedDialogError] = useState("");
+  const [confirmDivergenceDiscard, setConfirmDivergenceDiscard] = useState(false);
   const [compactionError, setCompactionError] = useState("");
   const [pendingProfile, setPendingProfile] = useState<Profile | null>(null);
   const [profileError, setProfileError] = useState("");
@@ -428,11 +429,11 @@ function App() {
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
   const openedDialog = publicationDecision ? "publication" : openedDialogName(opened);
-  const visibleOpenedDialog = !creating && dialog === null
+  const visibleOpenedDialog = !creating && dialog === null && !confirmDivergenceDiscard
     && leaseDecision === null && saveFailure === null
     ? invitationStaged ? "claim" : openedDialog : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
-    || invitationStaged
+    || invitationStaged || confirmDivergenceDiscard
     || editFailure !== null || leaseDecision !== null || saveFailure !== null;
   if (modalBusy.current && !wasModalBusy.current && findOpen) {
     suspendedFindFocus.current = document.activeElement === replaceInput.current
@@ -523,6 +524,7 @@ function App() {
     }
     setDecisionError("");
     setOpenedDialogError("");
+    setConfirmDivergenceDiscard(false);
     setFindOpen(false);
     setFindText("");
     setReplaceText("");
@@ -1182,6 +1184,7 @@ function App() {
       setDialog(null);
       setDecisionError("");
       setOpenedDialogError("");
+      setConfirmDivergenceDiscard(false);
       setCompactionError("");
       setProtection(null);
       setProtectionError("");
@@ -1219,17 +1222,22 @@ function App() {
       : "The three-way merge is clean. Review it, then save the merge.");
   }
 
-  async function beginDivergenceResolution() {
+  async function beginDivergenceResolution(discardUnsaved = false) {
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
     setOpenedDialogError("");
-    const outcome = await session.beginDivergenceResolution();
+    const outcome = await session.beginDivergenceResolution({ discardUnsaved });
     if (outcome.status === "attention") {
+      setConfirmDivergenceDiscard(false);
       setDecisionError("");
       setMessage("Divergence resolution requires a confirmed lease takeover.");
     } else if (outcome.status === "divergence") {
+      setConfirmDivergenceDiscard(false);
       applyDivergenceDraft(outcome.draft);
+    } else if (outcome.status === "unsaved-work") {
+      setConfirmDivergenceDiscard(true);
     } else if (outcome.status === "failed") {
+      setConfirmDivergenceDiscard(false);
       setMessage(`Divergence resolution needs attention: ${catalogText(outcome.code)}`);
       requestAnimationFrame(() => action?.focus());
     }
@@ -1488,6 +1496,17 @@ function App() {
       <p>The working copy and recovery journal remain available. No successful publication is being reported.</p>
       <div className="dialog-actions"><button onClick={() => session.dismissSaveFailure()}>Continue editing</button>
         <button autoFocus onClick={() => void save()}>Retry manual save</button></div>
+    </FocusedDialog>}
+    {confirmDivergenceDiscard && <FocusedDialog returnFocus={dialogReturnFocus.current}
+      title="Discard newer unsaved edits?" close={() => setConfirmDivergenceDiscard(false)}>
+      <p>The working copy has edits made after the locally saved candidate. Starting divergence resolution replaces those edits with a merge draft.</p>
+      <div className="dialog-actions">
+        <button onClick={() => setConfirmDivergenceDiscard(false)}>Keep newer edits</button>
+        <button onClick={() => { setConfirmDivergenceDiscard(false); setDialog("export"); }}>
+          Export newer edits…</button>
+        <button autoFocus onClick={() => void beginDivergenceResolution(true)}>
+          Discard newer edits and resolve</button>
+      </div>
     </FocusedDialog>}
     {creating && <CreationSecurityDialog returnFocus={dialogReturnFocus.current} onCancel={() =>
       rendererLifecycleCompletion.track(async () => {

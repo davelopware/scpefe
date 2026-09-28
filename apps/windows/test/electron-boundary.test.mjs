@@ -162,9 +162,10 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   const stopRegularSave = exposed.onRegularSave((value) => { regularSave = value; });
   rendererListeners.get("document:regular-saved")({}, { published: true,
     provisional: true, content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
-    password: "must not cross" });
+    password: "must not cross", journalScope: "adoption_2", revision: 4 });
   assert.deepEqual(JSON.parse(JSON.stringify(regularSave)), {
     published: true, provisional: true, content: "exact\ntext",
+    journalScope: "adoption_2", revision: 4,
   });
   stopRegularSave();
   assert.equal(rendererListeners.has("document:regular-saved"), false);

@@ -801,6 +801,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         { name: "Divergence needs resolution" });
       await user.click(ui.getByRole(conflict, "button", { name: "Retry publication" }));
       await ui.waitFor(() => assert.equal(editor.value.includes("local unpublished branch"), true));
+      await ui.waitFor(() => assert.equal(editor.readOnly, false));
       await user.clear(editor); await user.type(editor, "merged authenticated branch");
       await user.keyboard("{Control>}s{/Control}");
       await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,

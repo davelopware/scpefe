@@ -188,6 +188,7 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
   | Readonly<{ status: "publication"; publicationState: "target-published"
     | "pending-publication" | "conflict" }>
   | Readonly<{ status: "publication-discarded" | "divergence-required" }>
+  | Readonly<{ status: "unsaved-work" }>
   | Readonly<{ status: "backup"; created: boolean }>
   | Readonly<{ status: "export"; exported: boolean }>
   | Readonly<{ status: "recovery"; document: Doc & {
@@ -248,6 +249,8 @@ export class DocumentSession<Doc extends SessionDocument,
   private publicationFailureCode: SessionFailureCode | null = null;
   private saveFailureCode: SessionFailureCode | null = null;
   private resolvingDivergence = false;
+  private sealedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
+  private acceptedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly queuedCommands: QueuedCommand<Doc>[] = [];
   private commandRunning = false;
@@ -282,10 +285,15 @@ export class DocumentSession<Doc extends SessionDocument,
     this.publicationFailureCode = null;
     this.saveFailureCode = null;
     this.resolvingDivergence = false;
+    this.sealedRegularVersion = null;
+    this.acceptedRegularVersion = null;
     this.publicationState = document.provisional ? "provisional"
       : document.publicationState ?? "target-published";
     this.workingCopy = new WorkingCopy(this.journalHost);
     this.workingCopy.adoptOpen(document.content, Boolean(document.provisional));
+    if (!document.readOnly && document.provisional) {
+      this.workingCopy.ensureJournalVersion();
+    }
     this.stopWorkingCopy = this.workingCopy.subscribe(() => this.publishWorkingCopy());
     this.snapshot = this.openSnapshot(document, ++this.adoptionSequence, targetName);
     this.notify();
@@ -307,6 +315,12 @@ export class DocumentSession<Doc extends SessionDocument,
     this.snapshot = this.openSnapshot(safeDocument, current.adoption,
       safeDocument.targetName ?? current.targetName, current.pending);
     this.notify();
+    const copy = this.workingCopy;
+    const working = copy?.getSnapshot();
+    if (copy && current.kind === "read-only" && !safeDocument.readOnly
+      && working?.kind === "ready" && working.dirty) {
+      copy.ensureJournalVersion();
+    }
     return true;
   }
 
@@ -385,12 +399,13 @@ export class DocumentSession<Doc extends SessionDocument,
       if (operation === "divergence") {
         const result = await this.host.beginDivergenceResolution({ authorization });
         if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
-        this.clearPending();
         if ("decisionRequired" in result) {
+          this.clearPending();
           this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
-        this.publishWorkingCopy();
+        this.resolvingDivergence = true;
+        this.clearPending();
         return Object.freeze({ status: "divergence", draft: frozenCopy(result) });
       }
       const result = await this.host.migrateDocument({ authorization });
@@ -497,6 +512,7 @@ export class DocumentSession<Doc extends SessionDocument,
         return Object.freeze({ status: "unavailable" });
       }
       const content = this.snapshot.working.text;
+      const submittedVersion = this.workingCopy.journalVersion();
       const divergence = this.publicationState === "conflict";
       this.saveFailureCode = null;
       this.publishPending("save");
@@ -510,6 +526,7 @@ export class DocumentSession<Doc extends SessionDocument,
         this.publicationState = result.publicationState;
         if (result.publicationState !== "conflict") this.resolvingDivergence = false;
         this.publicationFailureCode = null;
+        this.sealedRegularVersion = submittedVersion;
         this.workingCopy.sealPublication(result.content, content);
         const current: DocumentSessionSnapshot<Doc> = this.getSnapshot();
         if (current.kind !== "read-only" && current.kind !== "edit") {
@@ -576,13 +593,22 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   /** Starts conflict resolution under the same adoption and command ordering as publication. */
-  beginDivergenceResolution(): Promise<DocumentSessionOutcome<Doc>> {
+  beginDivergenceResolution(options: { readonly discardUnsaved?: boolean } = {}):
+    Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
     const adoption = this.currentAdoption();
     return this.enqueue(async () => {
       if (!this.matchesAdoption(generation, adoption)
-        || this.publicationState !== "conflict") {
+        || this.publicationState !== "conflict" || this.resolvingDivergence) {
         return Object.freeze({ status: "unavailable" });
+      }
+      const current = this.snapshot;
+      if (current.kind !== "read-only" && current.kind !== "edit") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      if (current.working.dirty) {
+        if (!options.discardUnsaved) return Object.freeze({ status: "unsaved-work" });
+        this.workingCopy?.adoptPublication(current.document.content);
       }
       this.publicationFailureCode = null;
       this.publishPending("divergence");
@@ -591,11 +617,13 @@ export class DocumentSession<Doc extends SessionDocument,
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
-        this.clearPending();
         if ("decisionRequired" in result) {
+          this.clearPending();
           this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
+        this.resolvingDivergence = true;
+        this.clearPending();
         return Object.freeze({ status: "divergence", draft: frozenCopy(result) });
       } catch (error) {
         if (!this.matchesAdoption(generation, adoption)) {
@@ -740,11 +768,22 @@ export class DocumentSession<Doc extends SessionDocument,
 
   /** Applies a host regular-save notification without sealing the manual baseline. */
   regularSavePublished(result: { readonly published: true; readonly provisional: true;
-    readonly content: string }): boolean {
+    readonly content: string; readonly journalScope: string;
+    readonly revision: number }): boolean {
     const current = this.snapshot;
-    if (current.kind !== "edit" || !this.workingCopy || !current.working.dirty
+    const version = this.workingCopy?.journalVersion();
+    if (current.kind !== "edit" || !this.workingCopy || !version
+      || result.journalScope !== version.journalScope
+      || !Number.isSafeInteger(result.revision) || result.revision < 1
+      || result.revision > version.revision
+      || (this.sealedRegularVersion?.journalScope === result.journalScope
+        && result.revision <= this.sealedRegularVersion.revision)
+      || (this.acceptedRegularVersion?.journalScope === result.journalScope
+        && result.revision <= this.acceptedRegularVersion.revision)
       || this.publicationState === "pending-publication"
       || this.publicationState === "conflict") return false;
+    this.acceptedRegularVersion = Object.freeze({ journalScope: result.journalScope,
+      revision: result.revision });
     this.publicationState = "provisional";
     if (current.working.text === result.content) {
       this.workingCopy.markProvisional(result.content);
@@ -760,6 +799,8 @@ export class DocumentSession<Doc extends SessionDocument,
     if (!this.workingCopy) return false;
     this.publicationState = "target-published";
     this.resolvingDivergence = false;
+    this.sealedRegularVersion = null;
+    this.acceptedRegularVersion = null;
     this.publicationFailureCode = null;
     this.saveFailureCode = null;
     this.workingCopy.adoptPublication(text);
@@ -769,6 +810,7 @@ export class DocumentSession<Doc extends SessionDocument,
   adoptRecovery(text: string, selection: WorkingCopySelection): boolean {
     if (!this.workingCopy) return false;
     this.workingCopy.adoptRecovery(text, selection);
+    this.workingCopy.ensureJournalVersion();
     return true;
   }
 
@@ -856,6 +898,8 @@ export class DocumentSession<Doc extends SessionDocument,
     this.publicationFailureCode = null;
     this.saveFailureCode = null;
     this.resolvingDivergence = false;
+    this.sealedRegularVersion = null;
+    this.acceptedRegularVersion = null;
     this.cancelQueuedCommands();
     if (this.snapshot.kind === "closed") return;
     const targetName = this.snapshot.targetName;
@@ -877,6 +921,8 @@ export class DocumentSession<Doc extends SessionDocument,
     this.publicationFailureCode = null;
     this.saveFailureCode = null;
     this.resolvingDivergence = false;
+    this.sealedRegularVersion = null;
+    this.acceptedRegularVersion = null;
     this.cancelQueuedCommands();
     this.snapshot = CLOSED;
     this.publicationState = "target-published";

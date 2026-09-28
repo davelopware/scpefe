@@ -332,8 +332,10 @@ test("mounted shell presents truthful document states, history, failures, and se
 
   ui.fireEvent.change(editor, { target: { value: `${opened.content}!?`,
     selectionStart: opened.content.length + 2, selectionEnd: opened.content.length + 2 } });
+  const regularSource = workingCopyUpdates.at(-1);
   listeners["regular-save"]({ published: true, provisional: true,
-    content: `${opened.content}!?` });
+    content: `${opened.content}!?`, journalScope: regularSource.journalScope,
+    revision: regularSource.revision });
   await ui.waitFor(() => assert.equal(statusValue("Publication state"),
     "Provisional publication"));
   assert.equal(statusValue("Working copy state"), "Dirty");

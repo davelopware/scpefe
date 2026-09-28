@@ -181,9 +181,11 @@ test("manual save publishes active then sealed state through the session interfa
 
 test("a save acknowledgement cannot replace edits made while the host was busy", async () => {
   const host = new Host();
-  const session = new DocumentSession(host, new Journal());
+  const journal = new Journal();
+  const session = new DocumentSession(host, journal);
   session.adopt(opened("base", false));
   session.edit("first draft");
+  const submitted = journal.updates.at(-1)!;
   let finish!: (result: { saved: true; content: string;
     publicationState: "target-published" }) => void;
   host.saveDocument = () => new Promise((resolve) => { finish = resolve; });
@@ -199,6 +201,15 @@ test("a save acknowledgement cannot replace edits made while the host was busy",
   assert.equal(snapshot.working.text, "newer draft");
   assert.equal(snapshot.working.dirty, true);
   assert.equal(snapshot.commands.save, true);
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "first draft", journalScope: submitted.journalScope,
+    revision: submitted.revision }), false,
+  "a late notice for the sealed revision cannot demote the manual save");
+  const newer = journal.updates.at(-1)!;
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "newer draft", journalScope: newer.journalScope,
+    revision: newer.revision }), true,
+  "a later regular publication remains honestly provisional");
   session.dispose();
 });
 
@@ -262,12 +273,15 @@ test("backup and plaintext export preserve eligibility, cancellation, and curren
 });
 
 test("regular publication stays provisional and cannot overwrite a newer local edit", () => {
-  const session = new DocumentSession(new Host(), new Journal());
+  const journal = new Journal();
+  const session = new DocumentSession(new Host(), journal);
   session.adopt(opened("base", false));
   session.edit("first draft");
+  const first = journal.updates.at(-1)!;
   session.edit("newer draft");
   assert.equal(session.regularSavePublished({ published: true, provisional: true,
-    content: "first draft" }), true);
+    content: "first draft", journalScope: first.journalScope,
+    revision: first.revision }), true);
   const snapshot = session.getSnapshot();
   if (snapshot.kind !== "edit") throw new Error("expected edit session");
   assert.equal(snapshot.publication.state, "provisional");
@@ -278,7 +292,77 @@ test("regular publication stays provisional and cannot overwrite a newer local e
   assert.equal(snapshot.commands.backup, false);
   session.lockStarted();
   assert.equal(session.regularSavePublished({ published: true, provisional: true,
-    content: "late old document" }), false);
+    content: "late old document", journalScope: first.journalScope,
+    revision: first.revision }), false);
+  session.dispose();
+});
+
+test("regular notices require the originating adoption and reject older save revisions", async () => {
+  const journal = new Journal();
+  const session = new DocumentSession(new Host(), journal);
+  session.adopt(opened("A", false));
+  session.edit("A draft");
+  const old = journal.updates.at(-1)!;
+  session.adopt(opened("B", false));
+  session.edit("B draft");
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "A draft", journalScope: old.journalScope, revision: old.revision }), false);
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.working.text, "B draft");
+  assert.equal(snapshot.document.content, "B");
+  assert.equal(snapshot.publication.state, "target-published");
+
+  const savedRevision = journal.updates.at(-1)!;
+  assert.deepEqual(await session.save(),
+    { status: "saved", publicationState: "target-published" });
+  session.edit("B after save");
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "B draft", journalScope: savedRevision.journalScope,
+    revision: savedRevision.revision }), false);
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.working.text, "B after save");
+  assert.equal(snapshot.publication.state, "target-published");
+  session.dispose();
+});
+
+test("a delayed valid regular notice remains provisional after undo to clean", () => {
+  const journal = new Journal();
+  const session = new DocumentSession(new Host(), journal);
+  session.adopt(opened("base", false));
+  session.edit("draft");
+  const source = journal.updates.at(-1)!;
+  assert.equal(session.undo(), true);
+  const before = session.getSnapshot();
+  if (before.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(before.working.dirty, false);
+  assert.equal(session.regularSavePublished({ published: true, provisional: true,
+    content: "draft", journalScope: source.journalScope,
+    revision: source.revision }), true);
+  const after = session.getSnapshot();
+  if (after.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(after.publication.state, "provisional");
+  assert.equal(after.working.text, "base");
+  assert.equal(after.working.dirty, true);
+  assert.equal(after.document.content, "draft");
+  session.dispose();
+});
+
+test("adopted dirty work gets host correlation before its first new edit", () => {
+  const journal = new Journal();
+  const session = new DocumentSession(new Host(), journal);
+  session.adopt({ ...opened("provisional target"), provisional: true });
+  assert.equal(journal.updates.length, 0, "read-only open cannot send an edit update");
+  session.refreshDocument({ ...opened("provisional target", false), provisional: true });
+  const provisionalSource = journal.updates.at(-1)!;
+  assert.equal(provisionalSource.content, "provisional target");
+  assert.equal(provisionalSource.revision, 1);
+  session.adoptRecovery("recovered draft", { start: 4, end: 4 });
+  const recoveredSource = journal.updates.at(-1)!;
+  assert.equal(recoveredSource.content, "recovered draft");
+  assert.equal(recoveredSource.revision, 1);
+  assert.notEqual(recoveredSource.journalScope, provisionalSource.journalScope);
   session.dispose();
 });
 
@@ -343,9 +427,11 @@ test("discard uses the host-returned target and late save cannot replace a new a
 
 test("serialized duplicate saves publish only one backend candidate", async () => {
   const host = new Host();
-  const session = new DocumentSession(host, new Journal());
+  const journal = new Journal();
+  const session = new DocumentSession(host, journal);
   session.adopt(opened("base", false));
   session.edit("draft");
+  const source = journal.updates.at(-1)!;
   let finish!: (result: { saved: true; content: string;
     publicationState: "target-published" }) => void;
   let signalStarted!: () => void;
@@ -362,7 +448,8 @@ test("serialized duplicate saves publish only one backend candidate", async () =
   assert.deepEqual(await second, { status: "unavailable" });
   assert.deepEqual(host.saveRequests, ["draft"]);
   assert.equal(session.regularSavePublished({ published: true, provisional: true,
-    content: "draft" }), false, "a stale regular event cannot demote a sealed result");
+    content: "draft", journalScope: source.journalScope,
+    revision: source.revision }), false, "a stale regular event cannot demote a sealed result");
   const snapshot = session.getSnapshot();
   if (snapshot.kind !== "edit") throw new Error("expected edit session");
   assert.equal(snapshot.publication.state, "target-published");
@@ -417,6 +504,44 @@ test("conflict retry routes divergence acquisition through the session queue", a
   const outcome = await acquiring;
   if (outcome.status !== "divergence") throw new Error("expected merge draft");
   assert.equal(outcome.draft.content, "merge draft");
+  assert.deepEqual(await session.beginDivergenceResolution(),
+    { status: "unavailable" }, "an acquired draft cannot be reacquired before adoption");
+  session.dispose();
+});
+
+test("conflict acquisition requires explicit discard of edits newer than the saved candidate", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("saved candidate");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "conflict" }) => void;
+  host.saveDocument = () => new Promise((resolve) => { finish = resolve; });
+  const saving = session.save();
+  await Promise.resolve();
+  session.edit("newer unsaved edit");
+  finish({ saved: true, content: "saved candidate", publicationState: "conflict" });
+  assert.equal((await saving).status, "saved");
+  let acquisitions = 0;
+  host.beginDivergenceResolution = async () => {
+    acquisitions += 1;
+    return { content: "merge draft", hasConflicts: false, ancestorRevision: "a",
+      localRevision: "l", currentRevision: "c" };
+  };
+  assert.deepEqual(await session.retryPublication(), { status: "divergence-required" });
+  assert.deepEqual(await session.beginDivergenceResolution(),
+    { status: "unsaved-work" });
+  assert.equal(acquisitions, 0);
+  const preserved = session.getSnapshot();
+  if (preserved.kind !== "read-only" && preserved.kind !== "edit") {
+    throw new Error("expected unlocked session");
+  }
+  assert.equal(preserved.working.text, "newer unsaved edit");
+  assert.equal(preserved.working.dirty, true);
+  assert.deepEqual(await session.beginDivergenceResolution({ discardUnsaved: true }),
+    { status: "divergence", draft: { content: "merge draft", hasConflicts: false,
+      ancestorRevision: "a", localRevision: "l", currentRevision: "c" } });
+  assert.equal(acquisitions, 1);
   session.dispose();
 });
 

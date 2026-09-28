@@ -49,7 +49,9 @@ retry and discard, backup, and plaintext export now flow through the session.
 React uses its publication snapshot and command eligibility for status, menus,
 and dialogs; it does not retain a second publication state. The host still owns
 the exact candidate, publication transaction, backup destination, and export
-policy. Recovery decisions outside publication remain separate work.
+policy. Regular-save notices carry the originating working-copy scope and edit
+revision so a late notice cannot attach to another adoption or demote a newer
+manual save. Recovery decisions outside publication remain separate work.
 The class's journal drain waits for host update acknowledgements; the host
 retains durable checkpoint and failure policy, and can report a later
 checkpoint warning. The platform adapter supplies a fresh opaque journal
