@@ -57,6 +57,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   const maintenanceReleased = new Promise((resolve) => { releaseMaintenance = resolve; });
   const revisionGraphs = new Map();
   const maintenanceEntered = new Promise((resolve) => { maintenanceStarted = resolve; });
+  let holdSaveJournal = false; let releaseSaveJournal; let saveJournalStarted;
+  const saveJournalReleased = new Promise((resolve) => { releaseSaveJournal = resolve; });
+  const saveJournalEntered = new Promise((resolve) => { saveJournalStarted = resolve; });
   let holdDiscard = false; let releaseDiscard; let discardStarted;
   const discardReleased = new Promise((resolve) => { releaseDiscard = resolve; });
   const discardEntered = new Promise((resolve) => { discardStarted = resolve; });
@@ -321,6 +324,13 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       observeMethod(created.lifecycle, "runMaintenance", "service:maintenance");
       observeMethod(created.lifecycle, "runExclusive", "service:exclusive");
       observeMethod(created.journals, "write", "journal:write");
+      const trackedWrite = created.journals.write.bind(created.journals);
+      created.journals.write = (...args) => {
+        if (!holdSaveJournal) return trackedWrite(...args);
+        holdSaveJournal = false;
+        saveJournalStarted();
+        return saveJournalReleased.then(() => trackedWrite(...args));
+      };
       return created;
     },
     acknowledge: async (request, status, sequence) => {
@@ -359,7 +369,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     completion: mountedCompletion,
     primaryError,
     cancelPendingWork: () => {
-      releaseMaintenance(); releaseDiscard(); releaseNewLink?.(); releaseInitialRead();
+      releaseMaintenance(); releaseSaveJournal(); releaseDiscard(); releaseNewLink?.(); releaseInitialRead();
       releaseOtherRead?.(); host.protections.cancelForLock();
     },
     drainRendererTasks: () => new Promise((resolve) => setImmediate(resolve)),
@@ -1507,8 +1517,14 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     return;
   }
   if (origin.startsWith("s6-") || origin.startsWith("pp-")) {
+    await awaitLifecycleCompletion("typed journal before pending publication save");
+    if (origin === "s6-window") holdSaveJournal = true;
     publicationUnavailable = true;
     await command("File", /^Save/);
+    if (origin === "s6-window") {
+      await awaitHeldLifecycleCompletion(saveJournalEntered, () => releaseSaveJournal(),
+        "pending publication save journal write");
+    } else await awaitLifecycleCompletion("pending publication save");
     const pending = await ui.findByRole(document.body, "dialog",
       { name: "Manual save pending publication" });
     assert.equal(editor.value, "",
