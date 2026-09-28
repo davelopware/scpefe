@@ -16,6 +16,11 @@ interface OpenedDocument {
   headMismatch?: { kind: "rollback" | "divergence" | "replacement" | "witness-error";
     title: string; explanation: string; editingBlocked: true };
   unreadableJournal?: true;
+  canAddPasswords?: boolean;
+  canRemovePasswords?: boolean;
+  recoverySlot?: boolean;
+  profileMismatch?: object;
+  managedSlots?: ReadonlyArray<{ slotId: string }>;
 }
 
 const opened = (content = "private text", readOnly = true): OpenedDocument => ({
@@ -153,6 +158,29 @@ class Host implements DocumentSessionHost<OpenedDocument> {
   }
   async exportPlaintext(_request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: true } | null> { return { exported: true }; }
+  async changePassword(_request: { currentPassword: string; newPassword: string;
+    newPasswordConfirmation: string }): Promise<OpenedDocument> { return opened(); }
+  async createInvitation(_request: { temporaryLabel: string; temporaryPassword?: string;
+    canEdit: boolean; canAddPasswords: boolean; canRemovePasswords: boolean }):
+    Promise<{ created: true; temporaryPassword: string; opened: OpenedDocument }> {
+    return { created: true, temporaryPassword: "private one-time passphrase",
+      opened: { ...opened("private text", false), canAddPasswords: true,
+        canRemovePasswords: true,
+        managedSlots: [{ slotId: "new" }] } };
+  }
+  async claimInvitation(_request: { newPassword: string;
+    newPasswordConfirmation: string }): Promise<OpenedDocument> { return opened("claimed"); }
+  async cancelInvitationClaim(): Promise<boolean> { return true; }
+  async reconcileIdentity(): Promise<OpenedDocument> { return opened(); }
+  async updateSlotPermissions(_request: { slotId: string; canEdit: boolean;
+    canAddPasswords: boolean; canRemovePasswords: boolean }): Promise<OpenedDocument> {
+    return opened("private text", false);
+  }
+  async removeSlot(_slotId: string): Promise<{ removed: true; warningCode: "SLOT_REMOVED";
+    opened: OpenedDocument }> {
+    return { removed: true, warningCode: "SLOT_REMOVED",
+      opened: opened("private text", false) };
+  }
 }
 
 test("recovery attention carries safe context and restore adopts unsaved work atomically", async () => {
@@ -1212,5 +1240,174 @@ test("close leaves the session intact while host protection is pending, then cle
   assert.equal((await session.close()).status, "closed");
   assert.equal(session.getSnapshot().kind, "closed");
   assert.equal("targetName" in session.getSnapshot(), false);
+  session.dispose();
+});
+
+test("security availability follows the active slot policy and protection state", () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  const commands = () => {
+    const current = session.getSnapshot();
+    if (current.kind !== "read-only" && current.kind !== "edit") throw new Error("open");
+    return current.commands;
+  };
+  session.adopt({ ...opened(), canEdit: false, canAddPasswords: false,
+    canRemovePasswords: false });
+  assert.equal(commands().changePassword, true, "view-only may rotate its own password");
+  assert.equal(commands().createInvitation, false);
+  assert.equal(commands().removeSlot, false);
+  session.adopt({ ...opened("owner", false), canAddPasswords: true,
+    canRemovePasswords: true, managedSlots: [] });
+  assert.equal(commands().createInvitation, true);
+  assert.equal(commands().updateSlotPermissions, true);
+  assert.equal(commands().removeSlot, true);
+  session.edit("unsaved");
+  assert.equal(commands().changePassword, false);
+  assert.equal(commands().createInvitation, false);
+  session.adopt({ ...opened("mismatch"), profileMismatch: { editingBlocked: true } });
+  assert.equal(commands().reconcileIdentity, true);
+  assert.equal(commands().changePassword, false);
+  session.adopt({ ...opened("recovery"), recoverySlot: true });
+  assert.equal(commands().changePassword, true);
+  assert.equal(commands().createInvitation, false);
+  session.adopt({ ...opened("editor", false), canAddPasswords: false,
+    canRemovePasswords: false });
+  assert.equal(commands().createInvitation, false);
+  assert.equal(commands().updateSlotPermissions, false);
+  session.adopt({ ...opened("remover", false), canAddPasswords: false,
+    canRemovePasswords: true });
+  assert.equal(commands().removeSlot, true);
+  assert.equal(commands().updateSlotPermissions, false);
+  session.dispose();
+});
+
+test("security commands publish authoritative metadata and omit one-time secrets", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("owner", false), canAddPasswords: true,
+    canRemovePasswords: true, managedSlots: [] });
+  let passphrase = "";
+  const created = await session.createInvitation({ temporaryLabel: "Ada",
+    canEdit: true, canAddPasswords: false, canRemovePasswords: false },
+  (value) => { passphrase = value; });
+  assert.deepEqual(created, { status: "invitation-created" });
+  assert.equal(passphrase, "private one-time passphrase");
+  assert.equal(JSON.stringify(session.getSnapshot()).includes(passphrase), false);
+  const current = session.getSnapshot();
+  if (current.kind !== "edit") throw new Error("edit expected");
+  assert.deepEqual(current.document.managedSlots, [{ slotId: "new" }]);
+  assert.deepEqual(await session.removeSlot("new"),
+    { status: "slot-removed", warningCode: "SLOT_REMOVED" });
+  const after = session.getSnapshot();
+  if (after.kind !== "edit") throw new Error("edit expected");
+  assert.deepEqual(after.document.managedSlots, undefined);
+  session.dispose();
+});
+
+test("invitation claim and cancel preserve prior adoption and reject a late claim", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("prior"));
+  session.adopt({ readOnly: true, invitationRequired: true });
+  const staged = session.getSnapshot();
+  assert.equal(staged.invitationStaged, true);
+  assert.equal(staged.kind, "read-only");
+  if (staged.kind === "read-only") {
+    assert.equal(staged.commands.changePassword, false,
+      "security actions wait until the staged claim is resolved");
+  }
+  assert.deepEqual(await session.cancelInvitationClaim(), { status: "claim-canceled" });
+  const retained = session.getSnapshot();
+  if (retained.kind !== "read-only") throw new Error("prior lost");
+  assert.equal(retained.document.content, "prior");
+  assert.equal(retained.invitationStaged, undefined);
+  session.adopt({ readOnly: true, invitationRequired: true });
+  let finish!: (value: OpenedDocument) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.claimInvitation = () => new Promise((resolve) => { finish = resolve; started(); });
+  const claim = session.claimInvitation({ newPassword: "private replacement",
+    newPasswordConfirmation: "private replacement" });
+  await active;
+  session.lockStarted();
+  session.adopt(opened("replacement"));
+  finish(opened("claimed too late"));
+  assert.equal((await claim).status, "superseded");
+  const final = session.getSnapshot();
+  if (final.kind !== "read-only") throw new Error("replacement lost");
+  assert.equal(final.document.content, "replacement");
+  session.dispose();
+});
+
+test("a declined host claim cancellation keeps the invitation staged for retry", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("prior"));
+  session.adopt({ readOnly: true, invitationRequired: true });
+  host.cancelInvitationClaim = async () => false;
+  assert.deepEqual(await session.cancelInvitationClaim(),
+    { status: "failed", code: "LIFECYCLE_FAILED" });
+  const retained = session.getSnapshot();
+  if (retained.kind !== "read-only") throw new Error("prior lost");
+  assert.equal(retained.document.content, "prior");
+  assert.equal(retained.invitationStaged, true);
+  host.cancelInvitationClaim = async () => true;
+  assert.deepEqual(await session.cancelInvitationClaim(), { status: "claim-canceled" });
+  assert.equal(session.getSnapshot().invitationStaged, undefined);
+  session.dispose();
+});
+
+test("security publications return stable outcomes and reject stale profile metadata", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  const owner = { ...opened("owner", false), canAddPasswords: true,
+    canRemovePasswords: true };
+  session.adopt(owner);
+  host.changePassword = async () => ({ ...owner, targetName: "renamed.scpefe" });
+  assert.deepEqual(await session.changePassword({ currentPassword: "old secret",
+    newPassword: "new secret", newPasswordConfirmation: "new secret" }),
+  { status: "password-changed" });
+  let current = session.getSnapshot();
+  if (current.kind !== "edit") throw new Error("edit expected");
+  assert.equal(current.document.targetName, "renamed.scpefe");
+  const oldAdoption = current.adoption;
+  host.updateSlotPermissions = async () => ({ ...owner, managedSlots: [{ slotId: "slot" }] });
+  assert.deepEqual(await session.updateSlotPermissions({ slotId: "slot", canEdit: true,
+    canAddPasswords: false, canRemovePasswords: false }), { status: "permissions-updated" });
+  current = session.getSnapshot();
+  if (current.kind !== "edit") throw new Error("edit expected");
+  assert.equal(current.document.managedSlots?.[0]?.slotId, "slot");
+  session.adopt({ ...opened("replacement"), profileMismatch: { editingBlocked: true } });
+  assert.equal(session.refreshDocumentForAdoption(owner, oldAdoption), false);
+  host.reconcileIdentity = async () => opened("reconciled");
+  assert.deepEqual(await session.reconcileIdentity(), { status: "identity-reconciled" });
+  const reconciled = session.getSnapshot();
+  if (reconciled.kind !== "read-only") throw new Error("view expected");
+  assert.equal(reconciled.document.content, "reconciled");
+  session.dispose();
+});
+
+test("a late invitation publication neither reveals its passphrase nor updates a replacement", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("old", false), canAddPasswords: true });
+  let finish!: (result: { created: true; temporaryPassword: string;
+    opened: OpenedDocument }) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.createInvitation = () => new Promise((resolve) => { finish = resolve; started(); });
+  let shown = "";
+  const pending = session.createInvitation({ temporaryLabel: "Someone", canEdit: false,
+    canAddPasswords: false, canRemovePasswords: false }, (value) => { shown = value; });
+  await active;
+  session.lockStarted();
+  session.adopt(opened("replacement"));
+  finish({ created: true, temporaryPassword: "private passphrase",
+    opened: opened("stale result") });
+  assert.equal((await pending).status, "superseded");
+  assert.equal(shown, "");
+  const current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("replacement expected");
+  assert.equal(current.document.content, "replacement");
+  assert.equal(JSON.stringify(current).includes("private passphrase"), false);
   session.dispose();
 });

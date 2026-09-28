@@ -242,10 +242,16 @@ export function validateInvitationResult(value) {
       || typeof value.temporaryPassword !== "string"
       || value.temporaryPassword.length === 0
       || value.temporaryPassword.length > 4096
-      || Object.keys(value).some((key) => !["created", "temporaryPassword"].includes(key))) {
+      || !value.opened
+      || Object.keys(value).some((key) => !["created", "temporaryPassword", "opened"].includes(key))) {
     throw new TypeError("host returned an invalid invitation result");
   }
-  return Object.freeze({ created: true, temporaryPassword: value.temporaryPassword });
+  return Object.freeze({ created: true, temporaryPassword: value.temporaryPassword,
+    opened: validateActiveDocument(value.opened) });
+}
+
+export function validateActiveDocument(value) {
+  return value?.readOnly === false ? validateEditMode(value) : validateOpenedDocument(value);
 }
 
 export function validateInvitationClaimRequest(value) {
@@ -728,10 +734,12 @@ export function validateRegularSaveResult(value) {
 export function validateSlotRemovalResult(value) {
   if (!value || typeof value !== "object" || value.removed !== true
       || value.warningCode !== "SLOT_REMOVED"
-      || Object.keys(value).some((key) => !["removed", "warningCode"].includes(key))) {
+      || !value.opened
+      || Object.keys(value).some((key) => !["removed", "warningCode", "opened"].includes(key))) {
     throw new TypeError("host returned an invalid slot-removal result");
   }
-  return Object.freeze({ removed: true, warningCode: value.warningCode });
+  return Object.freeze({ removed: true, warningCode: value.warningCode,
+    opened: validateActiveDocument(value.opened) });
 }
 
 export function validateCreationResult(value) {
