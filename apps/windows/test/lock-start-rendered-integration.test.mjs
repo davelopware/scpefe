@@ -1278,7 +1278,19 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         "owner password words");
       await user.click(ui.getByLabelText(creation,
         "I understand that lost passwords cannot be recovered."));
+      if (origin === "dr-new-discard-retry") holdNewLink = true;
       await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+      if (origin === "dr-new-discard-retry") {
+        try {
+          await awaitHarnessPhase(newLinkEntered, "held New candidate link");
+          assert.equal(ui.getByRole(creation, "button", { name: "Creating…" }).disabled,
+            true, "creation stays busy until the candidate is linked");
+        } finally {
+          releaseNewLink?.();
+        }
+      }
+      await awaitHarnessPhase(protectionRequestObserved,
+        "dirty New protection request after candidate creation");
     } else if (entry === "open") {
       await command("File", /Open/);
       const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
@@ -1659,6 +1671,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await user.click(ui.getByLabelText(creation,
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    await awaitHarnessPhase(protectionRequestObserved,
+      "New protection request after candidate creation");
     const protection = await ui.findByRole(document.body, "dialog", { name: /before New/ });
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), true,
       "the isolated candidate exists until the protection decision completes");
@@ -1689,8 +1703,11 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await ui.findByText(retryProtection,
       /document protection choice could not be completed/i);
     saveFault = false;
+    holdMaintenance = true;
     await user.click(ui.getByRole(retryProtection, "button",
       { name: "Manual save and continue" }));
+    await awaitHeldLifecycleCompletion(maintenanceEntered, () => releaseMaintenance(),
+      "dirty New retry save publication");
     await ui.waitFor(async () => {
       assert.equal(document.querySelector(".dialog-error")?.textContent ?? "", "");
       assert.equal(document.querySelector("[role=dialog]") === null, true);
