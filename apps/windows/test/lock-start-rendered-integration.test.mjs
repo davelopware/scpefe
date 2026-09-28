@@ -1297,13 +1297,21 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (outcome === "cancel") {
       await user.click(ui.getByRole(protection, "button",
         { name: "Keep current document open" }));
-      const returned = await ui.findByRole(document.body, "dialog");
-      await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
-      await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
-      assert.equal(host.service === service, true); assert.equal(editor.value,
-        "mounted secret plaintext");
-      if (request) assert.deepEqual(acks.map(({ status }) => status),
-        ["queued", "presented", "canceled"]);
+      if (request) {
+        await ui.waitFor(() => assert.deepEqual(acks.map(({ status }) => status),
+          ["queued", "presented", "canceled"]));
+        await ui.waitFor(() => assert.match(
+          ui.getByRole(document.body, "status").textContent,
+          /Open request canceled; the current document remains open\./));
+        assert.equal(host.externalRequests.current(request.token), null);
+      } else {
+        const returned = await ui.findByRole(document.body, "dialog");
+        await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
+      }
+      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      assert.equal(host.service, service);
+      assert.equal(host.currentTarget, target);
+      assert.equal(editor.value, "mounted secret plaintext");
       return;
     }
     const decision = outcome.startsWith("save") ? "Manual save and continue"
