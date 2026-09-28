@@ -175,7 +175,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         calls.push(["compact", request]); compactionAttempts += 1;
         if (compactionAttempts === 1) throw new Error("backup verification failed");
         return { compacted: true, backupCreated: true,
-          previousHead: "44".repeat(32), head: "55".repeat(32) };
+          previousHead: "44".repeat(32), head: "55".repeat(32),
+          opened: { ...base, readOnly: false } };
       },
       migrateDocument: async ({ authorization } = {}) => {
         calls.push(["migrate", Boolean(authorization)]); migrationAttempts += 1;
@@ -497,7 +498,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await ui.waitFor(() => assert.equal(editor.readOnly, false));
     await command("Security", "Lock");
     openResult = { ...base, content: "legacy private text", canEdit: false,
-      migrationRequired: true,
+      migrationRequired: true, migrationCanEdit: true,
       migrationWarning: "A verified exact backup is required before migration." };
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
@@ -549,4 +550,47 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     listeners.locked({ locked: true, journalSaved: true, warning: null });
     assert.equal(editor.value, "");
     assert.equal(document.body.textContent.includes("legacy private text"), false);
+
+    openResult = { ...base, content: "denied legacy text", canEdit: false,
+      migrationRequired: true, migrationCanEdit: false };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "denied legacy words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    assert.equal(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and migrate…" }).disabled, true);
+    assert.match(dialog.textContent, /password slot cannot migrate/i);
+    listeners.locked({ locked: true, journalSaved: true, warning: null });
+
+    openResult = { ...base, content: "live legacy text", canEdit: false,
+      migrationRequired: true, migrationCanEdit: true };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "live legacy words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    let finishMigration;
+    let migrationStarted;
+    const migrationActive = new Promise((resolve) => { migrationStarted = resolve; });
+    dom.window.scpefe.migrateDocument = () => new Promise((resolve) => {
+      finishMigration = resolve; migrationStarted();
+    });
+    await user.click(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and migrate…" }));
+    await migrationActive;
+    await ui.waitFor(() => assert.equal(ui.queryByText(dialog,
+      /password slot cannot migrate/i), null));
+    listeners.locked({ locked: true, journalSaved: true, warning: null });
+    openResult = base;
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "replacement password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    finishMigration({ migrated: true, backupCreated: true,
+      compatibilityCode: "MIGRATION_COMPATIBILITY",
+      opened: { ...base, readOnly: false, content: "stale migrated text" } });
+    await ui.waitFor(() => assert.equal(status("Document state"), "Read-only"));
+    assert.equal(editor.value, "sealed text");
+    assert.equal(document.body.textContent.includes("stale migrated text"), false);
   });

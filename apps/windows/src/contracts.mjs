@@ -431,6 +431,10 @@ export function validateOpenedDocument(value) {
   if (value.migrationRequired !== undefined && typeof value.migrationRequired !== "boolean") {
     throw new TypeError("host returned invalid migration state");
   }
+  if (value.migrationCanEdit !== undefined
+      && (typeof value.migrationCanEdit !== "boolean" || !migrationRequired)) {
+    throw new TypeError("host returned invalid migration permission");
+  }
   let profileMismatch;
   if (value.profileMismatch !== undefined) {
     const mismatch = value.profileMismatch;
@@ -485,6 +489,8 @@ export function validateOpenedDocument(value) {
     canEdit: migrationRequired ? false : value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
     ...(migrationRequired ? { migrationRequired: true,
+      ...(value.migrationCanEdit !== undefined
+        ? { migrationCanEdit: value.migrationCanEdit } : {}),
       migrationWarning: "Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first." } : {}),
     ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
@@ -657,11 +663,12 @@ export function validateCompactionResult(value) {
       || value.backupCreated !== true
       || !/^[0-9a-f]{64}$/.test(value.previousHead)
       || !/^[0-9a-f]{64}$/.test(value.head)
-      || Object.keys(value).length !== 4) {
+      || !value.opened || Object.keys(value).length !== 5) {
     throw new TypeError("host returned an invalid compaction result");
   }
   return Object.freeze({ compacted: true, backupCreated: true,
-    previousHead: value.previousHead, head: value.head });
+    previousHead: value.previousHead, head: value.head,
+    opened: validateEditMode(value.opened) });
 }
 
 export function validateMigrationResult(value) {

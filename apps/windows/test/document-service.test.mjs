@@ -651,6 +651,7 @@ test("older containers remain read-only until verified-backup migration", async 
     setTimer: () => ({ unref() {} }), clearTimer: () => {} });
   const opened = await service.openDocument(target, "owner password words");
   assert.equal(opened.migrationRequired, true);
+  assert.equal(opened.migrationCanEdit, true);
   assert.equal(opened.canEdit, false);
   await assert.rejects(service.enterEditMode(), /must be migrated before editing or saving/);
   const result = await service.migrateDocument();
@@ -1078,7 +1079,7 @@ test("compaction creates an exact backup then publishes a verified shallow basel
     const result = await service.compactDocument(COMPACTION_CONFIRMATION);
 
     assert.deepEqual(result, { compacted: true, backupCreated: true,
-      previousHead, head: compactedHead });
+      previousHead, head: compactedHead, opened: service.active.opened });
     assert.deepEqual(await fs.readFile(target), candidate);
     assert.equal(await fs.readFile(defaultBackup, "utf8"),
       "existing backup must not be replaced");

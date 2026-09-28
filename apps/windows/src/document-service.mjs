@@ -411,7 +411,8 @@ export class DocumentService {
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
         canEdit: headMismatch || profileMismatch || migrationRequired || unreadableJournal
           ? false : slotCanEdit,
-        ...(migrationRequired ? { migrationRequired: true } : {}),
+        ...(migrationRequired ? { migrationRequired: true,
+          migrationCanEdit: slotCanEdit } : {}),
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
@@ -556,7 +557,8 @@ export class DocumentService {
       publicationState: "target-published",
       ...(active.profileMismatch ? { profileMismatch: active.profileMismatch } : {}),
       ...(active.headMismatch ? { headMismatch: active.headMismatch } : {}),
-      ...(active.migrationRequired ? { migrationRequired: true } : {}),
+      ...(active.migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: active.slotCanEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
     active.opened = active.editMode
       ? validateEditMode({ ...reopenedView, readOnly: false }) : reopenedView;
@@ -654,7 +656,8 @@ export class DocumentService {
     active.opened = validateOpenedDocument({ ...reopened.opened,
       canEdit: migrationRequired ? false : reopened.opened.canEdit,
       publicationState: "target-published",
-      ...(migrationRequired ? { migrationRequired: true } : {}),
+      ...(migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: reopened.opened.canEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
     active.documentId = reopened.documentId;
     active.baseRevision = reopened.baseRevision;
@@ -1639,7 +1642,7 @@ export class DocumentService {
     active.dirty = false;
     await this.witnesses.observe(active.target, active.observation);
     return validateCompactionResult({ compacted: true, backupCreated: true,
-      previousHead, head: active.baseRevision });
+      previousHead, head: active.baseRevision, opened: active.opened });
   }
 
   async migrateDocument(backupTarget, { takeoverToken } = {}) {
@@ -2174,7 +2177,8 @@ export class DocumentService {
     const opened = validateOpenedDocument({ ...baseOpened.opened,
       content: record.text, canEdit: headMismatch ? false : slotCanEdit,
       publicationState,
-      ...(migrationRequired ? { migrationRequired: true } : {}),
+      ...(migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: slotCanEdit } : {}),
       ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     this.active = { target, password, opened, editMode: false,
@@ -2200,10 +2204,13 @@ export class DocumentService {
       this.native.openDocument(published, active.password));
     const { headMismatch, slotCanEdit } = await this.#observeHead(
       active.target, reopened);
+    const migrationRequired = reopened.containerFormatVersion < 3;
     active.journalKey.fill(0);
     active.opened = validateOpenedDocument({ ...reopened.opened,
-      canEdit: headMismatch ? false : slotCanEdit,
+      canEdit: headMismatch || migrationRequired ? false : slotCanEdit,
       publicationState: "target-published",
+      ...(migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: slotCanEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     active.documentId = reopened.documentId;
@@ -2212,7 +2219,7 @@ export class DocumentService {
     active.observation = this.#observation(reopened);
     active.slotCanEdit = slotCanEdit;
     active.headMismatch = headMismatch;
-    active.migrationRequired = reopened.containerFormatVersion < 3;
+    active.migrationRequired = migrationRequired;
     active.baseContainer = Buffer.from(published);
     active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);

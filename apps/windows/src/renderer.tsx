@@ -50,6 +50,7 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   slotIdentityEmail?: string;
   headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
   managedSlots?: ManagedSlot[]; provisional?: true; migrationRequired?: true;
+  migrationCanEdit?: boolean;
   unreadableJournal?: true;
   migrationWarning?: string };
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
@@ -66,14 +67,14 @@ function isDocumentOpened(value: Opened | null): value is DocumentOpened {
 function openedDialogName(value: Opened | null): OpenedDialogName {
   if (value?.invitationRequired) return "claim";
   if (!isDocumentOpened(value)) return null;
-  if (value.migrationRequired) return "migration";
   if (value.profileMismatch) return "profile-mismatch";
   return null;
 }
 
 function sessionAttentionNeedsDialog(kind: string | undefined): boolean {
   return kind === "head-mismatch" || kind === "unreadable-journal"
-    || kind === "recovery-decision" || kind === "publication-decision";
+    || kind === "recovery-decision" || kind === "publication-decision"
+    || kind === "migration-decision";
 }
 
 const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> = [
@@ -226,7 +227,7 @@ function ManagedSlotControls({ slot, canUpdate, canRemove, onUpdate, onRemove }:
 
 function SlotAdministration({ opened, commands, onUpdate, onRemove, onCompact }: {
   opened: DocumentOpened;
-  commands: Pick<SessionCommands, "updateSlotPermissions" | "removeSlot">;
+  commands: Pick<SessionCommands, "updateSlotPermissions" | "removeSlot" | "compact">;
   onUpdate(slot: ManagedSlot, canEdit: boolean, canAddPasswords: boolean,
     canRemovePasswords: boolean): Promise<void>;
   onRemove(slot: ManagedSlot): Promise<void>;
@@ -239,7 +240,7 @@ function SlotAdministration({ opened, commands, onUpdate, onRemove, onCompact }:
     <h2 id="slot-administration-heading">Password-slot administration</h2>
     <p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent and is never listed as an ordinary slot.</p>
     {opened.readOnly && <p>Enter edit mode to publish permission changes or remove a slot.</p>}
-    {canUpdate && <CompactionControls onCompact={onCompact} />}
+    {commands.compact && <CompactionControls onCompact={onCompact} />}
     <p className="warning">Removing a slot affects only this updated document and does not revoke older copies or information already obtained.</p>
     {slots.length === 0 ? <p>No ordinary invitation slots exist.</p>
       : <ul className="managed-slots">{slots.map((slot) =>
@@ -282,7 +283,7 @@ declare global { interface Window { scpefe: {
   discardPendingPublication(): Promise<DocumentOpened>;
   backupDocument(): Promise<{ backedUp: true } | null>;
   compactDocument(request: { confirmed: true }): Promise<{ compacted: true; backupCreated: true;
-    previousHead: string; head: string } | null>;
+    previousHead: string; head: string; opened: DocumentOpened } | null>;
   migrateDocument(request?: { authorization?: string }): Promise<{
     migrated: true; backupCreated: true; compatibilityCode: string;
     opened: DocumentOpened } | LeaseDecision | null>;
@@ -375,6 +376,8 @@ function App() {
     ? attention : null;
   const headDecision = attention?.kind === "head-mismatch" ? attention : null;
   const unreadableDecision = attention?.kind === "unreadable-journal" ? attention : null;
+  const migrationDecision = attention?.kind === "migration-decision" ? attention : null;
+  const compactionDecision = attention?.kind === "compaction-decision" ? attention : null;
   const publicationState = sessionSnapshot.kind === "closed" ? null
     : sessionSnapshot.publication.state;
   const publicationResolving = sessionSnapshot.kind === "read-only"
@@ -417,7 +420,6 @@ function App() {
   const [decisionError, setDecisionError] = useState("");
   const [openedDialogError, setOpenedDialogError] = useState("");
   const [confirmDivergenceDiscard, setConfirmDivergenceDiscard] = useState(false);
-  const [compactionError, setCompactionError] = useState("");
   const [pendingProfile, setPendingProfile] = useState<Profile | null>(null);
   const [profileError, setProfileError] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -453,6 +455,8 @@ function App() {
   const openedDialog = opened?.invitationRequired ? "claim"
     : headDecision ? "head" : unreadableDecision ? "unreadable"
       : recoveryDecision ? "recovery" : publicationDecision ? "publication"
+        : isDocumentOpened(opened) && opened.profileMismatch ? "profile-mismatch"
+        : migrationDecision ? "migration"
         : openedDialogName(opened);
   const visibleOpenedDialog = !creating && dialog === null && !confirmDivergenceDiscard
     && leaseDecision === null && saveFailure === null
@@ -882,33 +886,14 @@ function App() {
   }
 
   async function migrate() {
-    const adoption = currentAdoption();
-    try {
-      setDecisionError("");
-      setOpenedDialogError("");
-      const result = await window.scpefe.migrateDocument();
-      if (!stillAdopted(adoption)) return;
-      if (!result) {
-        setOpenedDialogError("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
-        setMessage("Migration declined. The document remains read-only; saving requires migration.");
-        requestAnimationFrame(() => migrationRetryAction.current?.focus());
-        return;
-      }
-      if ("decisionRequired" in result) {
-        session.stageLeaseDecision(result, adoption!);
-        setMessage("Migration requires a confirmed lease takeover.");
-        return;
-      }
-      session.refreshDocument(result.opened);
-      session.adoptPublication(result.opened.content);
-      setMessage(catalogText(result.compatibilityCode));
-    } catch (error) {
-      if (!stillAdopted(adoption)) return;
-      const value = safeRendererErrorMessage(error);
-      setOpenedDialogError(value);
-      setMessage(`Migration needs attention: ${value}`);
-      requestAnimationFrame(() => migrationRetryAction.current?.focus());
-    }
+    setDecisionError("");
+    const outcome = await session.migrate();
+    if (outcome.status === "migration") setMessage(catalogText(outcome.compatibilityCode));
+    else if (outcome.status === "attention")
+      setMessage("Migration requires a confirmed lease takeover.");
+    else if (outcome.status === "migration-canceled")
+      setMessage("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
+    else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
   }
 
   async function confirmLeaseTakeover() {
@@ -922,15 +907,13 @@ function App() {
     } else if (outcome.status === "divergence") {
       showDivergenceDraft(outcome.hasConflicts);
     } else if (outcome.status === "migration") {
-      session.refreshDocument(outcome.document);
-      session.adoptPublication(outcome.document.content);
       setMessage(catalogText(outcome.compatibilityCode));
     } else if (outcome.status === "edit-mode") {
       setMessage("Edit mode entered after confirmed lease takeover.");
     } else if (outcome.status === "failed") {
       leaveConsumedTakeover(leaseDecision.operation, catalogText(outcome.code));
-    } else if (outcome.status === "unavailable" && leaseDecision.operation === "migration") {
-      setOpenedDialogError("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
+    } else if (outcome.status === "migration-canceled") {
+      setMessage("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
       requestAnimationFrame(() => migrationRetryAction.current?.focus());
     }
   }
@@ -1275,7 +1258,6 @@ function App() {
       setDecisionError("");
       setOpenedDialogError("");
       setConfirmDivergenceDiscard(false);
-      setCompactionError("");
       setProtection(null);
       setProtectionError("");
       setMessage(result.warningCode ? catalogText(result.warningCode)
@@ -1369,17 +1351,13 @@ function App() {
   }
 
   async function compact() {
-    try {
-      setCompactionError("");
-      const result = await window.scpefe.compactDocument({ confirmed: true });
-      if (result) {
-        setDialog("passwords");
-        setMessage("Verified backup created and document history compacted.");
-      } else setMessage("Compaction canceled; document history is unchanged.");
-    } catch (error) {
-      const value = safeRendererErrorMessage(error);
-      setCompactionError(value); setMessage(`Compaction needs attention: ${value}`);
-    }
+    const outcome = await session.confirmCompaction();
+    if (outcome.status === "compaction") {
+      setDialog("passwords");
+      setMessage("Verified backup created and document history compacted.");
+    } else if (outcome.status === "compaction-canceled") {
+      setMessage("Compaction canceled; document history is unchanged.");
+    } else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
   }
 
   function moveHistory(offset: number) {
@@ -1731,23 +1709,31 @@ function App() {
         {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
         <SlotAdministration opened={opened} commands={securityCommands ?? {
-          updateSlotPermissions: false, removeSlot: false }} onUpdate={updateManagedSlot}
+          updateSlotPermissions: false, removeSlot: false, compact: false }} onUpdate={updateManagedSlot}
           onRemove={removeManagedSlot} onCompact={async () => {
-            setCompactionError(""); setDialog("compaction");
+            if (session.requestCompaction().status === "attention") {
+              setDialog("compaction");
+            }
           }} />
         <div className="dialog-actions"><button onClick={closeDialog}
           disabled={invitationBusy}>Close</button></div></>}
       </FocusedDialog>}
     {dialog === "compaction" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Permanently compact document history?"
-      close={() => { setCompactionError(""); setDialog("passwords"); }}>
+      close={sessionSnapshot.pending === "compaction" ? undefined : () => {
+        session.cancelCompaction(); setDialog("passwords");
+      }}>
       <div className="warning" role="alert"><p>Compaction irreversibly removes older embedded history from this container.</p>
         <p>SCPEFE creates and verifies an exact backup first. Compaction cannot delete copies held by backups, sync tools, caches, or storage providers.</p></div>
-      {compactionError && <p className="dialog-error" role="alert">{compactionError}</p>}
+      {compactionDecision?.failureCode && <p className="dialog-error"
+        role="alert">{catalogText(compactionDecision.failureCode)}</p>}
       <div className="dialog-actions"><button autoFocus onClick={() => {
-        setCompactionError(""); setDialog("passwords");
+        session.cancelCompaction();
+        setDialog("passwords");
         setMessage("Compaction canceled; document history is unchanged.");
-      }}>Cancel</button><button onClick={() => void compact()}>
+      }} disabled={sessionSnapshot.pending === "compaction"}>Cancel</button><button
+        disabled={!compactionDecision || sessionSnapshot.pending === "compaction"}
+        onClick={() => void compact()}>
         Create verified backup and compact</button></div>
     </FocusedDialog>}
     {visibleOpenedDialog === "claim" && <FocusedDialog returnFocus={dialogReturnFocus.current}
@@ -1766,12 +1752,20 @@ function App() {
       <button onClick={() => void cancelInvitationClaim()}>Cancel</button></FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Older container"
-      initialFocus={openedDialogError ? migrationRetryAction : undefined}>
+      initialFocus={migrationDecision?.failureCode || migrationDecision?.canceled
+        ? migrationRetryAction : undefined}>
       <div className="warning" role="alert"><p>Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first.</p>
         <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
-      <div className="dialog-actions"><button onClick={lock}>Keep read-only and close</button>
-        {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
-        <button ref={migrationRetryAction} onClick={() => void migrate()}>
+      <div className="dialog-actions"><button onClick={lock}
+        disabled={sessionSnapshot.pending === "migration"}>Keep read-only and close</button>
+        {migrationDecision?.failureCode && <p className="dialog-error" role="alert">
+          {catalogText(migrationDecision.failureCode)}</p>}
+        {migrationDecision?.canceled && <p className="dialog-error" role="alert">
+          Migration was canceled before publication. Retry to acquire fresh lease authorization.</p>}
+        {!migrationDecision?.canMigrate && sessionSnapshot.pending === undefined
+          && <p role="note">This password slot cannot migrate this document until its edit permission and recovery decisions allow it.</p>}
+        <button ref={migrationRetryAction} disabled={!migrationDecision?.canMigrate}
+          onClick={() => void migrate()}>
           Create verified backup and migrate…</button></div></FocusedDialog>}
     {visibleOpenedDialog === "profile-mismatch" && activeDocument && opened.profileMismatch && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Profile mismatch">
