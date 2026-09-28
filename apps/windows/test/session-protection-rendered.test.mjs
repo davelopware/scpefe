@@ -107,7 +107,10 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
           pending.reject(new Error("The current document remains open"));
         } else pending.resolve(pending.operation === "external-open" ? null : false);
       } else if (pendingHost) {
-        const pending = pendingHost; pendingHost = null; pending.resolve(true);
+        const pending = pendingHost; pendingHost = null;
+        // Keep the mounted window alive after the simulated Exit decision so later
+        // protection scenarios can exercise the same adoption.
+        pending.resolve(pending.operation === "exit" ? false : true);
         if (pending.operation === "close") queueMicrotask(() => listeners.closed());
       }
       return { completed: true, proceed: request.decision !== "cancel" };
@@ -204,6 +207,22 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     assert.equal(ui.getByLabelText(find, "Find").value, protectedFind);
     assert.equal(ui.getByLabelText(find, "Replace with").value, protectedReplacement);
   }
+  listeners.external({ token: "queued-first" });
+  let firstOpen = await ui.findByRole(document.body, "dialog",
+    { name: "Open requested document" });
+  await user.type(ui.getByLabelText(firstOpen, "Password"), "first password");
+  await user.click(ui.getByRole(firstOpen, "button", { name: "Open" }));
+  dialog = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
+  listeners.external({ token: "queued-second" });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1,
+    "a second request waits behind active protection");
+  await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
+  const secondOpen = await ui.findByRole(document.body, "dialog",
+    { name: "Open requested document" });
+  assert.notEqual(secondOpen, firstOpen);
+  await user.click(ui.getByRole(secondOpen, "button", { name: "Cancel" }));
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  assert.equal(editor.value, "unsaved plaintext");
   await user.click(ui.getByRole(find, "button", { name: "Close" }));
   await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
 
@@ -300,7 +319,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   await ui.waitFor(() => assert.equal(
     ui.getByRole(document.body, "note").textContent.includes("No document"), true));
   assert.equal(editor.value, "");
-  assert.equal(decisions.length, 11);
+  assert.equal(decisions.length, 12);
   mountedRoot.unmount(); mountedRoot = null; await Promise.resolve();
   assert.equal(document.getElementById("root").childElementCount, 0);
   assert.equal(stopped, 8); assert.equal(frames.size, 0);

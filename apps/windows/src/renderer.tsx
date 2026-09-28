@@ -9,7 +9,7 @@ import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
   proposedPasswordRejectionMessage } from "./password-policy.mjs";
 import { RENDERER_LIFECYCLE_COMPLETION,
-  RendererLifecycleCompletion } from "./renderer-lifecycle-completion.mjs";
+  RendererLifecycleCompletion } from "./renderer-lifecycle-completion.ts";
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
 
@@ -351,6 +351,13 @@ function App() {
     };
   });
   const session = sessionStore.session;
+  useEffect(() => {
+    rendererLifecycleCompletion.setSessionSource({
+      getPendingWorkCount: session.getPendingWorkCount,
+      subscribe: session.subscribeWork,
+    });
+    return () => rendererLifecycleCompletion.setSessionSource(null);
+  }, [session]);
   const sessionSnapshot = useSessionSnapshot(session);
   const opened: Opened | null = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.document : null;
@@ -408,10 +415,7 @@ function App() {
   const [exportError, setExportError] = useState("");
   const journalSummary = sessionSnapshot.discovery ?? { total: 0,
     pendingPublications: 0 };
-  const [externalOpenRequest, setExternalOpenRequest] =
-    useState<ExternalOpenRequest | null>(null);
-  const [queuedExternalOpenRequest, setQueuedExternalOpenRequest] =
-    useState<ExternalOpenRequest | null>(null);
+  const externalOpen = sessionSnapshot.externalOpen;
   const [dialog, setDialog] = useState<DialogName>(null);
   const [creating, setCreating] = useState(false);
   const [openError, setOpenError] = useState("");
@@ -434,8 +438,8 @@ function App() {
   const [temporaryPasswordDraft, setTemporaryPasswordDraft] = useState("");
   const [claimPasswordDraft, setClaimPasswordDraft] = useState("");
   const [claimConfirmationDraft, setClaimConfirmationDraft] = useState("");
-  const [protection, setProtection] = useState<ProtectionRequest | null>(null);
-  const [protectionError, setProtectionError] = useState("");
+  const protection = sessionSnapshot.attention?.kind === "lifecycle-protection"
+    ? sessionSnapshot.attention : null;
   const editor = useRef<HTMLTextAreaElement>(null);
   const wasModalBusy = useRef(false);
   const replacementFocusPending = useRef(false);
@@ -501,14 +505,14 @@ function App() {
       }
     });
     const stopExternalOpen = window.scpefe.onExternalOpenRequested((request) => {
+      if (!session.queueExternalOpen(request)) return;
       const current = session.getSnapshot();
       if (modalBusy.current || (current.kind === "read-only" || current.kind === "edit")
         && current.publication.resolving) {
-        setQueuedExternalOpenRequest(request);
         setMessage("Another open request is waiting for the current dialog.");
       } else {
         dialogReturnFocus.current = document.activeElement as HTMLElement | null;
-        setExternalOpenRequest(request); setDialog("open");
+        session.activateExternalOpen(); setDialog("open");
         setMessage("Another open request is waiting. Enter its document password to continue.");
       }
     });
@@ -520,7 +524,7 @@ function App() {
     });
     const stopProtection = window.scpefe.onProtectionRequested?.((request) => {
       dialogReturnFocus.current = document.activeElement as HTMLElement | null;
-      setProtectionError(""); setProtection(request);
+      session.stageProtection(request);
     }) ?? (() => {});
     const stopClosed = window.scpefe.onDocumentClosed?.(() => {
       showLockedResult({ locked: true, journalSaved: true, warningCode: null }, true);
@@ -537,15 +541,15 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    if (!creating && dialog === null && openedDialog === null
-      && !publicationResolving && queuedExternalOpenRequest) {
+    if (!modalBusy.current && !creating && dialog === null && openedDialog === null
+      && !publicationResolving && !externalOpen?.active && externalOpen?.queued) {
       dialogReturnFocus.current = document.activeElement as HTMLElement | null;
-      setExternalOpenRequest(queuedExternalOpenRequest);
-      setQueuedExternalOpenRequest(null);
+      session.activateExternalOpen();
       setDialog("open");
       setMessage("Another open request is waiting. Enter its document password to continue.");
     }
-  }, [creating, dialog, openedDialog, publicationResolving, queuedExternalOpenRequest]);
+  }, [creating, dialog, openedDialog, modalBusy.current, publicationResolving,
+    externalOpen?.active, externalOpen?.queued, session]);
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
     securityPresentationEpoch.current += 1;
@@ -680,29 +684,16 @@ function App() {
       }, true);
     }
     else if (command === "exit") {
-      try { await window.scpefe.exitApplication(); }
-      catch (error) { showError(error); }
+      const outcome = await session.exit();
+      if (outcome.status === "failed") setMessage(catalogText(outcome.code));
     }
   }
 
   async function decideProtection(decision: "cancel" | "save" | "discard") {
     if (!protection) return;
-    try {
-      setProtectionError("");
-      const result = await window.scpefe.resolveProtection(
-        { token: protection.token, decision });
-      if (!result.completed) {
-        setProtection((current) => current && result.retryToken
-          ? { ...current, token: result.retryToken } : current);
-        setProtectionError(catalogText(result.errorCode ?? "LIFECYCLE_FAILED"));
-        return;
-      }
-      setProtection(null);
-      if (decision === "cancel") {
-        setMessage("Action canceled; the current document remains open and usable.");
-      }
-    } catch (error) {
-      setProtectionError(safeRendererErrorMessage(error));
+    const outcome = await session.decideProtection(decision);
+    if (outcome.status === "protection-canceled") {
+      setMessage("Action canceled; the current document remains open and usable.");
     }
   }
 
@@ -811,42 +802,50 @@ function App() {
   }
 
   async function cancelOpen() {
-    try {
-      if (externalOpenRequest) await window.scpefe.cancelExternalOpen(externalOpenRequest);
-      else if (dialog === "open") await window.scpefe.cancelOpenTarget();
-    } catch (error) {
-      setOpenError(safeRendererErrorMessage(error));
-      requestAnimationFrame(() => openPassword.current?.focus());
-      return;
+    if (externalOpen?.active) {
+      const outcome = await session.cancelExternalOpen();
+      if (outcome.status !== "external-canceled") {
+        if (outcome.status === "failed") setOpenError(catalogText(outcome.code));
+        requestAnimationFrame(() => openPassword.current?.focus());
+        return;
+      }
+    } else if (dialog === "open") {
+      try { await window.scpefe.cancelOpenTarget(); }
+      catch (error) {
+        setOpenError(safeRendererErrorMessage(error));
+        requestAnimationFrame(() => openPassword.current?.focus());
+        return;
+      }
     }
-    setExternalOpenRequest(null); setPendingOpenName(""); setOpenError(""); closeDialog();
+    setPendingOpenName(""); setOpenError(""); closeDialog();
   }
 
   async function openExternal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!externalOpenRequest) return;
+    if (!externalOpen?.active) return;
     const data = new FormData(event.currentTarget);
-    try {
-      const result = await window.scpefe.openExternalDocument({
-        ...externalOpenRequest, password: String(data.get("password")),
-      });
-      setExternalOpenRequest(null);
-      if (result) {
-        showReplacementResult(result); setDialog(null);
-        const adopted = session.getSnapshot();
-        if (!result.invitationRequired && openedDialogName(result) === null
-          && (adopted.kind === "read-only" || adopted.kind === "edit")
-          && !sessionAttentionNeedsDialog(adopted.attention?.kind)) {
-          focusEditorAfterDialog();
-        }
-      }
-      else { setDialog(null);
-        setMessage("Open request canceled; the current document remains open."); }
-      session.observeRecoveryDiscovery(await window.scpefe.getUnresolvedJournalSummary());
-    } catch (error) {
-      setOpenError(safeRendererErrorMessage(error));
+    const outcome = await session.openExternal(String(data.get("password")));
+    if (outcome.status === "failed") {
+      setOpenError(catalogText(outcome.code));
       requestAnimationFrame(() => openPassword.current?.focus());
+      return;
     }
+    if (outcome.status === "superseded") return;
+    if (outcome.status === "opened") {
+      const adopted = session.getSnapshot();
+      if (adopted.kind !== "read-only" && adopted.kind !== "edit") return;
+      showReplacementResult(adopted.document, true);
+      setDialog(null);
+      if (openedDialogName(adopted.document) === null
+        && !sessionAttentionNeedsDialog(adopted.attention?.kind)) focusEditorAfterDialog();
+    } else if (outcome.status === "invitation") {
+      setDialog(null);
+      setMessage("Claim the invitation before its document replaces the current session.");
+    } else if (outcome.status === "external-canceled") {
+      setDialog(null);
+      setMessage("Open request canceled; the current document remains open.");
+    }
+    session.observeRecoveryDiscovery(await window.scpefe.getUnresolvedJournalSummary());
   }
 
   async function enterEditMode() {
@@ -1251,15 +1250,11 @@ function App() {
       setInvitationBusy(false);
       setInvitationError("");
       setClaimError("");
-      setExternalOpenRequest(null);
-      setQueuedExternalOpenRequest(null);
       setCreating(false);
       setDialog(null);
       setDecisionError("");
       setOpenedDialogError("");
       setConfirmDivergenceDiscard(false);
-      setProtection(null);
-      setProtectionError("");
       setMessage(result.warningCode ? catalogText(result.warningCode)
         : "Document locked. Use Security → Unlock to continue.");
     });
@@ -1582,12 +1577,14 @@ function App() {
       rendererLifecycleCompletion.track(async () => {
         await window.scpefe.cancelCreateTarget(); setCreating(false);
       })} onCreate={(request: object) => rendererLifecycleCompletion.track(async () => {
-      const result = await window.scpefe.createDocument(request);
-      if (result) {
-        showOpenedResult({ ...result.opened, targetName: result.name });
+      const outcome = await session.create(request);
+      if (outcome.status === "created") {
+        const current = session.getSnapshot();
+        if (current.kind !== "read-only" && current.kind !== "edit") return;
+        showOpenedResult(current.document, true);
         setCreating(false); setMessage("Encrypted blank document published successfully.");
         focusEditorAfterDialog();
-      }
+      } else if (outcome.status === "failed") throw new Error(catalogText(outcome.code));
     })} />}
     {dialog === "profile" && <FocusedDialog returnFocus={dialogReturnFocus.current}
       title={profile ? "Profile" : "Set up this client"}
@@ -1618,12 +1615,12 @@ function App() {
     {(dialog === "open" || dialog === "unlock") && <FocusedDialog
       returnFocus={dialogReturnFocus.current}
       title={dialog === "unlock" ? "Unlock document"
-        : externalOpenRequest ? "Open requested document" : "Open document"}
+        : externalOpen?.active ? "Open requested document" : "Open document"}
       close={() => { void rendererLifecycleCompletion.track(cancelOpen); }}
       initialFocus={openPassword}>
       {pendingOpenName && <p>Selected target: <strong>{pendingOpenName}</strong></p>}
       <form onSubmit={(event) => { void rendererLifecycleCompletion.track(() =>
-        (externalOpenRequest ? openExternal : open)(event)); }}><label>Password
+        (externalOpen?.active ? openExternal : open)(event)); }}><label>Password
         <input ref={openPassword} name="password" type="password" required
           aria-describedby={openError ? "open-password-error" : undefined} /></label>
         {openError && <p id="open-password-error" className="dialog-error" role="alert">
@@ -1850,17 +1847,18 @@ function App() {
         </ul>
         <p>Cancel keeps this document open. Save retries or seals recoverable work. Discard is permanent where policy permits it.</p>
       </div>
-      {protectionError && <p className="dialog-error" role="alert">{protectionError}</p>}
+      {protection.failureCode && <p className="dialog-error" role="alert">
+        {catalogText(protection.failureCode)}</p>}
       <div className="dialog-actions"><button ref={(node) => {
-        if (node && !protectionError) node.focus();
+        if (node && !protection.failureCode) node.focus();
       }}
-        onClick={() => void rendererLifecycleCompletion.track(() =>
+        disabled={protection.resolving} onClick={() => void rendererLifecycleCompletion.track(() =>
           decideProtection("cancel"))}>Keep current document open</button>
-        <button onClick={() => void rendererLifecycleCompletion.track(() =>
+        <button disabled={protection.resolving} onClick={() => void rendererLifecycleCompletion.track(() =>
           decideProtection("save"))}>
           {protection.state.pendingPublication ? "Retry publication and continue"
             : "Manual save and continue"}</button>
-        <button onClick={() => void rendererLifecycleCompletion.track(() =>
+        <button disabled={protection.resolving} onClick={() => void rendererLifecycleCompletion.track(() =>
           decideProtection("discard"))}>Discard and continue</button>
       </div>
     </FocusedDialog>}

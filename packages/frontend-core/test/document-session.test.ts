@@ -115,6 +115,19 @@ class Host implements DocumentSessionHost<OpenedDocument> {
     return { locked: true, journalSaved: true, warningCode: null };
   }
   async closeDocument(): Promise<boolean> { return true; }
+  async createDocument(_request: object): Promise<{ created: true; opened: OpenedDocument;
+    name: string } | null> {
+    return { created: true, opened: opened("created", false), name: "new.scpefe" };
+  }
+  async exitApplication(): Promise<boolean> { return true; }
+  async openExternalDocument(_request: { token: string; password: string }):
+    Promise<OpenedDocument | SessionInvitation | null> { return opened("external"); }
+  async cancelExternalOpen(_request: { token: string }): Promise<boolean> { return true; }
+  async resolveProtection(_request: { token: string; decision: "cancel" | "save"
+    | "discard" }): Promise<{ completed: boolean; proceed: boolean;
+      retryToken?: string; errorCode?: string }> {
+    return { completed: true, proceed: false };
+  }
   async enterEditMode(request: { authorization?: string } = {}): Promise<OpenedDocument
     | { decisionRequired: "lease-takeover"; operation: "edit";
       holderName: string; authorization: string }> {
@@ -1577,5 +1590,229 @@ test("compaction cancellation and failure retain a live retry; lock rejects a la
   state = session.getSnapshot();
   if (state.kind !== "read-only") throw new Error("replacement expected");
   assert.equal(state.document.content, "replacement");
+  session.dispose();
+});
+
+test("external open requests stay ordered and replace only after host authorization", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("current"));
+  assert.equal(session.queueExternalOpen({ token: "request-a" }), true);
+  assert.equal(session.queueExternalOpen({ token: "request-b" }), true);
+  assert.equal(session.queueExternalOpen({ token: "request-a" }), false);
+  let state = session.getSnapshot();
+  assert.equal(state.externalOpen?.queued, 2);
+  assert.equal(JSON.stringify(state).includes("request-a"), false);
+  assert.equal(session.activateExternalOpen(), true);
+  state = session.getSnapshot();
+  assert.equal(state.externalOpen?.active, true);
+  assert.equal(state.externalOpen?.queued, 1);
+  host.openExternalDocument = async () => { throw new Error("private candidate path"); };
+  assert.deepEqual(await session.openExternal("wrong password"), { status: "failed",
+    code: "OPERATION_FAILED" });
+  state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("current document expected");
+  assert.equal(state.document.content, "current");
+  assert.equal(state.externalOpen?.active, true, "failed authentication stays retryable");
+  host.openExternalDocument = async () => opened("replacement");
+  assert.deepEqual(await session.openExternal("correct password"), { status: "opened" });
+  state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("replacement expected");
+  assert.equal(state.document.content, "replacement");
+  assert.equal(state.externalOpen?.queued, 1);
+  assert.equal(session.activateExternalOpen(), true);
+  assert.deepEqual(await session.cancelExternalOpen(), { status: "external-canceled" });
+  state = session.getSnapshot();
+  assert.equal(state.externalOpen, undefined);
+  session.dispose();
+});
+
+test("lock and replacement defeat a late external-open result", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("current"));
+  session.queueExternalOpen({ token: "request-a" });
+  session.activateExternalOpen();
+  let finish!: (value: OpenedDocument) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.openExternalDocument = () => new Promise((resolve) => { finish = resolve; started(); });
+  const pending = session.openExternal("password");
+  await active;
+  session.lockStarted();
+  session.adopt(opened("new current"));
+  finish(opened("late external"));
+  assert.equal((await pending).status, "superseded");
+  const state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("new current expected");
+  assert.equal(state.document.content, "new current");
+  assert.equal(state.externalOpen, undefined);
+  session.dispose();
+});
+
+test("protection attention derives current work and resolves inside an in-flight open", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("current", false));
+  session.edit("unsaved current");
+  let rejectOpen!: (reason: Error) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.openSelectedDocument = () => new Promise((_resolve, reject) => {
+    rejectOpen = reject; started();
+  });
+  const opening = session.openSelected("candidate password");
+  await active;
+  assert.equal(session.stageProtection({ token: "private-token", operation: "open",
+    state: { dirty: false, provisional: false, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false } }), true);
+  let state = session.getSnapshot();
+  if (state.kind !== "edit") throw new Error("current edit session expected");
+  assert.equal(state.attention?.kind, "lifecycle-protection");
+  if (state.attention?.kind !== "lifecycle-protection") throw new Error("attention expected");
+  assert.equal(state.attention.state.dirty, true);
+  assert.equal(JSON.stringify(state).includes("private-token"), false);
+  const decisions: string[] = [];
+  host.resolveProtection = async ({ token, decision }) => {
+    decisions.push(`${token}:${decision}`);
+    if (decision === "cancel") rejectOpen(new Error("candidate canceled"));
+    return decision === "save" ? { completed: false, proceed: false,
+      retryToken: "fresh-token", errorCode: "LIFECYCLE_FAILED" }
+      : { completed: true, proceed: false };
+  };
+  assert.deepEqual(await session.decideProtection("save"), { status: "failed",
+    code: "LIFECYCLE_FAILED" });
+  state = session.getSnapshot();
+  if (state.kind !== "edit" || state.attention?.kind !== "lifecycle-protection") {
+    throw new Error("retryable protection expected");
+  }
+  assert.equal(state.attention.failureCode, "LIFECYCLE_FAILED");
+  assert.deepEqual(await session.decideProtection("cancel"),
+    { status: "protection-canceled" });
+  assert.deepEqual(decisions, ["private-token:save", "fresh-token:cancel"]);
+  assert.equal((await opening).status, "failed");
+  state = session.getSnapshot();
+  if (state.kind !== "edit") throw new Error("current edit session expected");
+  assert.equal(state.working.text, "unsaved current");
+  session.dispose();
+});
+
+test("native window termination can stage protection without a renderer exit command", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("current", false));
+  session.edit("dirty current");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(session.stageProtection({ token: "native-window-token", operation: "exit",
+    state: { dirty: false, provisional: false, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false } }), true);
+  const state = session.getSnapshot();
+  assert.equal(state.attention?.kind, "lifecycle-protection");
+  assert.equal(session.getPendingWorkCount(), 0,
+    "a waiting human choice is quiescent until it starts an asynchronous decision");
+  assert.equal((await session.decideProtection("cancel")).status, "protection-canceled");
+  assert.equal(session.getPendingWorkCount(), 0);
+  session.dispose();
+});
+
+test("create and exit wait behind the session barrier and protect the current adoption", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("current", false));
+  let finish!: (result: { created: true; opened: OpenedDocument; name: string } | null) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.createDocument = () => new Promise((resolve) => { finish = resolve; started(); });
+  const creating = session.create({ password: "private password" });
+  await active;
+  let state = session.getSnapshot();
+  assert.equal(state.pending, "create");
+  assert.equal(session.stageProtection({ token: "create-token", operation: "new",
+    state: { dirty: false, provisional: false, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false } }), true);
+  host.resolveProtection = async () => {
+    queueMicrotask(() => finish({ created: true,
+      opened: opened("new document", false), name: "new.scpefe" }));
+    return { completed: true, proceed: true };
+  };
+  assert.equal((await session.decideProtection("discard")).status, "protection-resolved");
+  assert.deepEqual(await creating, { status: "created" });
+  state = session.getSnapshot();
+  if (state.kind !== "edit") throw new Error("created document expected");
+  assert.equal(state.document.content, "new document");
+  assert.equal(state.targetName, "new.scpefe");
+  host.exitApplication = async () => false;
+  assert.equal((await session.exit()).status, "pending");
+  assert.equal(session.getSnapshot().kind, "edit");
+  host.exitApplication = async () => true;
+  assert.equal((await session.exit()).status, "pending");
+  assert.equal(session.getSnapshot().kind, "edit");
+  session.closed();
+  assert.equal(session.getSnapshot().kind, "closed");
+  session.dispose();
+});
+
+test("lock-start defeats a late create result", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("current"));
+  let finish!: (result: { created: true; opened: OpenedDocument; name: string } | null) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.createDocument = () => new Promise((resolve) => { finish = resolve; started(); });
+  const creating = session.create({ password: "private password" });
+  await active;
+  session.lockStarted();
+  finish({ created: true, opened: opened("late document"), name: "late.scpefe" });
+  assert.equal((await creating).status, "superseded");
+  assert.equal(session.getSnapshot().kind, "locked");
+  session.dispose();
+});
+
+test("a newer adoption defeats late external, create, and close completions", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("original"));
+  let finishExternal!: (result: OpenedDocument) => void;
+  let started!: () => void;
+  let active = new Promise<void>((resolve) => { started = resolve; });
+  host.openExternalDocument = () => new Promise((resolve) => {
+    finishExternal = resolve; started();
+  });
+  session.queueExternalOpen({ token: "request" });
+  session.activateExternalOpen();
+  const external = session.openExternal("password");
+  await active;
+  session.adopt(opened("newer"));
+  finishExternal(opened("stale external"));
+  assert.equal((await external).status, "superseded");
+  let state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("newer adoption expected");
+  assert.equal(state.document.content, "newer");
+
+  let finishCreate!: (result: { created: true; opened: OpenedDocument; name: string }) => void;
+  active = new Promise<void>((resolve) => { started = resolve; });
+  host.createDocument = () => new Promise((resolve) => { finishCreate = resolve; started(); });
+  const creation = session.create({});
+  await active;
+  session.adopt(opened("newest"));
+  finishCreate({ created: true, opened: opened("stale create"), name: "old.scpefe" });
+  assert.equal((await creation).status, "superseded");
+
+  let finishClose!: (result: boolean) => void;
+  active = new Promise<void>((resolve) => { started = resolve; });
+  host.closeDocument = () => new Promise((resolve) => { finishClose = resolve; started(); });
+  const closing = session.close();
+  await active;
+  session.adopt(opened("latest"));
+  finishClose(true);
+  assert.equal((await closing).status, "superseded");
+  state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("latest adoption expected");
+  assert.equal(state.document.content, "latest");
   session.dispose();
 });
