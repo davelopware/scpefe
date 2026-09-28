@@ -6,7 +6,7 @@ import { SharedApp, type SessionHost, type JournalTransportHost,
 import { CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
-  proposedPasswordRejectionMessage } from "./password-policy.mjs";
+  proposedPasswordRejectionMessage, type PasswordPolicyHost } from "./password-policy.ts";
 import { RENDERER_LIFECYCLE_COMPLETION,
   RendererLifecycleCompletion } from "./renderer-lifecycle-completion.ts";
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -14,7 +14,7 @@ import "./styles.css";
 
 type WindowsFrontendHost = SessionHost & JournalTransportHost & SessionEventsHost
   & ShellHost & CreationTargetHost & SecurityClipboardHost
-  & Required<Pick<SessionHost, "createDocument">>;
+  & PasswordPolicyHost & Required<Pick<SessionHost, "createDocument">>;
 
 declare global { interface Window { scpefe: WindowsFrontendHost } }
 

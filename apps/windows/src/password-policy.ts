@@ -3,64 +3,95 @@ import { validatePassword } from "./contracts.mjs";
 
 const h = React.createElement;
 
+export type ProposedPasswordOutcome =
+  | Readonly<{ status: "empty" | "unavailable" }>
+  | Readonly<{ status: "rejected"; reason: "invalid" | "minimum-length" |
+      "maximum-size" | "predictable" }>
+  | Readonly<{ status: "accepted"; password: string }>;
+
+export interface PasswordPolicyHost {
+  assessPasswordPolicy(password: string): Promise<unknown>;
+}
+
+interface PasswordPolicyStatusProps {
+  id: string;
+  password: string;
+  confirmation?: string;
+  optionalBlankGenerates?: boolean;
+  comparePassword?: string;
+  compareMessage?: string;
+}
+
 export const PASSWORD_REQUIREMENTS = "Use a sufficiently long passphrase resistant to guessing. Canonical UUIDv4 values are allowed; obtain UUIDs from a trusted random generator.";
 
-const outcome = (status, details = {}) => Object.freeze({ status, ...details });
+const outcome = <T extends ProposedPasswordOutcome>(result: T): Readonly<T> =>
+  Object.freeze(result);
 
 /* Returns the canonical proposed password and the authoritative native policy outcome. */
-export async function assessProposedPassword(password) {
+export async function assessProposedPassword(password: string): Promise<ProposedPasswordOutcome> {
   if (typeof password !== "string") {
-    return outcome("rejected", { reason: "invalid" });
+    return outcome({ status: "rejected", reason: "invalid" });
   }
-  if (!password.trim()) return outcome("empty");
+  if (!password.trim()) return outcome({ status: "empty" });
   let canonicalPassword;
   try {
     canonicalPassword = validatePassword(password);
   } catch {
-    return outcome("rejected", { reason: "maximum-size" });
+    return outcome({ status: "rejected", reason: "maximum-size" });
   }
   const assess = window.scpefe?.assessPasswordPolicy;
-  if (!assess) return outcome("unavailable");
+  if (!assess) return outcome({ status: "unavailable" });
   try {
     const nativeAssessment = await assess(canonicalPassword);
     if (nativeAssessment === "accepted") {
-      return outcome("accepted", { password: canonicalPassword });
+      return outcome({ status: "accepted", password: canonicalPassword });
     }
-    if (["minimum-length", "predictable", "invalid"].includes(nativeAssessment)) {
-      return outcome("rejected", { reason: nativeAssessment });
+    if (nativeAssessment === "minimum-length" || nativeAssessment === "predictable"
+        || nativeAssessment === "invalid") {
+      return outcome({ status: "rejected", reason: nativeAssessment });
     }
-    return outcome("unavailable");
+    return outcome({ status: "unavailable" });
   } catch {
-    return outcome("unavailable");
+    return outcome({ status: "unavailable" });
   }
 }
 
 /* Gives a field-specific safe explanation for a rejected proposed password. */
-export function proposedPasswordRejectionMessage(result, label = "Password") {
+export function proposedPasswordRejectionMessage(
+  result: ProposedPasswordOutcome, label = "Password"): string {
   if (result.status === "empty") return `${label} is required.`;
   if (result.status === "unavailable") {
     return `${label} requirements could not be checked. Try again.`;
   }
-  if (result.reason === "minimum-length") return `${label} is too short. Add more characters.`;
-  if (result.reason === "maximum-size") return `${label} is too long.`;
-  if (result.reason === "invalid") return `${label} is invalid.`;
+  if (result.status === "rejected" && result.reason === "minimum-length") {
+    return `${label} is too short. Add more characters.`;
+  }
+  if (result.status === "rejected" && result.reason === "maximum-size") {
+    return `${label} is too long.`;
+  }
+  if (result.status === "rejected" && result.reason === "invalid") {
+    return `${label} is invalid.`;
+  }
   return `${label} is too predictable. Choose a passphrase that is harder to guess.`;
 }
 
 /* Reports the shared native password policy and workflow-specific comparison result. */
 export function PasswordPolicyStatus({ id, password = "", confirmation,
-  optionalBlankGenerates = false, comparePassword = "", compareMessage = "" }) {
-  const [assessment, setAssessment] = useState(() => outcome("empty"));
+  optionalBlankGenerates = false, comparePassword = "", compareMessage = "" }:
+  PasswordPolicyStatusProps): React.ReactElement {
+  const [assessment, setAssessment] = useState<ProposedPasswordOutcome>(
+    () => outcome({ status: "empty" }));
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     let current = true;
     if (!password.trim()) {
-      setAssessment(outcome("empty")); setChecking(false);
+      setAssessment(outcome({ status: "empty" })); setChecking(false);
       return () => { current = false; };
     }
     setChecking(true);
     const timer = setTimeout(() => {
+      if (!current) return;
       void assessProposedPassword(password).then((result) => {
         if (current) { setAssessment(result); setChecking(false); }
       });
