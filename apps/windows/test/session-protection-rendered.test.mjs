@@ -32,6 +32,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
 
   const listeners = {}; const decisions = []; let failedSave = true; let failedDiscard = true;
   let directSaveFailure = false;
+  let delaySave = false; let releaseSave = null;
   let stopped = 0;
   let protectedNumber = 0; let pendingHost = null; let openCalls = 0;
   const listen = (name, listener) => { listeners[name] = listener;
@@ -80,6 +81,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     cancelExternalOpen: async () => true,
     enterEditMode: async () => opened, updateWorkingCopy: async () => ({}),
     saveDocument: async (content) => {
+      if (delaySave) await new Promise((resolve) => { releaseSave = resolve; });
       if (directSaveFailure) throw new Error(
         "native failure at C:\\Users\\Ada\\Documents\\private-note.scpefe:42:9");
       return { saved: true, content, publicationState: "target-published" };
@@ -292,6 +294,30 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
       assert.equal(editor.value, "unsaved plaintext");
     });
 
+  await t.test("native Exit protection remains usable while manual save is in flight",
+    async () => {
+      delaySave = true;
+      await fileCommand(/Save/);
+      await ui.waitFor(() => assert.equal(typeof releaseSave, "function"));
+      try {
+        listeners.protection({ token: "70000000-0000-4000-8000-000000000000",
+          operation: "exit", state: states.exit });
+        const exitDialog = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
+        assert.equal(editor.value, "", "native protection masks text during the pending save");
+        await user.click(ui.getByRole(exitDialog, "button",
+          { name: "Keep current document open" }));
+        await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+        assert.equal(window[Symbol.for("scpefe.renderer.lifecycle-completion")].pendingCount > 0,
+          true, "canceling native Exit preserves the in-flight save");
+      } finally {
+        delaySave = false;
+        releaseSave?.(); releaseSave = null;
+      }
+      await ui.waitFor(() => assert.equal(
+        window[Symbol.for("scpefe.renderer.lifecycle-completion")].pendingCount, 0));
+      assert.equal(editor.value, "unsaved plaintext");
+    });
+
   editor.focus(); await user.keyboard("{Control>}f{/Control}");
   find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
   listeners.retained({ ...opened, recovery: { content: "recovered private plaintext",
@@ -319,7 +345,7 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   await ui.waitFor(() => assert.equal(
     ui.getByRole(document.body, "note").textContent.includes("No document"), true));
   assert.equal(editor.value, "");
-  assert.equal(decisions.length, 12);
+  assert.equal(decisions.length, 13);
   mountedRoot.unmount(); mountedRoot = null; await Promise.resolve();
   assert.equal(document.getElementById("root").childElementCount, 0);
   assert.equal(stopped, 8); assert.equal(frames.size, 0);

@@ -1533,7 +1533,7 @@ export class DocumentSession<Doc extends SessionDocument,
     return true;
   }
 
-  /** Adopts only a challenge for the operation currently waiting on the host barrier. */
+  /** Adopts the active command's challenge or a native Exit challenge for this open session. */
   stageProtection(request: SessionProtectionRequest): boolean {
     const expected: Record<SessionProtectionRequest["operation"], SessionPendingOperation> = {
       new: "create", open: "open", "external-open": "external-open",
@@ -1543,7 +1543,8 @@ export class DocumentSession<Doc extends SessionDocument,
       || request.token.length === 0 || !request.state
       || !Object.hasOwn(expected, request.operation)
       || (this.snapshot.pending !== expected[request.operation]
-        && !(request.operation === "exit" && this.snapshot.pending === undefined))
+        && !(request.operation === "exit" && (this.snapshot.kind === "read-only"
+          || this.snapshot.kind === "edit")))
       || !["dirty", "provisional", "pendingPublication", "recovered", "conflict",
         "unresolvedJournal", "activePublication"].every((key) =>
         typeof request.state[key as keyof SessionProtectionState] === "boolean")) return false;

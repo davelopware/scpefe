@@ -1718,6 +1718,49 @@ test("native window termination can stage protection without a renderer exit com
   session.dispose();
 });
 
+test("native Exit challenge remains actionable during an unrelated in-flight save", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("original", false));
+  session.edit("work to save");
+  let finishSave!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  let started!: () => void;
+  const active = new Promise<void>((resolve) => { started = resolve; });
+  host.saveDocument = () => new Promise((resolve) => { finishSave = resolve; started(); });
+  const saving = session.save();
+  await active;
+  assert.equal(session.getSnapshot().pending, "save");
+  assert.equal(session.stageProtection({ token: "native-exit-during-save",
+    operation: "exit", state: { dirty: true, provisional: false,
+      pendingPublication: false, recovered: false, conflict: false,
+      unresolvedJournal: false, activePublication: true } }), true);
+  let state = session.getSnapshot();
+  if (state.kind !== "edit" || state.attention?.kind !== "lifecycle-protection") {
+    throw new Error("native Exit protection expected over pending save");
+  }
+  assert.equal(state.pending, "save", "staging a native challenge retains the save");
+  assert.equal(state.attention.state.activePublication, true);
+  assert.equal(JSON.stringify(state).includes("native-exit-during-save"), false);
+  const decisions: string[] = [];
+  host.resolveProtection = async ({ token, decision }) => {
+    decisions.push(`${token}:${decision}`);
+    return { completed: true, proceed: false };
+  };
+  assert.equal((await session.decideProtection("cancel")).status, "protection-canceled");
+  assert.deepEqual(decisions, ["native-exit-during-save:cancel"]);
+  state = session.getSnapshot();
+  assert.equal(state.pending, "save", "canceling Exit does not cancel the save");
+  finishSave({ saved: true, content: "work to save",
+    publicationState: "target-published" });
+  assert.deepEqual(await saving, { status: "saved", publicationState: "target-published" });
+  state = session.getSnapshot();
+  if (state.kind !== "edit") throw new Error("saved current document expected");
+  assert.equal(state.attention?.kind === "lifecycle-protection", false);
+  assert.equal(state.working.text, "work to save");
+  session.dispose();
+});
+
 test("create and exit wait behind the session barrier and protect the current adoption", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
