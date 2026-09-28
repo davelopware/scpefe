@@ -539,7 +539,9 @@ test("authenticated switch discard removes only the active unreadable journal", 
         revisionGraph: [{ revisionId: baseRevision, parentRevisionIds: [] }],
         journalKey: Buffer.alloc(32, 0x94), manuallySealed: true };
     } }) });
-  await service.openDocument(target, "owner password words");
+  const opened = await service.openDocument(target, "owner password words");
+  assert.equal(opened.unreadableJournal, true);
+  assert.equal(opened.canEdit, false);
   assert.equal(service.active.unreadableJournal, true);
   assert.equal(warnings.at(-1), "RECOVERY_READ_FAILED");
   await assert.rejects(service.discardUnreadableJournalForSwitch("discard"),
@@ -553,6 +555,8 @@ test("authenticated switch discard removes only the active unreadable journal", 
   assert.equal(await fs.readFile(otherJournal, "utf8"),
     "another document's recovery data");
   assert.equal(service.active.unresolvedJournal, false);
+  assert.equal(service.active.opened.unreadableJournal, undefined);
+  assert.equal(service.active.opened.canEdit, true);
 });
 
 test("older containers remain read-only until verified-backup migration", async (t) => {
