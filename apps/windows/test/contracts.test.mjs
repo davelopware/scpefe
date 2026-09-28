@@ -248,14 +248,33 @@ test("backup results expose success without a host filesystem path", () => {
 });
 
 test("compaction results bind the verified backup and continuity heads", () => {
+  const opened = { content: "current", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
   assert.deepEqual(validateCompactionResult({ compacted: true, backupCreated: true,
-    previousHead: "12".repeat(32), head: "34".repeat(32) }), {
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened }), {
     compacted: true, backupCreated: true,
-    previousHead: "12".repeat(32), head: "34".repeat(32),
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened,
   });
   assert.throws(() => validateCompactionResult({ compacted: true,
-    backupCreated: false, previousHead: "12".repeat(32), head: "34".repeat(32) }),
+    backupCreated: false, previousHead: "12".repeat(32), head: "34".repeat(32),
+    opened }),
   /invalid compaction result/);
+  assert.throws(() => validateCompactionResult({ compacted: true,
+    backupCreated: true, previousHead: "12".repeat(32), head: "34".repeat(32) }),
+  /invalid compaction result/);
+});
+
+test("legacy migration permission is projected independently of blocked edit mode", () => {
+  const base = { content: "legacy", readOnly: true, canEdit: false,
+    publicationState: "target-published", migrationRequired: true };
+  assert.equal(validateOpenedDocument({ ...base,
+    migrationCanEdit: false }).migrationCanEdit, false);
+  assert.equal(validateOpenedDocument({ ...base,
+    migrationCanEdit: true }).migrationCanEdit, true);
+  assert.throws(() => validateOpenedDocument({ ...base,
+    migrationCanEdit: "yes" }), /migration permission/);
+  assert.throws(() => validateOpenedDocument({ content: "current", readOnly: true,
+    canEdit: true, migrationCanEdit: true }), /migration permission/);
 });
 
 test("plaintext export contracts expose only canonical text and line-ending choice", () => {

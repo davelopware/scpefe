@@ -438,7 +438,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
 
     await command("Security", "Lock");
     openResult = { ...readOnly, readOnly: true, canEdit: false,
-      migrationRequired: true,
+      migrationRequired: true, migrationCanEdit: true,
       migrationWarning: "This older container requires a verified backup before migration." };
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });

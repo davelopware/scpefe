@@ -184,7 +184,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:cancel-create-target",
   });
   compactionResult = { compacted: true, backupCreated: true,
-    previousHead: "12".repeat(32), head: "34".repeat(32) };
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened: editOpened };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument(
     { confirmed: true }))),
     compactionResult);
@@ -192,7 +192,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:compact", request: { confirmed: true },
   });
   compactionResult = { compacted: true, backupCreated: false,
-    previousHead: "12".repeat(32), head: "34".repeat(32) };
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened: editOpened };
   await assert.rejects(exposed.compactDocument({ confirmed: true }),
     /invalid compaction result/);
   assert.equal((await exposed.enterEditMode()).readOnly, false);
