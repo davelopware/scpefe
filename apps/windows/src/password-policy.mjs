@@ -61,6 +61,7 @@ export function PasswordPolicyStatus({ id, password = "", confirmation,
     }
     setChecking(true);
     const timer = setTimeout(() => {
+      if (!current) return;
       void assessProposedPassword(password).then((result) => {
         if (current) { setAssessment(result); setChecking(false); }
       });
