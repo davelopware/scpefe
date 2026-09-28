@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const windowsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(windowsRoot, "../..");
@@ -38,8 +38,10 @@ if (tests.length === 0) {
   throw new Error("No frontend TypeScript tests were found.");
 }
 
+const loader = pathToFileURL(path.join(
+  windowsRoot, "scripts/register-frontend-typescript.mjs")).href;
 const result = spawnSync(process.execPath,
-  ["--import", path.join(windowsRoot, "scripts/register-frontend-typescript.mjs"),
+  ["--import", loader,
     "--test", "--test-concurrency=1", ...tests],
   { cwd: windowsRoot, stdio: "inherit" });
 if (result.error) throw result.error;
