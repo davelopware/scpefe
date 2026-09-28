@@ -219,7 +219,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     "aria-describedby": "creation-security-warning", "aria-busy": submitting },
   h("h2", { id: "creation-security-title" }, "Secure new document"),
   h("p", { id: "creation-security-warning", className: "warning" },
-    "There is no account reset: without a valid owner or recovery password, the document is permanently irrecoverable."),
+    "Lost passwords cannot be recovered. Without a valid owner or recovery password, the document is permanently irrecoverable."),
   h("form", { onSubmit: submit, noValidate: true },
     h(PasswordConfirmationFields, { kind: "owner", label: "Owner password",
       confirmationLabel: "Confirm owner password", revealed: ownerRevealed,
