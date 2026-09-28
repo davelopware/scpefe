@@ -1,6 +1,8 @@
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { SharedApp, type SharedFrontendHost } from "@scpefe/react-ui";
+import { SharedApp, type SessionHost, type JournalTransportHost,
+  type SessionEventsHost, type ShellHost, type CreationTargetHost,
+  type SecurityClipboardHost } from "@scpefe/react-ui";
 import { CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
@@ -10,14 +12,21 @@ import { RENDERER_LIFECYCLE_COMPLETION,
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
 
-declare global { interface Window { scpefe: SharedFrontendHost } }
+type WindowsFrontendHost = SessionHost & JournalTransportHost & SessionEventsHost
+  & ShellHost & CreationTargetHost & SecurityClipboardHost
+  & Required<Pick<SessionHost, "createDocument">>;
+
+declare global { interface Window { scpefe: WindowsFrontendHost } }
 
 const completion = new RendererLifecycleCompletion();
 
 /** Composes the Windows host and safe platform adapters with the shared React UI. */
 export function mountApp(host: HTMLElement): Root {
   const root = createRoot(host);
-  root.render(<SharedApp host={window.scpefe} completion={completion}
+  root.render(<SharedApp sessionHost={window.scpefe} journalTransport={window.scpefe}
+    events={window.scpefe} shellHost={window.scpefe}
+    creationTargetHost={window.scpefe} securityClipboard={window.scpefe}
+    completion={completion}
     catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
     closeWindow={() => window.close()}
     assessProposedPassword={assessProposedPassword}

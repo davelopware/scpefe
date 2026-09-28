@@ -17,7 +17,8 @@ export type DialogAction = "retry-edit" | "cancel-lease" | "confirm-lease"
   | "discard-recovery" | "restore-recovery" | "discard-unreadable"
   | "discard-publication" | "reconnect-publication" | "compact"
   | "compaction-canceled" | "protection-cancel" | "protection-save"
-  | "protection-discard";
+  | "protection-discard" | "keep-newer-edits" | "export-newer-edits"
+  | "discard-newer-edits";
 
 /** Focus targets used after a host command leaves an attention dialog open. */
 export interface DialogHostHandle {
@@ -26,13 +27,14 @@ export interface DialogHostHandle {
 
 /** Renders every portable session attention as an accessible platform dialog. */
 export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialog,
-  decisionError, openedDialogError, returnFocus, catalogText, onAction, ref }: {
+  decisionError, openedDialogError, confirmDivergenceDiscard, returnFocus, catalogText, onAction, ref }: {
   session: DialogSession;
   visibleOpenedDialog: OpenedDialogName;
   activeDocument: boolean;
   dialog: string | null;
   decisionError: string;
   openedDialogError: string;
+  confirmDivergenceDiscard: boolean;
   returnFocus: HTMLElement | null;
   catalogText(code: string): string;
   onAction(action: DialogAction): void | Promise<void>;
@@ -70,7 +72,19 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
     target.current?.focus();
   } }), []);
   return <>
-    {!protection && <>{editFailure && <FocusedDialog returnFocus={returnFocus}
+    {!protection && <>
+    {confirmDivergenceDiscard && <FocusedDialog returnFocus={returnFocus}
+      title="Discard newer unsaved edits?" close={() => void onAction("keep-newer-edits")}>
+      <p>The working copy has edits made after the locally saved candidate. Starting divergence resolution replaces those edits with a merge draft.</p>
+      <div className="dialog-actions">
+        <button onClick={() => void onAction("keep-newer-edits")}>Keep newer edits</button>
+        <button onClick={() => { void onAction("export-newer-edits"); }}>
+          Export newer edits…</button>
+        <button autoFocus onClick={() => void onAction("discard-newer-edits")}>
+          Discard newer edits and resolve</button>
+      </div>
+    </FocusedDialog>}
+    {editFailure && <FocusedDialog returnFocus={returnFocus}
       title="Editing unavailable" initialFocus={editRetryAction}
       close={() => session.dismissEditFailure()}>
       <div className="warning" role="alert"><p>{editFailure}</p>

@@ -1,4 +1,4 @@
-/** Shared React presentation entry point; rendering modules are added here as migrated. */
+/** Shared React presentation entry point. */
 export type { SnapshotSource } from "@scpefe/frontend-core";
 export { FocusManager } from "./focus-manager.ts";
 export type { FocusDomCapability, FocusKeyEvent, FocusScope,
@@ -8,4 +8,8 @@ export { useModalFocus } from "./use-modal-focus.ts";
 export type { ModalFocusOptions } from "./use-modal-focus.ts";
 export { useSessionSnapshot } from "./use-session-snapshot.ts";
 export { SharedApp } from "./session/session-app.tsx";
-export type { SharedFrontendHost, SharedAppProps } from "./session/session-app.tsx";
+export type { SharedAppProps } from "./session/session-app.tsx";
+export type { SessionHost, JournalTransportHost, SessionEventsHost,
+  SecurityClipboardHost } from "./session/host-roles.ts";
+export type { ShellHost } from "./shell/shell-dialogs.tsx";
+export type { CreationTargetHost } from "./security/creation-flow.tsx";
