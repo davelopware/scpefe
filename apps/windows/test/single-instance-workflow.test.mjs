@@ -205,7 +205,8 @@ test("renderer makes external requests and unresolved journals accessible", asyn
   assert.match(renderer, /role="status" aria-live="polite" aria-atomic="true"/);
   assert.match(renderer, /recovery item/);
   assert.match(renderer, /Open requested document/);
-  assert.match(renderer, /externalOpenRequest \? openExternal : open/);
+  assert.match(renderer, /externalOpen\?\.active \? openExternal : open/);
+  assert.match(renderer, /session\.queueExternalOpen\(request\)/);
 });
 
 test("main registers file and URL lifecycle events before draining staged requests", async () => {

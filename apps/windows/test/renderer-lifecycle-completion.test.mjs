@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RendererLifecycleCompletion } from
-  "../src/renderer-lifecycle-completion.mjs";
+  "../src/renderer-lifecycle-completion.ts";
 import { cleanupMountedLifecycleHarness } from "./mounted-lifecycle-cleanup.mjs";
 
 test("waitForIdle includes work active at the synchronization boundary", async () => {
@@ -34,6 +34,24 @@ test("waitForIdle is bounded when lifecycle work cannot finish", async () => {
   await assert.rejects(completion.waitForIdle({ timeoutMs: 10 }), (error) =>
     error.code === "RENDERER_LIFECYCLE_TIMEOUT"
       && /did not finish within 10 ms/.test(error.message));
+});
+
+test("waitForIdle includes untracked session commands and journal completions", async () => {
+  const completion = new RendererLifecycleCompletion();
+  let pending = 1;
+  const listeners = new Set();
+  completion.setSessionSource({ getPendingWorkCount: () => pending,
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); } });
+  let idle = false;
+  const waiting = completion.waitForIdle({ timeoutMs: 1_000 }).then(() => { idle = true; });
+  await Promise.resolve();
+  assert.equal(idle, false);
+  pending = 0;
+  for (const listener of listeners) listener();
+  await waiting;
+  assert.equal(idle, true);
+  completion.setSessionSource(null);
+  assert.equal(listeners.size, 0);
 });
 
 test("mounted cleanup preserves DOM and files until tracked lifecycle work settles", async () => {

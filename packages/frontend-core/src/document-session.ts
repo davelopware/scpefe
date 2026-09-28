@@ -92,6 +92,44 @@ export interface SessionInvitation {
   readonly targetName?: string;
 }
 
+/** Opaque host-issued request retained until the presentation adapter can open it. */
+export interface SessionExternalOpenRequest {
+  readonly token: string;
+}
+
+/** Secret-free external-open ordering visible in every lifecycle state. */
+export interface SessionExternalOpenSnapshot {
+  readonly active: boolean;
+  readonly queued: number;
+}
+
+/** Host evidence retained privately while frontend state projects protection. */
+export interface SessionProtectionState {
+  readonly dirty: boolean;
+  readonly provisional: boolean;
+  readonly pendingPublication: boolean;
+  readonly recovered: boolean;
+  readonly conflict: boolean;
+  readonly unresolvedJournal: boolean;
+  readonly activePublication: boolean;
+}
+
+/** A host barrier challenge for one replacing or terminating operation. */
+export interface SessionProtectionRequest {
+  readonly token: string;
+  readonly operation: "new" | "open" | "external-open" | "close" | "exit";
+  readonly state: SessionProtectionState;
+}
+
+/** Presentation-safe lifecycle choice derived from the current session. */
+export interface SessionProtectionAttention {
+  readonly kind: "lifecycle-protection";
+  readonly operation: SessionProtectionRequest["operation"];
+  readonly state: SessionProtectionState;
+  readonly resolving: boolean;
+  readonly failureCode?: SessionFailureCode;
+}
+
 /** Host-issued one-shot lease challenge; authorization stays inside the session. */
 export interface SessionLeaseDecision {
   readonly decisionRequired: "lease-takeover";
@@ -181,7 +219,7 @@ export type SessionAttention = SessionLeaseAttention | SessionEditAttention
   | SessionPublicationAttention | SessionSaveAttention | SessionRecoveryAttention
   | SessionHeadAttention | SessionUnreadableJournalAttention
   | SessionRecoveryDiscoveryAttention | SessionMigrationAttention
-  | SessionCompactionAttention;
+  | SessionCompactionAttention | SessionProtectionAttention;
 
 /** A host-produced merge draft for the lease-gated divergence workflow. */
 export interface SessionMergeDraft {
@@ -195,11 +233,21 @@ export interface SessionMergeDraft {
 /** The lifecycle operations delegated to the host without replacing its barriers. */
 export interface DocumentSessionHost<Doc extends SessionDocument,
   Invite extends SessionInvitation = SessionInvitation> {
+  createDocument?(request: object): Promise<{ readonly created: true;
+    readonly opened: Doc; readonly name: string } | null>;
   openSelectedDocument(password: string): Promise<Doc | Invite>;
+  openExternalDocument?(request: SessionExternalOpenRequest & { readonly password: string }):
+    Promise<Doc | Invite | null>;
+  cancelExternalOpen?(request: SessionExternalOpenRequest): Promise<boolean>;
+  resolveProtection?(request: { readonly token: string;
+    readonly decision: "cancel" | "save" | "discard" }): Promise<{
+      readonly completed: boolean; readonly proceed: boolean;
+      readonly retryToken?: string; readonly errorCode?: string }>;
   unlockDocument(password: string): Promise<Doc | Invite>;
   lock(): Promise<{ readonly locked: true; readonly journalSaved: boolean;
     readonly warningCode: string | null }>;
   closeDocument(): Promise<boolean>;
+  exitApplication?(): Promise<boolean>;
   enterEditMode(request?: { readonly authorization?: string }):
     Promise<Doc | SessionLeaseDecision>;
   cancelLeaseTakeover(authorization: string): Promise<boolean>;
@@ -242,6 +290,8 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
 
 /** The active frontend command, without arguments or secrets. */
 export type SessionPendingOperation = "open" | "unlock" | "lock" | "close"
+  | "external-open" | "external-cancel"
+  | "create" | "exit"
   | "edit" | "lease-confirm" | "lease-cancel" | "save"
   | "recovery-restore" | "recovery-discard"
   | "head-accept"
@@ -257,8 +307,9 @@ export interface ClosedSessionSnapshot {
   readonly kind: "closed";
   readonly invitationStaged?: true;
   readonly pending?: SessionPendingOperation;
-  readonly attention?: SessionRecoveryDiscoveryAttention;
+  readonly attention?: SessionRecoveryDiscoveryAttention | SessionProtectionAttention;
   readonly discovery?: SessionRecoveryDiscovery;
+  readonly externalOpen?: SessionExternalOpenSnapshot;
 }
 
 /** A locked target with no reachable document or editing state. */
@@ -268,8 +319,9 @@ export interface LockedSessionSnapshot {
   readonly targetName: string | null;
   readonly pending?: SessionPendingOperation;
   readonly publication: SessionPublicationSnapshot;
-  readonly attention?: SessionRecoveryDiscoveryAttention;
+  readonly attention?: SessionRecoveryDiscoveryAttention | SessionProtectionAttention;
   readonly discovery?: SessionRecoveryDiscovery;
+  readonly externalOpen?: SessionExternalOpenSnapshot;
 }
 
 /** Unlocked viewing state; host edit authority is absent. */
@@ -283,6 +335,7 @@ export interface ReadOnlySessionSnapshot<Doc extends SessionDocument> {
   readonly commands: SessionCommands;
   readonly publication: SessionPublicationSnapshot;
   readonly discovery?: SessionRecoveryDiscovery;
+  readonly externalOpen?: SessionExternalOpenSnapshot;
   readonly attention?: SessionAttention;
   readonly pending?: SessionPendingOperation;
   readonly queued?: "lease-confirm" | "lease-cancel";
@@ -299,6 +352,7 @@ export interface EditSessionSnapshot<Doc extends SessionDocument> {
   readonly commands: SessionCommands;
   readonly publication: SessionPublicationSnapshot;
   readonly discovery?: SessionRecoveryDiscovery;
+  readonly externalOpen?: SessionExternalOpenSnapshot;
   readonly attention?: SessionAttention;
   readonly pending?: SessionPendingOperation;
   readonly queued?: "lease-confirm" | "lease-cancel";
@@ -312,7 +366,7 @@ export type DocumentSessionSnapshot<Doc extends SessionDocument> =
 /** Stable command result that never carries raw host errors or secrets. */
 export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument> =
   | Readonly<{ status: "opened" | "invitation" | "closed" | "pending"
-    | "superseded" | "attention" | "edit-mode" | "unavailable" }>
+    | "superseded" | "attention" | "edit-mode" | "unavailable" | "created" }>
   | Readonly<{ status: "canceled"; revoked: boolean }>
   | Readonly<{ status: "saved"; publicationState: "target-published"
     | "pending-publication" | "conflict" }>
@@ -328,6 +382,8 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
   | Readonly<{ status: "divergence"; hasConflicts: boolean }>
   | Readonly<{ status: "migration"; compatibilityCode: string }>
   | Readonly<{ status: "migration-canceled" | "compaction-canceled" }>
+  | Readonly<{ status: "external-canceled" }>
+  | Readonly<{ status: "protection-canceled" | "protection-resolved" }>
   | Readonly<{ status: "compaction"; previousHead: string; head: string }>
   | Readonly<{ status: "locked"; warningCode: SessionLockWarningCode | null }>
   | Readonly<{ status: "password-changed" | "invitation-created"
@@ -401,6 +457,7 @@ export class DocumentSession<Doc extends SessionDocument,
   private sealedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
   private acceptedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
   private readonly listeners = new Set<() => void>();
+  private readonly workListeners = new Set<() => void>();
   private readonly queuedCommands: QueuedCommand<Doc>[] = [];
   private commandRunning = false;
   private generation = 0;
@@ -408,15 +465,33 @@ export class DocumentSession<Doc extends SessionDocument,
   private invitationStaged = false;
   private invitationEpoch = 0;
   private disposed = false;
+  private readonly externalOpenQueue: SessionExternalOpenRequest[] = [];
+  private activeExternalOpen: SessionExternalOpenRequest | null = null;
+  private protectionRequest: { token: string;
+    operation: SessionProtectionRequest["operation"]; state: SessionProtectionState;
+    generation: number; resolving: boolean; failureCode: SessionFailureCode | null } | null = null;
 
   constructor(private readonly host: DocumentSessionHost<Doc, Invite>,
     private readonly journalHost: WorkingCopyJournalHost) {}
 
   getSnapshot = (): DocumentSessionSnapshot<Doc> => this.snapshot;
 
+  /** Host teardown waits for commands and current-journal writes that can still settle. */
+  getPendingWorkCount = (): number => {
+    const current = this.snapshot;
+    const journal = current.kind === "read-only" || current.kind === "edit"
+      ? current.working.journal.pending : 0;
+    return this.queuedCommands.length + Number(this.commandRunning) + journal;
+  };
+
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  };
+
+  subscribeWork = (listener: () => void): (() => void) => {
+    this.workListeners.add(listener);
+    return () => { this.workListeners.delete(listener); };
   };
 
   /** Updates safe recovery discovery shared by all presentation adapters. */
@@ -459,6 +534,8 @@ export class DocumentSession<Doc extends SessionDocument,
       return Object.freeze({ status: "invitation" });
     }
     this.invitationStaged = false;
+    this.protectionRequest = null;
+    this.activeExternalOpen = null;
     this.invitationEpoch += 1;
     const document = frozenCopy(result as Doc);
     const targetName = document.targetName ?? (this.snapshot.kind === "closed"
@@ -1446,10 +1523,196 @@ export class DocumentSession<Doc extends SessionDocument,
     return true;
   }
 
+  /** Retains each host request until modal attention permits presentation. */
+  queueExternalOpen(request: SessionExternalOpenRequest): boolean {
+    if (this.disposed || typeof request.token !== "string" || request.token.length === 0
+      || this.activeExternalOpen?.token === request.token
+      || this.externalOpenQueue.some((item) => item.token === request.token)) return false;
+    this.externalOpenQueue.push(Object.freeze({ token: request.token }));
+    this.publishExternalOpen();
+    return true;
+  }
+
+  /** Adopts the active command's challenge or a native Exit challenge for this open session. */
+  stageProtection(request: SessionProtectionRequest): boolean {
+    const expected: Record<SessionProtectionRequest["operation"], SessionPendingOperation> = {
+      new: "create", open: "open", "external-open": "external-open",
+      close: "close", exit: "exit",
+    };
+    if (this.disposed || this.protectionRequest || typeof request?.token !== "string"
+      || request.token.length === 0 || !request.state
+      || !Object.hasOwn(expected, request.operation)
+      || (this.snapshot.pending !== expected[request.operation]
+        && !(request.operation === "exit" && (this.snapshot.kind === "read-only"
+          || this.snapshot.kind === "edit")))
+      || !["dirty", "provisional", "pendingPublication", "recovered", "conflict",
+        "unresolvedJournal", "activePublication"].every((key) =>
+        typeof request.state[key as keyof SessionProtectionState] === "boolean")) return false;
+    this.protectionRequest = { token: request.token, operation: request.operation,
+      state: Object.freeze({ dirty: request.state.dirty,
+        provisional: request.state.provisional,
+        pendingPublication: request.state.pendingPublication,
+        recovered: request.state.recovered, conflict: request.state.conflict,
+        unresolvedJournal: request.state.unresolvedJournal,
+        activePublication: request.state.activePublication }),
+      generation: this.generation, resolving: false, failureCode: null };
+    this.publishProtection();
+    return true;
+  }
+
+  /** Resolves a nested host protection choice without deadlocking its waiting command. */
+  async decideProtection(decision: "cancel" | "save" | "discard"):
+    Promise<DocumentSessionOutcome<Doc>> {
+    const pending = this.protectionRequest;
+    if (!pending || pending.resolving || !this.host.resolveProtection) {
+      return Object.freeze({ status: "unavailable" });
+    }
+    pending.resolving = true;
+    pending.failureCode = null;
+    this.publishProtection();
+    try {
+      const result = await this.host.resolveProtection({ token: pending.token, decision });
+      if (pending !== this.protectionRequest || pending.generation !== this.generation) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if (!result.completed) {
+        if (result.retryToken) pending.token = result.retryToken;
+        pending.resolving = false;
+        pending.failureCode = result.errorCode === "LIFECYCLE_FAILED"
+          ? "LIFECYCLE_FAILED" : "OPERATION_FAILED";
+        this.publishProtection();
+        return Object.freeze({ status: "failed", code: pending.failureCode });
+      }
+      this.protectionRequest = null;
+      this.publishProtection();
+      return Object.freeze({ status: !result.proceed || decision === "cancel"
+        ? "protection-canceled" : "protection-resolved" });
+    } catch (error) {
+      if (pending !== this.protectionRequest || pending.generation !== this.generation) {
+        return Object.freeze({ status: "superseded" });
+      }
+      pending.resolving = false;
+      pending.failureCode = hostFailureCode(error);
+      this.publishProtection();
+      return Object.freeze({ status: "failed", code: pending.failureCode });
+    }
+  }
+
+  /** Selects the oldest retained request for password entry. */
+  activateExternalOpen(): boolean {
+    if (this.activeExternalOpen || this.externalOpenQueue.length === 0) return false;
+    this.activeExternalOpen = this.externalOpenQueue.shift()!;
+    this.publishExternalOpen();
+    return true;
+  }
+
+  /** Authenticates the active request; the host alone commits the candidate. */
+  openExternal(password: string): Promise<DocumentSessionOutcome<Doc>> {
+    const request = this.activeExternalOpen;
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!request || request !== this.activeExternalOpen
+        || generation !== this.generation || adoption !== this.currentAdoption()
+        || !this.host.openExternalDocument) {
+        password = "";
+        return Object.freeze({ status: "superseded" });
+      }
+      this.publishPending("external-open");
+      try {
+        const result = await this.host.openExternalDocument({ ...request, password });
+        password = "";
+        if (generation !== this.generation || adoption !== this.currentAdoption()
+          || request !== this.activeExternalOpen) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.activeExternalOpen = null;
+        this.clearPending();
+        if (result === null) {
+          this.publishExternalOpen();
+          return Object.freeze({ status: "external-canceled" });
+        }
+        return this.adopt(result);
+      } catch (error) {
+        password = "";
+        if (generation !== this.generation || adoption !== this.currentAdoption()
+          || request !== this.activeExternalOpen) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  /** Acknowledges cancellation without replacing the current document. */
+  cancelExternalOpen(): Promise<DocumentSessionOutcome<Doc>> {
+    const request = this.activeExternalOpen;
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!request || request !== this.activeExternalOpen
+        || generation !== this.generation || adoption !== this.currentAdoption()
+        || !this.host.cancelExternalOpen) {
+        return Object.freeze({ status: "superseded" });
+      }
+      this.publishPending("external-cancel");
+      try {
+        const canceled = await this.host.cancelExternalOpen(request);
+        if (generation !== this.generation || adoption !== this.currentAdoption()
+          || request !== this.activeExternalOpen) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        if (!canceled) return Object.freeze({ status: "unavailable" });
+        this.activeExternalOpen = null;
+        this.publishExternalOpen();
+        return Object.freeze({ status: "external-canceled" });
+      } catch (error) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()
+          || request !== this.activeExternalOpen) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  /** Commits the host-authorized new candidate only to its originating session generation. */
+  create(request: object): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (generation !== this.generation || adoption !== this.currentAdoption()) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if (!this.host.createDocument) return Object.freeze({ status: "unavailable" });
+      this.publishPending("create");
+      try {
+        const result = await this.host.createDocument(request);
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        if (!result) return Object.freeze({ status: "pending" });
+        this.adopt({ ...result.opened, targetName: result.name } as Doc);
+        return Object.freeze({ status: "created" });
+      } catch (error) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
   openSelected(password: string): Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
+    const adoption = this.currentAdoption();
     return this.enqueue(() => {
-      if (generation !== this.generation) {
+      if (generation !== this.generation || adoption !== this.currentAdoption()) {
         password = "";
         return Promise.resolve(Object.freeze({ status: "superseded" }));
       }
@@ -1459,7 +1722,7 @@ export class DocumentSession<Doc extends SessionDocument,
         operation = this.host.openSelectedDocument(password);
       } catch (error) {
         password = "";
-        if (generation !== this.generation) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
           return Promise.resolve(Object.freeze({ status: "superseded" }));
         }
         this.clearPending();
@@ -1468,11 +1731,15 @@ export class DocumentSession<Doc extends SessionDocument,
       }
       password = "";
       return operation.then((result) => {
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         if (result.invitationRequired === true) this.clearPending();
         return this.adopt(result);
       }, (error) => {
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         this.clearPending();
         return Object.freeze({ status: "failed" as const, code: hostFailureCode(error) });
       });
@@ -1481,8 +1748,9 @@ export class DocumentSession<Doc extends SessionDocument,
 
   unlock(password: string): Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
+    const adoption = this.currentAdoption();
     return this.enqueue(() => {
-      if (generation !== this.generation) {
+      if (generation !== this.generation || adoption !== this.currentAdoption()) {
         password = "";
         return Promise.resolve(Object.freeze({ status: "superseded" }));
       }
@@ -1492,7 +1760,7 @@ export class DocumentSession<Doc extends SessionDocument,
         operation = this.host.unlockDocument(password);
       } catch (error) {
         password = "";
-        if (generation !== this.generation) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
           return Promise.resolve(Object.freeze({ status: "superseded" }));
         }
         this.clearPending();
@@ -1501,11 +1769,15 @@ export class DocumentSession<Doc extends SessionDocument,
       }
       password = "";
       return operation.then((result) => {
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         if (result.invitationRequired === true) this.clearPending();
         return this.adopt(result);
       }, (error) => {
-        if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         this.clearPending();
         return Object.freeze({ status: "failed" as const, code: hostFailureCode(error) });
       });
@@ -1516,6 +1788,9 @@ export class DocumentSession<Doc extends SessionDocument,
   lockStarted(): void {
     if (this.disposed) return;
     this.generation += 1;
+    this.externalOpenQueue.length = 0;
+    this.activeExternalOpen = null;
+    this.protectionRequest = null;
     this.invitationStaged = false;
     this.invitationEpoch += 1;
     this.leaseDecision = null;
@@ -1535,7 +1810,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.acceptedRegularVersion = null;
     this.cancelQueuedCommands();
     if (this.snapshot.kind === "closed") {
-      const { invitationStaged: _staged, ...current } = this.snapshot;
+      const { invitationStaged: _staged, externalOpen: _external, ...current } = this.snapshot;
       this.snapshot = Object.freeze(current);
       this.notify();
       return;
@@ -1555,6 +1830,9 @@ export class DocumentSession<Doc extends SessionDocument,
   closed(): void {
     if (this.disposed) return;
     this.generation += 1;
+    this.externalOpenQueue.length = 0;
+    this.activeExternalOpen = null;
+    this.protectionRequest = null;
     this.invitationStaged = false;
     this.invitationEpoch += 1;
     this.leaseDecision = null;
@@ -1582,17 +1860,32 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   lock(): Promise<DocumentSessionOutcome> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    const adoptionSequence = this.adoptionSequence;
     return this.enqueue(async () => {
+      if (generation !== this.generation || adoption !== this.currentAdoption()) {
+        return Object.freeze({ status: "superseded" });
+      }
       try {
         this.publishPending("lock");
         const result = await this.host.lock();
-        this.lockCompleted();
+        if (adoptionSequence !== this.adoptionSequence || this.snapshot.kind === "closed") {
+          return Object.freeze({ status: "superseded" });
+        }
+        if (this.snapshot.kind !== "locked") {
+          if (generation !== this.generation) return Object.freeze({ status: "superseded" });
+          this.lockCompleted();
+        }
         const warningCode: SessionLockWarningCode | null = result.warningCode === null
           || result.warningCode === undefined ? null
             : result.warningCode === "LOCK_CHECKPOINT_FAILED"
               ? "LOCK_CHECKPOINT_FAILED" : "OPERATION_FAILED";
         return Object.freeze({ status: "locked" as const, warningCode });
       } catch (error) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         this.clearPending();
         return Object.freeze({ status: "failed" as const,
           code: hostFailureCode(error) });
@@ -1601,10 +1894,18 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   close(): Promise<DocumentSessionOutcome> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
     return this.enqueue(async () => {
+      if (generation !== this.generation || adoption !== this.currentAdoption()) {
+        return Object.freeze({ status: "superseded" });
+      }
       try {
         this.publishPending("close");
         const completed = await this.host.closeDocument();
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         if (!completed) {
           this.clearPending();
           return Object.freeze({ status: "pending" as const });
@@ -1612,9 +1913,46 @@ export class DocumentSession<Doc extends SessionDocument,
         this.closed();
         return Object.freeze({ status: "closed" as const });
       } catch (error) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
         this.clearPending();
         return Object.freeze({ status: "failed" as const,
           code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  /** Waits for the native termination barrier before dropping frontend state. */
+  exit(): Promise<DocumentSessionOutcome> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (generation !== this.generation || adoption !== this.currentAdoption()) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if (!this.host.exitApplication) return Object.freeze({ status: "unavailable" });
+      this.publishPending("exit");
+      try {
+        const completed = await this.host.exitApplication();
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
+        if (!completed) {
+          this.clearPending();
+          return Object.freeze({ status: "pending" });
+        }
+        // Native quit owns the final window teardown. Keep the current adoption
+        // until its lock-start/closed notification so a simulated or deferred quit
+        // cannot make the mounted session appear destroyed early.
+        this.clearPending();
+        return Object.freeze({ status: "pending" });
+      } catch (error) {
+        if (generation !== this.generation || adoption !== this.currentAdoption()) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
       }
     });
   }
@@ -1760,7 +2098,9 @@ export class DocumentSession<Doc extends SessionDocument,
       compact: administrationReady && document.canAddPasswords === true
         && document.canRemovePasswords === true && this.host.compactDocument !== undefined,
     });
-    const attention: SessionAttention | undefined = this.leaseDecision
+    const attention: SessionAttention | undefined = this.protectionRequest
+      ? this.protectionAttention()
+      : this.leaseDecision
       ? Object.freeze({ kind: "lease-takeover", operation: this.leaseDecision.operation,
         holderName: this.leaseDecision.holderName })
       : this.editFailureCode ? Object.freeze({ kind: "edit-unavailable",
@@ -1796,6 +2136,8 @@ export class DocumentSession<Doc extends SessionDocument,
         : this.discovery.total > 0 ? this.discoveryAttention() : undefined;
     return document.readOnly
       ? Object.freeze({ kind: "read-only", adoption, targetName, working, commands,
+        ...(this.externalOpenProjection()
+          ? { externalOpen: this.externalOpenProjection() } : {}),
         ...(this.invitationStaged ? { invitationStaged: true } : {}),
         publication: Object.freeze({ state: this.publicationState,
           resolving: this.resolvingDivergence }),
@@ -1805,6 +2147,8 @@ export class DocumentSession<Doc extends SessionDocument,
         ...(this.queuedLeaseOperation ? { queued: this.queuedLeaseOperation } : {}),
         document: document as Doc & { readOnly: true } })
       : Object.freeze({ kind: "edit", adoption, targetName, working, commands,
+        ...(this.externalOpenProjection()
+          ? { externalOpen: this.externalOpenProjection() } : {}),
         ...(this.invitationStaged ? { invitationStaged: true } : {}),
         publication: Object.freeze({ state: this.publicationState,
           resolving: this.resolvingDivergence }),
@@ -1823,7 +2167,72 @@ export class DocumentSession<Doc extends SessionDocument,
     this.notify();
   }
 
-  private notify(): void { for (const listener of this.listeners) listener(); }
+  private externalOpenProjection(): SessionExternalOpenSnapshot | undefined {
+    if (!this.activeExternalOpen && this.externalOpenQueue.length === 0) return undefined;
+    return Object.freeze({ active: this.activeExternalOpen !== null,
+      queued: this.externalOpenQueue.length });
+  }
+
+  private protectionAttention(): SessionProtectionAttention | undefined {
+    const pending = this.protectionRequest;
+    if (!pending) return undefined;
+    const current = this.snapshot;
+    const document = current.kind === "read-only" || current.kind === "edit"
+      ? current.document : null;
+    const working = current.kind === "read-only" || current.kind === "edit"
+      ? current.working : null;
+    const evidence = pending.state;
+    const state: SessionProtectionState = Object.freeze({
+      dirty: Boolean(evidence.dirty || working?.dirty),
+      provisional: Boolean(evidence.provisional || document?.provisional
+        || this.publicationState === "provisional"),
+      pendingPublication: Boolean(evidence.pendingPublication
+        || this.publicationState === "pending-publication"),
+      recovered: Boolean(evidence.recovered || document?.recovery),
+      conflict: Boolean(evidence.conflict || this.publicationState === "conflict"),
+      unresolvedJournal: Boolean(evidence.unresolvedJournal || document?.unreadableJournal
+        || document?.recovery || working?.journal.failed),
+      activePublication: evidence.activePublication,
+    });
+    return Object.freeze({ kind: "lifecycle-protection", operation: pending.operation,
+      state, resolving: pending.resolving,
+      ...(pending.failureCode ? { failureCode: pending.failureCode } : {}) });
+  }
+
+  private publishProtection(): void {
+    const current = this.snapshot;
+    if (current.kind === "read-only" || current.kind === "edit") {
+      this.publishWorkingCopy();
+      return;
+    }
+    const { attention: _attention, ...state } = current;
+    this.snapshot = Object.freeze({ ...state,
+      ...(this.protectionAttention()
+        ? { attention: this.protectionAttention() }
+        : this.discovery.total > 0 ? { attention: this.discoveryAttention() } : {}) }) as
+      DocumentSessionSnapshot<Doc>;
+    this.notify();
+  }
+
+  private publishExternalOpen(): void {
+    const current = this.snapshot;
+    if (current.kind === "read-only" || current.kind === "edit") {
+      this.publishWorkingCopy();
+      return;
+    }
+    const { externalOpen: _externalOpen, ...state } = current;
+    const projected = this.externalOpenProjection();
+    this.snapshot = Object.freeze({ ...state,
+      ...(projected ? { externalOpen: projected } : {}) }) as DocumentSessionSnapshot<Doc>;
+    this.notify();
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) listener();
+    this.notifyWork();
+  }
+
+  private notifyWork(): void { for (const listener of this.workListeners) listener(); }
 
   private publishPending(pending: SessionPendingOperation): void {
     this.queuedLeaseOperation = null;
@@ -1874,6 +2283,7 @@ export class DocumentSession<Doc extends SessionDocument,
     return new Promise((resolve) => {
       this.queuedCommands.push({ run, resolve });
       this.runNextCommand();
+      this.notifyWork();
     });
   }
 
@@ -1887,6 +2297,7 @@ export class DocumentSession<Doc extends SessionDocument,
     }).finally(() => {
       this.commandRunning = false;
       this.runNextCommand();
+      this.notifyWork();
     });
   }
 
@@ -1894,5 +2305,6 @@ export class DocumentSession<Doc extends SessionDocument,
     for (const command of this.queuedCommands.splice(0)) {
       command.resolve(Object.freeze({ status: "superseded" }));
     }
+    this.notifyWork();
   }
 }
