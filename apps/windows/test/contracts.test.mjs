@@ -37,9 +37,11 @@ test("password administration requests are narrow and enforce confirmations", ()
   assert.throws(() => validateInvitationCreateRequest({ temporaryLabel: "Colleague",
     canEdit: false, canAddPasswords: true, canRemovePasswords: false }),
   /implies edit/);
+  const invitationOpened = { content: "", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
   assert.deepEqual(validateInvitationResult({ created: true,
-    temporaryPassword: "one time secret" }), { created: true,
-    temporaryPassword: "one time secret" });
+    temporaryPassword: "one time secret", opened: invitationOpened }), { created: true,
+    temporaryPassword: "one time secret", opened: invitationOpened });
   assert.throws(() => validateInvitationResult({ created: true,
     temporaryPassword: "" }), /invalid invitation result/);
   assert.deepEqual(validateInvitationClaimRequest({
@@ -152,6 +154,8 @@ test("accepts only validated read-only native results", () => {
 });
 
 test("push and administration results are canonical and narrowly projected", () => {
+  const invitationOpened = { content: "", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
   assert.deepEqual(validateRegularSaveResult({ published: true, provisional: true,
     content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
     password: "must not cross", journalScope: "adoption_2", revision: 4 }), {
@@ -159,8 +163,9 @@ test("push and administration results are canonical and narrowly projected", () 
     journalScope: "adoption_2", revision: 4,
   });
   assert.deepEqual(validateSlotRemovalResult({ removed: true,
-    warningCode: "SLOT_REMOVED" }), {
+    warningCode: "SLOT_REMOVED", opened: invitationOpened }), {
     removed: true, warningCode: "SLOT_REMOVED",
+    opened: invitationOpened,
   });
   assert.throws(() => validateSlotRemovalResult({ removed: true,
     warningCode: "SLOT_REMOVED", targetPath: "C:\\private\\notes.scpefe" }),

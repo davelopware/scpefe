@@ -17,6 +17,10 @@ export interface SessionDocument {
     readonly explanation?: string; readonly editingBlocked?: true };
   readonly profileMismatch?: object;
   readonly unreadableJournal?: true;
+  readonly canAddPasswords?: boolean;
+  readonly canRemovePasswords?: boolean;
+  readonly recoverySlot?: boolean;
+  readonly managedSlots?: ReadonlyArray<{ readonly slotId: string }>;
 }
 
 /** Host-validated recovery evidence; content remains in the document, not attention. */
@@ -44,6 +48,28 @@ export interface SessionCommands {
   readonly recoveryDiscard: boolean;
   readonly acceptHeadMismatch: boolean;
   readonly unreadableDiscard: boolean;
+  readonly changePassword: boolean;
+  readonly createInvitation: boolean;
+  readonly reconcileIdentity: boolean;
+  readonly updateSlotPermissions: boolean;
+  readonly removeSlot: boolean;
+}
+
+/** A password slot's requested permissions; the host remains the final authority. */
+export interface SessionSlotPermissions {
+  readonly slotId: string;
+  readonly canEdit: boolean;
+  readonly canAddPasswords: boolean;
+  readonly canRemovePasswords: boolean;
+}
+
+/** An invitation request without the one-time passphrase returned by the host. */
+export interface SessionInvitationRequest {
+  readonly temporaryLabel: string;
+  readonly temporaryPassword?: string;
+  readonly canEdit: boolean;
+  readonly canAddPasswords: boolean;
+  readonly canRemovePasswords: boolean;
 }
 
 /** The host's publication state plus a provisional revision still awaiting manual save. */
@@ -181,6 +207,17 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   backupDocument(): Promise<{ readonly backedUp: true } | null>;
   exportPlaintext(request: { readonly content: string;
     readonly lineEndings: "lf" | "native" }): Promise<{ readonly exported: true } | null>;
+  changePassword?(request: { readonly currentPassword: string; readonly newPassword: string;
+    readonly newPasswordConfirmation: string }): Promise<Doc>;
+  createInvitation?(request: SessionInvitationRequest): Promise<{
+    readonly created: true; readonly temporaryPassword: string; readonly opened: Doc }>;
+  claimInvitation?(request: { readonly newPassword: string;
+    readonly newPasswordConfirmation: string }): Promise<Doc>;
+  cancelInvitationClaim?(): Promise<boolean>;
+  reconcileIdentity?(): Promise<Doc>;
+  updateSlotPermissions?(request: SessionSlotPermissions): Promise<Doc>;
+  removeSlot?(slotId: string): Promise<{ readonly removed: true;
+    readonly warningCode: "SLOT_REMOVED"; readonly opened: Doc }>;
 }
 
 /** The active frontend command, without arguments or secrets. */
@@ -190,11 +227,15 @@ export type SessionPendingOperation = "open" | "unlock" | "lock" | "close"
   | "head-accept"
   | "unreadable-discard"
   | "publication-retry" | "publication-discard" | "backup" | "export"
-  | "divergence";
+  | "divergence"
+  | "password-change" | "invitation-create" | "invitation-claim"
+  | "invitation-cancel" | "identity-reconcile" | "permissions-update"
+  | "slot-remove";
 
 /** A secret-free closed application state. */
 export interface ClosedSessionSnapshot {
   readonly kind: "closed";
+  readonly invitationStaged?: true;
   readonly pending?: SessionPendingOperation;
   readonly attention?: SessionRecoveryDiscoveryAttention;
   readonly discovery?: SessionRecoveryDiscovery;
@@ -203,6 +244,7 @@ export interface ClosedSessionSnapshot {
 /** A locked target with no reachable document or editing state. */
 export interface LockedSessionSnapshot {
   readonly kind: "locked";
+  readonly invitationStaged?: true;
   readonly targetName: string | null;
   readonly pending?: SessionPendingOperation;
   readonly publication: SessionPublicationSnapshot;
@@ -213,6 +255,7 @@ export interface LockedSessionSnapshot {
 /** Unlocked viewing state; host edit authority is absent. */
 export interface ReadOnlySessionSnapshot<Doc extends SessionDocument> {
   readonly kind: "read-only";
+  readonly invitationStaged?: true;
   readonly adoption: number;
   readonly targetName: string | null;
   readonly document: Readonly<Doc & { readonly readOnly: true }>;
@@ -228,6 +271,7 @@ export interface ReadOnlySessionSnapshot<Doc extends SessionDocument> {
 /** Unlocked state after the host has granted edit authority. */
 export interface EditSessionSnapshot<Doc extends SessionDocument> {
   readonly kind: "edit";
+  readonly invitationStaged?: true;
   readonly adoption: number;
   readonly targetName: string | null;
   readonly document: Readonly<Doc & { readonly readOnly: false }>;
@@ -265,11 +309,16 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
   | Readonly<{ status: "migration"; document: Doc;
     compatibilityCode: string }>
   | Readonly<{ status: "locked"; warningCode: SessionLockWarningCode | null }>
+  | Readonly<{ status: "password-changed" | "invitation-created"
+    | "identity-reconciled" | "permissions-updated" | "claim-canceled"
+    | "invitation-claimed" }>
+  | Readonly<{ status: "slot-removed"; warningCode: "SLOT_REMOVED" }>
   | Readonly<{ status: "failed"; code: SessionFailureCode }>;
 
 /** Codes that the platform message catalogue may safely present. */
 export type SessionFailureCode = "OPERATION_FAILED" | "OPEN_FAILED"
-  | "UNLOCK_FAILED" | "LOCK_CHECKPOINT_FAILED" | "LIFECYCLE_FAILED";
+  | "UNLOCK_FAILED" | "LOCK_CHECKPOINT_FAILED" | "LIFECYCLE_FAILED"
+  | "WEAK_PASSWORD" | "PASSWORD_ALREADY_IN_USE";
 
 /** Lock warnings with an intentionally bounded presentation vocabulary. */
 export type SessionLockWarningCode = "LOCK_CHECKPOINT_FAILED" | "OPERATION_FAILED";
@@ -277,7 +326,7 @@ export type SessionLockWarningCode = "LOCK_CHECKPOINT_FAILED" | "OPERATION_FAILE
 const CLOSED: ClosedSessionSnapshot = Object.freeze({ kind: "closed" });
 const SAFE_HOST_CODES = new Set<SessionFailureCode>([
   "OPERATION_FAILED", "OPEN_FAILED", "UNLOCK_FAILED", "LOCK_CHECKPOINT_FAILED",
-  "LIFECYCLE_FAILED",
+  "LIFECYCLE_FAILED", "WEAK_PASSWORD", "PASSWORD_ALREADY_IN_USE",
 ]);
 
 function hostFailureCode(error: unknown): SessionFailureCode {
@@ -329,6 +378,8 @@ export class DocumentSession<Doc extends SessionDocument,
   private commandRunning = false;
   private generation = 0;
   private adoptionSequence = 0;
+  private invitationStaged = false;
+  private invitationEpoch = 0;
   private disposed = false;
 
   constructor(private readonly host: DocumentSessionHost<Doc, Invite>,
@@ -370,8 +421,18 @@ export class DocumentSession<Doc extends SessionDocument,
     if (this.disposed) return Object.freeze({ status: "superseded" });
     if (result.invitationRequired === true) {
       // The host stages an invitation without replacing the current document.
+      this.invitationStaged = true;
+      this.invitationEpoch += 1;
+      if (this.snapshot.kind === "read-only" || this.snapshot.kind === "edit") {
+        this.publishWorkingCopy();
+      } else {
+        this.snapshot = Object.freeze({ ...this.snapshot, invitationStaged: true });
+        this.notify();
+      }
       return Object.freeze({ status: "invitation" });
     }
+    this.invitationStaged = false;
+    this.invitationEpoch += 1;
     const document = frozenCopy(result as Doc);
     const targetName = document.targetName ?? (this.snapshot.kind === "closed"
       ? null : this.snapshot.targetName);
@@ -432,6 +493,206 @@ export class DocumentSession<Doc extends SessionDocument,
       copy.ensureJournalVersion();
     }
     return true;
+  }
+
+  /** Applies an asynchronous profile update only to its original adoption. */
+  refreshDocumentForAdoption(document: Doc, adoption: number): boolean {
+    return this.currentAdoption() === adoption && this.refreshDocument(document);
+  }
+
+  /** Changes the active slot password, then projects the host's verified document. */
+  changePassword(request: { readonly currentPassword: string;
+    readonly newPassword: string; readonly newPasswordConfirmation: string }):
+    Promise<DocumentSessionOutcome<Doc>> {
+    return this.runSecurityDocumentCommand("changePassword", "password-change",
+      "password-changed", () => this.host.changePassword?.(request));
+  }
+
+  /** Publishes an invitation; its one-time passphrase is delivered only to presentation. */
+  createInvitation(request: SessionInvitationRequest,
+    showPassphrase: (passphrase: string) => void): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!this.matchesAdoption(generation, adoption)) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if ((this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
+        || !this.snapshot.commands.createInvitation || !this.host.createInvitation) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.publishPending("invitation-create");
+      try {
+        const result = await this.host.createInvitation(request);
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.refreshDocument(result.opened);
+        this.clearPending();
+        showPassphrase(result.temporaryPassword);
+        return Object.freeze({ status: "invitation-created" });
+      } catch (error) {
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  /** Claims a staged invitation only while its original session generation survives. */
+  claimInvitation(request: { readonly newPassword: string;
+    readonly newPasswordConfirmation: string }): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const epoch = this.invitationEpoch;
+    return this.enqueue(async () => {
+      if (generation !== this.generation || epoch !== this.invitationEpoch) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if (!this.invitationStaged || !this.host.claimInvitation) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.publishPending("invitation-claim");
+      try {
+        const document = await this.host.claimInvitation(request);
+        if (generation !== this.generation || epoch !== this.invitationEpoch) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.adopt(document);
+        return Object.freeze({ status: "invitation-claimed" });
+      } catch (error) {
+        if (generation !== this.generation || epoch !== this.invitationEpoch) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  /** Cancels a staged invitation while retaining the authoritative prior document. */
+  cancelInvitationClaim(): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const epoch = this.invitationEpoch;
+    return this.enqueue(async () => {
+      if (generation !== this.generation || epoch !== this.invitationEpoch) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if (!this.invitationStaged || !this.host.cancelInvitationClaim) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.publishPending("invitation-cancel");
+      try {
+        await this.host.cancelInvitationClaim();
+        if (generation !== this.generation || epoch !== this.invitationEpoch) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.invitationStaged = false;
+        this.invitationEpoch += 1;
+        this.clearPending();
+        this.publishInvitationState();
+        return Object.freeze({ status: "claim-canceled" });
+      } catch (error) {
+        if (generation !== this.generation || epoch !== this.invitationEpoch) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  /** Reconciles the active slot against the protected local profile. */
+  reconcileIdentity(): Promise<DocumentSessionOutcome<Doc>> {
+    return this.runSecurityDocumentCommand("reconcileIdentity", "identity-reconcile",
+      "identity-reconciled", () => this.host.reconcileIdentity?.());
+  }
+
+  /** Publishes permissions and adopts the host's canonical slot list. */
+  updateSlotPermissions(request: SessionSlotPermissions): Promise<DocumentSessionOutcome<Doc>> {
+    return this.runSecurityDocumentCommand("updateSlotPermissions", "permissions-update",
+      "permissions-updated", () => this.host.updateSlotPermissions?.(request));
+  }
+
+  /** Removes a slot and adopts the host's canonical slot list. */
+  removeSlot(slotId: string): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!this.matchesAdoption(generation, adoption)) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if ((this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
+        || !this.snapshot.commands.removeSlot || !this.host.removeSlot) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.publishPending("slot-remove");
+      try {
+        const result = await this.host.removeSlot(slotId);
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.refreshDocument(result.opened);
+        this.clearPending();
+        return Object.freeze({ status: "slot-removed", warningCode: "SLOT_REMOVED" });
+      } catch (error) {
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  private runSecurityDocumentCommand(command: "changePassword" | "reconcileIdentity"
+    | "updateSlotPermissions", pending: SessionPendingOperation,
+    status: "password-changed" | "identity-reconciled" | "permissions-updated",
+    invoke: () => Promise<Doc> | undefined): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!this.matchesAdoption(generation, adoption)) {
+        return Object.freeze({ status: "superseded" });
+      }
+      if ((this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
+        || !this.snapshot.commands[command]) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.publishPending(pending);
+      try {
+        const operation = invoke();
+        if (!operation) {
+          this.clearPending();
+          return Object.freeze({ status: "unavailable" });
+        }
+        const document = await operation;
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.refreshDocument(document);
+        this.clearPending();
+        return Object.freeze({ status });
+      } catch (error) {
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.clearPending();
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
+      }
+    });
+  }
+
+  private publishInvitationState(): void {
+    if (this.snapshot.kind === "read-only" || this.snapshot.kind === "edit") {
+      this.publishWorkingCopy();
+    } else {
+      const { invitationStaged: _staged, ...current } = this.snapshot;
+      this.snapshot = Object.freeze({ ...current,
+        ...(this.invitationStaged ? { invitationStaged: true } : {}) });
+      this.notify();
+    }
   }
 
   /** Requests host edit authority and represents a takeover challenge as safe attention. */
@@ -1133,6 +1394,8 @@ export class DocumentSession<Doc extends SessionDocument,
   lockStarted(): void {
     if (this.disposed) return;
     this.generation += 1;
+    this.invitationStaged = false;
+    this.invitationEpoch += 1;
     this.leaseDecision = null;
     this.queuedLeaseOperation = null;
     this.editFailureCode = null;
@@ -1145,7 +1408,12 @@ export class DocumentSession<Doc extends SessionDocument,
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
     this.cancelQueuedCommands();
-    if (this.snapshot.kind === "closed") return;
+    if (this.snapshot.kind === "closed") {
+      const { invitationStaged: _staged, ...current } = this.snapshot;
+      this.snapshot = Object.freeze(current);
+      this.notify();
+      return;
+    }
     const targetName = this.snapshot.targetName;
     this.snapshot = Object.freeze({ kind: "locked", targetName,
       publication: Object.freeze({ state: this.publicationState,
@@ -1161,6 +1429,8 @@ export class DocumentSession<Doc extends SessionDocument,
   closed(): void {
     if (this.disposed) return;
     this.generation += 1;
+    this.invitationStaged = false;
+    this.invitationEpoch += 1;
     this.leaseDecision = null;
     this.queuedLeaseOperation = null;
     this.editFailureCode = null;
@@ -1297,6 +1567,12 @@ export class DocumentSession<Doc extends SessionDocument,
     if (!working || working.kind !== "ready") {
       throw new Error("unlocked document requires a working copy");
     }
+    const securityReady = !this.invitationStaged && !working.dirty
+      && !document.recovery && !document.headMismatch
+      && !document.unreadableJournal && !document.migrationRequired
+      && this.publicationState === "target-published" && pending === undefined;
+    const administrationReady = securityReady && !document.readOnly
+      && !document.profileMismatch;
     const commands: SessionCommands = Object.freeze({
       enterEdit: document.readOnly && document.canEdit === true
         && (document.publicationState === undefined
@@ -1335,6 +1611,13 @@ export class DocumentSession<Doc extends SessionDocument,
       acceptHeadMismatch: Boolean(document.headMismatch) && pending === undefined,
       unreadableDiscard: Boolean(document.unreadableJournal) && !document.headMismatch
         && pending === undefined,
+      changePassword: securityReady && !document.profileMismatch,
+      createInvitation: administrationReady && document.canAddPasswords === true
+        && (document.managedSlots?.length ?? 0) < 7,
+      reconcileIdentity: securityReady && Boolean(document.profileMismatch),
+      updateSlotPermissions: administrationReady && document.canAddPasswords === true
+        && document.canRemovePasswords === true,
+      removeSlot: administrationReady && document.canRemovePasswords === true,
     });
     const attention: SessionAttention | undefined = this.leaseDecision
       ? Object.freeze({ kind: "lease-takeover", operation: this.leaseDecision.operation,
@@ -1366,6 +1649,7 @@ export class DocumentSession<Doc extends SessionDocument,
         : this.discovery.total > 0 ? this.discoveryAttention() : undefined;
     return document.readOnly
       ? Object.freeze({ kind: "read-only", adoption, targetName, working, commands,
+        ...(this.invitationStaged ? { invitationStaged: true } : {}),
         publication: Object.freeze({ state: this.publicationState,
           resolving: this.resolvingDivergence }),
         ...(this.discovery.total > 0 ? { discovery: this.discovery } : {}),
@@ -1374,6 +1658,7 @@ export class DocumentSession<Doc extends SessionDocument,
         ...(this.queuedLeaseOperation ? { queued: this.queuedLeaseOperation } : {}),
         document: document as Doc & { readOnly: true } })
       : Object.freeze({ kind: "edit", adoption, targetName, working, commands,
+        ...(this.invitationStaged ? { invitationStaged: true } : {}),
         publication: Object.freeze({ state: this.publicationState,
           resolving: this.resolvingDivergence }),
         ...(this.discovery.total > 0 ? { discovery: this.discovery } : {}),

@@ -615,7 +615,7 @@ export class DocumentService {
     active.baseContainer = Buffer.from(published);
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
-    return Object.freeze({ created: true, temporaryPassword });
+    return Object.freeze({ created: true, temporaryPassword, opened: active.opened });
   }
 
   async claimInvitation(newPassword) {
@@ -777,10 +777,10 @@ export class DocumentService {
     }
     const targetSlot = String(slotId ?? "");
     if (!DOCUMENT_ID.test(targetSlot)) throw new TypeError("slot ID is invalid");
-    await this.#publishSlotAdministration((current) =>
+    const opened = await this.#publishSlotAdministration((current) =>
       this.native.removeSlot(current, active.password, targetSlot));
     return Object.freeze({ removed: true,
-      warningCode: "SLOT_REMOVED" });
+      warningCode: "SLOT_REMOVED", opened });
   }
 
   async #publishSlotAdministration(createCandidate) {

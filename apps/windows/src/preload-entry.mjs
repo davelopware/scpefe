@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer as rawIpcRenderer } from "electron";
 import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
   validateOpenTargetResult,
-  validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
+  validateProfile, validateOpenedDocument, validateActiveDocument,
+  validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
   validateMigrationResult,
@@ -125,7 +126,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value === null ? null : value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateMigrationResult(value);
   },
-  changePassword: async (request) => validateOpenedDocument(
+  changePassword: async (request) => validateActiveDocument(
     await ipcRenderer.invoke("document:change-password",
       validatePasswordChangeRequest(request))),
   createInvitation: async (request) => validateInvitationResult(
@@ -147,9 +148,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     if (typeof value !== "boolean") throw new TypeError("host returned invalid claim cancellation");
     return value;
   },
-  reconcileIdentity: async () => validateOpenedDocument(
+  reconcileIdentity: async () => validateActiveDocument(
     await ipcRenderer.invoke("document:reconcile-identity")),
-  updateSlotPermissions: async (request) => validateOpenedDocument(
+  updateSlotPermissions: async (request) => validateActiveDocument(
     await ipcRenderer.invoke("document:update-slot-permissions",
       validateSlotPermissionsRequest(request))),
   removeSlot: async (slotId) => validateSlotRemovalResult(

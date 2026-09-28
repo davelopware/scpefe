@@ -1,9 +1,10 @@
 import React, { FormEvent, KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { DocumentSession, type WorkingCopyJournalHost } from "@scpefe/frontend-core";
+import { DocumentSession, type SessionCommands,
+  type WorkingCopyJournalHost } from "@scpefe/frontend-core";
 import { useModalFocus, useSessionSnapshot } from "@scpefe/react-ui";
-import { compactionAvailable, CompactionControls } from "./compaction-controls.mjs";
+import { CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
   proposedPasswordRejectionMessage } from "./password-policy.mjs";
@@ -223,16 +224,17 @@ function ManagedSlotControls({ slot, canUpdate, canRemove, onUpdate, onRemove }:
   </li>;
 }
 
-function SlotAdministration({ opened, onUpdate, onRemove, onCompact }: {
+function SlotAdministration({ opened, commands, onUpdate, onRemove, onCompact }: {
   opened: DocumentOpened;
+  commands: Pick<SessionCommands, "updateSlotPermissions" | "removeSlot">;
   onUpdate(slot: ManagedSlot, canEdit: boolean, canAddPasswords: boolean,
     canRemovePasswords: boolean): Promise<void>;
   onRemove(slot: ManagedSlot): Promise<void>;
   onCompact(): Promise<void>;
 }) {
   const slots = opened.managedSlots ?? [];
-  const canUpdate = compactionAvailable(opened);
-  const canRemove = !opened.readOnly && opened.canRemovePasswords === true;
+  const canUpdate = commands.updateSlotPermissions;
+  const canRemove = commands.removeSlot;
   return <aside className="slot-administration" aria-labelledby="slot-administration-heading">
     <h2 id="slot-administration-heading">Password-slot administration</h2>
     <p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent and is never listed as an ordinary slot.</p>
@@ -286,14 +288,16 @@ declare global { interface Window { scpefe: {
     opened: DocumentOpened } | LeaseDecision | null>;
   changePassword(request: { currentPassword: string; newPassword: string;
     newPasswordConfirmation: string }): Promise<DocumentOpened>;
-  createInvitation(request: object): Promise<{ created: true; temporaryPassword: string }>;
+  createInvitation(request: object): Promise<{ created: true; temporaryPassword: string;
+    opened: DocumentOpened }>;
   copyInvitationPassphrase(password: string): Promise<boolean>;
   claimInvitation(request: { newPassword: string;
     newPasswordConfirmation: string }): Promise<DocumentOpened>;
   cancelInvitationClaim(): Promise<boolean>;
   reconcileIdentity(): Promise<DocumentOpened>;
   updateSlotPermissions(request: object): Promise<DocumentOpened>;
-  removeSlot(slotId: string): Promise<{ removed: true; warningCode: string }>;
+  removeSlot(slotId: string): Promise<{ removed: true; warningCode: "SLOT_REMOVED";
+    opened: DocumentOpened }>;
   exportPlaintext(request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: true } | null>;
   updateWorkingCopy(value: { content: string; cursor: Cursor;
@@ -349,6 +353,8 @@ function App() {
   const sessionSnapshot = useSessionSnapshot(session);
   const opened: Opened | null = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.document : null;
+  const securityCommands = sessionSnapshot.kind === "read-only"
+    || sessionSnapshot.kind === "edit" ? sessionSnapshot.commands : null;
   const targetName = sessionSnapshot.kind === "closed" ? null
     : sessionSnapshot.targetName;
   const lockedDocument = sessionSnapshot.kind === "locked";
@@ -377,7 +383,11 @@ function App() {
     || sessionSnapshot.pending === "lease-cancel"
     || ((sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit")
       && sessionSnapshot.queued !== undefined);
-  useEffect(() => () => session.dispose(), [session]);
+  const securityPresentationEpoch = useRef(0);
+  useEffect(() => () => {
+    securityPresentationEpoch.current += 1;
+    session.dispose();
+  }, [session]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [clientSettings, setClientSettings] = useState<ClientSettings>({
     regularSaveEnabled: false, regularSaveIntervalMs: 120_000,
@@ -400,7 +410,7 @@ function App() {
   const [creating, setCreating] = useState(false);
   const [openError, setOpenError] = useState("");
   const [pendingOpenName, setPendingOpenName] = useState("");
-  const [invitationStaged, setInvitationStaged] = useState(false);
+  const invitationStaged = sessionSnapshot.invitationStaged === true;
   const [decisionError, setDecisionError] = useState("");
   const [openedDialogError, setOpenedDialogError] = useState("");
   const [confirmDivergenceDiscard, setConfirmDivergenceDiscard] = useState(false);
@@ -530,6 +540,7 @@ function App() {
   }, [creating, dialog, openedDialog, publicationResolving, queuedExternalOpenRequest]);
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
+    securityPresentationEpoch.current += 1;
     if (!alreadyAdopted) session.adopt(result);
     const adopted = session.getSnapshot();
     if (adopted.kind === "read-only" || adopted.kind === "edit") {
@@ -542,6 +553,10 @@ function App() {
     setFindText("");
     setReplaceText("");
     setFindStatus("");
+    setCurrentPasswordDraft(""); setNewPasswordDraft("");
+    setNewPasswordConfirmationDraft(""); setTemporaryPasswordDraft("");
+    setClaimPasswordDraft(""); setClaimConfirmationDraft("");
+    setInvitationPassphrase(null);
     if (result.recovery) {
       const source = [result.recovery.authorName, result.recovery.deviceName]
         .filter(Boolean).join(" on ");
@@ -553,11 +568,15 @@ function App() {
 
   function showReplacementResult(result: Opened, alreadyAdopted = false) {
     if (result.invitationRequired) {
-      setInvitationStaged(true);
+      securityPresentationEpoch.current += 1;
+      setInvitationPassphrase(null);
+      setCurrentPasswordDraft(""); setNewPasswordDraft("");
+      setNewPasswordConfirmationDraft(""); setTemporaryPasswordDraft("");
+      setClaimPasswordDraft(""); setClaimConfirmationDraft("");
+      session.adopt(result);
       setMessage("Claim the invitation before its document replaces the current session.");
       return;
     }
-    setInvitationStaged(false);
     showOpenedResult(result, alreadyAdopted);
   }
 
@@ -711,11 +730,14 @@ function App() {
       const identityChanged = profile !== null
         && (profile.name !== candidate.name || profile.email !== candidate.email);
       const saved = await window.scpefe.saveProfile(candidate);
+      const adoption = currentAdoption();
       const authoritative = identityChanged ? await window.scpefe.reconcileProfile() : null;
       setProfile(saved);
       setPendingProfile(null);
       setProfileError("");
-      if (authoritative) session.refreshDocument(authoritative);
+      if (authoritative && adoption !== null) {
+        session.refreshDocumentForAdoption(authoritative, adoption);
+      }
       setDialog(null);
       setMessage("Local profile saved.");
     } catch (error) {
@@ -756,7 +778,6 @@ function App() {
       }
       if (outcome.status === "superseded") return;
       if (outcome.status === "invitation") {
-        setInvitationStaged(true);
         setMessage("Claim the invitation before its document replaces the current session.");
       } else if (outcome.status === "opened") {
         const adopted = session.getSnapshot();
@@ -924,7 +945,9 @@ function App() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
+    const startingSnapshot = session.getSnapshot();
     const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (session.getSnapshot() !== startingSnapshot) return;
     if (assessed.status !== "accepted") {
       setClaimError(proposedPasswordRejectionMessage(assessed, "Replacement password"));
       requestAnimationFrame(() => (form.elements.namedItem(
@@ -941,20 +964,20 @@ function App() {
     }
     try {
       setClaimError("");
-      const result = await window.scpefe.claimInvitation({ newPassword: password,
+      const outcome = await session.claimInvitation({ newPassword: password,
         newPasswordConfirmation: String(data.get("newPasswordConfirmation")) });
-      form.reset();
-      setClaimPasswordDraft(""); setClaimConfirmationDraft("");
-      setInvitationStaged(false); showOpenedResult(result);
-      setMessage("Invitation claimed and replacement password safely published.");
-    } catch (error) {
-      const value = safeRendererErrorMessage(error);
-      if (/current document remains open/i.test(value)) {
-        setInvitationStaged(false);
-        setMessage("Invitation claim canceled; the current session remains open.");
-        return;
+      if (outcome.status === "invitation-claimed") {
+        form.reset();
+        const adopted = session.getSnapshot();
+        if (adopted.kind === "read-only" || adopted.kind === "edit") {
+          showOpenedResult(adopted.document, true);
+        }
+        setMessage("Invitation claimed and replacement password safely published.");
+      } else if (outcome.status === "failed") {
+        setClaimError(catalogText(outcome.code));
       }
-      setClaimError(value);
+    } catch (error) {
+      setClaimError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => (form.elements.namedItem(
         "newPassword") as HTMLElement | null)?.focus());
     }
@@ -962,12 +985,14 @@ function App() {
 
   async function cancelInvitationClaim() {
     try {
-      if (!await window.scpefe.cancelInvitationClaim()) {
-        throw new Error("The invitation claim is no longer staged");
+      const outcome = await session.cancelInvitationClaim();
+      if (outcome.status === "claim-canceled") {
+        setClaimError("");
+        setClaimPasswordDraft(""); setClaimConfirmationDraft("");
+        setMessage("Invitation claim canceled; the current session is unchanged.");
+      } else if (outcome.status === "failed") {
+        setClaimError(catalogText(outcome.code));
       }
-      setClaimError("");
-      setInvitationStaged(false);
-      setMessage("Invitation claim canceled; the current session is unchanged.");
     } catch (error) {
       setClaimError(safeRendererErrorMessage(error));
     }
@@ -978,7 +1003,9 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const currentPassword = String(data.get("currentPassword"));
+    const startingSnapshot = session.getSnapshot();
     const assessed = await assessProposedPassword(String(data.get("newPassword")));
+    if (session.getSnapshot() !== startingSnapshot) return;
     if (assessed.status !== "accepted") {
       setPasswordError(proposedPasswordRejectionMessage(assessed, "New password"));
       requestAnimationFrame(() => (form.elements.namedItem(
@@ -999,15 +1026,23 @@ function App() {
     }
     try {
       setPasswordError("");
-      const result = await window.scpefe.changePassword({
+      const outcome = await session.changePassword({
         currentPassword, newPassword: proposedPassword,
         newPasswordConfirmation: confirmation,
       });
-      form.reset();
-      setCurrentPasswordDraft(""); setNewPasswordDraft("");
-      setNewPasswordConfirmationDraft("");
-      session.refreshDocument(result);
-      setMessage("Password changed and the updated document was published safely.");
+      if (outcome.status === "password-changed") {
+        form.reset();
+        setCurrentPasswordDraft(""); setNewPasswordDraft("");
+        setNewPasswordConfirmationDraft("");
+        setMessage("Password changed and the updated document was published safely.");
+      } else if (outcome.status === "failed") {
+        setPasswordError(catalogText(outcome.code));
+        if (outcome.code === "WEAK_PASSWORD"
+          || outcome.code === "PASSWORD_ALREADY_IN_USE") {
+          requestAnimationFrame(() => (form.elements.namedItem(
+            "newPassword") as HTMLElement | null)?.focus());
+        }
+      }
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => {
@@ -1024,8 +1059,11 @@ function App() {
     const form = event.currentTarget;
     const data = new FormData(form);
     const enteredTemporary = String(data.get("temporaryPassword"));
+    const startingSnapshot = session.getSnapshot();
+    const presentationEpoch = securityPresentationEpoch.current;
     const assessed = enteredTemporary
       ? await assessProposedPassword(enteredTemporary) : null;
+    if (session.getSnapshot() !== startingSnapshot) return;
     if (assessed && assessed.status !== "accepted") {
       setInvitationError(proposedPasswordRejectionMessage(
         assessed, "Temporary passphrase"));
@@ -1035,18 +1073,30 @@ function App() {
       return;
     }
     try {
-      const result = await window.scpefe.createInvitation({
+      const outcome = await session.createInvitation({
         temporaryLabel: String(data.get("temporaryLabel")),
         temporaryPassword: assessed?.password,
         canEdit: data.get("canEdit") === "on",
         canAddPasswords: data.get("canAddPasswords") === "on",
         canRemovePasswords: data.get("canRemovePasswords") === "on",
+      }, (passphrase) => {
+        if (securityPresentationEpoch.current === presentationEpoch) {
+          setInvitationPassphrase(passphrase);
+        }
       });
-      setInvitationError("");
-      setInvitationPasswordError(false);
-      setInvitationPassphrase(result.temporaryPassword);
-      form.reset();
-      setTemporaryPasswordDraft("");
+      if (outcome.status === "invitation-created") {
+        setInvitationError("");
+        setInvitationPasswordError(false);
+        form.reset();
+        setTemporaryPasswordDraft("");
+      } else if (outcome.status === "failed") {
+        setInvitationError(catalogText(outcome.code));
+        const fieldAssignable = outcome.code === "WEAK_PASSWORD"
+          || outcome.code === "PASSWORD_ALREADY_IN_USE";
+        setInvitationPasswordError(fieldAssignable);
+        if (fieldAssignable) requestAnimationFrame(() => (form.elements.namedItem(
+          "temporaryPassword") as HTMLElement | null)?.focus());
+      }
     } catch (error) {
       setInvitationError(safeRendererErrorMessage(error));
       const fieldAssignable = (error as { code?: string })?.code === "WEAK_PASSWORD"
@@ -1062,9 +1112,10 @@ function App() {
   async function reconcileIdentity() {
     try {
       setPasswordError("");
-      const result = await window.scpefe.reconcileIdentity();
-      session.refreshDocument(result);
-      setMessage("Password-slot identity reconciled through a sealed publication.");
+      const outcome = await session.reconcileIdentity();
+      if (outcome.status === "identity-reconciled") {
+        setMessage("Password-slot identity reconciled through a sealed publication.");
+      } else if (outcome.status === "failed") setPasswordError(catalogText(outcome.code));
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
     }
@@ -1074,10 +1125,10 @@ function App() {
     canAddPasswords: boolean, canRemovePasswords: boolean) {
     try {
       setPasswordError("");
-      const result = await window.scpefe.updateSlotPermissions({ slotId: slot.slotId,
+      const outcome = await session.updateSlotPermissions({ slotId: slot.slotId,
         canEdit, canAddPasswords, canRemovePasswords });
-      session.refreshDocument(result);
-      setMessage("Slot permissions published.");
+      if (outcome.status === "permissions-updated") setMessage("Slot permissions published.");
+      else if (outcome.status === "failed") setPasswordError(catalogText(outcome.code));
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
     }
@@ -1086,11 +1137,9 @@ function App() {
   async function removeManagedSlot(slot: ManagedSlot) {
     try {
       setPasswordError("");
-      const result = await window.scpefe.removeSlot(slot.slotId);
-      reflectCurrent((current) => ({ ...current,
-        managedSlots: current.managedSlots?.filter(
-          (candidate) => candidate.slotId !== slot.slotId) }));
-      setMessage(catalogText(result.warningCode));
+      const outcome = await session.removeSlot(slot.slotId);
+      if (outcome.status === "slot-removed") setMessage(catalogText(outcome.warningCode));
+      else if (outcome.status === "failed") setPasswordError(catalogText(outcome.code));
     } catch (error) {
       setPasswordError(safeRendererErrorMessage(error));
     }
@@ -1163,6 +1212,7 @@ function App() {
   }
 
   function showLockedResult(result: LockResult, closed = false) {
+    securityPresentationEpoch.current += 1;
     document.querySelectorAll<HTMLInputElement>(
       "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -1189,7 +1239,6 @@ function App() {
       setInvitationPassphrase(null);
       setInvitationError("");
       setClaimError("");
-      setInvitationStaged(false);
       setExternalOpenRequest(null);
       setQueuedExternalOpenRequest(null);
       setCreating(false);
@@ -1407,10 +1456,14 @@ function App() {
       : publicationState === "conflict" ? "Publication conflict"
         : publicationState === "provisional" ? "Provisional publication" : "Published";
   const closeDialog = () => {
+    securityPresentationEpoch.current += 1;
     setPendingProfile(null);
     setProfileError("");
     setPasswordError("");
     setInvitationPassphrase(null);
+    setCurrentPasswordDraft(""); setNewPasswordDraft("");
+    setNewPasswordConfirmationDraft(""); setTemporaryPasswordDraft("");
+    setClaimPasswordDraft(""); setClaimConfirmationDraft("");
     setInvitationError("");
     setExportError("");
     setDialog(null);
@@ -1625,8 +1678,8 @@ function App() {
             confirmation={newPasswordConfirmationDraft} comparePassword={currentPasswordDraft}
             compareMessage="New password must differ from the current password." />
           {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
-          <button>Change password</button></form>
-        {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) < 7
+          <button disabled={!securityCommands?.changePassword}>Change password</button></form>
+        {(securityCommands?.createInvitation || sessionSnapshot.pending === "invitation-create")
           && <form onSubmit={createInvitation}><h3>Invite another person</h3>
             <label>Temporary label<input name="temporaryLabel" required /></label>
             <label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password"
@@ -1642,10 +1695,12 @@ function App() {
             {invitationError && <p id={invitationPasswordError
               ? "invitation-password-error" : undefined} className="dialog-error"
               role="alert">{invitationError}</p>}
-            <button>Create invitation</button></form>}
+            <button disabled={sessionSnapshot.pending === "invitation-create"}>
+              Create invitation</button></form>}
         {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
-        <SlotAdministration opened={opened} onUpdate={updateManagedSlot}
+        <SlotAdministration opened={opened} commands={securityCommands ?? {
+          updateSlotPermissions: false, removeSlot: false }} onUpdate={updateManagedSlot}
           onRemove={removeManagedSlot} onCompact={async () => {
             setCompactionError(""); setDialog("compaction");
           }} />

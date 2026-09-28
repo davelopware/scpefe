@@ -56,7 +56,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     currentRevision: "33".repeat(32) };
   let migrationResult = null;
   let invitationResult = { created: true,
-    temporaryPassword: "generated secret words" };
+    temporaryPassword: "generated secret words", opened: editOpened };
   let rejectedChannel = null;
   let rejectedError = null;
   const invocations = [];
@@ -120,7 +120,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:cancel-lease-takeover") return true;
         if (channel === "document:migrate") return migrationResult;
         if (channel === "document:remove-slot") {
-          return { removed: true, warningCode: "SLOT_REMOVED" };
+          return { removed: true, warningCode: "SLOT_REMOVED", opened: editOpened };
         }
         return null;
       } },
@@ -301,7 +301,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(await exposed.cancelInvitationClaim(), true);
   assert.equal(invocations.at(-1).channel, "document:cancel-invitation-claim");
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.removeSlot("ab".repeat(16)))), {
-    removed: true, warningCode: "SLOT_REMOVED",
+    removed: true, warningCode: "SLOT_REMOVED", opened: editOpened,
   });
   await exposed.changePassword({ currentPassword: "current password words",
     newPassword: "replacement password words",
@@ -314,7 +314,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.createInvitation({
     temporaryLabel: "Colleague", temporaryPassword: "", canEdit: true,
     canAddPasswords: false, canRemovePasswords: false, ignored: "private",
-  }))), { created: true, temporaryPassword: "generated secret words" });
+  }))), { created: true, temporaryPassword: "generated secret words",
+    opened: editOpened });
   assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
     channel: "document:create-invitation", request: {
       temporaryLabel: "Colleague", canEdit: true, canAddPasswords: false,
