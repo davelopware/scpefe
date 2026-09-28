@@ -1437,7 +1437,12 @@ test("migration uses canonical slot permission and adopts only the live verified
   assert.equal(state.attention?.kind, "migration-decision");
   host.migrateDocument = async () => ({ opened: opened("migrated", false),
     compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  assert.equal((await session.migrate()).status, "migration");
+  const migration = await session.migrate();
+  assert.deepEqual(migration, { status: "migration",
+    compatibilityCode: "MIGRATION_COMPATIBILITY" });
+  assert.equal("document" in migration, false);
+  assert.equal("content" in migration, false);
+  assert.equal(JSON.stringify(migration).includes("migrated"), false);
   state = session.getSnapshot();
   if (state.kind !== "edit") throw new Error("edit expected");
   assert.equal(state.document.content, "migrated");
@@ -1497,7 +1502,11 @@ test("compaction requires full administration, explicit confirmation, and a clea
   assert.equal(session.cancelCompaction().status, "compaction-canceled");
   assert.equal((await session.confirmCompaction()).status, "unavailable");
   assert.equal(session.requestCompaction().status, "attention");
-  assert.equal((await session.confirmCompaction()).status, "compaction");
+  const compaction = await session.confirmCompaction();
+  assert.deepEqual(compaction, { status: "compaction", previousHead: "a", head: "b" });
+  assert.equal("document" in compaction, false);
+  assert.equal("content" in compaction, false);
+  assert.equal(JSON.stringify(compaction).includes("owner"), false);
   state = session.getSnapshot();
   if (state.kind !== "edit") throw new Error("edit expected");
   assert.equal(state.working.dirty, false);

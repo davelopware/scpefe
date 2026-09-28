@@ -326,11 +326,9 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
   | Readonly<{ status: "head-accepted" }>
   | Readonly<{ status: "unreadable-discarded" }>
   | Readonly<{ status: "divergence"; hasConflicts: boolean }>
-  | Readonly<{ status: "migration"; document: Doc;
-    compatibilityCode: string }>
+  | Readonly<{ status: "migration"; compatibilityCode: string }>
   | Readonly<{ status: "migration-canceled" | "compaction-canceled" }>
-  | Readonly<{ status: "compaction"; document: Doc;
-    previousHead: string; head: string }>
+  | Readonly<{ status: "compaction"; previousHead: string; head: string }>
   | Readonly<{ status: "locked"; warningCode: SessionLockWarningCode | null }>
   | Readonly<{ status: "password-changed" | "invitation-created"
     | "identity-reconciled" | "permissions-updated" | "claim-canceled"
@@ -944,7 +942,7 @@ export class DocumentSession<Doc extends SessionDocument,
         return Object.freeze({ status: "migration-canceled" });
       }
       this.replaceWorkingDocument(result.opened, "open");
-      return Object.freeze({ status: "migration", document: frozenCopy(result.opened),
+      return Object.freeze({ status: "migration",
         compatibilityCode: result.compatibilityCode });
     } catch (error) {
       if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
@@ -998,7 +996,7 @@ export class DocumentSession<Doc extends SessionDocument,
           return Object.freeze({ status: "compaction-canceled" });
         }
         this.replaceWorkingDocument(result.opened, "open");
-        return Object.freeze({ status: "compaction", document: frozenCopy(result.opened),
+        return Object.freeze({ status: "compaction",
           previousHead: result.previousHead, head: result.head });
       } catch (error) {
         if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
