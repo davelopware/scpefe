@@ -183,6 +183,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:discard-recovery")),
   acceptHeadMismatch: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:accept-head-mismatch")),
+  discardUnreadableJournal: async () => validateOpenedDocument(
+    await ipcRenderer.invoke("document:discard-unreadable-journal",
+      { confirmed: true })),
   closeDocument: async () => {
     const value = await ipcRenderer.invoke("document:close");
     if (typeof value !== "boolean") throw new TypeError("host returned invalid close result");

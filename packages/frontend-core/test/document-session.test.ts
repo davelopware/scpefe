@@ -11,6 +11,11 @@ interface OpenedDocument {
   targetName: string;
   canEdit: boolean;
   provisional?: true;
+  recovery?: { content: string; state: "unsaved"; updateTime: number;
+    cursor: { start: number; end: number }; authorName?: string; deviceName?: string };
+  headMismatch?: { kind: "rollback" | "divergence" | "replacement" | "witness-error";
+    title: string; explanation: string; editingBlocked: true };
+  unreadableJournal?: true;
 }
 
 const opened = (content = "private text", readOnly = true): OpenedDocument => ({
@@ -110,7 +115,7 @@ class Host implements DocumentSessionHost<OpenedDocument> {
     return this.editResult;
   }
   async cancelLeaseTakeover(_authorization: string): Promise<boolean> { return true; }
-  async restoreRecoveredWork(_request: { authorization: string }): Promise<OpenedDocument & {
+  async restoreRecoveredWork(_request: { authorization?: string } = {}): Promise<OpenedDocument & {
     recoveredUnsaved: true; cursor: { start: number; end: number } } | {
       decisionRequired: "lease-takeover"; operation: "recovery";
       holderName: string; authorization: string }> {
@@ -140,12 +145,254 @@ class Host implements DocumentSessionHost<OpenedDocument> {
     return { content: "private text", publicationState: "target-published" };
   }
   async discardPendingPublication(): Promise<OpenedDocument> { return opened(); }
+  async discardRecoveredWork(): Promise<OpenedDocument> { return opened(); }
+  async acceptHeadMismatch(): Promise<OpenedDocument> { return opened(); }
+  async discardUnreadableJournal(): Promise<OpenedDocument> { return opened(); }
   async backupDocument(): Promise<{ backedUp: true } | null> {
     return { backedUp: true };
   }
   async exportPlaintext(_request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: true } | null> { return { exported: true }; }
 }
+
+test("recovery attention carries safe context and restore adopts unsaved work atomically", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  const recovered = { content: "protected recovered words", state: "unsaved" as const,
+    updateTime: 1720000000000, cursor: { start: 4, end: 4 },
+    authorName: "Ada", deviceName: "Desk" };
+  session.adopt({ ...opened("verified target"), recovery: recovered });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(snapshot.attention, { kind: "recovery-decision",
+    updateTime: 1720000000000, authorName: "Ada", deviceName: "Desk",
+    canRestore: true });
+  assert.equal(snapshot.commands.recoveryRestore, true);
+  assert.equal(snapshot.commands.recoveryDiscard, true);
+  assert.equal(snapshot.commands.enterEdit, false);
+  assert.equal(JSON.stringify(snapshot.attention).includes(recovered.content), false);
+  host.restoreRecoveredWork = async () => ({ ...opened(recovered.content, false),
+    recoveredUnsaved: true, cursor: recovered.cursor });
+  const seen: string[] = [];
+  session.subscribe(() => {
+    const current = session.getSnapshot();
+    if (current.kind === "read-only" || current.kind === "edit") {
+      seen.push(`${current.kind}:${current.working.text}:${current.attention?.kind ?? "none"}`);
+    }
+  });
+  assert.deepEqual(await session.restoreRecovery(), { status: "recovery" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit");
+  assert.equal(snapshot.working.text, recovered.content);
+  assert.equal(snapshot.working.baseline, "invalid");
+  assert.equal(snapshot.working.dirty, true);
+  assert.equal(snapshot.document.targetName, "notes.scpefe");
+  assert.equal(snapshot.attention, undefined);
+  assert.equal(seen.some((value) => value.includes("read-only:protected recovered")), false,
+    "subscribers cannot see recovery text under old read-only authority");
+  assert.equal(JSON.stringify(await session.restoreRecovery()).includes(recovered.content), false);
+  session.dispose();
+});
+
+test("head mismatch acceptance is serialized, safe, and invalidated by lock", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("verified target"), headMismatch: {
+    kind: "rollback", title: "host heading", explanation: "private path" } });
+  const current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(current.attention, { kind: "head-mismatch", mismatchKind: "rollback" });
+  assert.equal(current.commands.acceptHeadMismatch, true);
+  assert.equal(JSON.stringify(current.attention).includes("private path"), false);
+  let resolve!: (document: OpenedDocument) => void;
+  host.acceptHeadMismatch = () => new Promise((done) => { resolve = done; });
+  const accepting = session.acceptHeadMismatch();
+  await Promise.resolve();
+  assert.equal(session.getSnapshot().pending, "head-accept");
+  session.lockStarted();
+  resolve(opened("late document"));
+  assert.deepEqual(await accepting, { status: "superseded" });
+  assert.equal(session.getSnapshot().kind, "locked");
+  session.dispose();
+});
+
+test("head and recovery evidence reveal one actionable decision at a time", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  const recovery = { content: "protected recovery", state: "unsaved" as const,
+    updateTime: 1, cursor: { start: 0, end: 0 } };
+  session.adopt({ ...opened("target"), recovery, headMismatch: {
+    kind: "rollback", title: "host title", explanation: "host prose",
+    editingBlocked: true } });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention?.kind, "head-mismatch");
+  assert.equal(snapshot.commands.acceptHeadMismatch, true);
+  assert.equal(snapshot.commands.recoveryRestore, false);
+  assert.equal(snapshot.commands.recoveryDiscard, false);
+  host.acceptHeadMismatch = async () => ({ ...opened("target"), recovery });
+  assert.deepEqual(await session.acceptHeadMismatch(), { status: "head-accepted" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention?.kind, "recovery-decision");
+  assert.equal(snapshot.commands.recoveryDiscard, true);
+  session.dispose();
+});
+
+test("accepting a head still requires unreadable-journal discard before edit", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("target"), canEdit: false, unreadableJournal: true,
+    headMismatch: { kind: "divergence", title: "host title",
+      explanation: "private head prose", editingBlocked: true } });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention?.kind, "head-mismatch");
+  assert.equal(snapshot.commands.unreadableDiscard, false);
+  host.acceptHeadMismatch = async () => ({ ...opened("target"), canEdit: false,
+    unreadableJournal: true });
+  assert.deepEqual(await session.acceptHeadMismatch(), { status: "head-accepted" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(snapshot.attention, { kind: "unreadable-journal" });
+  assert.equal(snapshot.commands.unreadableDiscard, true);
+  assert.equal(snapshot.commands.enterEdit, false);
+  assert.deepEqual(await session.enterEditMode(), { status: "unavailable" });
+  host.discardUnreadableJournal = async () => opened("target");
+  assert.deepEqual(await session.discardUnreadableJournal(),
+    { status: "unreadable-discarded" });
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention, undefined);
+  assert.equal(snapshot.commands.enterEdit, true);
+  assert.deepEqual(await session.enterEditMode(), { status: "edit-mode" });
+  assert.equal(session.getSnapshot().kind, "edit");
+  session.dispose();
+});
+
+test("discarding recovery invalidates an outstanding one-shot lease challenge", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("target"), recovery: { content: "protected",
+    state: "unsaved", updateTime: 1, cursor: { start: 0, end: 0 } } });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(session.stageLeaseDecision({ decisionRequired: "lease-takeover",
+    operation: "recovery", holderName: "Remote", authorization: "old token" },
+  snapshot.adoption), true);
+  assert.deepEqual(await session.discardRecovery(), { status: "recovery-discarded" });
+  assert.deepEqual(await session.confirmLeaseTakeover(), { status: "unavailable" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("old token"), false);
+  session.dispose();
+});
+
+test("queued confirmation cannot replay a lease after recovery is discarded", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("target"), recovery: { content: "protected",
+    state: "unsaved", updateTime: 1, cursor: { start: 0, end: 0 } } });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  session.stageLeaseDecision({ decisionRequired: "lease-takeover",
+    operation: "recovery", holderName: "Remote", authorization: "old token" },
+  snapshot.adoption);
+  let finish!: (document: OpenedDocument) => void;
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  host.discardRecoveredWork = () => new Promise((resolve) => {
+    finish = resolve; started();
+  });
+  const discarding = session.discardRecovery();
+  await begun;
+  const confirming = session.confirmLeaseTakeover();
+  finish(opened("target"));
+  assert.deepEqual(await discarding, { status: "recovery-discarded" });
+  assert.deepEqual(await confirming, { status: "superseded" });
+  session.dispose();
+});
+
+test("unreadable journal requires explicit discard and keeps protected state on failure", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("verified target"), unreadableJournal: true });
+  let current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(current.attention, { kind: "unreadable-journal" });
+  assert.equal(current.commands.enterEdit, false);
+  assert.equal(current.commands.unreadableDiscard, true);
+  host.discardUnreadableJournal = async () => { throw new Error("private journal path"); };
+  assert.deepEqual(await session.discardUnreadableJournal(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(current.working.text, "verified target");
+  assert.deepEqual(current.attention, { kind: "unreadable-journal",
+    failureCode: "OPERATION_FAILED" });
+  host.discardUnreadableJournal = async () => opened("verified target");
+  assert.deepEqual(await session.discardUnreadableJournal(),
+    { status: "unreadable-discarded" });
+  current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(current.attention, undefined);
+  assert.equal(current.commands.enterEdit, true);
+  session.dispose();
+});
+
+test("recovery discovery is safe semantic attention across locked and open states", () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.observeRecoveryDiscovery({ total: 3, pendingPublications: 1 });
+  let snapshot = session.getSnapshot();
+  assert.deepEqual(snapshot.attention, { kind: "recovery-discovery",
+    total: 3, pendingPublications: 1 });
+  session.adopt(opened());
+  snapshot = session.getSnapshot();
+  assert.deepEqual(snapshot.attention, { kind: "recovery-discovery",
+    total: 3, pendingPublications: 1 });
+  session.lockStarted();
+  snapshot = session.getSnapshot();
+  assert.deepEqual(snapshot.attention, { kind: "recovery-discovery",
+    total: 3, pendingPublications: 1 });
+  session.observeRecoveryDiscovery({ total: 0, pendingPublications: 0 });
+  assert.equal(session.getSnapshot().attention, undefined);
+  session.dispose();
+});
+
+test("late recovery and merge completions cannot reintroduce protected text after lock", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("verified"), recovery: { content: "secret recovery",
+    state: "unsaved", updateTime: 1, cursor: { start: 0, end: 0 } } });
+  let resolveRecovery!: (document: OpenedDocument & { recoveredUnsaved: true;
+    cursor: { start: number; end: number } }) => void;
+  let started!: () => void;
+  host.restoreRecoveredWork = () => new Promise((resolve) => {
+    resolveRecovery = resolve; started();
+  });
+  let begun = new Promise<void>((resolve) => { started = resolve; });
+  const restoring = session.restoreRecovery();
+  await begun;
+  session.lockStarted();
+  resolveRecovery({ ...opened("secret recovery", false), recoveredUnsaved: true,
+    cursor: { start: 0, end: 0 } });
+  assert.deepEqual(await restoring, { status: "superseded" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("secret recovery"), false);
+
+  session.adopt({ ...opened("saved candidate"), publicationState: "conflict" });
+  let resolveMerge!: (draft: { content: string; hasConflicts: boolean;
+    ancestorRevision: string; localRevision: string; currentRevision: string }) => void;
+  host.beginDivergenceResolution = () => new Promise((resolve) => {
+    resolveMerge = resolve; started();
+  });
+  begun = new Promise<void>((resolve) => { started = resolve; });
+  const merging = session.beginDivergenceResolution();
+  await begun;
+  session.lockStarted();
+  resolveMerge({ content: "secret merge", hasConflicts: true,
+    ancestorRevision: "a", localRevision: "b", currentRevision: "c" });
+  assert.deepEqual(await merging, { status: "superseded" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("secret merge"), false);
+  session.dispose();
+});
 
 test("manual save publishes active then sealed state through the session interface", async () => {
   const host = new Host();
@@ -503,7 +750,13 @@ test("conflict retry routes divergence acquisition through the session queue", a
     localRevision: "l", currentRevision: "c" });
   const outcome = await acquiring;
   if (outcome.status !== "divergence") throw new Error("expected merge draft");
-  assert.equal(outcome.draft.content, "merge draft");
+  assert.deepEqual(outcome, { status: "divergence", hasConflicts: false });
+  assert.equal(JSON.stringify(outcome).includes("merge draft"), false);
+  const merged = session.getSnapshot();
+  if (merged.kind !== "edit") throw new Error("expected atomic edit adoption");
+  assert.equal(merged.working.text, "merge draft");
+  assert.equal(merged.working.dirty, true);
+  assert.equal(merged.publication.resolving, true);
   assert.deepEqual(await session.beginDivergenceResolution(),
     { status: "unavailable" }, "an acquired draft cannot be reacquired before adoption");
   session.dispose();
@@ -539,9 +792,25 @@ test("conflict acquisition requires explicit discard of edits newer than the sav
   assert.equal(preserved.working.text, "newer unsaved edit");
   assert.equal(preserved.working.dirty, true);
   assert.deepEqual(await session.beginDivergenceResolution({ discardUnsaved: true }),
-    { status: "divergence", draft: { content: "merge draft", hasConflicts: false,
-      ancestorRevision: "a", localRevision: "l", currentRevision: "c" } });
+    { status: "divergence", hasConflicts: false });
   assert.equal(acquisitions, 1);
+  session.dispose();
+});
+
+test("failed divergence acquisition preserves even consented unsaved work for retry", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("saved candidate", false), publicationState: "conflict" });
+  session.edit("newer protected edit");
+  host.beginDivergenceResolution = async () => { throw new Error("private merge path"); };
+  assert.deepEqual(await session.beginDivergenceResolution({ discardUnsaved: true }),
+    { status: "failed", code: "OPERATION_FAILED" });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected editable session");
+  assert.equal(snapshot.working.text, "newer protected edit");
+  assert.equal(snapshot.working.dirty, true);
+  assert.deepEqual(snapshot.attention, { kind: "publication-decision", state: "conflict",
+    failureCode: "OPERATION_FAILED" });
   session.dispose();
 });
 
@@ -664,8 +933,9 @@ test("other lease decisions consume each authority once across changed evidence 
   if (initial.kind !== "read-only") throw new Error("expected read-only");
   assert.equal(session.stageLeaseDecision(first, initial.adoption), true);
   const requests: string[] = [];
-  host.restoreRecoveredWork = async ({ authorization }) => {
-    requests.push(authorization);
+  host.restoreRecoveredWork = async (request) => {
+    const authorization = request?.authorization;
+    requests.push(authorization ?? "");
     return { ...first, authorization: "changed-evidence token" };
   };
   assert.deepEqual(await session.confirmLeaseTakeover(), { status: "attention" });

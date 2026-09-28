@@ -61,6 +61,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     let divergenceAttempts = 0;
     let divergenceSaveAttempts = 0;
     let headAccepts = 0;
+    let unreadableDiscards = 0;
     let cancelAttempts = 0;
     const calls = [];
     const listen = (name, listener) => {
@@ -159,6 +160,14 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       acceptHeadMismatch: async () => {
         headAccepts += 1;
         if (headAccepts === 1) throw new Error("witness write failed");
+        if (openResult.unreadableJournal) {
+          return { ...openResult, headMismatch: undefined, canEdit: false };
+        }
+        return base;
+      },
+      discardUnreadableJournal: async () => {
+        unreadableDiscards += 1;
+        if (unreadableDiscards === 1) throw new Error("private journal location");
         return base;
       },
       backupDocument: async () => null, exportPlaintext: async () => null,
@@ -456,6 +465,36 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       await user.click(ui.getByRole(dialog, "button",
         { name: "Accept current authenticated head" }));
     }
+    await command("Security", "Lock");
+    openResult = { ...base, content: "unreadable private target", canEdit: false,
+      unreadableJournal: true, headMismatch: { kind: "divergence",
+        title: "Authenticated divergence detected", explanation: "private witness path",
+        editingBlocked: true } };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "journal password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Authenticated divergence detected" });
+    assert.equal(ui.queryByRole(dialog, "button", { name: "Discard unreadable journal" }), null);
+    await user.click(ui.getByRole(dialog, "button",
+      { name: "Accept current authenticated head" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Unreadable recovery journal" });
+    assert.equal(editor.value, "");
+    assert.equal(document.body.textContent.includes("unreadable private target"), false);
+    const discardUnreadable = ui.getByRole(dialog, "button",
+      { name: "Discard unreadable journal" });
+    await user.click(discardUnreadable);
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /operation could not be completed safely/i);
+    assert.equal(document.body.textContent.includes("private journal location"), false);
+    await user.click(discardUnreadable);
+    await ui.waitFor(() => assert.equal(unreadableDiscards, 2));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await command("Edit", "Edit Contents");
+    await ui.waitFor(() => assert.equal(editor.readOnly, false));
     await command("Security", "Lock");
     openResult = { ...base, content: "legacy private text", canEdit: false,
       migrationRequired: true,

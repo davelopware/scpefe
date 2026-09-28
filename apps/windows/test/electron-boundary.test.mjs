@@ -146,7 +146,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "cancelLeaseTakeover", "discardRecoveredWork",
-    "acceptHeadMismatch", "closeDocument", "exitApplication", "resolveProtection",
+    "acceptHeadMismatch", "discardUnreadableJournal", "closeDocument", "exitApplication", "resolveProtection",
     "lock", "onLockStarted", "onLocked",
     "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
     "onUnresolvedJournalSummary",

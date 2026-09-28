@@ -49,6 +49,24 @@ test("journal warning events carry a validated adoption scope", async () => {
   ]);
 });
 
+test("unreadable journal IPC requires explicit confirmation before host disposal", async () => {
+  const { host, handlers, service } = fixture();
+  await host.start();
+  const calls = [];
+  service.active = { opened: { content: "verified", readOnly: true,
+    canEdit: true, publicationState: "target-published" } };
+  service.discardUnreadableJournalForSwitch = async (confirmation) => {
+    calls.push(confirmation);
+    return { discarded: true };
+  };
+  const discard = handlers.get("document:discard-unreadable-journal");
+  await assert.rejects(discard({}, { confirmed: false }), /explicit confirmation/);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await discard({}, { confirmed: true }), service.active.opened);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /Permanently discard the unreadable recovery journal/);
+});
+
 test("new and open password entry time out without an active document", async () => {
   for (const channel of ["document:choose-create-target", "document:choose-open-target"]) {
     const { host, handlers, events, timers } = fixture();

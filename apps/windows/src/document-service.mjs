@@ -409,13 +409,15 @@ export class DocumentService {
       ? nativeOpened.opened
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-        canEdit: headMismatch || profileMismatch || migrationRequired ? false : slotCanEdit,
+        canEdit: headMismatch || profileMismatch || migrationRequired || unreadableJournal
+          ? false : slotCanEdit,
         ...(migrationRequired ? { migrationRequired: true } : {}),
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
         ...(headMismatch ? { headMismatch } : {}),
         ...(profileMismatch ? { profileMismatch } : {}),
+        ...(unreadableJournal ? { unreadableJournal: true } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
@@ -450,6 +452,9 @@ export class DocumentService {
     }
     if (active.recovery) {
       throw new Error("Restore or discard recovered work before editing");
+    }
+    if (active.unreadableJournal) {
+      throw new Error("Discard or preserve the unreadable journal before editing");
     }
     if (active.headMismatch) {
       throw new Error("Accept or resolve the head mismatch before editing");
@@ -845,12 +850,11 @@ export class DocumentService {
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
     this.active.unresolvedJournal = false;
-    this.active.opened = validateOpenedDocument({
-      content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.headMismatch ? false : this.active.slotCanEdit,
-      publicationState: this.active.opened.publicationState,
-      ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
-      ...(this.active.headMismatch ? { headMismatch: this.active.headMismatch } : {}) });
+    this.active.opened = validateOpenedDocument({ ...this.active.opened,
+      recovery: undefined, readOnly: true,
+      canEdit: this.active.headMismatch || this.active.profileMismatch
+        || this.active.migrationRequired || this.active.unreadableJournal
+        ? false : this.active.slotCanEdit });
     return this.active.opened;
   }
 
@@ -870,17 +874,15 @@ export class DocumentService {
   }
 
   async acceptHeadMismatch() {
-    if (!this.active?.headMismatch) throw new Error("No head mismatch is available");
-    await this.witnesses.accept(this.active.target, this.active.observation);
-    this.active.headMismatch = null;
-    this.active.opened = validateOpenedDocument({
-      content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.slotCanEdit,
-      publicationState: this.active.opened.publicationState,
-      ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
-      ...(this.active.opened.recovery ? { recovery: this.active.opened.recovery } : {}),
-    });
-    return this.active.opened;
+    const active = this.active;
+    if (!active?.headMismatch) throw new Error("No head mismatch is available");
+    await this.witnesses.accept(active.target, active.observation);
+    active.headMismatch = null;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      headMismatch: undefined, readOnly: true,
+      canEdit: active.profileMismatch || active.migrationRequired
+        || active.unreadableJournal ? false : active.slotCanEdit });
+    return active.opened;
   }
 
   async reconnectPendingPublication() {
@@ -1130,6 +1132,10 @@ export class DocumentService {
     await this.journals.clear(active.documentId);
     active.unreadableJournal = false;
     active.unresolvedJournal = false;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      unreadableJournal: undefined,
+      canEdit: active.headMismatch || active.profileMismatch || active.migrationRequired
+        ? false : active.slotCanEdit });
     return Object.freeze({ discarded: true, documentId: active.documentId });
   }
 

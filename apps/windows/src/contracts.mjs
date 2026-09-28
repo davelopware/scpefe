@@ -472,6 +472,9 @@ export function validateOpenedDocument(value) {
         ? { mustBeChangedKnown: slot.mustBeChangedKnown } : {}),
       ...(slot.identityKnown !== undefined ? { identityKnown: slot.identityKnown } : {}) });
   });
+  if (value.unreadableJournal !== undefined && value.unreadableJournal !== true) {
+    throw new TypeError("host returned invalid unreadable journal decision");
+  }
   return Object.freeze({ content, readOnly: true,
     canEdit: migrationRequired ? false : value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
@@ -494,6 +497,7 @@ export function validateOpenedDocument(value) {
     ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),
     ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
+    ...(value.unreadableJournal === true ? { unreadableJournal: true } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
 

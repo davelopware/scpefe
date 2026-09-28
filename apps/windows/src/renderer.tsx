@@ -49,13 +49,14 @@ type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   slotIdentityEmail?: string;
   headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
   managedSlots?: ManagedSlot[]; provisional?: true; migrationRequired?: true;
+  unreadableJournal?: true;
   migrationWarning?: string };
 type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
 type DialogName = "profile" | "open" | "export"
   | "unlock" | "passwords" | "compaction" | null;
 type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
-  | "recovery" | "publication" | null;
+  | "recovery" | "unreadable" | "publication" | null;
 
 function isDocumentOpened(value: Opened | null): value is DocumentOpened {
   return value !== null && value.invitationRequired !== true;
@@ -66,9 +67,12 @@ function openedDialogName(value: Opened | null): OpenedDialogName {
   if (!isDocumentOpened(value)) return null;
   if (value.migrationRequired) return "migration";
   if (value.profileMismatch) return "profile-mismatch";
-  if (value.headMismatch) return "head";
-  if (value.recovery) return "recovery";
   return null;
+}
+
+function sessionAttentionNeedsDialog(kind: string | undefined): boolean {
+  return kind === "head-mismatch" || kind === "unreadable-journal"
+    || kind === "recovery-decision" || kind === "publication-decision";
 }
 
 const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> = [
@@ -300,6 +304,7 @@ declare global { interface Window { scpefe: {
   cancelLeaseTakeover(authorization: string): Promise<boolean>;
   discardRecoveredWork(): Promise<DocumentOpened>;
   acceptHeadMismatch(): Promise<DocumentOpened>;
+  discardUnreadableJournal(): Promise<DocumentOpened>;
   closeDocument(): Promise<boolean>;
   exitApplication(): Promise<boolean>;
   resolveProtection(request: { token: string; decision: "cancel" | "save" | "discard" }):
@@ -360,6 +365,10 @@ function App() {
     ? catalogText(attention.code) : null;
   const publicationDecision = attention?.kind === "publication-decision"
     ? attention : null;
+  const recoveryDecision = attention?.kind === "recovery-decision"
+    ? attention : null;
+  const headDecision = attention?.kind === "head-mismatch" ? attention : null;
+  const unreadableDecision = attention?.kind === "unreadable-journal" ? attention : null;
   const publicationState = sessionSnapshot.kind === "closed" ? null
     : sessionSnapshot.publication.state;
   const publicationResolving = sessionSnapshot.kind === "read-only"
@@ -381,9 +390,8 @@ function App() {
   const [findStatus, setFindStatus] = useState("");
   const [lineEndings, setLineEndings] = useState<"lf" | "native">("lf");
   const [exportError, setExportError] = useState("");
-  const [journalSummary, setJournalSummary] = useState<JournalSummary>({
-    total: 0, pendingPublications: 0,
-  });
+  const journalSummary = sessionSnapshot.discovery ?? { total: 0,
+    pendingPublications: 0 };
   const [externalOpenRequest, setExternalOpenRequest] =
     useState<ExternalOpenRequest | null>(null);
   const [queuedExternalOpenRequest, setQueuedExternalOpenRequest] =
@@ -428,7 +436,10 @@ function App() {
   const migrationRetryAction = useRef<HTMLButtonElement>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
-  const openedDialog = publicationDecision ? "publication" : openedDialogName(opened);
+  const openedDialog = opened?.invitationRequired ? "claim"
+    : headDecision ? "head" : unreadableDecision ? "unreadable"
+      : recoveryDecision ? "recovery" : publicationDecision ? "publication"
+        : openedDialogName(opened);
   const visibleOpenedDialog = !creating && dialog === null && !confirmDivergenceDiscard
     && leaseDecision === null && saveFailure === null
     ? invitationStaged ? "claim" : openedDialog : null;
@@ -446,7 +457,9 @@ function App() {
     void rendererLifecycleCompletion.track(() =>
       window.scpefe.getClientSettings().then(setClientSettings).catch(showError));
     void rendererLifecycleCompletion.track(() =>
-      window.scpefe.getUnresolvedJournalSummary().then(setJournalSummary).catch(showError));
+      window.scpefe.getUnresolvedJournalSummary().then((summary) => {
+        session.observeRecoveryDiscovery(summary);
+      }).catch(showError));
   }, []);
   const showError = (error: unknown) => setMessage(safeRendererErrorMessage(error));
   function reflectCurrent(update: (document: DocumentOpened) => DocumentOpened): void {
@@ -482,7 +495,7 @@ function App() {
       }
     });
     const stopJournalSummary = window.scpefe.onUnresolvedJournalSummary(
-      setJournalSummary);
+      (summary) => { session.observeRecoveryDiscovery(summary); });
     const stopSwitchRetained = window.scpefe.onSwitchRetained((result) => {
       showOpenedResult(result);
       setMessage("The current document remains open with its manual save pending publication.");
@@ -753,7 +766,8 @@ function App() {
       setPendingOpenName(""); setDialog(null);
       const adopted = session.getSnapshot();
       if (outcome.status === "opened" && (adopted.kind === "read-only"
-          || adopted.kind === "edit") && openedDialogName(adopted.document) === null) {
+          || adopted.kind === "edit") && openedDialogName(adopted.document) === null
+          && !sessionAttentionNeedsDialog(adopted.attention?.kind)) {
         focusEditorAfterDialog();
       }
     }
@@ -786,13 +800,16 @@ function App() {
       setExternalOpenRequest(null);
       if (result) {
         showReplacementResult(result); setDialog(null);
-        if (!result.invitationRequired && openedDialogName(result) === null) {
+        const adopted = session.getSnapshot();
+        if (!result.invitationRequired && openedDialogName(result) === null
+          && (adopted.kind === "read-only" || adopted.kind === "edit")
+          && !sessionAttentionNeedsDialog(adopted.attention?.kind)) {
           focusEditorAfterDialog();
         }
       }
       else { setDialog(null);
         setMessage("Open request canceled; the current document remains open."); }
-      setJournalSummary(await window.scpefe.getUnresolvedJournalSummary());
+      session.observeRecoveryDiscovery(await window.scpefe.getUnresolvedJournalSummary());
     } catch (error) {
       setOpenError(safeRendererErrorMessage(error));
       requestAnimationFrame(() => openPassword.current?.focus());
@@ -872,9 +889,9 @@ function App() {
     if (outcome.status === "attention") {
       setDecisionError("The lease changed. Review the current holder before trying again.");
     } else if (outcome.status === "recovery") {
-      applyRecoveredWork(outcome.document);
+      setMessage("Recovered work restored as unsaved changes.");
     } else if (outcome.status === "divergence") {
-      applyDivergenceDraft(outcome.draft);
+      showDivergenceDraft(outcome.hasConflicts);
     } else if (outcome.status === "migration") {
       session.refreshDocument(outcome.document);
       session.adoptPublication(outcome.document.content);
@@ -1079,14 +1096,6 @@ function App() {
     }
   }
 
-  function applyRecoveredWork(result: DocumentOpened & {
-    recoveredUnsaved: true; cursor: Cursor }) {
-    session.refreshDocument(result);
-    session.adoptRecovery(result.content, result.cursor);
-    setOpenedDialogError("");
-    setMessage("Recovered work restored as unsaved changes.");
-  }
-
   function openedActionFailure(error: unknown, action: HTMLElement | null, prefix: string) {
     const value = safeRendererErrorMessage(error);
     setOpenedDialogError(value);
@@ -1095,50 +1104,53 @@ function App() {
   }
 
   async function restoreRecovery() {
-    const adoption = currentAdoption();
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
-    try {
-      setOpenedDialogError("");
-      const result = await window.scpefe.restoreRecoveredWork();
-      if (!stillAdopted(adoption)) return;
-      if ("decisionRequired" in result) {
-        session.stageLeaseDecision(result, adoption!);
-        setDecisionError("");
-        setMessage("Restoring recovered work requires a confirmed lease takeover.");
-        return;
-      }
-      applyRecoveredWork(result);
-    } catch (error) {
-      if (!stillAdopted(adoption)) return;
-      openedActionFailure(error, action, "Recovery restore needs attention");
+    const outcome = await session.restoreRecovery();
+    if (outcome.status === "attention") {
+      setDecisionError("");
+      setMessage("Restoring recovered work requires a confirmed lease takeover.");
+    } else if (outcome.status === "recovery") {
+      setMessage("Recovered work restored as unsaved changes.");
+    } else if (outcome.status === "failed") {
+      setMessage(`Recovery restore needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
     }
   }
 
   async function discardRecovery() {
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
-    try {
-      setOpenedDialogError("");
-      const result = await window.scpefe.discardRecoveredWork();
-      session.refreshDocument(result);
-      session.adoptPublication(result.content);
+    const outcome = await session.discardRecovery();
+    if (outcome.status === "recovery-discarded") {
       setMessage("Recovered work discarded.");
-    } catch (error) {
-      openedActionFailure(error, action, "Recovery discard needs attention");
+    } else if (outcome.status === "failed") {
+      setMessage(`Recovery discard needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
     }
   }
 
   async function acceptHeadMismatch() {
     const action = document.activeElement instanceof HTMLElement
       ? document.activeElement : null;
-    try {
-      setOpenedDialogError("");
-      const result = await window.scpefe.acceptHeadMismatch();
-      session.refreshDocument(result);
+    const outcome = await session.acceptHeadMismatch();
+    if (outcome.status === "head-accepted") {
       setMessage("Current authenticated head accepted. Editing may now be enabled.");
-    } catch (error) {
-      openedActionFailure(error, action, "Authenticated-head acceptance needs attention");
+    } else if (outcome.status === "failed") {
+      setMessage(`Authenticated-head acceptance needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
+    }
+  }
+
+  async function discardUnreadableJournal() {
+    const action = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
+    const outcome = await session.discardUnreadableJournal();
+    if (outcome.status === "unreadable-discarded") {
+      setMessage("Unreadable recovery journal discarded. Editing may now be enabled.");
+    } else if (outcome.status === "failed") {
+      setMessage(`Unreadable journal discard needs attention: ${catalogText(outcome.code)}`);
+      requestAnimationFrame(() => action?.focus());
     }
   }
 
@@ -1212,12 +1224,9 @@ function App() {
     }
   }
 
-  function applyDivergenceDraft(draft: MergeDraft) {
-    session.adoptDivergence(draft.content);
-    reflectCurrent((current) => ({ ...current,
-      content: draft.content, readOnly: false, canEdit: true }));
+  function showDivergenceDraft(hasConflicts: boolean) {
     setOpenedDialogError("");
-    setMessage(draft.hasConflicts
+    setMessage(hasConflicts
       ? "Resolve every local/current marker, then save the merge."
       : "The three-way merge is clean. Review it, then save the merge.");
   }
@@ -1233,7 +1242,7 @@ function App() {
       setMessage("Divergence resolution requires a confirmed lease takeover.");
     } else if (outcome.status === "divergence") {
       setConfirmDivergenceDiscard(false);
-      applyDivergenceDraft(outcome.draft);
+      showDivergenceDraft(outcome.hasConflicts);
     } else if (outcome.status === "unsaved-work") {
       setConfirmDivergenceDiscard(true);
     } else if (outcome.status === "failed") {
@@ -1683,20 +1692,47 @@ function App() {
         <p>The document remains available read-only. Editing is blocked until you explicitly reconcile the slot identity.</p></div>
       <div className="dialog-actions"><button onClick={lock}>Lock now</button>
         <button onClick={() => setDialog("passwords")}>Open Passwords to reconcile</button></div></FocusedDialog>}
-    {visibleOpenedDialog === "head" && activeDocument && opened.headMismatch && <FocusedDialog
-      returnFocus={dialogReturnFocus.current} title={opened.headMismatch.title}>
-      <p>{opened.headMismatch.explanation}</p>
-      {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
-      <button onClick={acceptHeadMismatch}>Accept current authenticated head</button>
+    {visibleOpenedDialog === "head" && activeDocument && headDecision && <FocusedDialog
+      returnFocus={dialogReturnFocus.current} title={headDecision.mismatchKind === "rollback"
+        ? "Authenticated rollback detected" : headDecision.mismatchKind === "divergence"
+          ? "Authenticated divergence detected" : headDecision.mismatchKind === "replacement"
+            ? "Document identity replacement detected" : "Authenticated witness needs attention"}>
+      <p>{headDecision.mismatchKind === "rollback"
+        ? "The authenticated head appears older than the last trusted observation."
+        : headDecision.mismatchKind === "replacement"
+          ? "The target has a different document identity."
+          : headDecision.mismatchKind === "divergence"
+            ? "The authenticated head diverged from the last trusted observation."
+            : "The previous head observation could not be verified."}</p>
+      {headDecision.failureCode && <p className="dialog-error" role="alert">
+        {catalogText(headDecision.failureCode)}</p>}
+      <button disabled={sessionSnapshot.kind !== "read-only"
+        && sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.acceptHeadMismatch}
+        onClick={acceptHeadMismatch}>Accept current authenticated head</button>
     </FocusedDialog>}
-    {visibleOpenedDialog === "recovery" && activeDocument && opened.recovery && <FocusedDialog
+    {visibleOpenedDialog === "recovery" && activeDocument && recoveryDecision && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Recovered work"
-      initialFocus={openedDialogError ? recoveryRestoreAction : undefined}>
-      <p>Recovered work from {new Date(opened.recovery.updateTime).toLocaleString()} is available as unsaved changes.</p>
-      {openedDialogError && <p className="dialog-error" role="alert">{openedDialogError}</p>}
-      <div className="dialog-actions"><button onClick={discardRecovery}>Discard recovered work</button>
-        <button ref={recoveryRestoreAction} disabled={!opened.canEdit}
+      initialFocus={recoveryDecision.failureCode ? recoveryRestoreAction : undefined}>
+      <p>Recovered work from {new Date(recoveryDecision.updateTime).toLocaleString()} is available as unsaved changes.</p>
+      {recoveryDecision.failureCode && <p className="dialog-error" role="alert">
+        {catalogText(recoveryDecision.failureCode)}</p>}
+      <div className="dialog-actions"><button disabled={sessionSnapshot.kind !== "read-only"
+        && sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.recoveryDiscard}
+        onClick={discardRecovery}>Discard recovered work</button>
+        <button ref={recoveryRestoreAction} disabled={sessionSnapshot.kind !== "read-only"
+          && sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.recoveryRestore}
           onClick={restoreRecovery}>Restore unsaved work</button></div></FocusedDialog>}
+    {visibleOpenedDialog === "unreadable" && activeDocument && unreadableDecision
+      && <FocusedDialog returnFocus={dialogReturnFocus.current}
+        title="Unreadable recovery journal">
+        <p>The recovery journal for this document could not be read. Keep the document read-only or explicitly discard that journal before editing.</p>
+        {unreadableDecision.failureCode && <p className="dialog-error" role="alert">
+          {catalogText(unreadableDecision.failureCode)}</p>}
+        <div className="dialog-actions"><button onClick={lock}>Keep read-only and close</button>
+          <button disabled={sessionSnapshot.kind !== "read-only"
+            && sessionSnapshot.kind !== "edit" || !sessionSnapshot.commands.unreadableDiscard}
+            onClick={discardUnreadableJournal}>Discard unreadable journal</button></div>
+      </FocusedDialog>}
     {visibleOpenedDialog === "publication" && activeDocument && publicationDecision
       && <FocusedDialog returnFocus={dialogReturnFocus.current}
         initialFocus={publicationDecision.failureCode || openedDialogError

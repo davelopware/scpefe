@@ -15,6 +15,7 @@ import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenR
   validatePassword, validateProfile, validateTakeoverCancellation,
   validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
 import { safeEventCode } from "./error-boundary.mjs";
+import { DISCARD_UNREADABLE_JOURNAL_CONFIRMATION } from "./document-service.mjs";
 
 const AUTOMATIC_LOCK_REASONS = Object.freeze([
   "inactivity", "lease-refresh-failed", "screen-lock", "app-lock",
@@ -347,6 +348,16 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:accept-head-mismatch", () => this.service.acceptHeadMismatch());
+    this.#register("document:discard-unreadable-journal", async (request) => {
+      if (!request || request.confirmed !== true
+          || Object.keys(request).length !== 1) {
+        throw new TypeError("Unreadable journal discard requires explicit confirmation");
+      }
+      await this.service.discardUnreadableJournalForSwitch(
+        DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
+      await this.sendJournalSummary();
+      return this.service.active.opened;
+    });
     this.#register("document:cancel-lease-takeover", (authorization) =>
       this.leaseTakeovers.cancel(validateTakeoverCancellation(authorization), this.service));
     this.#register("document:claim-invitation", (password) =>
