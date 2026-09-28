@@ -384,8 +384,11 @@ function App() {
     || ((sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit")
       && sessionSnapshot.queued !== undefined);
   const securityPresentationEpoch = useRef(0);
+  const invitationSubmission = useRef<number | null>(null);
+  const invitationSubmissionSequence = useRef(0);
   useEffect(() => () => {
     securityPresentationEpoch.current += 1;
+    invitationSubmission.current = null;
     session.dispose();
   }, [session]);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -420,6 +423,7 @@ function App() {
   const [passwordError, setPasswordError] = useState("");
   const [invitationPassphrase, setInvitationPassphrase] = useState<string | null>(null);
   const [invitationError, setInvitationError] = useState("");
+  const [invitationBusy, setInvitationBusy] = useState(false);
   const [invitationPasswordError, setInvitationPasswordError] = useState(false);
   const [claimError, setClaimError] = useState("");
   const [currentPasswordDraft, setCurrentPasswordDraft] = useState("");
@@ -541,6 +545,8 @@ function App() {
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
     securityPresentationEpoch.current += 1;
+    invitationSubmission.current = null;
+    setInvitationBusy(false);
     if (!alreadyAdopted) session.adopt(result);
     const adopted = session.getSnapshot();
     if (adopted.kind === "read-only" || adopted.kind === "edit") {
@@ -569,6 +575,8 @@ function App() {
   function showReplacementResult(result: Opened, alreadyAdopted = false) {
     if (result.invitationRequired) {
       securityPresentationEpoch.current += 1;
+      invitationSubmission.current = null;
+      setInvitationBusy(false);
       setInvitationPassphrase(null);
       setCurrentPasswordDraft(""); setNewPasswordDraft("");
       setNewPasswordConfirmationDraft(""); setTemporaryPasswordDraft("");
@@ -1056,11 +1064,30 @@ function App() {
 
   async function createInvitation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (invitationSubmission.current !== null) return;
     const form = event.currentTarget;
+    const submission = ++invitationSubmissionSequence.current;
+    const presentationEpoch = securityPresentationEpoch.current;
+    invitationSubmission.current = submission;
+    setInvitationBusy(true);
+    try {
+      await publishInvitation(form, presentationEpoch);
+    } catch (error) {
+      if (securityPresentationEpoch.current === presentationEpoch) {
+        setInvitationError(safeRendererErrorMessage(error));
+      }
+    } finally {
+      if (invitationSubmission.current === submission) {
+        invitationSubmission.current = null;
+        setInvitationBusy(false);
+      }
+    }
+  }
+
+  async function publishInvitation(form: HTMLFormElement, presentationEpoch: number) {
     const data = new FormData(form);
     const enteredTemporary = String(data.get("temporaryPassword"));
     const startingSnapshot = session.getSnapshot();
-    const presentationEpoch = securityPresentationEpoch.current;
     const assessed = enteredTemporary
       ? await assessProposedPassword(enteredTemporary) : null;
     if (session.getSnapshot() !== startingSnapshot) return;
@@ -1213,6 +1240,7 @@ function App() {
 
   function showLockedResult(result: LockResult, closed = false) {
     securityPresentationEpoch.current += 1;
+    invitationSubmission.current = null;
     document.querySelectorAll<HTMLInputElement>(
       "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -1237,6 +1265,7 @@ function App() {
       setClaimPasswordDraft("");
       setClaimConfirmationDraft("");
       setInvitationPassphrase(null);
+      setInvitationBusy(false);
       setInvitationError("");
       setClaimError("");
       setExternalOpenRequest(null);
@@ -1456,6 +1485,7 @@ function App() {
       : publicationState === "conflict" ? "Publication conflict"
         : publicationState === "provisional" ? "Provisional publication" : "Published";
   const closeDialog = () => {
+    if (invitationSubmission.current !== null) return;
     securityPresentationEpoch.current += 1;
     setPendingProfile(null);
     setProfileError("");
@@ -1695,7 +1725,8 @@ function App() {
             {invitationError && <p id={invitationPasswordError
               ? "invitation-password-error" : undefined} className="dialog-error"
               role="alert">{invitationError}</p>}
-            <button disabled={sessionSnapshot.pending === "invitation-create"}>
+            {invitationBusy && <p role="status">Finishing invitation publication…</p>}
+            <button disabled={invitationBusy}>
               Create invitation</button></form>}
         {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
@@ -1704,7 +1735,8 @@ function App() {
           onRemove={removeManagedSlot} onCompact={async () => {
             setCompactionError(""); setDialog("compaction");
           }} />
-        <div className="dialog-actions"><button onClick={closeDialog}>Close</button></div></>}
+        <div className="dialog-actions"><button onClick={closeDialog}
+          disabled={invitationBusy}>Close</button></div></>}
       </FocusedDialog>}
     {dialog === "compaction" && activeDocument && <FocusedDialog
       returnFocus={dialogReturnFocus.current} title="Permanently compact document history?"

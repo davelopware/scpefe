@@ -584,9 +584,13 @@ export class DocumentSession<Doc extends SessionDocument,
       }
       this.publishPending("invitation-cancel");
       try {
-        await this.host.cancelInvitationClaim();
+        const canceled = await this.host.cancelInvitationClaim();
         if (generation !== this.generation || epoch !== this.invitationEpoch) {
           return Object.freeze({ status: "superseded" });
+        }
+        if (!canceled) {
+          this.clearPending();
+          return Object.freeze({ status: "failed", code: "LIFECYCLE_FAILED" });
         }
         this.invitationStaged = false;
         this.invitationEpoch += 1;

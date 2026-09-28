@@ -1338,6 +1338,24 @@ test("invitation claim and cancel preserve prior adoption and reject a late clai
   session.dispose();
 });
 
+test("a declined host claim cancellation keeps the invitation staged for retry", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("prior"));
+  session.adopt({ readOnly: true, invitationRequired: true });
+  host.cancelInvitationClaim = async () => false;
+  assert.deepEqual(await session.cancelInvitationClaim(),
+    { status: "failed", code: "LIFECYCLE_FAILED" });
+  const retained = session.getSnapshot();
+  if (retained.kind !== "read-only") throw new Error("prior lost");
+  assert.equal(retained.document.content, "prior");
+  assert.equal(retained.invitationStaged, true);
+  host.cancelInvitationClaim = async () => true;
+  assert.deepEqual(await session.cancelInvitationClaim(), { status: "claim-canceled" });
+  assert.equal(session.getSnapshot().invitationStaged, undefined);
+  session.dispose();
+});
+
 test("security publications return stable outcomes and reject stale profile metadata", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());

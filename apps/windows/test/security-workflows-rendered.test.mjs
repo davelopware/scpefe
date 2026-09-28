@@ -58,6 +58,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     let claimAttempts = 0;
     let canceledClaims = 0;
     let resolveClaim;
+    let deferInvitation = false;
+    let resolveInvitation;
     const calls = [];
     const listeners = {};
     const managedSlot = { slotId: "ab".repeat(16), identityName: "Grace",
@@ -126,6 +128,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
         if (invitationAttempts === 2) throw new SafeBoundaryError("PASSWORD_ALREADY_IN_USE");
         if (invitationAttempts === 3) throw new Error("Invitation publication failed safely");
         calls.push(["invitation", value]);
+        if (deferInvitation) return new Promise((resolve) => { resolveInvitation = resolve; });
         serviceOpened = { ...editable, managedSlots: [managedSlot,
           { ...managedSlot, slotId: "cd".repeat(16), identityName: "Invite" }] };
         return { created: true, temporaryPassword: "generated invitation secret",
@@ -282,6 +285,40 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Done" }));
     await ui.waitFor(() => assert.equal(document.body.textContent.includes(
       "generated invitation secret"), false));
+
+    async function beginDeferredInvitation(label) {
+      deferInvitation = true;
+      resolveInvitation = null;
+      const form = ui.getByRole(dialog, "heading",
+        { name: "Invite another person" }).closest("form");
+      await user.type(ui.getByLabelText(form, "Temporary label"), label);
+      await user.click(ui.getByRole(form, "button", { name: "Create invitation" }));
+      await ui.waitFor(() => assert.equal(typeof resolveInvitation, "function"));
+    }
+    async function finishDeferredInvitation(secret) {
+      resolveInvitation({ created: true, temporaryPassword: secret,
+        opened: { ...editable, managedSlots: [managedSlot] } });
+      const result = await ui.findByLabelText(dialog, "One-time temporary passphrase");
+      assert.equal(result.value, secret,
+        "a committed invitation must present its one-time passphrase");
+      deferInvitation = false;
+      await user.click(ui.getByRole(dialog, "button", { name: "Done" }));
+    }
+    await beginDeferredInvitation("Close race");
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Passwords" }) !== null,
+      true, "Close cannot discard a passphrase while publication is pending");
+    await finishDeferredInvitation("close-race-secret");
+
+    await beginDeferredInvitation("Escape race");
+    await user.click(ui.getByLabelText(dialog,
+      "Temporary passphrase (leave blank to generate)"));
+    assert.equal(dialog.contains(document.activeElement), true);
+    await user.keyboard("{Escape}");
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Passwords" }) !== null,
+      true, "Escape cannot discard a passphrase while publication is pending");
+    await finishDeferredInvitation("escape-race-secret");
+
     const permissionGroup = ui.getByRole(dialog, "group",
       { name: /Permissions for Grace/ });
     await user.click(ui.getByLabelText(permissionGroup, "May add passwords"));
