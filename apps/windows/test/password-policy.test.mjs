@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import "../scripts/register-frontend-typescript.mjs";
 
 test("all new-password workflows expose the shared policy and live authoritative result",
   async (t) => {
@@ -23,7 +24,7 @@ test("all new-password workflows expose the shared policy and live authoritative
     const React = (await import("react")).default;
     const { cleanup, render, within } = await import("@testing-library/react");
     const { assessProposedPassword, PasswordPolicyStatus } = await import(
-      "../src/password-policy.mjs");
+      "../src/password-policy.ts");
     t.after(() => {
       cleanup(); dom.window.close();
       for (const [key, descriptor] of prior) {

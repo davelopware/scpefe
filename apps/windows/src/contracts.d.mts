@@ -8,3 +8,6 @@ export function validateCreateFormRequest(value: unknown): {
   understandsIrrecoverable: true;
   storedRecoverySeparately: boolean;
 };
+
+/** Returns the validated canonical password or rejects invalid input. */
+export function validatePassword(value: unknown): string;

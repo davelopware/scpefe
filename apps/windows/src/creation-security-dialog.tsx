@@ -6,7 +6,7 @@ import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
 import { assessProposedPassword, proposedPasswordRejectionMessage,
   type ProposedPasswordOutcome }
-  from "./password-policy.mjs";
+  from "./password-policy.ts";
 
 export type CreationFormRequest = {
   ownerPassword: string;

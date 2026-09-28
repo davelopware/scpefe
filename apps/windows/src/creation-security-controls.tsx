@@ -1,5 +1,5 @@
 import React, { type ChangeEvent, type RefObject } from "react";
-import { PasswordPolicyStatus } from "./password-policy.mjs";
+import { PasswordPolicyStatus } from "./password-policy.ts";
 
 const h = React.createElement;
 
