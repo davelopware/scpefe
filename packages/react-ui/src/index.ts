@@ -7,3 +7,5 @@ export { browserFocusDom, browserFocusManager } from "./browser-focus-dom.ts";
 export { useModalFocus } from "./use-modal-focus.ts";
 export type { ModalFocusOptions } from "./use-modal-focus.ts";
 export { useSessionSnapshot } from "./use-session-snapshot.ts";
+export { SharedApp } from "./session/session-app.tsx";
+export type { SharedFrontendHost, SharedAppProps } from "./session/session-app.tsx";
