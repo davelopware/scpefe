@@ -275,7 +275,6 @@ export function useAttentionActions({ session, completion, catalogText,
 
   function handleDialogAction(action: DialogAction): void | Promise<void> {
     switch (action) {
-      case "retry-edit": return enterEditMode();
       case "cancel-lease": return cancelLeaseDecision();
       case "confirm-lease": return confirmLeaseTakeover();
       case "retry-save": return save();

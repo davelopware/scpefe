@@ -11,6 +11,8 @@ import { SecurityDialogs, type SecurityDialogsHandle } from "../security/securit
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
 import { useAttentionActions } from "./use-attention-actions.ts";
+import { SessionPresentation } from "./session-presentation.ts";
+import type { DialogAction } from "../dialogs/dialog-host.tsx";
 import { useSessionEvents } from "./use-session-events.ts";
 import type { DocumentOpened, Opened, DialogName, OpenedDialogName } from "./types.ts";
 import type { SessionHost, JournalTransportHost, SessionEventsHost,
@@ -104,8 +106,6 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const attention = sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit"
     ? sessionSnapshot.attention : undefined;
   const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
-  const editFailure = attention?.kind === "edit-unavailable"
-    ? catalogText(attention.code) : null;
   const saveFailure = attention?.kind === "save-failed"
     ? catalogText(attention.code) : null;
   const publicationDecision = attention?.kind === "publication-decision"
@@ -121,6 +121,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
     session.dispose();
   }, [session]);
   const [message, setMessage] = useState("");
+  const [presentation] = useState(() => new SessionPresentation(session, catalogText));
+  const presentationView = presentation.view();
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialog] = useState<DialogName>(null);
@@ -152,7 +154,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     ? invitationStaged ? "claim" : openedDialog : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
     || invitationStaged || confirmDivergenceDiscard
-    || editFailure !== null || leaseDecision !== null || saveFailure !== null;
+    || presentationView.blocked || leaseDecision !== null || saveFailure !== null;
   useSessionEvents({ session, events, shellHost,
     completion: rendererLifecycleCompletion,
     forwardJournalWarning: sessionStore.forwardJournalWarning,
@@ -267,6 +269,16 @@ export function SharedApp({ sessionHost, journalTransport, events,
     setDialog(null);
   };
 
+  async function runDialogAction(action: DialogAction) {
+    if (action === "continue-read-only" || action === "retry-edit") {
+      await presentation.act(action);
+      const safeMessage = presentation.view().safeMessage;
+      if (safeMessage !== null) setMessage(safeMessage);
+      return;
+    }
+    await attentionActions.run(action);
+  }
+
   useEffect(() => {
     document.title = targetName
       ? `${dirty ? "*" : ""}${targetName} — SCPEFE` : "SCPEFE";
@@ -309,7 +321,9 @@ export function SharedApp({ sessionHost, journalTransport, events,
       activeDocument={activeDocument} dialog={dialog} decisionError={decisionError}
       openedDialogError={openedDialogError}
       confirmDivergenceDiscard={confirmDivergenceDiscard}
+      editDecision={presentationView.selectedDecision}
+      focusIntent={presentationView.focusIntent}
       returnFocus={dialogReturnFocus.current} catalogText={catalogText}
-      onAction={attentionActions.run} />
+      onAction={runDialogAction} />
   </main>;
 }

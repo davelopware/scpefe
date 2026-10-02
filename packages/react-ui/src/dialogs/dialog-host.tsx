@@ -3,16 +3,17 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "./focused-dialog.tsx";
 import type { DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
 import type { DocumentOpened, OpenedDialogName } from "../session/types.ts";
+import type { EditUnavailableDecision, SessionPresentationView } from "../session/session-presentation.ts";
 
 /** Dialog-only view of the external session seam. */
 type DialogSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>> & {
-  dismissEditFailure(): void;
   dismissSaveFailure(): void;
   cancelCompaction(): unknown;
 };
 
 /** User gestures emitted by semantic attention dialogs. */
-export type DialogAction = "retry-edit" | "cancel-lease" | "confirm-lease"
+export type DialogAction = "retry-edit" | "continue-read-only"
+  | "cancel-lease" | "confirm-lease"
   | "retry-save" | "lock" | "migrate" | "open-passwords" | "accept-head"
   | "discard-recovery" | "restore-recovery" | "discard-unreadable"
   | "discard-publication" | "reconnect-publication" | "compact"
@@ -27,7 +28,8 @@ export interface DialogHostHandle {
 
 /** Renders every portable session attention as an accessible platform dialog. */
 export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialog,
-  decisionError, openedDialogError, confirmDivergenceDiscard, returnFocus, catalogText, onAction, ref }: {
+  decisionError, openedDialogError, confirmDivergenceDiscard, returnFocus, catalogText,
+  editDecision, focusIntent, onAction, ref }: {
   session: DialogSession;
   visibleOpenedDialog: OpenedDialogName;
   activeDocument: boolean;
@@ -37,6 +39,8 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   confirmDivergenceDiscard: boolean;
   returnFocus: HTMLElement | null;
   catalogText(code: string): string;
+  editDecision: EditUnavailableDecision | null;
+  focusIntent: SessionPresentationView["focusIntent"];
   onAction(action: DialogAction): void | Promise<void>;
   ref?: React.Ref<DialogHostHandle>;
 }): React.ReactElement {
@@ -48,8 +52,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   const protection = snapshot.attention?.kind === "lifecycle-protection"
     ? snapshot.attention : null;
   const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
-  const editFailure = attention?.kind === "edit-unavailable"
-    ? catalogText(attention.code) : null;
+  const editFailure = editDecision?.message ?? null;
   const saveFailure = attention?.kind === "save-failed"
     ? catalogText(attention.code) : null;
   const publicationDecision = attention?.kind === "publication-decision" ? attention : null;
@@ -85,14 +88,14 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       </div>
     </FocusedDialog>}
     {editFailure && <FocusedDialog returnFocus={returnFocus}
-      title="Editing unavailable" initialFocus={editRetryAction}
-      close={() => session.dismissEditFailure()}>
+      title="Editing unavailable"
+      initialFocus={focusIntent === "edit-retry" ? editRetryAction : undefined}
+      close={() => void onAction("continue-read-only")}>
       <div className="warning" role="alert"><p>{editFailure}</p>
         <p>The document remains read-only.</p></div>
-      <div className="dialog-actions"><button onClick={() => session.dismissEditFailure()}>
-        Continue read-only</button><button ref={editRetryAction} autoFocus onClick={() => {
-          session.dismissEditFailure(); void onAction("retry-edit");
-        }}>Retry editing</button></div>
+      <div className="dialog-actions"><button onClick={() => void onAction("continue-read-only")}>
+        Continue read-only</button><button ref={editRetryAction} autoFocus
+        onClick={() => void onAction("retry-edit")}>Retry editing</button></div>
     </FocusedDialog>}
     {leaseDecision && <FocusedDialog returnFocus={returnFocus}
       title="Confirm editing-lease takeover">
