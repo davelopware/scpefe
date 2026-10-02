@@ -280,12 +280,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
       || action === "compaction-canceled") {
       const actionElement = document.activeElement instanceof HTMLElement
         ? document.activeElement : null;
-      await presentation.act(action);
+      const nextDialog = await presentation.act(action);
       refreshPresentation((revision) => revision + 1);
       const result = presentation.view();
-      if (action === "compact" && result.safeMessage ===
-        "Verified backup created and document history compacted."
-        || action === "compaction-canceled") setDialog("passwords");
+      if (nextDialog === "passwords") setDialog(nextDialog);
       const safeMessage = result.safeMessage;
       if (safeMessage !== null) setMessage(safeMessage);
       if (result.focusIntent === "decision-action") {

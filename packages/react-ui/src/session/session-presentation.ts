@@ -15,7 +15,7 @@ export interface EditUnavailableDecision {
   readonly message: string;
 }
 
-/** A recovery, authenticated-head, or unreadable-journal decision ready to render. */
+/** A document-session attention decision ready to render. */
 export type DocumentAttentionDecision =
   | { readonly kind: "lease-takeover"; readonly holderName: string;
     readonly operation: "edit" | "recovery" | "divergence" | "migration";
@@ -112,7 +112,7 @@ export class SessionPresentation {
   async act(action: "continue-read-only" | "retry-edit" | "restore-recovery"
     | "discard-recovery" | "accept-head" | "discard-unreadable"
     | "confirm-lease" | "cancel-lease" | "migrate" | "compact"
-    | "compaction-canceled"): Promise<void> {
+    | "compaction-canceled"): Promise<"passwords" | void> {
     const snapshot = this.current();
     if ((snapshot.kind !== "read-only" && snapshot.kind !== "edit")
       || !snapshot.attention) return;
@@ -193,6 +193,9 @@ export class SessionPresentation {
           this.safeMessage = value;
           this.focusIntent = action === "migrate" ? "migration-retry" : "decision-action";
         }
+      }
+      if (outcome.status === "compaction" || outcome.status === "compaction-canceled") {
+        return "passwords";
       }
       return;
     }

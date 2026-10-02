@@ -262,3 +262,79 @@ test("compaction cancellation and safe failure return to the staged decision", a
   assert.equal(JSON.stringify(presentation.view()).includes("private backup path"), false);
   session.dispose();
 });
+
+test("confirmed lease enters edit mode through one-shot session authority", async () => {
+  const used: string[] = [];
+  const host = { enterEditMode: async ({ authorization }: { authorization?: string } = {}) => {
+    if (!authorization) return { decisionRequired: "lease-takeover" as const,
+      operation: "edit" as const, holderName: "Ada", authorization: "private authorization" };
+    used.push(authorization);
+    return { ...opened, readOnly: false };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt(opened);
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await session.enterEditMode();
+  await presentation.act("confirm-lease");
+  assert.deepEqual(used, ["private authorization"]);
+  assert.equal(session.getSnapshot().kind, "edit");
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage,
+    "Edit mode entered after confirmed lease takeover.");
+  assert.equal(presentation.view().focusIntent, "return");
+  session.dispose();
+});
+
+test("migration and compaction success return to the current document presentation", async () => {
+  const migrationHost = { migrateDocument: async () => ({
+    opened: { ...opened, migrationRequired: undefined }, compatibilityCode: "MIGRATED",
+  }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const journal = { createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
+    onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost;
+  const migrationSession = new DocumentSession(migrationHost, journal);
+  migrationSession.adopt({ ...opened, migrationRequired: true, migrationCanEdit: true });
+  const migration = new SessionPresentation(migrationSession, (code) =>
+    code === "MIGRATED" ? "Migration complete." : "safe failure");
+  assert.equal(await migration.act("migrate"), undefined);
+  assert.equal(migration.view().selectedDecision, null);
+  assert.equal(migration.view().safeMessage, "Migration complete.");
+  assert.equal(migrationSession.getSnapshot().kind, "read-only");
+  migrationSession.dispose();
+
+  const compactHost = { compactDocument: async ({ confirmed }: { confirmed: true }) => {
+    assert.equal(confirmed, true);
+    return { opened: { ...opened, readOnly: false, canAddPasswords: true,
+      canRemovePasswords: true }, previousHead: "old", head: "new" };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const compactSession = new DocumentSession(compactHost, journal);
+  compactSession.adopt({ ...opened, readOnly: false, canAddPasswords: true,
+    canRemovePasswords: true });
+  const compact = new SessionPresentation(compactSession, () => "safe failure");
+  assert.equal(compactSession.requestCompaction().status, "attention");
+  assert.equal(await compact.act("compact"), "passwords");
+  assert.equal(compact.view().selectedDecision, null);
+  assert.equal(compact.view().safeMessage,
+    "Verified backup created and document history compacted.");
+  compactSession.dispose();
+});
+
+test("a lock during compaction cancellation cannot reopen the password form", async () => {
+  const host = { compactDocument: async () => null } as
+    unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false, canAddPasswords: true,
+    canRemovePasswords: true });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  session.requestCompaction();
+  const pending = presentation.act("compaction-canceled");
+  session.lockStarted();
+  assert.equal(await pending, undefined);
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage, null);
+  session.dispose();
+});
