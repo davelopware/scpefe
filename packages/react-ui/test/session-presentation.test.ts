@@ -85,3 +85,86 @@ test("retry runs through the document session and exposes its safe outcome", asy
   assert.equal(presentation.view().blocked, false);
   session.dispose();
 });
+
+test("recovery waits behind a form, then restores unsaved work with a safe outcome", async () => {
+  const privateText = "private recovered content";
+  const recovered = { ...opened, recovery: { content: privateText, state: "unsaved" as const,
+    updateTime: 42, cursor: { start: 0, end: 0 } } };
+  const host = { restoreRecoveredWork: async () => ({ ...opened, readOnly: false,
+    content: privateText }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const journal = { createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
+    onJournalWarning: () => () => {} } as WorkingCopyJournalHost;
+  const session = new DocumentSession(host, journal);
+  session.adopt(recovered);
+  const presentation = new SessionPresentation(session, () => "The operation could not be completed safely.");
+  assert.equal(presentation.view({ formActive: true }).selectedDecision, null);
+  assert.deepEqual(presentation.view().selectedDecision, { kind: "recovery-decision",
+    updateTime: 42, failureMessage: null });
+  await presentation.act("restore-recovery");
+  assert.equal(presentation.view().safeMessage, "Recovered work restored as unsaved changes.");
+  assert.equal(presentation.view().focusIntent, "return");
+  assert.equal(JSON.stringify(presentation.view()).includes(privateText), false);
+  session.dispose();
+});
+
+test("head and unreadable-journal decisions keep read-only authority and safe failure text", async () => {
+  for (const decision of ["head", "unreadable"] as const) {
+    let calls = 0;
+    const host = {
+      acceptHeadMismatch: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("private witness location");
+        return { ...opened, headMismatch: undefined };
+      },
+      discardUnreadableJournal: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("private journal location");
+        return { ...opened, unreadableJournal: undefined };
+      },
+    } as unknown as DocumentSessionHost<DocumentOpened>;
+    const journal = { createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
+      onJournalWarning: () => () => {} } as WorkingCopyJournalHost;
+    const session = new DocumentSession(host, journal);
+    session.adopt(decision === "head" ? { ...opened, headMismatch: {
+      kind: "rollback", title: "private title", explanation: "private explanation",
+      editingBlocked: true } } : { ...opened, unreadableJournal: true });
+    const presentation = new SessionPresentation(session,
+      () => "The operation could not be completed safely.");
+    const action = decision === "head" ? "accept-head" : "discard-unreadable";
+    assert.equal(presentation.view({ formActive: true }).selectedDecision, null);
+    assert.equal(presentation.view().selectedDecision?.kind,
+      decision === "head" ? "head-mismatch" : "unreadable-journal");
+    await presentation.act(action);
+    assert.equal(session.getSnapshot().kind, "read-only");
+    assert.equal(presentation.view().focusIntent, "decision-action");
+    assert.equal(presentation.view().selectedDecision?.kind,
+      decision === "head" ? "head-mismatch" : "unreadable-journal");
+    assert.equal(JSON.stringify(presentation.view()).includes("private"), false);
+    await presentation.act(action);
+    assert.equal(presentation.view().selectedDecision, null);
+    assert.match(presentation.view().safeMessage ?? "", /Editing may now be enabled/);
+    assert.equal(calls, 2);
+    session.dispose();
+  }
+});
+
+test("a replaced document drops a pending recovery outcome", async () => {
+  let finish!: (value: DocumentOpened) => void;
+  const host = { discardRecoveredWork: () => new Promise<DocumentOpened>((resolve) => {
+    finish = resolve;
+  }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const journal = { createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
+    onJournalWarning: () => () => {} } as WorkingCopyJournalHost;
+  const session = new DocumentSession(host, journal);
+  session.adopt({ ...opened, recovery: { content: "private", state: "unsaved",
+    updateTime: 42, cursor: { start: 0, end: 0 } } });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  const pending = presentation.act("discard-recovery");
+  await Promise.resolve();
+  session.adopt({ ...opened, content: "new document" });
+  finish(opened);
+  await pending;
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().focusIntent, null);
+  session.dispose();
+});

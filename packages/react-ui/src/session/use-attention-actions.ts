@@ -9,8 +9,7 @@ type FullSession = DocumentSession<DocumentOpened,
 type AttentionSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>
   & Pick<FullSession, "getSnapshot" | "decideProtection" | "enterEditMode"
     | "migrate" | "confirmLeaseTakeover" | "cancelLeaseTakeover"
-    | "restoreRecovery" | "discardRecovery" | "acceptHeadMismatch"
-    | "discardUnreadableJournal" | "lock" | "save" | "beginDivergenceResolution"
+    | "lock" | "save" | "beginDivergenceResolution"
     | "retryPublication" | "discardPublication" | "backup"
     | "confirmCompaction" | "undo" | "redo">;
 
@@ -117,57 +116,6 @@ export function useAttentionActions({ session, completion, catalogText,
     } else if (outcome.status === "failed") {
       const value = catalogText(outcome.code);
       setMessage(`Lease takeover cancellation needs attention: ${value}`);
-    }
-  }
-
-  async function restoreRecovery() {
-    const action = document.activeElement instanceof HTMLElement
-      ? document.activeElement : null;
-    const outcome = await session.restoreRecovery();
-    if (outcome.status === "attention") {
-      setDecisionError("");
-      setMessage("Restoring recovered work requires a confirmed lease takeover.");
-    } else if (outcome.status === "recovery") {
-      setMessage("Recovered work restored as unsaved changes.");
-    } else if (outcome.status === "failed") {
-      setMessage(`Recovery restore needs attention: ${catalogText(outcome.code)}`);
-      requestAnimationFrame(() => action?.focus());
-    }
-  }
-
-  async function discardRecovery() {
-    const action = document.activeElement instanceof HTMLElement
-      ? document.activeElement : null;
-    const outcome = await session.discardRecovery();
-    if (outcome.status === "recovery-discarded") {
-      setMessage("Recovered work discarded.");
-    } else if (outcome.status === "failed") {
-      setMessage(`Recovery discard needs attention: ${catalogText(outcome.code)}`);
-      requestAnimationFrame(() => action?.focus());
-    }
-  }
-
-  async function acceptHeadMismatch() {
-    const action = document.activeElement instanceof HTMLElement
-      ? document.activeElement : null;
-    const outcome = await session.acceptHeadMismatch();
-    if (outcome.status === "head-accepted") {
-      setMessage("Current authenticated head accepted. Editing may now be enabled.");
-    } else if (outcome.status === "failed") {
-      setMessage(`Authenticated-head acceptance needs attention: ${catalogText(outcome.code)}`);
-      requestAnimationFrame(() => action?.focus());
-    }
-  }
-
-  async function discardUnreadableJournal() {
-    const action = document.activeElement instanceof HTMLElement
-      ? document.activeElement : null;
-    const outcome = await session.discardUnreadableJournal();
-    if (outcome.status === "unreadable-discarded") {
-      setMessage("Unreadable recovery journal discarded. Editing may now be enabled.");
-    } else if (outcome.status === "failed") {
-      setMessage(`Unreadable journal discard needs attention: ${catalogText(outcome.code)}`);
-      requestAnimationFrame(() => action?.focus());
     }
   }
 
@@ -281,10 +229,6 @@ export function useAttentionActions({ session, completion, catalogText,
       case "lock": lock(); return;
       case "migrate": return migrate();
       case "open-passwords": onDialog("passwords"); return;
-      case "accept-head": return acceptHeadMismatch();
-      case "discard-recovery": return discardRecovery();
-      case "restore-recovery": return restoreRecovery();
-      case "discard-unreadable": return discardUnreadableJournal();
       case "discard-publication": return discardPublication();
       case "reconnect-publication": return reconnectPublication();
       case "compact": return compact();

@@ -246,6 +246,22 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await user.click(action);
     await ui.waitFor(() => assert.equal(status("Document state"), "Read-only"));
     assert.equal(recoveryDiscards, 2);
+    await command("Security", "Profile…");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Profile" });
+    const draftName = ui.getByLabelText(dialog, "Name");
+    await user.clear(draftName);
+    await user.type(draftName, "Local profile draft");
+    listeners.switch({ ...base, recovery: { content: "deferred private text",
+      state: "unsaved", updateTime: 2, cursor: { start: 0, end: 0 } } });
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Recovered work" }), null);
+    assert.equal(draftName.value, "Local profile draft");
+    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
+    assert.equal(document.body.textContent.includes("deferred private text"), false);
+    await ui.waitFor(() => assert.equal(document.activeElement?.textContent?.trim(),
+      "Discard recovered work"));
+    await user.click(ui.getByRole(dialog, "button", { name: "Discard recovered work" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     await command("Security", "Lock");
     openResult = { ...base, recovery: { content: "recovered private text",
       state: "unsaved", updateTime: 1, cursor: { start: 3, end: 3 } } };
@@ -441,6 +457,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.equal(editor.value, "");
     assert.equal(document.body.textContent.includes("authenticated private text"), false);
     action = ui.getByRole(dialog, "button", { name: "Accept current authenticated head" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
       /operation could not be completed safely/i);
@@ -487,6 +504,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.equal(document.body.textContent.includes("unreadable private target"), false);
     const discardUnreadable = ui.getByRole(dialog, "button",
       { name: "Discard unreadable journal" });
+    await ui.waitFor(() => assert.equal(document.activeElement?.textContent?.trim(),
+      "Keep read-only and close"));
     await user.click(discardUnreadable);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
       /operation could not be completed safely/i);

@@ -110,10 +110,6 @@ export function SharedApp({ sessionHost, journalTransport, events,
     ? catalogText(attention.code) : null;
   const publicationDecision = attention?.kind === "publication-decision"
     ? attention : null;
-  const recoveryDecision = attention?.kind === "recovery-decision"
-    ? attention : null;
-  const headDecision = attention?.kind === "head-mismatch" ? attention : null;
-  const unreadableDecision = attention?.kind === "unreadable-journal" ? attention : null;
   const migrationDecision = attention?.kind === "migration-decision" ? attention : null;
   const publicationResolving = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
@@ -122,7 +118,6 @@ export function SharedApp({ sessionHost, journalTransport, events,
   }, [session]);
   const [message, setMessage] = useState("");
   const [presentation] = useState(() => new SessionPresentation(session, catalogText));
-  const presentationView = presentation.view();
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialog] = useState<DialogName>(null);
@@ -143,6 +138,11 @@ export function SharedApp({ sessionHost, journalTransport, events,
     onDialog: setDialog, onExport: () => shellDialogs.current?.showExport(),
     onLocked: showLockedResult, dialogHost });
   const { decisionError, openedDialogError, confirmDivergenceDiscard } = attentionActions;
+  const presentationView = presentation.view({ formActive: creating || dialog !== null });
+  const selected = presentationView.selectedDecision;
+  const recoveryDecision = selected?.kind === "recovery-decision" ? selected : null;
+  const headDecision = selected?.kind === "head-mismatch" ? selected : null;
+  const unreadableDecision = selected?.kind === "unreadable-journal" ? selected : null;
   const openedDialog = opened?.invitationRequired ? "claim"
     : headDecision ? "head" : unreadableDecision ? "unreadable"
       : recoveryDecision ? "recovery" : publicationDecision ? "publication"
@@ -270,10 +270,18 @@ export function SharedApp({ sessionHost, journalTransport, events,
   };
 
   async function runDialogAction(action: DialogAction) {
-    if (action === "continue-read-only" || action === "retry-edit") {
+    if (action === "continue-read-only" || action === "retry-edit"
+      || action === "restore-recovery" || action === "discard-recovery"
+      || action === "accept-head" || action === "discard-unreadable") {
+      const actionElement = document.activeElement instanceof HTMLElement
+        ? document.activeElement : null;
       await presentation.act(action);
-      const safeMessage = presentation.view().safeMessage;
+      const result = presentation.view();
+      const safeMessage = result.safeMessage;
       if (safeMessage !== null) setMessage(safeMessage);
+      if (result.focusIntent === "decision-action") {
+        requestAnimationFrame(() => actionElement?.focus());
+      }
       return;
     }
     await attentionActions.run(action);
@@ -321,7 +329,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       activeDocument={activeDocument} dialog={dialog} decisionError={decisionError}
       openedDialogError={openedDialogError}
       confirmDivergenceDiscard={confirmDivergenceDiscard}
-      editDecision={presentationView.selectedDecision}
+      selectedDecision={presentationView.selectedDecision}
       focusIntent={presentationView.focusIntent}
       returnFocus={dialogReturnFocus.current} catalogText={catalogText}
       onAction={runDialogAction} />
