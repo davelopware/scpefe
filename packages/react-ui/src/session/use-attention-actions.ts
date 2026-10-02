@@ -1,23 +1,20 @@
-import { useState, type RefObject } from "react";
-import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
-import { useSessionSnapshot } from "../use-session-snapshot.ts";
-import type { DialogAction, DialogHostHandle } from "../dialogs/dialog-host.tsx";
-import type { DialogName, DocumentOpened, LeaseOperation, Opened } from "./types.ts";
+import { useState } from "react";
+import type { DocumentSession } from "@scpefe/frontend-core";
+import type { DialogAction } from "../dialogs/dialog-host.tsx";
+import type { DialogName, DocumentOpened, Opened } from "./types.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
-type AttentionSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>
-  & Pick<FullSession, "getSnapshot" | "decideProtection" | "enterEditMode"
-    | "migrate" | "confirmLeaseTakeover" | "cancelLeaseTakeover"
+type AttentionSession = Pick<FullSession, "getSnapshot" | "decideProtection" | "enterEditMode"
     | "lock" | "save" | "beginDivergenceResolution"
     | "retryPublication" | "discardPublication" | "backup"
-    | "confirmCompaction" | "undo" | "redo">;
+    | "undo" | "redo">;
 
 type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
 
 /** Owns graphical attention state and maps structured session outcomes to safe UI messages. */
 export function useAttentionActions({ session, completion, catalogText,
-  onMessage: setMessage, onDialog, onExport, onLocked, dialogHost }: {
+  onMessage: setMessage, onDialog, onExport, onLocked }: {
   session: AttentionSession;
   completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
   catalogText(code: string): string;
@@ -25,17 +22,11 @@ export function useAttentionActions({ session, completion, catalogText,
   onDialog(dialog: DialogName): void;
   onExport(): void;
   onLocked(result: LockResult, closed?: boolean): void;
-  dialogHost: RefObject<DialogHostHandle | null>;
 }) {
-  const snapshot = useSessionSnapshot(session);
-  const attention = snapshot.kind === "read-only" || snapshot.kind === "edit"
-    ? snapshot.attention : undefined;
-  const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
-  const [decisionError, setDecisionError] = useState("");
   const [openedDialogError, setOpenedDialogError] = useState("");
   const [confirmDivergenceDiscard, setConfirmDivergenceDiscard] = useState(false);
   function reset() {
-    setDecisionError(""); setOpenedDialogError("");
+    setOpenedDialogError("");
     setConfirmDivergenceDiscard(false);
   }
   async function decideProtection(decision: "cancel" | "save" | "discard") {
@@ -50,73 +41,8 @@ export function useAttentionActions({ session, completion, catalogText,
   async function enterEditMode() {
     const outcome = await session.enterEditMode();
     if (outcome.status === "attention") {
-      setDecisionError("");
       setMessage("Editing requires a confirmed lease takeover.");
     } else if (outcome.status === "edit-mode") setMessage("Edit mode entered.");
-  }
-
-  function leaveConsumedTakeover(operation: LeaseOperation, value: string) {
-    setDecisionError("");
-    if (operation === "edit") {
-      setMessage(`Editing needs attention: ${value}`);
-      requestAnimationFrame(() => dialogHost.current?.focus("edit"));
-      return;
-    }
-    setOpenedDialogError(value);
-    setMessage(`${operation === "migration" ? "Migration"
-      : operation === "recovery" ? "Recovery restore"
-      : "Divergence resolution"} needs attention: ${value}`);
-    requestAnimationFrame(() => {
-      dialogHost.current?.focus(operation === "migration" ? "migration"
-        : operation === "recovery" ? "recovery" : "publication");
-    });
-  }
-
-  async function migrate() {
-    setDecisionError("");
-    const outcome = await session.migrate();
-    if (outcome.status === "migration") setMessage(catalogText(outcome.compatibilityCode));
-    else if (outcome.status === "attention")
-      setMessage("Migration requires a confirmed lease takeover.");
-    else if (outcome.status === "migration-canceled")
-      setMessage("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
-    else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
-  }
-
-  async function confirmLeaseTakeover() {
-    if (!leaseDecision) return;
-    setDecisionError("");
-    const outcome = await session.confirmLeaseTakeover();
-    if (outcome.status === "attention") {
-      setDecisionError("The lease changed. Review the current holder before trying again.");
-    } else if (outcome.status === "recovery") {
-      setMessage("Recovered work restored as unsaved changes.");
-    } else if (outcome.status === "divergence") {
-      showDivergenceDraft(outcome.hasConflicts);
-    } else if (outcome.status === "migration") {
-      setMessage(catalogText(outcome.compatibilityCode));
-    } else if (outcome.status === "edit-mode") {
-      setMessage("Edit mode entered after confirmed lease takeover.");
-    } else if (outcome.status === "failed") {
-      leaveConsumedTakeover(leaseDecision.operation, catalogText(outcome.code));
-    } else if (outcome.status === "migration-canceled") {
-      setMessage("Migration was canceled before publication. Retry to acquire fresh lease authorization.");
-      requestAnimationFrame(() => dialogHost.current?.focus("migration"));
-    }
-  }
-
-  async function cancelLeaseDecision() {
-    if (!leaseDecision) return;
-    setDecisionError("");
-    const outcome = await session.cancelLeaseTakeover();
-    if (outcome.status === "canceled") {
-      setMessage(outcome.revoked
-        ? "Lease takeover canceled; the document session is unchanged."
-        : "Lease takeover was already inactive; the document session is unchanged.");
-    } else if (outcome.status === "failed") {
-      const value = catalogText(outcome.code);
-      setMessage(`Lease takeover cancellation needs attention: ${value}`);
-    }
   }
 
   async function lock() {
@@ -154,7 +80,6 @@ export function useAttentionActions({ session, completion, catalogText,
     const outcome = await session.beginDivergenceResolution({ discardUnsaved });
     if (outcome.status === "attention") {
       setConfirmDivergenceDiscard(false);
-      setDecisionError("");
       setMessage("Divergence resolution requires a confirmed lease takeover.");
     } else if (outcome.status === "divergence") {
       setConfirmDivergenceDiscard(false);
@@ -206,16 +131,6 @@ export function useAttentionActions({ session, completion, catalogText,
     else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
   }
 
-  async function compact() {
-    const outcome = await session.confirmCompaction();
-    if (outcome.status === "compaction") {
-      onDialog("passwords");
-      setMessage("Verified backup created and document history compacted.");
-    } else if (outcome.status === "compaction-canceled") {
-      setMessage("Compaction canceled; document history is unchanged.");
-    } else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
-  }
-
   function moveHistory(offset: number) {
     if (offset < 0) session.undo();
     else session.redo();
@@ -223,16 +138,11 @@ export function useAttentionActions({ session, completion, catalogText,
 
   function handleDialogAction(action: DialogAction): void | Promise<void> {
     switch (action) {
-      case "cancel-lease": return cancelLeaseDecision();
-      case "confirm-lease": return confirmLeaseTakeover();
       case "retry-save": return save();
       case "lock": lock(); return;
-      case "migrate": return migrate();
       case "open-passwords": onDialog("passwords"); return;
       case "discard-publication": return discardPublication();
       case "reconnect-publication": return reconnectPublication();
-      case "compact": return compact();
-      case "compaction-canceled": setMessage("Compaction canceled; document history is unchanged."); return;
       case "keep-newer-edits": setConfirmDivergenceDiscard(false); return;
       case "export-newer-edits": setConfirmDivergenceDiscard(false); onExport(); return;
       case "discard-newer-edits": return beginDivergenceResolution(true);
@@ -241,7 +151,7 @@ export function useAttentionActions({ session, completion, catalogText,
       case "protection-discard": return completion.track(() => decideProtection("discard"));
     }
   }
-  return { decisionError, openedDialogError, confirmDivergenceDiscard,
+  return { openedDialogError, confirmDivergenceDiscard,
     reset, run: handleDialogAction, enterEditMode, save, backup, lock,
     moveHistory, beginDivergenceResolution };
 }
