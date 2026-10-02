@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RendererLifecycleCompletion } from
-  "../src/renderer-lifecycle-completion.mjs";
+  "../src/renderer-lifecycle-completion.ts";
 import { cleanupMountedLifecycleHarness } from "./mounted-lifecycle-cleanup.mjs";
 
 test("waitForIdle includes work active at the synchronization boundary", async () => {
@@ -13,6 +13,7 @@ test("waitForIdle includes work active at the synchronization boundary", async (
     finished = true;
   });
   await Promise.resolve();
+  assert.equal(completion.pendingCount, 1);
 
   let idle = false;
   const waiting = completion.waitForIdle({ timeoutMs: 1_000 }).then(() => { idle = true; });
@@ -23,6 +24,7 @@ test("waitForIdle includes work active at the synchronization boundary", async (
   await waiting;
   assert.equal(finished, true);
   await operation;
+  assert.equal(completion.pendingCount, 0);
 });
 
 test("waitForIdle is bounded when lifecycle work cannot finish", async () => {
@@ -32,6 +34,24 @@ test("waitForIdle is bounded when lifecycle work cannot finish", async () => {
   await assert.rejects(completion.waitForIdle({ timeoutMs: 10 }), (error) =>
     error.code === "RENDERER_LIFECYCLE_TIMEOUT"
       && /did not finish within 10 ms/.test(error.message));
+});
+
+test("waitForIdle includes untracked session commands and journal completions", async () => {
+  const completion = new RendererLifecycleCompletion();
+  let pending = 1;
+  const listeners = new Set();
+  completion.setSessionSource({ getPendingWorkCount: () => pending,
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); } });
+  let idle = false;
+  const waiting = completion.waitForIdle({ timeoutMs: 1_000 }).then(() => { idle = true; });
+  await Promise.resolve();
+  assert.equal(idle, false);
+  pending = 0;
+  for (const listener of listeners) listener();
+  await waiting;
+  assert.equal(idle, true);
+  completion.setSessionSource(null);
+  assert.equal(listeners.size, 0);
 });
 
 test("mounted cleanup preserves DOM and files until tracked lifecycle work settles", async () => {
@@ -82,4 +102,74 @@ test("mounted cleanup finishes every stage and rethrows the first teardown failu
     timeoutMs: 1_000 }), (error) => error === unmountFailure);
   assert.deepEqual(events, ["drain-1", "unmount", "drain-2", "clear-frames",
     "close-dom", "restore-globals", "remove-files"]);
+});
+
+test("mounted cleanup restores every stage after lifecycle idle times out", async () => {
+  const timeout = Object.assign(new Error("held lifecycle work"),
+    { code: "RENDERER_LIFECYCLE_TIMEOUT" });
+  const events = [];
+  let waits = 0;
+  await assert.rejects(cleanupMountedLifecycleHarness({
+    completion: { waitForIdle: async () => {
+      events.push(`wait-${++waits}`);
+      if (waits === 1) throw timeout;
+    } },
+    cancelPendingWork: () => events.push("cancel-pending"),
+    drainRendererTasks: () => events.push("drain"),
+    unmount: () => events.push("unmount"),
+    clearFrames: () => events.push("clear-frames"),
+    closeDom: () => events.push("close-dom"),
+    restoreGlobals: () => events.push("restore-globals"),
+    removeTemporaryFiles: () => events.push("remove-files"),
+  }), (error) => error === timeout);
+  assert.deepEqual(events, ["cancel-pending", "wait-1", "cancel-pending", "wait-2", "drain", "unmount",
+    "drain", "clear-frames", "close-dom", "restore-globals", "remove-files"]);
+});
+
+test("mounted cleanup keeps a scenario assertion as the primary error", async () => {
+  const primary = new Error("scenario assertion failed");
+  const events = [];
+  await cleanupMountedLifecycleHarness({
+    primaryError: primary,
+    completion: { waitForIdle: async () => events.push("wait") },
+    cancelPendingWork: () => events.push("cancel-pending"),
+    drainRendererTasks: () => events.push("drain"),
+    unmount: () => { events.push("unmount"); throw new Error("secondary unmount failure"); },
+    clearFrames: () => events.push("clear-frames"),
+    closeDom: () => events.push("close-dom"),
+    restoreGlobals: () => events.push("restore-globals"),
+    removeTemporaryFiles: () => events.push("remove-files"),
+  });
+  assert.deepEqual(events, ["cancel-pending", "wait", "drain", "unmount", "drain",
+    "clear-frames", "close-dom", "restore-globals", "remove-files"]);
+});
+
+test("mounted cleanup settles work after both scenario failure and idle timeout", async () => {
+  const primary = new Error("scenario assertion failed");
+  const timeout = Object.assign(new Error("idle timed out"),
+    { code: "RENDERER_LIFECYCLE_TIMEOUT" });
+  const events = [];
+  let canceled = false;
+  let waits = 0;
+  await cleanupMountedLifecycleHarness({
+    primaryError: primary,
+    completion: { waitForIdle: async () => {
+      events.push(`wait-${++waits}`);
+      if (!canceled) throw timeout;
+    } },
+    cancelPendingWork: () => {
+      events.push("cancel-pending");
+      if (waits > 0) canceled = true;
+    },
+    drainRendererTasks: () => events.push("drain"),
+    unmount: () => events.push("unmount"),
+    clearFrames: () => events.push("clear-frames"),
+    closeDom: () => events.push("close-dom"),
+    restoreGlobals: () => events.push("restore-globals"),
+    removeTemporaryFiles: () => events.push("remove-files"),
+  });
+  assert.deepEqual(events, ["cancel-pending", "wait-1", "cancel-pending", "wait-2",
+    "drain", "unmount", "drain", "clear-frames", "close-dom", "restore-globals",
+    "remove-files"]);
+  assert.equal(canceled, true, "tracked work is settled before DOM and file teardown");
 });

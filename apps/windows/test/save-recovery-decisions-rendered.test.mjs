@@ -61,6 +61,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     let divergenceAttempts = 0;
     let divergenceSaveAttempts = 0;
     let headAccepts = 0;
+    let unreadableDiscards = 0;
     let cancelAttempts = 0;
     const calls = [];
     const listen = (name, listener) => {
@@ -159,6 +160,14 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       acceptHeadMismatch: async () => {
         headAccepts += 1;
         if (headAccepts === 1) throw new Error("witness write failed");
+        if (openResult.unreadableJournal) {
+          return { ...openResult, headMismatch: undefined, canEdit: false };
+        }
+        return base;
+      },
+      discardUnreadableJournal: async () => {
+        unreadableDiscards += 1;
+        if (unreadableDiscards === 1) throw new Error("private journal location");
         return base;
       },
       backupDocument: async () => null, exportPlaintext: async () => null,
@@ -166,7 +175,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         calls.push(["compact", request]); compactionAttempts += 1;
         if (compactionAttempts === 1) throw new Error("backup verification failed");
         return { compacted: true, backupCreated: true,
-          previousHead: "44".repeat(32), head: "55".repeat(32) };
+          previousHead: "44".repeat(32), head: "55".repeat(32),
+          opened: { ...base, readOnly: false } };
       },
       migrateDocument: async ({ authorization } = {}) => {
         calls.push(["migrate", Boolean(authorization)]); migrationAttempts += 1;
@@ -331,6 +341,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     assert.match(dialog.textContent, /Fresh remote editor/);
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Confirm editing-lease takeover" });
     assert.ok(await ui.findByText(dialog, /The lease changed/));
     assert.match(dialog.textContent, /Updated remote editor/);
     await user.click(ui.getByRole(dialog, "button", { name: "Force takeover" }));
@@ -455,8 +467,38 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         { name: "Accept current authenticated head" }));
     }
     await command("Security", "Lock");
+    openResult = { ...base, content: "unreadable private target", canEdit: false,
+      unreadableJournal: true, headMismatch: { kind: "divergence",
+        title: "Authenticated divergence detected", explanation: "private witness path",
+        editingBlocked: true } };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "journal password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Authenticated divergence detected" });
+    assert.equal(ui.queryByRole(dialog, "button", { name: "Discard unreadable journal" }), null);
+    await user.click(ui.getByRole(dialog, "button",
+      { name: "Accept current authenticated head" }));
+    dialog = await ui.findByRole(document.body, "dialog",
+      { name: "Unreadable recovery journal" });
+    assert.equal(editor.value, "");
+    assert.equal(document.body.textContent.includes("unreadable private target"), false);
+    const discardUnreadable = ui.getByRole(dialog, "button",
+      { name: "Discard unreadable journal" });
+    await user.click(discardUnreadable);
+    assert.match((await ui.findByRole(dialog, "alert")).textContent,
+      /operation could not be completed safely/i);
+    assert.equal(document.body.textContent.includes("private journal location"), false);
+    await user.click(discardUnreadable);
+    await ui.waitFor(() => assert.equal(unreadableDiscards, 2));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await command("Edit", "Edit Contents");
+    await ui.waitFor(() => assert.equal(editor.readOnly, false));
+    await command("Security", "Lock");
     openResult = { ...base, content: "legacy private text", canEdit: false,
-      migrationRequired: true,
+      migrationRequired: true, migrationCanEdit: true,
       migrationWarning: "A verified exact backup is required before migration." };
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
@@ -508,4 +550,47 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     listeners.locked({ locked: true, journalSaved: true, warning: null });
     assert.equal(editor.value, "");
     assert.equal(document.body.textContent.includes("legacy private text"), false);
+
+    openResult = { ...base, content: "denied legacy text", canEdit: false,
+      migrationRequired: true, migrationCanEdit: false };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "denied legacy words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    assert.equal(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and migrate…" }).disabled, true);
+    assert.match(dialog.textContent, /password slot cannot migrate/i);
+    listeners.locked({ locked: true, journalSaved: true, warning: null });
+
+    openResult = { ...base, content: "live legacy text", canEdit: false,
+      migrationRequired: true, migrationCanEdit: true };
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "live legacy words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
+    let finishMigration;
+    let migrationStarted;
+    const migrationActive = new Promise((resolve) => { migrationStarted = resolve; });
+    dom.window.scpefe.migrateDocument = () => new Promise((resolve) => {
+      finishMigration = resolve; migrationStarted();
+    });
+    await user.click(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and migrate…" }));
+    await migrationActive;
+    await ui.waitFor(() => assert.equal(ui.queryByText(dialog,
+      /password slot cannot migrate/i), null));
+    listeners.locked({ locked: true, journalSaved: true, warning: null });
+    openResult = base;
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "replacement password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    finishMigration({ migrated: true, backupCreated: true,
+      compatibilityCode: "MIGRATION_COMPATIBILITY",
+      opened: { ...base, readOnly: false, content: "stale migrated text" } });
+    await ui.waitFor(() => assert.equal(status("Document state"), "Read-only"));
+    assert.equal(editor.value, "sealed text");
+    assert.equal(document.body.textContent.includes("stale migrated text"), false);
   });

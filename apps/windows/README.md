@@ -30,8 +30,9 @@ Run this from the repository root in PowerShell:
 .\scripts\build-windows-preview.ps1
 ```
 
-The command installs locked npm dependencies, installs `libsodium:x64-windows`
-with vcpkg, builds and tests the C++ library and Node-API bridge, builds and
+The command installs locked npm workspace dependencies from the repository
+root, installs `libsodium:x64-windows` with vcpkg, builds and tests the C++
+library and Node-API bridge, builds and
 type-checks the renderer and preload, verifies the staged bridge under Electron,
 and writes:
 

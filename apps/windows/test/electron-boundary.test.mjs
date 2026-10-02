@@ -56,7 +56,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     currentRevision: "33".repeat(32) };
   let migrationResult = null;
   let invitationResult = { created: true,
-    temporaryPassword: "generated secret words" };
+    temporaryPassword: "generated secret words", opened: editOpened };
   let rejectedChannel = null;
   let rejectedError = null;
   const invocations = [];
@@ -120,7 +120,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:cancel-lease-takeover") return true;
         if (channel === "document:migrate") return migrationResult;
         if (channel === "document:remove-slot") {
-          return { removed: true, warningCode: "SLOT_REMOVED" };
+          return { removed: true, warningCode: "SLOT_REMOVED", opened: editOpened };
         }
         return null;
       } },
@@ -146,7 +146,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
     "restoreRecoveredWork", "cancelLeaseTakeover", "discardRecoveredWork",
-    "acceptHeadMismatch", "closeDocument", "exitApplication", "resolveProtection",
+    "acceptHeadMismatch", "discardUnreadableJournal", "closeDocument", "exitApplication", "resolveProtection",
     "lock", "onLockStarted", "onLocked",
     "onJournalWarning", "onRegularSave", "onExternalOpenRequested",
     "onUnresolvedJournalSummary",
@@ -162,9 +162,10 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   const stopRegularSave = exposed.onRegularSave((value) => { regularSave = value; });
   rendererListeners.get("document:regular-saved")({}, { published: true,
     provisional: true, content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
-    password: "must not cross" });
+    password: "must not cross", journalScope: "adoption_2", revision: 4 });
   assert.deepEqual(JSON.parse(JSON.stringify(regularSave)), {
     published: true, provisional: true, content: "exact\ntext",
+    journalScope: "adoption_2", revision: 4,
   });
   stopRegularSave();
   assert.equal(rendererListeners.has("document:regular-saved"), false);
@@ -183,7 +184,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:cancel-create-target",
   });
   compactionResult = { compacted: true, backupCreated: true,
-    previousHead: "12".repeat(32), head: "34".repeat(32) };
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened: editOpened };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.compactDocument(
     { confirmed: true }))),
     compactionResult);
@@ -191,7 +192,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     channel: "document:compact", request: { confirmed: true },
   });
   compactionResult = { compacted: true, backupCreated: false,
-    previousHead: "12".repeat(32), head: "34".repeat(32) };
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened: editOpened };
   await assert.rejects(exposed.compactDocument({ confirmed: true }),
     /invalid compaction result/);
   assert.equal((await exposed.enterEditMode()).readOnly, false);
@@ -300,7 +301,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(await exposed.cancelInvitationClaim(), true);
   assert.equal(invocations.at(-1).channel, "document:cancel-invitation-claim");
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.removeSlot("ab".repeat(16)))), {
-    removed: true, warningCode: "SLOT_REMOVED",
+    removed: true, warningCode: "SLOT_REMOVED", opened: editOpened,
   });
   await exposed.changePassword({ currentPassword: "current password words",
     newPassword: "replacement password words",
@@ -313,7 +314,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.createInvitation({
     temporaryLabel: "Colleague", temporaryPassword: "", canEdit: true,
     canAddPasswords: false, canRemovePasswords: false, ignored: "private",
-  }))), { created: true, temporaryPassword: "generated secret words" });
+  }))), { created: true, temporaryPassword: "generated secret words",
+    opened: editOpened });
   assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
     channel: "document:create-invitation", request: {
       temporaryLabel: "Colleague", canEdit: true, canAddPasswords: false,
@@ -399,12 +401,16 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   rejectedChannel = null;
 
   const warnings = [];
-  const stopWarning = exposed.onJournalWarning((warning) => warnings.push(warning));
+  const stopWarning = exposed.onJournalWarning((warning, scope) =>
+    warnings.push({ warning, scope }));
   rendererListeners.get("document:journal-warning")({}, {
-    code: "PUBLICATION_RECOVERED", message: forgedSecret, nativeExtra: forgedSecret });
+    code: "PUBLICATION_RECOVERED", journalScope: "adoption_2",
+    message: forgedSecret, nativeExtra: forgedSecret });
   rendererListeners.get("document:journal-warning")({}, {
-    code: "UNKNOWN_WARNING", message: forgedSecret });
-  assert.deepEqual(warnings, ["PUBLICATION_RECOVERED", "JOURNAL_WARNING"]);
-  assert.doesNotMatch(warnings.join(" "), /owner recovery|Users|private-note|native\.cc/i);
+    code: "UNKNOWN_WARNING", journalScope: "../../private", message: forgedSecret });
+  assert.deepEqual(warnings, [
+    { warning: "PUBLICATION_RECOVERED", scope: "adoption_2" },
+    { warning: "JOURNAL_WARNING", scope: null }]);
+  assert.doesNotMatch(JSON.stringify(warnings), /owner recovery|Users|private-note|native\.cc/i);
   stopWarning();
 });

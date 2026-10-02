@@ -242,10 +242,16 @@ export function validateInvitationResult(value) {
       || typeof value.temporaryPassword !== "string"
       || value.temporaryPassword.length === 0
       || value.temporaryPassword.length > 4096
-      || Object.keys(value).some((key) => !["created", "temporaryPassword"].includes(key))) {
+      || !value.opened
+      || Object.keys(value).some((key) => !["created", "temporaryPassword", "opened"].includes(key))) {
     throw new TypeError("host returned an invalid invitation result");
   }
-  return Object.freeze({ created: true, temporaryPassword: value.temporaryPassword });
+  return Object.freeze({ created: true, temporaryPassword: value.temporaryPassword,
+    opened: validateActiveDocument(value.opened) });
+}
+
+export function validateActiveDocument(value) {
+  return value?.readOnly === false ? validateEditMode(value) : validateOpenedDocument(value);
 }
 
 export function validateInvitationClaimRequest(value) {
@@ -425,6 +431,10 @@ export function validateOpenedDocument(value) {
   if (value.migrationRequired !== undefined && typeof value.migrationRequired !== "boolean") {
     throw new TypeError("host returned invalid migration state");
   }
+  if (value.migrationCanEdit !== undefined
+      && (typeof value.migrationCanEdit !== "boolean" || !migrationRequired)) {
+    throw new TypeError("host returned invalid migration permission");
+  }
   let profileMismatch;
   if (value.profileMismatch !== undefined) {
     const mismatch = value.profileMismatch;
@@ -472,10 +482,15 @@ export function validateOpenedDocument(value) {
         ? { mustBeChangedKnown: slot.mustBeChangedKnown } : {}),
       ...(slot.identityKnown !== undefined ? { identityKnown: slot.identityKnown } : {}) });
   });
+  if (value.unreadableJournal !== undefined && value.unreadableJournal !== true) {
+    throw new TypeError("host returned invalid unreadable journal decision");
+  }
   return Object.freeze({ content, readOnly: true,
     canEdit: migrationRequired ? false : value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
     ...(migrationRequired ? { migrationRequired: true,
+      ...(value.migrationCanEdit !== undefined
+        ? { migrationCanEdit: value.migrationCanEdit } : {}),
       migrationWarning: "Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first." } : {}),
     ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
@@ -494,6 +509,7 @@ export function validateOpenedDocument(value) {
     ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),
     ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
+    ...(value.unreadableJournal === true ? { unreadableJournal: true } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
 
@@ -647,11 +663,12 @@ export function validateCompactionResult(value) {
       || value.backupCreated !== true
       || !/^[0-9a-f]{64}$/.test(value.previousHead)
       || !/^[0-9a-f]{64}$/.test(value.head)
-      || Object.keys(value).length !== 4) {
+      || !value.opened || Object.keys(value).length !== 5) {
     throw new TypeError("host returned an invalid compaction result");
   }
   return Object.freeze({ compacted: true, backupCreated: true,
-    previousHead: value.previousHead, head: value.head });
+    previousHead: value.previousHead, head: value.head,
+    opened: validateEditMode(value.opened) });
 }
 
 export function validateMigrationResult(value) {
@@ -679,11 +696,23 @@ export function validateWorkingCopy(value) {
       || start < 0 || end < start || end > value.content.length) {
     throw new TypeError("cursor must be within the working copy");
   }
+  const journalScope = value.journalScope;
+  if (journalScope !== undefined
+      && (typeof journalScope !== "string"
+        || !/^[A-Za-z0-9_-]{1,128}$/.test(journalScope))) {
+    throw new TypeError("journal scope must be an opaque identifier");
+  }
+  const revision = value.revision;
+  if (revision !== undefined
+      && (!Number.isSafeInteger(revision) || revision < 1)) {
+    throw new TypeError("working-copy revision must be a positive integer");
+  }
   const content = canonicalizeDocumentText(value.content);
   return { content, cursor: {
     start: canonicalCursorOffset(value.content, start),
     end: canonicalCursorOffset(value.content, end),
-  } };
+  }, ...(journalScope === undefined ? {} : { journalScope }),
+  ...(revision === undefined ? {} : { revision }) };
 }
 
 export function validateLockResult(value) {
@@ -698,20 +727,26 @@ export function validateLockResult(value) {
 
 export function validateRegularSaveResult(value) {
   if (!value || typeof value !== "object" || value.published !== true
-      || value.provisional !== true || typeof value.content !== "string") {
+      || value.provisional !== true || typeof value.content !== "string"
+      || typeof value.journalScope !== "string"
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+      || !Number.isSafeInteger(value.revision) || value.revision < 1) {
     throw new TypeError("host returned an invalid regular-save result");
   }
   return Object.freeze({ published: true, provisional: true,
-    content: canonicalizeDocumentText(value.content) });
+    content: canonicalizeDocumentText(value.content),
+    journalScope: value.journalScope, revision: value.revision });
 }
 
 export function validateSlotRemovalResult(value) {
   if (!value || typeof value !== "object" || value.removed !== true
       || value.warningCode !== "SLOT_REMOVED"
-      || Object.keys(value).some((key) => !["removed", "warningCode"].includes(key))) {
+      || !value.opened
+      || Object.keys(value).some((key) => !["removed", "warningCode", "opened"].includes(key))) {
     throw new TypeError("host returned an invalid slot-removal result");
   }
-  return Object.freeze({ removed: true, warningCode: value.warningCode });
+  return Object.freeze({ removed: true, warningCode: value.warningCode,
+    opened: validateActiveDocument(value.opened) });
 }
 
 export function validateCreationResult(value) {

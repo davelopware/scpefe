@@ -37,9 +37,11 @@ test("password administration requests are narrow and enforce confirmations", ()
   assert.throws(() => validateInvitationCreateRequest({ temporaryLabel: "Colleague",
     canEdit: false, canAddPasswords: true, canRemovePasswords: false }),
   /implies edit/);
+  const invitationOpened = { content: "", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
   assert.deepEqual(validateInvitationResult({ created: true,
-    temporaryPassword: "one time secret" }), { created: true,
-    temporaryPassword: "one time secret" });
+    temporaryPassword: "one time secret", opened: invitationOpened }), { created: true,
+    temporaryPassword: "one time secret", opened: invitationOpened });
   assert.throws(() => validateInvitationResult({ created: true,
     temporaryPassword: "" }), /invalid invitation result/);
   assert.deepEqual(validateInvitationClaimRequest({
@@ -152,14 +154,18 @@ test("accepts only validated read-only native results", () => {
 });
 
 test("push and administration results are canonical and narrowly projected", () => {
+  const invitationOpened = { content: "", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
   assert.deepEqual(validateRegularSaveResult({ published: true, provisional: true,
     content: "exact\r\ntext", targetPath: "C:\\private\\notes.scpefe",
-    password: "must not cross" }), {
+    password: "must not cross", journalScope: "adoption_2", revision: 4 }), {
     published: true, provisional: true, content: "exact\ntext",
+    journalScope: "adoption_2", revision: 4,
   });
   assert.deepEqual(validateSlotRemovalResult({ removed: true,
-    warningCode: "SLOT_REMOVED" }), {
+    warningCode: "SLOT_REMOVED", opened: invitationOpened }), {
     removed: true, warningCode: "SLOT_REMOVED",
+    opened: invitationOpened,
   });
   assert.throws(() => validateSlotRemovalResult({ removed: true,
     warningCode: "SLOT_REMOVED", targetPath: "C:\\private\\notes.scpefe" }),
@@ -199,6 +205,16 @@ test("canonicalizes working-copy cursor offsets with pasted text", () => {
   assert.deepEqual(validateWorkingCopy({ content: "\ufeffa\r\nb",
     cursor: { start: 4, end: 5 } }),
   { content: "a\nb", cursor: { start: 2, end: 3 } });
+  assert.deepEqual(validateWorkingCopy({ content: "a", cursor: { start: 1, end: 1 },
+    journalScope: "adoption_2", revision: 4 }),
+  { content: "a", cursor: { start: 1, end: 1 }, journalScope: "adoption_2",
+    revision: 4 });
+  assert.throws(() => validateWorkingCopy({ content: "a",
+    cursor: { start: 1, end: 1 }, journalScope: "adoption_2", revision: 0 }),
+  /revision/);
+  assert.throws(() => validateWorkingCopy({ content: "a",
+    cursor: { start: 1, end: 1 }, journalScope: "../../private" }),
+  /journal scope/);
 });
 
 test("creation results expose only a safe name and validated blank edit session", () => {
@@ -232,14 +248,33 @@ test("backup results expose success without a host filesystem path", () => {
 });
 
 test("compaction results bind the verified backup and continuity heads", () => {
+  const opened = { content: "current", readOnly: false, canEdit: true,
+    publicationState: "target-published" };
   assert.deepEqual(validateCompactionResult({ compacted: true, backupCreated: true,
-    previousHead: "12".repeat(32), head: "34".repeat(32) }), {
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened }), {
     compacted: true, backupCreated: true,
-    previousHead: "12".repeat(32), head: "34".repeat(32),
+    previousHead: "12".repeat(32), head: "34".repeat(32), opened,
   });
   assert.throws(() => validateCompactionResult({ compacted: true,
-    backupCreated: false, previousHead: "12".repeat(32), head: "34".repeat(32) }),
+    backupCreated: false, previousHead: "12".repeat(32), head: "34".repeat(32),
+    opened }),
   /invalid compaction result/);
+  assert.throws(() => validateCompactionResult({ compacted: true,
+    backupCreated: true, previousHead: "12".repeat(32), head: "34".repeat(32) }),
+  /invalid compaction result/);
+});
+
+test("legacy migration permission is projected independently of blocked edit mode", () => {
+  const base = { content: "legacy", readOnly: true, canEdit: false,
+    publicationState: "target-published", migrationRequired: true };
+  assert.equal(validateOpenedDocument({ ...base,
+    migrationCanEdit: false }).migrationCanEdit, false);
+  assert.equal(validateOpenedDocument({ ...base,
+    migrationCanEdit: true }).migrationCanEdit, true);
+  assert.throws(() => validateOpenedDocument({ ...base,
+    migrationCanEdit: "yes" }), /migration permission/);
+  assert.throws(() => validateOpenedDocument({ content: "current", readOnly: true,
+    canEdit: true, migrationCanEdit: true }), /migration permission/);
 });
 
 test("plaintext export contracts expose only canonical text and line-ending choice", () => {

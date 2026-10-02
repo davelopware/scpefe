@@ -11,9 +11,12 @@
     "preview:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-windows-preview.ps1",
     "start": "electron .",
     "test": "node scripts/run-desktop-tests.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit --project ../../packages/frontend-core/tsconfig.json && tsc --noEmit --project ../../packages/react-ui/tsconfig.json",
+    "test:frontend": "node scripts/run-frontend-tests.mjs"
   },
   "dependencies": {
+    "@scpefe/frontend-core": "0.1.0",
+    "@scpefe/react-ui": "0.1.0",
     "@vitejs/plugin-react": "6.1.1",
     "electron": "44.4.3",
     "react": "19.3.0",

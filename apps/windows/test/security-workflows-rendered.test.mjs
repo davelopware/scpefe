@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
+import { SafeBoundaryError } from "../src/error-boundary.mjs";
 
 test("mounted security dialogs gate profile, filter administration, and clear one-time secrets",
   async (t) => {
@@ -54,6 +55,11 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     let permissionAttempts = 0;
     let removalAttempts = 0;
     let reconcileAttempts = 0;
+    let claimAttempts = 0;
+    let canceledClaims = 0;
+    let resolveClaim;
+    let deferInvitation = false;
+    let resolveInvitation;
     const calls = [];
     const listeners = {};
     const managedSlot = { slotId: "ab".repeat(16), identityName: "Grace",
@@ -103,6 +109,9 @@ test("mounted security dialogs gate profile, filter administration, and clear on
         serviceOpened = openResult; return serviceOpened;
       },
       unlockDocument: async () => { serviceOpened = openResult; return serviceOpened; },
+      claimInvitation: async () => { claimAttempts += 1;
+        return new Promise((resolve) => { resolveClaim = resolve; }); },
+      cancelInvitationClaim: async () => { canceledClaims += 1; return true; },
       openExternalDocument: async () => null,
       enterEditMode: async () => { editing = true; serviceOpened = {
         ...(serviceOpened ?? editable), readOnly: false, canEdit: true };
@@ -115,13 +124,15 @@ test("mounted security dialogs gate profile, filter administration, and clear on
           : password === "predictable proposed password" ? "predictable"
           : password.length >= 20 ? "accepted" : "minimum-length",
       createInvitation: async (value) => { invitationAttempts += 1;
-        if (invitationAttempts === 1) throw Object.assign(new Error("weak"),
-          { code: "WEAK_PASSWORD" });
-        if (invitationAttempts === 2) throw Object.assign(new Error("clash"),
-          { code: "PASSWORD_ALREADY_IN_USE" });
+        if (invitationAttempts === 1) throw new SafeBoundaryError("WEAK_PASSWORD");
+        if (invitationAttempts === 2) throw new SafeBoundaryError("PASSWORD_ALREADY_IN_USE");
         if (invitationAttempts === 3) throw new Error("Invitation publication failed safely");
         calls.push(["invitation", value]);
-        return { created: true, temporaryPassword: "generated invitation secret" }; },
+        if (deferInvitation) return new Promise((resolve) => { resolveInvitation = resolve; });
+        serviceOpened = { ...editable, managedSlots: [managedSlot,
+          { ...managedSlot, slotId: "cd".repeat(16), identityName: "Invite" }] };
+        return { created: true, temporaryPassword: "generated invitation secret",
+          opened: serviceOpened }; },
       copyInvitationPassphrase: async (value) => {
         copyAttempts += 1;
         if (copyAttempts === 1) throw new Error("Clipboard unavailable");
@@ -133,7 +144,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       removeSlot: async (value) => { removalAttempts += 1;
         if (removalAttempts === 1) throw new Error("Removal publication failed safely");
         calls.push(["remove", value]);
-        return { removed: true, warningCode: "SLOT_REMOVED" }; },
+        serviceOpened = { ...editable, managedSlots: [] };
+        return { removed: true, warningCode: "SLOT_REMOVED", opened: serviceOpened }; },
       reconcileIdentity: async () => { reconcileAttempts += 1;
         if (reconcileAttempts === 1) throw new Error("Reconciliation publication failed safely");
         calls.push(["reconcile"]); serviceOpened = {
@@ -248,11 +260,11 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     const temporaryInput = ui.getByLabelText(invitationForm,
       "Temporary passphrase (leave blank to generate)");
     assert.equal(temporaryInput.value, "manual temporary phrase 2026!");
-    assert.equal(document.activeElement === temporaryInput, true);
+    await ui.waitFor(() => assert.equal(document.activeElement === temporaryInput, true));
     assert.match(temporaryInput.getAttribute("aria-describedby"), /invitation-password-error/);
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
     await ui.waitFor(() => assert.equal(invitationAttempts, 2));
-    assert.equal(document.activeElement === temporaryInput, true);
+    await ui.waitFor(() => assert.equal(document.activeElement === temporaryInput, true));
     await user.clear(temporaryInput);
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
     await ui.waitFor(() => assert.equal(invitationAttempts, 3));
@@ -273,6 +285,40 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Done" }));
     await ui.waitFor(() => assert.equal(document.body.textContent.includes(
       "generated invitation secret"), false));
+
+    async function beginDeferredInvitation(label) {
+      deferInvitation = true;
+      resolveInvitation = null;
+      const form = ui.getByRole(dialog, "heading",
+        { name: "Invite another person" }).closest("form");
+      await user.type(ui.getByLabelText(form, "Temporary label"), label);
+      await user.click(ui.getByRole(form, "button", { name: "Create invitation" }));
+      await ui.waitFor(() => assert.equal(typeof resolveInvitation, "function"));
+    }
+    async function finishDeferredInvitation(secret) {
+      resolveInvitation({ created: true, temporaryPassword: secret,
+        opened: { ...editable, managedSlots: [managedSlot] } });
+      const result = await ui.findByLabelText(dialog, "One-time temporary passphrase");
+      assert.equal(result.value, secret,
+        "a committed invitation must present its one-time passphrase");
+      deferInvitation = false;
+      await user.click(ui.getByRole(dialog, "button", { name: "Done" }));
+    }
+    await beginDeferredInvitation("Close race");
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Passwords" }) !== null,
+      true, "Close cannot discard a passphrase while publication is pending");
+    await finishDeferredInvitation("close-race-secret");
+
+    await beginDeferredInvitation("Escape race");
+    await user.click(ui.getByLabelText(dialog,
+      "Temporary passphrase (leave blank to generate)"));
+    assert.equal(dialog.contains(document.activeElement), true);
+    await user.keyboard("{Escape}");
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Passwords" }) !== null,
+      true, "Escape cannot discard a passphrase while publication is pending");
+    await finishDeferredInvitation("escape-race-secret");
+
     const permissionGroup = ui.getByRole(dialog, "group",
       { name: /Permissions for Grace/ });
     await user.click(ui.getByLabelText(permissionGroup, "May add passwords"));
@@ -392,7 +438,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
 
     await command("Security", "Lock");
     openResult = { ...readOnly, readOnly: true, canEdit: false,
-      migrationRequired: true,
+      migrationRequired: true, migrationCanEdit: true,
       migrationWarning: "This older container requires a verified backup before migration." };
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
@@ -408,4 +454,38 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       ui.getByLabelText(document.body, "Document state").textContent, "Locked"));
     assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "",
       "declining migration immediately removes the older document plaintext");
+
+    openResult = readOnly;
+    await command("Security", "Unlock");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "owner password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
+    openResult = { readOnly: true, invitationRequired: true };
+    await command("File", /Open/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "invitation password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
+    await user.type(ui.getByLabelText(dialog, "New password"), "界界界界");
+    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(canceledClaims, 1);
+    assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value,
+      "protected content", "canceling a staged claim retains the prior document");
+    assert.equal(document.body.textContent.includes("界界界界"), false);
+
+    await command("File", /Open/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+    await user.type(ui.getByLabelText(dialog, "Password"), "invitation password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
+    await user.type(ui.getByLabelText(dialog, "New password"), "界界界界");
+    await user.type(ui.getByLabelText(dialog, "Confirm new password"), "界界界界");
+    await user.click(ui.getByRole(dialog, "button", { name: "Replace password and claim identity" }));
+    await ui.waitFor(() => assert.equal(claimAttempts, 1));
+    listeners.locked({ locked: true, journalSaved: true, warningCode: null });
+    resolveClaim({ ...readOnly, content: "claim completed too late" });
+    await ui.waitFor(() => assert.equal(
+      ui.getByLabelText(document.body, "Document state").textContent, "Locked"));
+    assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "");
   });

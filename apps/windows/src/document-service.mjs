@@ -409,13 +409,16 @@ export class DocumentService {
       ? nativeOpened.opened
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-        canEdit: headMismatch || profileMismatch || migrationRequired ? false : slotCanEdit,
-        ...(migrationRequired ? { migrationRequired: true } : {}),
+        canEdit: headMismatch || profileMismatch || migrationRequired || unreadableJournal
+          ? false : slotCanEdit,
+        ...(migrationRequired ? { migrationRequired: true,
+          migrationCanEdit: slotCanEdit } : {}),
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
         ...(headMismatch ? { headMismatch } : {}),
         ...(profileMismatch ? { profileMismatch } : {}),
+        ...(unreadableJournal ? { unreadableJournal: true } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
@@ -450,6 +453,9 @@ export class DocumentService {
     }
     if (active.recovery) {
       throw new Error("Restore or discard recovered work before editing");
+    }
+    if (active.unreadableJournal) {
+      throw new Error("Discard or preserve the unreadable journal before editing");
     }
     if (active.headMismatch) {
       throw new Error("Accept or resolve the head mismatch before editing");
@@ -551,7 +557,8 @@ export class DocumentService {
       publicationState: "target-published",
       ...(active.profileMismatch ? { profileMismatch: active.profileMismatch } : {}),
       ...(active.headMismatch ? { headMismatch: active.headMismatch } : {}),
-      ...(active.migrationRequired ? { migrationRequired: true } : {}),
+      ...(active.migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: active.slotCanEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
     active.opened = active.editMode
       ? validateEditMode({ ...reopenedView, readOnly: false }) : reopenedView;
@@ -610,7 +617,7 @@ export class DocumentService {
     active.baseContainer = Buffer.from(published);
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
-    return Object.freeze({ created: true, temporaryPassword });
+    return Object.freeze({ created: true, temporaryPassword, opened: active.opened });
   }
 
   async claimInvitation(newPassword) {
@@ -649,7 +656,8 @@ export class DocumentService {
     active.opened = validateOpenedDocument({ ...reopened.opened,
       canEdit: migrationRequired ? false : reopened.opened.canEdit,
       publicationState: "target-published",
-      ...(migrationRequired ? { migrationRequired: true } : {}),
+      ...(migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: reopened.opened.canEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
     active.documentId = reopened.documentId;
     active.baseRevision = reopened.baseRevision;
@@ -772,10 +780,10 @@ export class DocumentService {
     }
     const targetSlot = String(slotId ?? "");
     if (!DOCUMENT_ID.test(targetSlot)) throw new TypeError("slot ID is invalid");
-    await this.#publishSlotAdministration((current) =>
+    const opened = await this.#publishSlotAdministration((current) =>
       this.native.removeSlot(current, active.password, targetSlot));
     return Object.freeze({ removed: true,
-      warningCode: "SLOT_REMOVED" });
+      warningCode: "SLOT_REMOVED", opened });
   }
 
   async #publishSlotAdministration(createCandidate) {
@@ -845,12 +853,11 @@ export class DocumentService {
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
     this.active.unresolvedJournal = false;
-    this.active.opened = validateOpenedDocument({
-      content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.headMismatch ? false : this.active.slotCanEdit,
-      publicationState: this.active.opened.publicationState,
-      ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
-      ...(this.active.headMismatch ? { headMismatch: this.active.headMismatch } : {}) });
+    this.active.opened = validateOpenedDocument({ ...this.active.opened,
+      recovery: undefined, readOnly: true,
+      canEdit: this.active.headMismatch || this.active.profileMismatch
+        || this.active.migrationRequired || this.active.unreadableJournal
+        ? false : this.active.slotCanEdit });
     return this.active.opened;
   }
 
@@ -870,17 +877,15 @@ export class DocumentService {
   }
 
   async acceptHeadMismatch() {
-    if (!this.active?.headMismatch) throw new Error("No head mismatch is available");
-    await this.witnesses.accept(this.active.target, this.active.observation);
-    this.active.headMismatch = null;
-    this.active.opened = validateOpenedDocument({
-      content: this.active.opened.content, readOnly: true,
-      canEdit: this.active.slotCanEdit,
-      publicationState: this.active.opened.publicationState,
-      ...(this.active.opened.lease ? { lease: this.active.opened.lease } : {}),
-      ...(this.active.opened.recovery ? { recovery: this.active.opened.recovery } : {}),
-    });
-    return this.active.opened;
+    const active = this.active;
+    if (!active?.headMismatch) throw new Error("No head mismatch is available");
+    await this.witnesses.accept(active.target, active.observation);
+    active.headMismatch = null;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      headMismatch: undefined, readOnly: true,
+      canEdit: active.profileMismatch || active.migrationRequired
+        || active.unreadableJournal ? false : active.slotCanEdit });
+    return active.opened;
   }
 
   async reconnectPendingPublication() {
@@ -1130,6 +1135,10 @@ export class DocumentService {
     await this.journals.clear(active.documentId);
     active.unreadableJournal = false;
     active.unresolvedJournal = false;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      unreadableJournal: undefined,
+      canEdit: active.headMismatch || active.profileMismatch || active.migrationRequired
+        ? false : active.slotCanEdit });
     return Object.freeze({ discarded: true, documentId: active.documentId });
   }
 
@@ -1255,7 +1264,8 @@ export class DocumentService {
     }
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
-    const canonical = canonicalizeDocumentText(active.working.content);
+    const source = active.working;
+    const canonical = canonicalizeDocumentText(source.content);
     const mergeAncestor = this.#regularSaveMergeAncestor(active);
     await this.#flushActive(active);
     let published;
@@ -1344,14 +1354,16 @@ export class DocumentService {
     active.manuallySealed = false;
     active.dirty = true;
     active.unresolvedJournal = true;
+    const latestWorking = active.working;
     await this.journals.write(active.documentId, active.journalKey, {
-      text: canonical, baseRevision: active.baseRevision,
-      cursor: { ...active.working.cursor }, target: active.target,
+      text: latestWorking.content, baseRevision: active.baseRevision,
+      cursor: { ...latestWorking.cursor }, target: active.target,
       state: "unsaved", updateTime: this.now(),
     });
     const result = Object.freeze({ published: true, provisional: true,
       content: canonical });
-    this.onRegularSave(result);
+    this.onRegularSave(Object.freeze({ ...result,
+      journalScope: source.journalScope ?? null, revision: source.revision ?? null }));
     return result;
   }
 
@@ -1466,14 +1478,18 @@ export class DocumentService {
     this.active.targetContent = canonical;
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
-    this.active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-    this.active.dirty = false;
+    const latestWorking = this.active.working;
+    const newerWork = latestWorking && latestWorking.content !== canonical;
+    this.active.working = newerWork
+      ? latestWorking : { content: canonical, cursor: { start: 0, end: 0 } };
+    this.active.dirty = Boolean(newerWork);
     this.active.manuallySealed = true;
     this.active.pendingPublication = false;
     this.active.pendingRecord = null;
     this.active.unresolvedJournal = false;
     this.active.recovery = null;
     this.active.continuousDue = null;
+    if (newerWork) this.#scheduleCheckpoint();
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical,
       publicationState: "target-published" });
@@ -1626,7 +1642,7 @@ export class DocumentService {
     active.dirty = false;
     await this.witnesses.observe(active.target, active.observation);
     return validateCompactionResult({ compacted: true, backupCreated: true,
-      previousHead, head: active.baseRevision });
+      previousHead, head: active.baseRevision, opened: active.opened });
   }
 
   async migrateDocument(backupTarget, { takeoverToken } = {}) {
@@ -2161,7 +2177,8 @@ export class DocumentService {
     const opened = validateOpenedDocument({ ...baseOpened.opened,
       content: record.text, canEdit: headMismatch ? false : slotCanEdit,
       publicationState,
-      ...(migrationRequired ? { migrationRequired: true } : {}),
+      ...(migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: slotCanEdit } : {}),
       ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     this.active = { target, password, opened, editMode: false,
@@ -2187,10 +2204,13 @@ export class DocumentService {
       this.native.openDocument(published, active.password));
     const { headMismatch, slotCanEdit } = await this.#observeHead(
       active.target, reopened);
+    const migrationRequired = reopened.containerFormatVersion < 3;
     active.journalKey.fill(0);
     active.opened = validateOpenedDocument({ ...reopened.opened,
-      canEdit: headMismatch ? false : slotCanEdit,
+      canEdit: headMismatch || migrationRequired ? false : slotCanEdit,
       publicationState: "target-published",
+      ...(migrationRequired ? { migrationRequired: true,
+        migrationCanEdit: slotCanEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     active.documentId = reopened.documentId;
@@ -2199,7 +2219,7 @@ export class DocumentService {
     active.observation = this.#observation(reopened);
     active.slotCanEdit = slotCanEdit;
     active.headMismatch = headMismatch;
-    active.migrationRequired = reopened.containerFormatVersion < 3;
+    active.migrationRequired = migrationRequired;
     active.baseContainer = Buffer.from(published);
     active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);
@@ -2367,6 +2387,7 @@ export class DocumentService {
 
   #scheduleCheckpoint() {
     const active = this.active;
+    const journalScope = active.working?.journalScope ?? null;
     const now = this.now();
     if (active.continuousDue === null) {
       active.continuousDue = now + this.checkpointContinuousMs;
@@ -2377,7 +2398,7 @@ export class DocumentService {
       this.checkpointTimer = null;
       void this.#flushActive(active).catch((error) => {
         active.journalWarning = "RECOVERY_CHECKPOINT_FAILED";
-        this.onJournalWarning(active.journalWarning);
+        this.onJournalWarning(active.journalWarning, journalScope);
       });
     }, Math.max(0, due - now));
     this.checkpointTimer?.unref?.();

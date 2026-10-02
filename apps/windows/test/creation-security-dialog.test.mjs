@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { JSDOM } from "jsdom";
+import "../scripts/register-frontend-typescript.mjs";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "https://scpefe.invalid/",
@@ -33,7 +34,7 @@ const React = (await import("react")).default;
 const { cleanup, render, waitFor, within } = await import("@testing-library/react");
 const userEvent = (await import("@testing-library/user-event")).default;
 const { CreateDocumentControl, CreationSecurityDialog } = await import(
-  "../src/creation-security-dialog.mjs");
+  "../src/creation-security-dialog.tsx");
 const { SafeBoundaryError } = await import("../src/error-boundary.mjs");
 
 after(() => {
@@ -74,8 +75,8 @@ async function enterOwner(ui, user, confirmation = "owner password words") {
     "I understand that lost passwords cannot be recovered."));
 }
 
-test("mounted post-picker dialog is focused and has no initial-text field", (t) => {
-  const { ui } = mountedDialog(t);
+test("mounted post-picker dialog is focused and has no initial-text field", async (t) => {
+  const { user, ui } = mountedDialog(t);
   const dialog = ui.getByRole("dialog", { name: "Secure new document" });
   assert.equal(dialog.getAttribute("aria-modal"), "true");
   assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
@@ -83,7 +84,48 @@ test("mounted post-picker dialog is focused and has no initial-text field", (t) 
   assert.equal(ui.queryByLabelText("Initial text") === null, true,
     "creation dialog has no initial-text field");
   assert.match(dialog.textContent, /lost passwords cannot be recovered/i);
+  await user.keyboard("{Shift>}{Tab}{/Shift}");
+  assert.equal(dom.window.document.activeElement === ui.getByRole("button", { name: "Create" }),
+    true, "Shift+Tab wraps to the final creation action");
+  await user.keyboard("{Tab}");
+  assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
+    true, "Tab wraps back to the first creation field");
 });
+
+test("mounted creation dialog reveals password pairs independently without changing drafts",
+  async (t) => {
+    const { user, ui } = mountedDialog(t);
+    const owner = ui.getByLabelText("Owner password");
+    const ownerConfirmation = ui.getByLabelText("Confirm owner password");
+    const recovery = ui.getByLabelText(/Independent recovery password/);
+    const recoveryConfirmation = ui.getByLabelText("Confirm recovery password");
+    const inputs = [owner, ownerConfirmation, recovery, recoveryConfirmation];
+    await user.type(owner, "owner secret words");
+    await user.type(ownerConfirmation, "owner secret words");
+    await user.type(recovery, "recovery secret words");
+    await user.type(recoveryConfirmation, "recovery secret words");
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["password", "password", "password", "password"]);
+
+    const ownerToggle = ui.getByRole("button", { name: "Show owner passwords" });
+    ownerToggle.focus();
+    await user.keyboard("{Enter}");
+    assert.equal(ui.getByRole("button", { name: "Hide owner passwords" })
+      .getAttribute("aria-pressed"), "true");
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["text", "text", "password", "password"]);
+
+    await user.click(ui.getByRole("button", { name: "Show recovery passwords" }));
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["text", "text", "text", "text"]);
+    await user.click(ui.getByRole("button", { name: "Hide owner passwords" }));
+    await user.click(ui.getByRole("button", { name: "Hide recovery passwords" }));
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["password", "password", "password", "password"]);
+    assert.deepEqual(inputs.map((input) => input.value),
+      ["owner secret words", "owner secret words",
+        "recovery secret words", "recovery secret words"]);
+  });
 
 test("password fields expose requirements and live confirmation feedback", async (t) => {
   const { user, ui } = mountedDialog(t);

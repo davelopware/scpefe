@@ -1,0 +1,44 @@
+export type Profile = { name: string; email: string; deviceName: string };
+export type Cursor = { start: number; end: number };
+export type Recovery = { content: string; state: "unsaved"; updateTime: number; cursor: Cursor;
+  authorName?: string; deviceName?: string };
+export type Lease = { active: boolean; holderName: string; holderEmail: string;
+  deviceName: string; holderUtcMs: number; durationMs: number };
+export type HeadMismatch = { kind: "rollback" | "divergence" | "replacement" | "witness-error";
+  title: string; explanation: string; editingBlocked: true };
+export type PublicationState = "target-published" | "pending-publication" | "conflict";
+export type ClientSettings = { regularSaveEnabled: boolean; regularSaveIntervalMs: number };
+export type JournalSummary = { total: number; pendingPublications: number };
+export type ExternalOpenRequest = { token: string };
+export type ProtectionOperation = "new" | "open" | "external-open" | "close" | "exit";
+export type ProtectionRequest = { token: string; operation: ProtectionOperation; state: {
+  dirty: boolean; provisional: boolean; pendingPublication: boolean; recovered: boolean;
+  conflict: boolean; unresolvedJournal: boolean; activePublication: boolean } };
+export type ProfileMismatch = { slotName: string; slotEmail: string;
+  profileName: string; profileEmail: string; editingBlocked: true };
+export type ManagedSlot = { slotId: string; identityName: string; identityEmail: string;
+  canEdit: boolean; canAddPasswords: boolean; canRemovePasswords: boolean;
+  mustBeChanged: boolean; slotIdKnown?: boolean; permissionsKnown?: boolean;
+  mustBeChangedKnown?: boolean; identityKnown?: boolean };
+export type MergeDraft = { content: string; hasConflicts: boolean;
+  ancestorRevision: string; localRevision: string; currentRevision: string };
+export type LeaseOperation = "edit" | "recovery" | "divergence" | "migration";
+export type LeaseDecision = { decisionRequired: "lease-takeover"; operation: LeaseOperation;
+  holderName: string; authorization: string };
+export type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
+  publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
+  targetName?: string;
+  canAddPasswords?: boolean; canRemovePasswords?: boolean; invitationRequired?: false;
+  recoverySlot?: boolean; slotId?: string; slotIdentityName?: string;
+  slotIdentityEmail?: string;
+  headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
+  managedSlots?: ManagedSlot[]; provisional?: true; migrationRequired?: true;
+  migrationCanEdit?: boolean;
+  unreadableJournal?: true;
+  migrationWarning?: string };
+export type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
+  targetName?: string };
+export type DialogName = "profile" | "open" | "export"
+  | "unlock" | "passwords" | "compaction" | null;
+export type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
+  | "recovery" | "unreadable" | "publication" | null;

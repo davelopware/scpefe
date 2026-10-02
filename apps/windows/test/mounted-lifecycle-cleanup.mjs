@@ -1,19 +1,25 @@
-/* Tears down a mounted lifecycle harness only after its rendered work is idle. */
+/* Cancels pending decisions and restores every mounted stage after lifecycle work settles. */
 export async function cleanupMountedLifecycleHarness({ completion, unmount,
   drainRendererTasks, clearFrames, closeDom, restoreGlobals, removeTemporaryFiles,
-  timeoutMs = 5_000 }) {
+  cancelPendingWork, primaryError = null, timeoutMs = 5_000 }) {
   if (typeof completion?.waitForIdle !== "function") {
     throw new TypeError("renderer lifecycle completion is unavailable");
   }
-  await completion.waitForIdle({ timeoutMs });
   let failed = false;
   let firstFailure;
   const attempt = async (operation) => {
+    if (typeof operation !== "function") return;
     try { await operation(); }
     catch (error) {
       if (!failed) { failed = true; firstFailure = error; }
     }
   };
+  await attempt(cancelPendingWork);
+  await attempt(() => completion.waitForIdle({ timeoutMs }));
+  if (failed) {
+    await attempt(cancelPendingWork);
+    await attempt(() => completion.waitForIdle({ timeoutMs }));
+  }
   await attempt(drainRendererTasks);
   await attempt(unmount);
   await attempt(drainRendererTasks);
@@ -21,5 +27,5 @@ export async function cleanupMountedLifecycleHarness({ completion, unmount,
   await attempt(closeDom);
   await attempt(restoreGlobals);
   await attempt(removeTemporaryFiles);
-  if (failed) throw firstFailure;
+  if (failed && !primaryError) throw firstFailure;
 }

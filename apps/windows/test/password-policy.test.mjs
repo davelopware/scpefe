@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import "../scripts/register-frontend-typescript.mjs";
 
 test("all new-password workflows expose the shared policy and live authoritative result",
   async (t) => {
@@ -23,7 +24,7 @@ test("all new-password workflows expose the shared policy and live authoritative
     const React = (await import("react")).default;
     const { cleanup, render, within } = await import("@testing-library/react");
     const { assessProposedPassword, PasswordPolicyStatus } = await import(
-      "../src/password-policy.mjs");
+      "../src/password-policy.ts");
     t.after(() => {
       cleanup(); dom.window.close();
       for (const [key, descriptor] of prior) {
@@ -82,4 +83,39 @@ test("all new-password workflows expose the shared policy and live authoritative
         expected);
       rendered.unmount();
     }
+
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const queuedCallbacks = [];
+    const queuedTimer = Symbol("queued password policy timer");
+    let cancelled = false;
+    let assessmentCalls = 0;
+    dom.window.scpefe.assessPasswordPolicy = async () => {
+      assessmentCalls += 1;
+      return "accepted";
+    };
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      if (delay === 120) {
+        queuedCallbacks.push(() => callback(...args));
+        return queuedTimer;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    };
+    globalThis.clearTimeout = (timer) => {
+      if (timer === queuedTimer) cancelled = true;
+      else originalClearTimeout(timer);
+    };
+    try {
+      const rendered = render(React.createElement(PasswordPolicyStatus,
+        { id: "queued", password: "strong passphrase words" }));
+      rendered.unmount();
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+    assert.equal(queuedCallbacks.length, 1, "one policy timer was queued");
+    assert.equal(cancelled, true, "unmount cancels the queued timer");
+    queuedCallbacks[0]();
+    assert.equal(assessmentCalls, 0,
+      "a callback already dispatched before cancellation cannot assess after unmount");
   });

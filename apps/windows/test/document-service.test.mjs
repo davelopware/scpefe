@@ -539,7 +539,9 @@ test("authenticated switch discard removes only the active unreadable journal", 
         revisionGraph: [{ revisionId: baseRevision, parentRevisionIds: [] }],
         journalKey: Buffer.alloc(32, 0x94), manuallySealed: true };
     } }) });
-  await service.openDocument(target, "owner password words");
+  const opened = await service.openDocument(target, "owner password words");
+  assert.equal(opened.unreadableJournal, true);
+  assert.equal(opened.canEdit, false);
   assert.equal(service.active.unreadableJournal, true);
   assert.equal(warnings.at(-1), "RECOVERY_READ_FAILED");
   await assert.rejects(service.discardUnreadableJournalForSwitch("discard"),
@@ -553,6 +555,57 @@ test("authenticated switch discard removes only the active unreadable journal", 
   assert.equal(await fs.readFile(otherJournal, "utf8"),
     "another document's recovery data");
   assert.equal(service.active.unresolvedJournal, false);
+  assert.equal(service.active.opened.unreadableJournal, undefined);
+  assert.equal(service.active.opened.canEdit, true);
+});
+
+test("accepting a head mismatch preserves an unreadable journal decision until explicit discard", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-head-unreadable-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const journalDirectory = path.join(directory, "journals");
+  const documentId = "95".repeat(16);
+  const ancestor = "96".repeat(32);
+  const initialHead = "97".repeat(32);
+  const divergedHead = "98".repeat(32);
+  let diverged = false;
+  await fs.writeFile(target, "container");
+  const native = withLease({ openDocument() {
+    return { content: diverged ? "diverged text" : "initial text",
+      readOnly: true, canEdit: true, documentId,
+      baseRevision: diverged ? divergedHead : initialHead,
+      revisionGraph: diverged
+        ? [{ revisionId: divergedHead, parentRevisionIds: [ancestor] }]
+        : [{ revisionId: ancestor, parentRevisionIds: [] },
+          { revisionId: initialHead, parentRevisionIds: [ancestor] }],
+      journalKey: Buffer.alloc(32, 0x99), manuallySealed: true };
+  } });
+  const options = { native, fs, publicationCapabilities, journalDirectory,
+    profilePath: await writeProfile(directory, "Ada", "Desk"),
+    witnessDirectory: path.join(directory, "witnesses") };
+  const first = new DocumentService(options);
+  await first.openDocument(target, "password words");
+  await first.lock();
+  await fs.mkdir(journalDirectory, { recursive: true });
+  await fs.writeFile(path.join(journalDirectory, `${documentId}.work-journal`),
+    "unreadable authenticated envelope");
+  diverged = true;
+  const service = new DocumentService(options);
+  const opened = await service.openDocument(target, "password words");
+  assert.equal(opened.headMismatch.kind, "divergence");
+  assert.equal(opened.unreadableJournal, true);
+  assert.equal(opened.canEdit, false);
+  const accepted = await service.acceptHeadMismatch();
+  assert.equal(accepted.headMismatch, undefined);
+  assert.equal(accepted.unreadableJournal, true);
+  assert.equal(accepted.canEdit, false);
+  await assert.rejects(service.enterEditMode(), /unreadable journal/);
+  await service.discardUnreadableJournalForSwitch(
+    DISCARD_UNREADABLE_JOURNAL_CONFIRMATION);
+  assert.equal(service.active.opened.unreadableJournal, undefined);
+  assert.equal(service.active.opened.canEdit, true);
+  assert.equal((await service.enterEditMode()).readOnly, false);
+  await service.lock();
 });
 
 test("older containers remain read-only until verified-backup migration", async (t) => {
@@ -598,6 +651,7 @@ test("older containers remain read-only until verified-backup migration", async 
     setTimer: () => ({ unref() {} }), clearTimer: () => {} });
   const opened = await service.openDocument(target, "owner password words");
   assert.equal(opened.migrationRequired, true);
+  assert.equal(opened.migrationCanEdit, true);
   assert.equal(opened.canEdit, false);
   await assert.rejects(service.enterEditMode(), /must be migrated before editing or saving/);
   const result = await service.migrateDocument();
@@ -1025,7 +1079,7 @@ test("compaction creates an exact backup then publishes a verified shallow basel
     const result = await service.compactDocument(COMPACTION_CONFIRMATION);
 
     assert.deepEqual(result, { compacted: true, backupCreated: true,
-      previousHead, head: compactedHead });
+      previousHead, head: compactedHead, opened: service.active.opened });
     assert.deepEqual(await fs.readFile(target), candidate);
     assert.equal(await fs.readFile(defaultBackup, "utf8"),
       "existing backup must not be replaced");
@@ -1532,6 +1586,38 @@ test("ordinary pending publications still require candidate plaintext to match",
   assert.equal(opened.publicationState, "pending-publication");
   assert.equal(await fs.readFile(target, "utf8"), "container");
   assert.equal(warnings.includes("RECOVERY_READ_FAILED"), true);
+});
+
+test("checkpoint failure reports the scope of the update that scheduled it", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-journal-scope-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const profilePath = await writeProfile(directory, "Ada", "Desk PC");
+  const timers = [];
+  const warnings = [];
+  const service = new DocumentService({ fs, profilePath, publicationCapabilities,
+    native: withLease({ openDocument: () => ({ content: "base", readOnly: true,
+      canEdit: true, documentId: "ab".repeat(16), baseRevision: "cd".repeat(32),
+      journalKey: Buffer.alloc(32, 7) }) }),
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer);
+      return timer;
+    }, clearTimer: (timer) => { timer.cleared = true; },
+    onJournalWarning: (code, scope) => warnings.push([code, scope]) });
+  await service.openDocument(target, "password words");
+  await service.enterEditMode();
+  service.journals.write = async () => { throw new Error("journal unavailable"); };
+  service.updateWorkingCopy({ content: "draft", cursor: { start: 5, end: 5 },
+    journalScope: "adoption_1" });
+  const checkpoint = timers.findLast((timer) => timer.delay === 10_000
+    && !timer.cleared);
+  assert.ok(checkpoint);
+  checkpoint.callback();
+  await service.flushChain.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(warnings, [["RECOVERY_CHECKPOINT_FAILED", "adoption_1"]]);
 });
 
 test("checkpoints continuously typed work and recovers it as unsaved", async (t) => {
@@ -2891,6 +2977,8 @@ test("validated client settings opt into cumulative regular provisional saves", 
   await fs.writeFile(target, initial);
   const revisionId = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const regularInputs = [];
+  let onRegularCandidate = () => {};
+  let onManualCandidate = () => {};
   const native = withLease({
     openDocument(bytes) {
       const value = JSON.parse(bytes.toString());
@@ -2903,6 +2991,7 @@ test("validated client settings opt into cumulative regular provisional saves", 
             parentRevisionIds: [value.parent] }] : [])] };
     },
     regularSaveDocument(bytes, _password, input) {
+      onRegularCandidate();
       const value = JSON.parse(bytes.toString());
       const parent = value.sealed ? revisionId(bytes) : value.parent;
       regularInputs.push({ content: input.content, parent });
@@ -2910,6 +2999,7 @@ test("validated client settings opt into cumulative regular provisional saves", 
         sealed: false, parent, base: value.sealed ? value : value.base }));
     },
     saveDocument(bytes, _password, input) {
+      onManualCandidate();
       const value = JSON.parse(bytes.toString());
       return Buffer.from(JSON.stringify({ content: input.content, sealed: true,
         parent: value.sealed ? revisionId(bytes) : value.parent }));
@@ -2920,7 +3010,9 @@ test("validated client settings opt into cumulative regular provisional saves", 
     },
   });
   const timers = [];
+  const regularNotices = [];
   const service = new DocumentService({ native, fs, profilePath, settingsPath,
+    onRegularSave: (notice) => regularNotices.push(notice),
     publicationCapabilities, setTimer(callback, delay) {
       const timer = { callback, delay, cleared: false }; timers.push(timer); return timer;
     }, clearTimer(timer) { timer.cleared = true; } });
@@ -2936,9 +3028,21 @@ test("validated client settings opt into cumulative regular provisional saves", 
   await service.enterEditMode();
   assert.equal(timers.some((timer) => timer.delay === 15_000), true);
 
-  service.updateWorkingCopy({ content: "first", cursor: { start: 5, end: 5 } });
+  service.updateWorkingCopy({ content: "first", cursor: { start: 5, end: 5 },
+    journalScope: "adoption_1", revision: 1 });
+  onRegularCandidate = () => {
+    onRegularCandidate = () => {};
+    service.updateWorkingCopy({ content: "base", cursor: { start: 4, end: 4 },
+      journalScope: "adoption_1", revision: 2 });
+  };
   assert.deepEqual(await service.regularSaveDocument(), {
     published: true, provisional: true, content: "first" });
+  assert.deepEqual(regularNotices[0], { published: true, provisional: true,
+    content: "first", journalScope: "adoption_1", revision: 1 });
+  assert.equal(service.active.working.content, "base");
+  assert.equal((await service.journals.read(
+    service.active.documentId, service.active.journalKey)).text, "base",
+  "a later undo remains the recoverable working copy after provisional publication");
   const firstParent = regularInputs[0].parent;
   assert.equal(service.active.manuallySealed, false);
   assert.equal(service.active.dirty, true);
@@ -2963,6 +3067,22 @@ test("validated client settings opt into cumulative regular provisional saves", 
   const discarded = await service.discardRecoveredWork();
   assert.equal(discarded.content, "second");
   assert.equal(discarded.provisional, undefined);
+
+  await service.enterEditMode();
+  service.updateWorkingCopy({ content: "manual candidate",
+    cursor: { start: 16, end: 16 }, journalScope: "adoption_2", revision: 1 });
+  onManualCandidate = () => {
+    onManualCandidate = () => {};
+    service.updateWorkingCopy({ content: "newer unsaved work",
+      cursor: { start: 18, end: 18 }, journalScope: "adoption_2", revision: 2 });
+  };
+  assert.deepEqual(await service.saveDocument("manual candidate"),
+    { saved: true, content: "manual candidate", publicationState: "target-published" });
+  assert.equal(service.active.working.content, "newer unsaved work");
+  assert.equal(service.active.dirty, true);
+  await service.lock("save-completion-drain");
+  const laterRecovered = await service.openDocument(target, "password words");
+  assert.equal(laterRecovered.recovery.content, "newer unsaved work");
 });
 
 async function regularPublicationFixture(directory) {

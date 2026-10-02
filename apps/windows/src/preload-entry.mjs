@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer as rawIpcRenderer } from "electron";
 import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
   validateOpenTargetResult,
-  validateProfile, validateOpenedDocument, validateEditMode, validateSaveResult,
+  validateProfile, validateOpenedDocument, validateActiveDocument,
+  validateEditMode, validateSaveResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
   validateMigrationResult,
@@ -125,7 +126,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value === null ? null : value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateMigrationResult(value);
   },
-  changePassword: async (request) => validateOpenedDocument(
+  changePassword: async (request) => validateActiveDocument(
     await ipcRenderer.invoke("document:change-password",
       validatePasswordChangeRequest(request))),
   createInvitation: async (request) => validateInvitationResult(
@@ -147,9 +148,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     if (typeof value !== "boolean") throw new TypeError("host returned invalid claim cancellation");
     return value;
   },
-  reconcileIdentity: async () => validateOpenedDocument(
+  reconcileIdentity: async () => validateActiveDocument(
     await ipcRenderer.invoke("document:reconcile-identity")),
-  updateSlotPermissions: async (request) => validateOpenedDocument(
+  updateSlotPermissions: async (request) => validateActiveDocument(
     await ipcRenderer.invoke("document:update-slot-permissions",
       validateSlotPermissionsRequest(request))),
   removeSlot: async (slotId) => validateSlotRemovalResult(
@@ -183,6 +184,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:discard-recovery")),
   acceptHeadMismatch: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:accept-head-mismatch")),
+  discardUnreadableJournal: async () => validateOpenedDocument(
+    await ipcRenderer.invoke("document:discard-unreadable-journal",
+      { confirmed: true })),
   closeDocument: async () => {
     const value = await ipcRenderer.invoke("document:close");
     if (typeof value !== "boolean") throw new TypeError("host returned invalid close result");
@@ -230,8 +234,10 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     const handler = (_event, value) => {
       if (value && typeof value === "object" && isCatalogCode(value.code)) {
-        listener(value.code);
-      } else listener("JOURNAL_WARNING");
+        listener(value.code, typeof value.journalScope === "string"
+          && /^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+          ? value.journalScope : null);
+      } else listener("JOURNAL_WARNING", null);
     };
     ipcRenderer.on("document:journal-warning", handler);
     return () => ipcRenderer.removeListener("document:journal-warning", handler);
