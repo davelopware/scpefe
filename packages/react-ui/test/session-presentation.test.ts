@@ -8,7 +8,9 @@ const opened: DocumentOpened = { content: "draft", readOnly: true, canEdit: true
   publicationState: "target-published", targetName: "notes.scpefe" };
 
 function setup() {
-  let edit: () => Promise<DocumentOpened> = async () => { throw new Error("private host path"); };
+  type EditResult = DocumentOpened | { decisionRequired: "lease-takeover";
+    operation: "edit"; holderName: string; authorization: string };
+  let edit: () => Promise<EditResult> = async () => { throw new Error("private host path"); };
   const host = { enterEditMode: () => edit() } as unknown as DocumentSessionHost<DocumentOpened>;
   const journal = { createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
     onJournalWarning: () => () => {} } as WorkingCopyJournalHost;
@@ -16,7 +18,15 @@ function setup() {
   session.adopt(opened);
   const presentation = new SessionPresentation(session, () => "The operation could not be completed safely.");
   return { session, presentation, succeed: () => { edit = async () => ({ ...opened,
-    readOnly: false }); } };
+    readOnly: false }); }, challenge: () => { edit = async () => ({
+      decisionRequired: "lease-takeover", operation: "edit", holderName: "Ada",
+      authorization: "private authorization",
+    }); }, defer: () => {
+      let resolve!: (value: EditResult) => void;
+      const result = new Promise<EditResult>((complete) => { resolve = complete; });
+      edit = () => result;
+      return () => resolve({ ...opened, readOnly: false });
+    } };
 }
 
 test("edit failure is one selected decision with safe text and retry focus", async () => {
@@ -31,6 +41,36 @@ test("edit failure is one selected decision with safe text and retry focus", asy
   await presentation.act("continue-read-only");
   assert.equal(presentation.view().selectedDecision, null);
   assert.equal(presentation.view().blocked, false);
+  assert.equal(presentation.view().focusIntent, "return");
+  session.dispose();
+});
+
+test("retry exposes the takeover message without leaking its authorization", async () => {
+  const { session, presentation, challenge } = setup();
+  await session.enterEditMode();
+  challenge();
+  await presentation.act("retry-edit");
+  const view = presentation.view();
+  assert.equal(view.selectedDecision, null);
+  assert.equal(view.safeMessage, "Editing requires a confirmed lease takeover.");
+  assert.equal(view.focusIntent, "return");
+  assert.equal(JSON.stringify(view).includes("private authorization"), false);
+  assert.equal(session.getSnapshot().attention?.kind, "lease-takeover");
+  session.dispose();
+});
+
+test("a late retry cannot present an outcome from a replaced document", async () => {
+  const { session, presentation, defer } = setup();
+  await session.enterEditMode();
+  const finish = defer();
+  const pending = presentation.act("retry-edit");
+  await Promise.resolve();
+  session.adopt({ ...opened, content: "replacement" });
+  finish();
+  await pending;
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().focusIntent, null);
+  assert.equal(session.getSnapshot().kind, "read-only");
   session.dispose();
 });
 
