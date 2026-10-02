@@ -174,6 +174,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       compactDocument: async (request) => {
         calls.push(["compact", request]); compactionAttempts += 1;
         if (compactionAttempts === 1) throw new Error("backup verification failed");
+        if (compactionAttempts === 2) return null;
         return { compacted: true, backupCreated: true,
           previousHead: "44".repeat(32), head: "55".repeat(32),
           opened: { ...base, readOnly: false } };
@@ -324,9 +325,18 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
     await user.click(ui.getByRole(dialog, "button",
       { name: "Create verified backup and compact" }));
+    await ui.waitFor(() => assert.match(
+      ui.getByRole(document.body, "status").textContent,
+      /Compaction canceled; document history is unchanged/));
+    assert.equal(document.body.contains(dialog), true);
+    assert.equal(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and compact" }).disabled, false);
+    await user.click(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and compact" }));
     await ui.findByRole(document.body, "dialog", { name: "Passwords" });
     assert.deepEqual(calls.filter(([name]) => name === "compact"), [
       ["compact", { confirmed: true }], ["compact", { confirmed: true }],
+      ["compact", { confirmed: true }],
     ]);
     await user.click(ui.getByRole(document.body, "button", { name: "Close" }));
 

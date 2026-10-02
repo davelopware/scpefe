@@ -194,7 +194,8 @@ export class SessionPresentation {
           this.focusIntent = action === "migrate" ? "migration-retry" : "decision-action";
         }
       }
-      if (outcome.status === "compaction" || outcome.status === "compaction-canceled") {
+      if (outcome.status === "compaction"
+        || (outcome.status === "compaction-canceled" && action === "compaction-canceled")) {
         return "passwords";
       }
       return;

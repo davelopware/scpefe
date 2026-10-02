@@ -263,6 +263,32 @@ test("compaction cancellation and safe failure return to the staged decision", a
   session.dispose();
 });
 
+test("host-canceled compaction keeps the current decision available for retry", async () => {
+  let attempts = 0;
+  const host = { compactDocument: async () => {
+    attempts += 1;
+    return attempts === 1 ? null : { opened: { ...opened, readOnly: false,
+      canAddPasswords: true, canRemovePasswords: true }, previousHead: "old", head: "new" };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false, canAddPasswords: true,
+    canRemovePasswords: true });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  session.requestCompaction();
+  assert.equal(await presentation.act("compact"), undefined);
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "compaction-decision", failureMessage: null,
+  });
+  assert.equal(presentation.view().safeMessage,
+    "Compaction canceled; document history is unchanged.");
+  assert.equal(await presentation.act("compact"), "passwords");
+  assert.equal(attempts, 2);
+  assert.equal(presentation.view().selectedDecision, null);
+  session.dispose();
+});
+
 test("confirmed lease enters edit mode through one-shot session authority", async () => {
   const used: string[] = [];
   const host = { enterEditMode: async ({ authorization }: { authorization?: string } = {}) => {
