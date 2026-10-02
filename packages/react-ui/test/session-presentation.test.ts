@@ -51,7 +51,8 @@ test("retry exposes the takeover message without leaking its authorization", asy
   challenge();
   await presentation.act("retry-edit");
   const view = presentation.view();
-  assert.equal(view.selectedDecision, null);
+  assert.deepEqual(view.selectedDecision, { kind: "lease-takeover", operation: "edit",
+    holderName: "Ada", errorMessage: null });
   assert.equal(view.safeMessage, "Editing requires a confirmed lease takeover.");
   assert.equal(view.focusIntent, "return");
   assert.equal(JSON.stringify(view).includes("private authorization"), false);
@@ -166,5 +167,98 @@ test("a replaced document drops a pending recovery outcome", async () => {
   await pending;
   assert.equal(presentation.view().safeMessage, null);
   assert.equal(presentation.view().focusIntent, null);
+  session.dispose();
+});
+
+test("lease takeover uses one decision and cancellation consumes its authorization", async () => {
+  let canceled = "";
+  const host = {
+    enterEditMode: async () => ({ decisionRequired: "lease-takeover", operation: "edit",
+      holderName: "Ada", authorization: "private authorization" }),
+    cancelLeaseTakeover: async (authorization: string) => { canceled = authorization; return true; },
+  } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, {
+    createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
+    onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt(opened);
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await session.enterEditMode();
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "lease-takeover", holderName: "Ada", operation: "edit", errorMessage: null,
+  });
+  assert.equal(presentation.view({ formActive: true }).selectedDecision, null);
+  await presentation.act("cancel-lease");
+  assert.equal(canceled, "private authorization");
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage,
+    "Lease takeover canceled; the document session is unchanged.");
+  assert.equal(JSON.stringify(presentation.view()).includes("private authorization"), false);
+  session.dispose();
+});
+
+test("migration failure stays actionable with a safe message and retry focus", async () => {
+  const host = { migrateDocument: async () => { throw new Error("private path"); } } as
+    unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, {
+    createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
+    onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, migrationRequired: true, migrationCanEdit: true });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  assert.equal(presentation.view().selectedDecision?.kind, "migration-decision");
+  await presentation.act("migrate");
+  assert.equal(presentation.view().safeMessage, "safe failure");
+  assert.equal(presentation.view().focusIntent, "migration-retry");
+  assert.equal(JSON.stringify(presentation.view()).includes("private path"), false);
+  session.dispose();
+});
+
+test("changed takeover evidence presents the current holder and cannot replay authorization", async () => {
+  const used: string[] = [];
+  const host = { enterEditMode: async ({ authorization }: { authorization?: string } = {}) => {
+    if (authorization) used.push(authorization);
+    return { decisionRequired: "lease-takeover" as const, operation: "edit" as const,
+      holderName: authorization ? "Bea" : "Ada",
+      authorization: authorization ? "second secret" : "first secret" };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt(opened);
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await session.enterEditMode();
+  await presentation.act("confirm-lease");
+  assert.deepEqual(presentation.view().selectedDecision, { kind: "lease-takeover",
+    holderName: "Bea", operation: "edit",
+    errorMessage: "The lease changed. Review the current holder before trying again." });
+  assert.deepEqual(used, ["first secret"]);
+  assert.equal(presentation.view().focusIntent, "decision-action");
+  await presentation.act("confirm-lease");
+  assert.deepEqual(used, ["first secret", "second secret"]);
+  session.dispose();
+});
+
+test("compaction cancellation and safe failure return to the staged decision", async () => {
+  const host = { compactDocument: async () => { throw new Error("private backup path"); } } as
+    unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false, canAddPasswords: true,
+    canRemovePasswords: true });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  assert.equal(session.requestCompaction().status, "attention");
+  assert.equal(presentation.view().selectedDecision?.kind, "compaction-decision");
+  await presentation.act("compact");
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "compaction-decision", failureMessage: "safe failure",
+  });
+  assert.equal(presentation.view().safeMessage, "safe failure");
+  await presentation.act("compaction-canceled");
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage,
+    "Compaction canceled; document history is unchanged.");
+  assert.equal(JSON.stringify(presentation.view()).includes("private backup path"), false);
   session.dispose();
 });

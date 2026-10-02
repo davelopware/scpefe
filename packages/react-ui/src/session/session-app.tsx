@@ -105,12 +105,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const dirty = working?.dirty ?? false;
   const attention = sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit"
     ? sessionSnapshot.attention : undefined;
-  const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
   const saveFailure = attention?.kind === "save-failed"
     ? catalogText(attention.code) : null;
   const publicationDecision = attention?.kind === "publication-decision"
     ? attention : null;
-  const migrationDecision = attention?.kind === "migration-decision" ? attention : null;
   const publicationResolving = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
   useEffect(() => () => {
@@ -118,6 +116,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   }, [session]);
   const [message, setMessage] = useState("");
   const [presentation] = useState(() => new SessionPresentation(session, catalogText));
+  const [, refreshPresentation] = useState(0);
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialog] = useState<DialogName>(null);
@@ -136,10 +135,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const attentionActions = useAttentionActions({ session,
     completion: rendererLifecycleCompletion, catalogText, onMessage: setMessage,
     onDialog: setDialog, onExport: () => shellDialogs.current?.showExport(),
-    onLocked: showLockedResult, dialogHost });
-  const { decisionError, openedDialogError, confirmDivergenceDiscard } = attentionActions;
-  const presentationView = presentation.view({ formActive: creating || dialog !== null });
+    onLocked: showLockedResult });
+  const { openedDialogError, confirmDivergenceDiscard } = attentionActions;
+  const presentationView = presentation.view({ formActive: creating
+    || (dialog !== null && dialog !== "compaction") });
   const selected = presentationView.selectedDecision;
+  const leaseDecision = selected?.kind === "lease-takeover" ? selected : null;
+  const migrationDecision = selected?.kind === "migration-decision" ? selected : null;
   const recoveryDecision = selected?.kind === "recovery-decision" ? selected : null;
   const headDecision = selected?.kind === "head-mismatch" ? selected : null;
   const unreadableDecision = selected?.kind === "unreadable-journal" ? selected : null;
@@ -272,15 +274,30 @@ export function SharedApp({ sessionHost, journalTransport, events,
   async function runDialogAction(action: DialogAction) {
     if (action === "continue-read-only" || action === "retry-edit"
       || action === "restore-recovery" || action === "discard-recovery"
-      || action === "accept-head" || action === "discard-unreadable") {
+      || action === "accept-head" || action === "discard-unreadable"
+      || action === "confirm-lease" || action === "cancel-lease"
+      || action === "migrate" || action === "compact"
+      || action === "compaction-canceled") {
       const actionElement = document.activeElement instanceof HTMLElement
         ? document.activeElement : null;
       await presentation.act(action);
+      refreshPresentation((revision) => revision + 1);
       const result = presentation.view();
+      if (action === "compact" && result.safeMessage ===
+        "Verified backup created and document history compacted."
+        || action === "compaction-canceled") setDialog("passwords");
       const safeMessage = result.safeMessage;
       if (safeMessage !== null) setMessage(safeMessage);
       if (result.focusIntent === "decision-action") {
         requestAnimationFrame(() => actionElement?.focus());
+      } else if (result.focusIntent === "migration-retry"
+        || result.focusIntent === "edit-retry"
+        || result.focusIntent === "recovery-restore"
+        || result.focusIntent === "publication-retry") {
+        const target = result.focusIntent === "migration-retry" ? "migration"
+          : result.focusIntent === "edit-retry" ? "edit"
+            : result.focusIntent === "recovery-restore" ? "recovery" : "publication";
+        requestAnimationFrame(() => dialogHost.current?.focus(target));
       }
       return;
     }
@@ -326,7 +343,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       claimVisible={!protection && visibleOpenedDialog === "claim"}
       activeDocument={activeDocument} returnFocus={dialogReturnFocus.current} />
     <DialogHost ref={dialogHost} session={session} visibleOpenedDialog={visibleOpenedDialog}
-      activeDocument={activeDocument} dialog={dialog} decisionError={decisionError}
+      activeDocument={activeDocument} dialog={dialog}
       openedDialogError={openedDialogError}
       confirmDivergenceDiscard={confirmDivergenceDiscard}
       selectedDecision={presentationView.selectedDecision}

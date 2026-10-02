@@ -5,7 +5,9 @@ type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
 type PresentationSession = Pick<FullSession,
   "getSnapshot" | "dismissEditFailure" | "enterEditMode" | "restoreRecovery"
-  | "discardRecovery" | "acceptHeadMismatch" | "discardUnreadableJournal">;
+  | "discardRecovery" | "acceptHeadMismatch" | "discardUnreadableJournal"
+  | "confirmLeaseTakeover" | "cancelLeaseTakeover" | "migrate"
+  | "confirmCompaction" | "cancelCompaction">;
 
 /** The single edit-failure decision exposed to graphical renderers. */
 export interface EditUnavailableDecision {
@@ -15,6 +17,12 @@ export interface EditUnavailableDecision {
 
 /** A recovery, authenticated-head, or unreadable-journal decision ready to render. */
 export type DocumentAttentionDecision =
+  | { readonly kind: "lease-takeover"; readonly holderName: string;
+    readonly operation: "edit" | "recovery" | "divergence" | "migration";
+    readonly errorMessage: string | null }
+  | { readonly kind: "migration-decision"; readonly canMigrate: boolean;
+    readonly canceled: boolean; readonly failureMessage: string | null }
+  | { readonly kind: "compaction-decision"; readonly failureMessage: string | null }
   | { readonly kind: "recovery-decision"; readonly updateTime: number;
     readonly failureMessage: string | null }
   | { readonly kind: "head-mismatch"; readonly mismatchKind: "rollback"
@@ -29,13 +37,17 @@ export interface SessionPresentationView {
   readonly blocked: boolean;
   readonly safeMessage: string | null;
   readonly focusIntent: "edit-retry" | "recovery-restore" | "decision-action"
-    | "return" | null;
+    | "migration-retry" | "publication-retry" | "return" | null;
 }
 
 /** Selects document decisions and presents their actions, safe outcomes, and focus. */
 export class SessionPresentation {
   private safeMessage: string | null = null;
-  private focusIntent: "decision-action" | "return" | null = null;
+  private focusIntent: SessionPresentationView["focusIntent"] = null;
+  private leaseError: string | null = null;
+  private leaseInFlight: { holderName: string;
+    operation: "edit" | "recovery" | "divergence" | "migration" } | null = null;
+  private compactionInFlight = false;
   private adoption: number | null = null;
 
   constructor(private readonly session: PresentationSession,
@@ -49,6 +61,9 @@ export class SessionPresentation {
       this.adoption = adoption;
       this.safeMessage = null;
       this.focusIntent = null;
+      this.leaseError = null;
+      this.leaseInFlight = null;
+      this.compactionInFlight = false;
     }
     return snapshot;
   }
@@ -60,6 +75,20 @@ export class SessionPresentation {
     const selectedDecision = attention?.kind === "edit-unavailable"
       ? { kind: "edit-unavailable" as const, message: this.catalogText(attention.code) }
       : formActive ? null
+      : this.compactionInFlight || snapshot.pending === "compaction"
+        ? { kind: "compaction-decision" as const, failureMessage: null }
+      : this.leaseInFlight
+        ? { kind: "lease-takeover" as const, ...this.leaseInFlight, errorMessage: null }
+      : attention?.kind === "lease-takeover"
+        ? { kind: "lease-takeover" as const, holderName: attention.holderName,
+          operation: attention.operation, errorMessage: this.leaseError }
+      : attention?.kind === "migration-decision"
+        ? { kind: "migration-decision" as const, canMigrate: attention.canMigrate,
+          canceled: attention.canceled === true,
+          failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
+      : attention?.kind === "compaction-decision"
+        ? { kind: "compaction-decision" as const,
+          failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : attention?.kind === "recovery-decision"
         ? { kind: "recovery-decision" as const, updateTime: attention.updateTime,
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
@@ -72,16 +101,101 @@ export class SessionPresentation {
       : null;
     return { selectedDecision, blocked: selectedDecision !== null,
       safeMessage: this.safeMessage,
-      focusIntent: selectedDecision?.kind === "edit-unavailable" ? "edit-retry"
+      focusIntent: this.focusIntent ?? (selectedDecision?.kind === "edit-unavailable" ? "edit-retry"
         : selectedDecision?.kind === "recovery-decision" && selectedDecision.failureMessage
-          ? "recovery-restore" : this.focusIntent };
+          ? "recovery-restore"
+        : selectedDecision?.kind === "migration-decision"
+          && (selectedDecision.failureMessage || selectedDecision.canceled)
+          ? "migration-retry" : null) };
   }
 
   async act(action: "continue-read-only" | "retry-edit" | "restore-recovery"
-    | "discard-recovery" | "accept-head" | "discard-unreadable"): Promise<void> {
+    | "discard-recovery" | "accept-head" | "discard-unreadable"
+    | "confirm-lease" | "cancel-lease" | "migrate" | "compact"
+    | "compaction-canceled"): Promise<void> {
     const snapshot = this.current();
     if ((snapshot.kind !== "read-only" && snapshot.kind !== "edit")
       || !snapshot.attention) return;
+    if (action === "confirm-lease" || action === "cancel-lease"
+      || action === "migrate" || action === "compact"
+      || action === "compaction-canceled") {
+      const attention = snapshot.attention;
+      if ((action === "confirm-lease" || action === "cancel-lease")
+        ? attention.kind !== "lease-takeover"
+        : action === "migrate" ? attention.kind !== "migration-decision"
+          : attention.kind !== "compaction-decision") return;
+      const adoption = snapshot.adoption;
+      this.leaseError = null;
+      if ((action === "confirm-lease" || action === "cancel-lease")
+        && attention.kind === "lease-takeover") this.leaseInFlight = {
+          holderName: attention.holderName, operation: attention.operation,
+        };
+      if (action === "compact") this.compactionInFlight = true;
+      const outcome = await (action === "confirm-lease" ? this.session.confirmLeaseTakeover()
+        : action === "cancel-lease" ? this.session.cancelLeaseTakeover()
+        : action === "migrate" ? this.session.migrate()
+        : action === "compact" ? this.session.confirmCompaction()
+        : this.session.cancelCompaction());
+      const current = this.current();
+      this.leaseInFlight = null;
+      this.compactionInFlight = false;
+      if ((current.kind !== "read-only" && current.kind !== "edit")
+        || current.adoption !== adoption) return;
+      if (outcome.status === "attention") {
+        if (action === "confirm-lease") {
+          this.leaseError = "The lease changed. Review the current holder before trying again.";
+          this.focusIntent = "decision-action";
+        } else this.safeMessage = action === "migrate"
+          ? "Migration requires a confirmed lease takeover."
+          : "Editing requires a confirmed lease takeover.";
+      } else if (outcome.status === "canceled") {
+        this.safeMessage = outcome.revoked
+          ? "Lease takeover canceled; the document session is unchanged."
+          : "Lease takeover was already inactive; the document session is unchanged.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "migration-canceled") {
+        this.safeMessage = "Migration was canceled before publication. Retry to acquire fresh lease authorization.";
+        this.focusIntent = "migration-retry";
+      } else if (outcome.status === "compaction-canceled") {
+        this.safeMessage = "Compaction canceled; document history is unchanged.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "migration") {
+        this.safeMessage = this.catalogText(outcome.compatibilityCode);
+        this.focusIntent = "return";
+      } else if (outcome.status === "compaction") {
+        this.safeMessage = "Verified backup created and document history compacted.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "recovery") {
+        this.safeMessage = "Recovered work restored as unsaved changes.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "edit-mode") {
+        this.safeMessage = "Edit mode entered after confirmed lease takeover.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "divergence") {
+        this.safeMessage = outcome.hasConflicts
+          ? "Resolve every local/current marker, then save the merge."
+          : "The three-way merge is clean. Review it, then save the merge.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "failed") {
+        const value = this.catalogText(outcome.code);
+        if (action === "cancel-lease") this.safeMessage =
+          `Lease takeover cancellation needs attention: ${value}`;
+        else if (action === "confirm-lease") {
+          const operation = attention.kind === "lease-takeover" ? attention.operation : "edit";
+          const prefix = operation === "migration" ? "Migration"
+            : operation === "recovery" ? "Recovery restore"
+              : operation === "divergence" ? "Divergence resolution" : "Editing";
+          this.safeMessage = `${prefix} needs attention: ${value}`;
+          this.focusIntent = operation === "migration" ? "migration-retry"
+            : operation === "divergence" ? "publication-retry"
+            : operation === "edit" ? "edit-retry" : "recovery-restore";
+        } else {
+          this.safeMessage = value;
+          this.focusIntent = action === "migrate" ? "migration-retry" : "decision-action";
+        }
+      }
+      return;
+    }
     if (action === "restore-recovery" || action === "discard-recovery"
       || action === "accept-head" || action === "discard-unreadable") {
       const expected = action === "accept-head" ? "head-mismatch"
