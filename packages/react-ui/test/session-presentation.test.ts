@@ -120,6 +120,7 @@ test("queued external opens wait behind a form and document attention, then reta
   await presentation.act("discard-recovery");
   assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
   assert.equal(presentation.activateQueuedExternalOpen(), true);
+  assert.equal(presentation.view().safeMessage, null);
   assert.deepEqual(session.getSnapshot().externalOpen, { active: true, queued: 1 });
   assert.equal(presentation.activateQueuedExternalOpen(), false);
   assert.equal((await session.openExternal("wrong")).status, "failed");

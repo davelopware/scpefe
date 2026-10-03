@@ -12,6 +12,7 @@ type PresentationSession = Pick<FullSession,
   | "decideProtection" | "activateExternalOpen">;
 type ProtectionAttention = Extract<NonNullable<
   DocumentSessionSnapshot<DocumentOpened>["attention"]>, { kind: "lifecycle-protection" }>;
+const QUEUED_OPEN_WAITING_MESSAGE = "Another open request is waiting for the current dialog.";
 
 /** Host lifecycle challenge that takes priority over every form and decision. */
 export interface LifecycleProtectionDecision {
@@ -127,14 +128,16 @@ export class SessionPresentation {
     if (this.disposed || formActive || this.view().blocked
       || (snapshot.kind === "read-only" || snapshot.kind === "edit")
         && snapshot.publication.resolving) return false;
-    return this.session.activateExternalOpen();
+    const activated = this.session.activateExternalOpen();
+    if (activated) this.safeMessage = null;
+    return activated;
   }
 
   /** Reports a queued open waiting behind the current graphical decision. */
   externalOpenQueued(waiting: boolean): void {
     this.current();
     if (!this.disposed && waiting) {
-      this.safeMessage = "Another open request is waiting for the current dialog.";
+      this.safeMessage = QUEUED_OPEN_WAITING_MESSAGE;
     }
   }
 
