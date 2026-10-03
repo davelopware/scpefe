@@ -134,11 +134,13 @@ export class SessionPresentation {
   }
 
   /** Reports a queued open waiting behind the current graphical decision. */
-  externalOpenQueued(waiting: boolean): void {
-    this.current();
-    if (!this.disposed && waiting) {
+  externalOpenQueued(waiting: boolean): string | null {
+    const snapshot = this.current();
+    if (!this.disposed && waiting && !snapshot.externalOpen?.active) {
       this.safeMessage = QUEUED_OPEN_WAITING_MESSAGE;
+      return this.safeMessage;
     }
+    return null;
   }
 
   view({ formActive = false }: { formActive?: boolean } = {}): SessionPresentationView {
@@ -198,7 +200,8 @@ export class SessionPresentation {
       ? { kind: "newer-edits-confirmation" } : selectedDecision,
       openedDialog: this.confirmDivergenceDiscard ? null : openedDialog,
       blocked: selectedDecision !== null || this.confirmDivergenceDiscard,
-      safeMessage: selectedDecision?.kind === "lifecycle-protection" ? null : this.safeMessage,
+      safeMessage: selectedDecision?.kind === "lifecycle-protection"
+        || snapshot.externalOpen?.active ? null : this.safeMessage,
       focusIntent: selectedDecision?.kind === "lifecycle-protection"
         ? (selectedDecision.failureMessage ? "decision-action" : null)
         : this.focusIntent ?? (selectedDecision?.kind === "invitation-claim"

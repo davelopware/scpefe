@@ -340,8 +340,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
-    <StatusBar session={session} active={activeDocument}
-      message={presentationView.safeMessage ?? message} /></div>
+    <StatusBar session={session} active={activeDocument} message={message} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}

@@ -109,7 +109,8 @@ test("queued external opens wait behind a form and document attention, then reta
   const presentation = new SessionPresentation(session, () => "Safe failure.");
   session.queueExternalOpen({ token: "first" });
   session.queueExternalOpen({ token: "second" });
-  presentation.externalOpenQueued(true);
+  assert.equal(presentation.externalOpenQueued(true),
+    "Another open request is waiting for the current dialog.");
   assert.equal(presentation.view().safeMessage,
     "Another open request is waiting for the current dialog.");
   assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
@@ -122,6 +123,8 @@ test("queued external opens wait behind a form and document attention, then reta
   assert.equal(presentation.activateQueuedExternalOpen(), true);
   assert.equal(presentation.view().safeMessage, null);
   assert.deepEqual(session.getSnapshot().externalOpen, { active: true, queued: 1 });
+  assert.equal(presentation.externalOpenQueued(true), null);
+  assert.equal(presentation.view().safeMessage, null);
   assert.equal(presentation.activateQueuedExternalOpen(), false);
   assert.equal((await session.openExternal("wrong")).status, "failed");
   assert.equal(presentation.activateQueuedExternalOpen(), false);

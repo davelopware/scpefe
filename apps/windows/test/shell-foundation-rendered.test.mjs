@@ -221,6 +221,9 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   await user.click(ui.getByRole(recoveryDialog, "button", { name: "Discard recovered work" }));
   let queued = await ui.findByRole(document.body, "dialog",
     { name: "Open requested document" });
+  assert.match(status.textContent,
+    /Another open request is waiting\. Enter its document password to continue\./,
+    "the active request replaces the earlier recovery and queued-waiting messages");
   await ui.waitFor(() => assert.equal(document.activeElement ===
     ui.getByLabelText(queued, "Password"), true));
   await user.click(ui.getByRole(queued, "button", { name: "Cancel" }));

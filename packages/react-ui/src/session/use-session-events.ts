@@ -56,7 +56,8 @@ export function useSessionEvents({ session, presentation, events, shellHost, com
       const current = session.getSnapshot();
       if (modalBusy.current || (current.kind === "read-only" || current.kind === "edit")
         && current.publication.resolving) {
-        presentation.externalOpenQueued(true);
+        const waitingMessage = presentation.externalOpenQueued(true);
+        if (waitingMessage !== null) onMessage(waitingMessage);
       }
     });
     const stopJournalSummary = events.onUnresolvedJournalSummary(
