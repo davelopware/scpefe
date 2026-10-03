@@ -136,7 +136,8 @@ export class SessionPresentation {
   /** Reports a queued open waiting behind the current graphical decision. */
   externalOpenQueued(waiting: boolean): string | null {
     const snapshot = this.current();
-    if (!this.disposed && waiting && !snapshot.externalOpen?.active) {
+    if (!this.disposed && waiting && !snapshot.externalOpen?.active
+      && snapshot.attention?.kind !== "lifecycle-protection") {
       this.safeMessage = QUEUED_OPEN_WAITING_MESSAGE;
       return this.safeMessage;
     }

@@ -136,6 +136,19 @@ test("queued external opens wait behind a form and document attention, then reta
   session.dispose();
 });
 
+test("queued-open status waits while lifecycle protection has priority", () => {
+  const { session, presentation } = setup();
+  assert.equal(session.stageProtection({ token: "exit", operation: "exit", state: {
+    dirty: true, provisional: false, pendingPublication: false, recovered: false,
+    conflict: false, unresolvedJournal: false, activePublication: false,
+  } }), true);
+  session.queueExternalOpen({ token: "later" });
+  assert.equal(presentation.view().selectedDecision?.kind, "lifecycle-protection");
+  assert.equal(presentation.externalOpenQueued(true), null);
+  assert.equal(presentation.view().safeMessage, null);
+  session.dispose();
+});
+
 test("lifecycle protection preempts a form, retries failure, and restores it on cancel", async () => {
   let attempts = 0;
   const host = { resolveProtection: async () => (++attempts === 1
