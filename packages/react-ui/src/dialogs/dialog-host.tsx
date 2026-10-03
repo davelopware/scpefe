@@ -6,14 +6,12 @@ import type { DocumentOpened, OpenedDialogName } from "../session/types.ts";
 import type { SessionPresentationView } from "../session/session-presentation.ts";
 
 /** Dialog-only view of the external session seam. */
-type DialogSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>> & {
-  dismissSaveFailure(): void;
-};
+type DialogSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>;
 
 /** User gestures emitted by semantic attention dialogs. */
 export type DialogAction = "retry-edit" | "continue-read-only"
   | "cancel-lease" | "confirm-lease"
-  | "retry-save" | "lock" | "migrate" | "open-passwords" | "accept-head"
+  | "retry-save" | "continue-editing" | "lock" | "migrate" | "open-passwords" | "accept-head"
   | "discard-recovery" | "restore-recovery" | "discard-unreadable"
   | "discard-publication" | "reconnect-publication" | "compact"
   | "compaction-canceled" | "protection-cancel" | "protection-save"
@@ -22,19 +20,17 @@ export type DialogAction = "retry-edit" | "continue-read-only"
 
 /** Focus targets used after a host command leaves an attention dialog open. */
 export interface DialogHostHandle {
-  focus(action: "edit" | "recovery" | "publication" | "migration"): void;
+  focus(action: "edit" | "save" | "recovery" | "publication" | "migration"): void;
 }
 
 /** Renders every portable session attention as an accessible platform dialog. */
 export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialog,
-  openedDialogError, confirmDivergenceDiscard, returnFocus, catalogText,
+  returnFocus, catalogText,
   selectedDecision, focusIntent, onAction, ref }: {
   session: DialogSession;
   visibleOpenedDialog: OpenedDialogName;
   activeDocument: boolean;
   dialog: string | null;
-  openedDialogError: string;
-  confirmDivergenceDiscard: boolean;
   returnFocus: HTMLElement | null;
   catalogText(code: string): string;
   selectedDecision: SessionPresentationView["selectedDecision"];
@@ -45,16 +41,16 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   const snapshot = useSessionSnapshot(session);
   const opened = snapshot.kind === "read-only" || snapshot.kind === "edit"
     ? snapshot.document : null;
-  const attention = snapshot.kind === "read-only" || snapshot.kind === "edit"
-    ? snapshot.attention : undefined;
   const protection = snapshot.attention?.kind === "lifecycle-protection"
     ? snapshot.attention : null;
   const leaseDecision = selectedDecision?.kind === "lease-takeover" ? selectedDecision : null;
   const editFailure = selectedDecision?.kind === "edit-unavailable"
     ? selectedDecision.message : null;
-  const saveFailure = attention?.kind === "save-failed"
-    ? catalogText(attention.code) : null;
-  const publicationDecision = attention?.kind === "publication-decision" ? attention : null;
+  const saveFailure = selectedDecision?.kind === "save-failed"
+    ? selectedDecision : null;
+  const publicationDecision = selectedDecision?.kind === "publication-decision"
+    ? selectedDecision : null;
+  const confirmDivergenceDiscard = selectedDecision?.kind === "newer-edits-confirmation";
   const recoveryDecision = selectedDecision?.kind === "recovery-decision"
     ? selectedDecision : null;
   const headDecision = selectedDecision?.kind === "head-mismatch" ? selectedDecision : null;
@@ -68,11 +64,13 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
     || ((snapshot.kind === "read-only" || snapshot.kind === "edit")
       && snapshot.queued !== undefined);
   const editRetryAction = useRef<HTMLButtonElement>(null);
+  const saveRetryAction = useRef<HTMLButtonElement>(null);
   const recoveryRestoreAction = useRef<HTMLButtonElement>(null);
   const publicationRetryAction = useRef<HTMLButtonElement>(null);
   const migrationRetryAction = useRef<HTMLButtonElement>(null);
   useImperativeHandle(ref, () => ({ focus: (action) => {
     const target = action === "edit" ? editRetryAction
+      : action === "save" ? saveRetryAction
       : action === "recovery" ? recoveryRestoreAction
         : action === "migration" ? migrationRetryAction : publicationRetryAction;
     target.current?.focus();
@@ -113,11 +111,12 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       </button></div>
     </FocusedDialog>}
     {saveFailure && <FocusedDialog returnFocus={returnFocus}
-      title="Manual save failed" close={() => session.dismissSaveFailure()}>
-      <p className="dialog-error" role="alert">{saveFailure}</p>
+      title="Manual save failed" close={() => void onAction("continue-editing")}
+      initialFocus={focusIntent === "save-retry" ? saveRetryAction : undefined}>
+      <p className="dialog-error" role="alert">{saveFailure.message}</p>
       <p>The working copy and recovery journal remain available. No successful publication is being reported.</p>
-      <div className="dialog-actions"><button onClick={() => session.dismissSaveFailure()}>Continue editing</button>
-        <button autoFocus onClick={() => void onAction("retry-save")}>Retry manual save</button></div>
+      <div className="dialog-actions"><button onClick={() => void onAction("continue-editing")}>Continue editing</button>
+        <button ref={saveRetryAction} autoFocus onClick={() => void onAction("retry-save")}>Retry manual save</button></div>
     </FocusedDialog>}
     {dialog === "compaction" && activeDocument && compactionDecision && <FocusedDialog
       returnFocus={returnFocus} title="Permanently compact document history?"
@@ -200,14 +199,13 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       </FocusedDialog>}
     {visibleOpenedDialog === "publication" && activeDocument && publicationDecision
       && <FocusedDialog returnFocus={returnFocus}
-        initialFocus={publicationDecision.failureCode || openedDialogError
+        initialFocus={publicationDecision.failureMessage
           ? publicationRetryAction : undefined}
         title={publicationDecision.state === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
         <p>{publicationDecision.state === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
-        {(publicationDecision.failureCode || openedDialogError)
+        {publicationDecision.failureMessage
           && <p className="dialog-error" role="alert">
-            {publicationDecision.failureCode
-              ? catalogText(publicationDecision.failureCode) : openedDialogError}</p>}
+            {publicationDecision.failureMessage}</p>}
         <div className="dialog-actions"><button disabled={snapshot.kind !== "read-only"
           && snapshot.kind !== "edit" || !snapshot.commands.publicationDiscard}
           onClick={() => void onAction("discard-publication")}>Discard pending save</button>

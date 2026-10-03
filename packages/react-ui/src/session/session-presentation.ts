@@ -7,12 +7,31 @@ type PresentationSession = Pick<FullSession,
   "getSnapshot" | "dismissEditFailure" | "enterEditMode" | "restoreRecovery"
   | "discardRecovery" | "acceptHeadMismatch" | "discardUnreadableJournal"
   | "confirmLeaseTakeover" | "cancelLeaseTakeover" | "migrate"
-  | "confirmCompaction" | "cancelCompaction">;
+  | "confirmCompaction" | "cancelCompaction" | "save" | "dismissSaveFailure"
+  | "retryPublication" | "discardPublication" | "beginDivergenceResolution">;
 
 /** The single edit-failure decision exposed to graphical renderers. */
 export interface EditUnavailableDecision {
   readonly kind: "edit-unavailable";
   readonly message: string;
+}
+
+/** A failed manual save whose working copy remains available. */
+export interface SaveFailedDecision {
+  readonly kind: "save-failed";
+  readonly message: string;
+}
+
+/** A locally saved candidate awaiting publication or conflict resolution. */
+export interface PublicationDecision {
+  readonly kind: "publication-decision";
+  readonly state: "pending-publication" | "conflict";
+  readonly failureMessage: string | null;
+}
+
+/** Explicit choice before replacing newer working-copy edits with a merge draft. */
+export interface NewerEditsDecision {
+  readonly kind: "newer-edits-confirmation";
 }
 
 /** A document-session attention decision ready to render. */
@@ -33,10 +52,12 @@ export type DocumentAttentionDecision =
 
 /** Observable graphical state for selected document attention. */
 export interface SessionPresentationView {
-  readonly selectedDecision: EditUnavailableDecision | DocumentAttentionDecision | null;
+  readonly selectedDecision: EditUnavailableDecision | SaveFailedDecision | PublicationDecision
+    | NewerEditsDecision
+    | DocumentAttentionDecision | null;
   readonly blocked: boolean;
   readonly safeMessage: string | null;
-  readonly focusIntent: "edit-retry" | "recovery-restore" | "decision-action"
+  readonly focusIntent: "edit-retry" | "save-retry" | "recovery-restore" | "decision-action"
     | "migration-retry" | "publication-retry" | "return" | null;
 }
 
@@ -48,6 +69,7 @@ export class SessionPresentation {
   private leaseInFlight: { holderName: string;
     operation: "edit" | "recovery" | "divergence" | "migration" } | null = null;
   private compactionInFlight = false;
+  private confirmDivergenceDiscard = false;
   private adoption: number | null = null;
 
   constructor(private readonly session: PresentationSession,
@@ -64,6 +86,7 @@ export class SessionPresentation {
       this.leaseError = null;
       this.leaseInFlight = null;
       this.compactionInFlight = false;
+      this.confirmDivergenceDiscard = false;
     }
     return snapshot;
   }
@@ -75,6 +98,8 @@ export class SessionPresentation {
     const selectedDecision = attention?.kind === "edit-unavailable"
       ? { kind: "edit-unavailable" as const, message: this.catalogText(attention.code) }
       : formActive ? null
+      : attention?.kind === "save-failed"
+        ? { kind: "save-failed" as const, message: this.catalogText(attention.code) }
       : this.compactionInFlight || snapshot.pending === "compaction"
         ? { kind: "compaction-decision" as const, failureMessage: null }
       : this.leaseInFlight
@@ -98,24 +123,137 @@ export class SessionPresentation {
       : attention?.kind === "unreadable-journal"
         ? { kind: "unreadable-journal" as const,
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
+      : attention?.kind === "publication-decision"
+        ? { kind: "publication-decision" as const, state: attention.state,
+          failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : null;
-    return { selectedDecision, blocked: selectedDecision !== null,
+    return { selectedDecision: this.confirmDivergenceDiscard
+      ? { kind: "newer-edits-confirmation" } : selectedDecision,
+      blocked: selectedDecision !== null || this.confirmDivergenceDiscard,
       safeMessage: this.safeMessage,
       focusIntent: this.focusIntent ?? (selectedDecision?.kind === "edit-unavailable" ? "edit-retry"
+        : selectedDecision?.kind === "save-failed" ? "save-retry"
         : selectedDecision?.kind === "recovery-decision" && selectedDecision.failureMessage
           ? "recovery-restore"
         : selectedDecision?.kind === "migration-decision"
           && (selectedDecision.failureMessage || selectedDecision.canceled)
-          ? "migration-retry" : null) };
+          ? "migration-retry"
+        : selectedDecision?.kind === "publication-decision" && selectedDecision.failureMessage
+          ? "publication-retry" : null) };
   }
 
-  async act(action: "continue-read-only" | "retry-edit" | "restore-recovery"
-    | "discard-recovery" | "accept-head" | "discard-unreadable"
-    | "confirm-lease" | "cancel-lease" | "migrate" | "compact"
-    | "compaction-canceled"): Promise<"passwords" | void> {
+  /** Presents the structured manual-save outcome for the current adoption. */
+  async save(): Promise<void> {
+    const snapshot = this.current();
+    if (snapshot.kind !== "read-only" && snapshot.kind !== "edit") return;
+    const adoption = snapshot.adoption;
+    const outcome = await this.session.save();
+    const current = this.current();
+    if ((current.kind !== "read-only" && current.kind !== "edit")
+      || current.adoption !== adoption) return;
+    if (outcome.status === "saved") {
+      this.safeMessage = outcome.publicationState === "pending-publication"
+        ? "Manual save is pending publication; its exact candidate is stored locally."
+        : outcome.publicationState === "conflict"
+          ? "Manual save is local, but the target changed; divergence must be resolved."
+          : "Manual save published and verified.";
+      this.focusIntent = "return";
+    } else if (outcome.status === "failed") {
+      this.safeMessage = `Manual save failed; changes remain recoverable: ${this.catalogText(outcome.code)}`;
+      this.focusIntent = "save-retry";
+    }
+  }
+
+  /** Starts a merge draft only after the session permits discarding newer edits. */
+  async beginDivergenceResolution(discardUnsaved = false): Promise<void> {
     const snapshot = this.current();
     if ((snapshot.kind !== "read-only" && snapshot.kind !== "edit")
+      || snapshot.attention?.kind !== "publication-decision"
+      || snapshot.attention.state !== "conflict") return;
+    const adoption = snapshot.adoption;
+    const outcome = await this.session.beginDivergenceResolution({ discardUnsaved });
+    const current = this.current();
+    if ((current.kind !== "read-only" && current.kind !== "edit")
+      || current.adoption !== adoption) return;
+    if (outcome.status === "unsaved-work") {
+      this.confirmDivergenceDiscard = true;
+      this.focusIntent = "decision-action";
+    } else if (outcome.status === "attention") {
+      this.confirmDivergenceDiscard = false;
+      this.safeMessage = "Divergence resolution requires a confirmed lease takeover.";
+      this.focusIntent = "decision-action";
+    } else if (outcome.status === "divergence") {
+      this.confirmDivergenceDiscard = false;
+      this.safeMessage = outcome.hasConflicts
+        ? "Resolve every local/current marker, then save the merge."
+        : "The three-way merge is clean. Review it, then save the merge.";
+      this.focusIntent = "return";
+    } else if (outcome.status === "failed") {
+      this.confirmDivergenceDiscard = false;
+      this.safeMessage = `Divergence resolution needs attention: ${this.catalogText(outcome.code)}`;
+      this.focusIntent = "publication-retry";
+    }
+  }
+
+  async act(action: "continue-read-only" | "retry-edit" | "retry-save"
+    | "continue-editing" | "restore-recovery"
+    | "reconnect-publication" | "discard-publication"
+    | "keep-newer-edits" | "export-newer-edits" | "discard-newer-edits"
+    | "discard-recovery" | "accept-head" | "discard-unreadable"
+    | "confirm-lease" | "cancel-lease" | "migrate" | "compact"
+    | "compaction-canceled"): Promise<"passwords" | "export" | void> {
+    const snapshot = this.current();
+    if (action === "keep-newer-edits" || action === "export-newer-edits"
+      || action === "discard-newer-edits") {
+      if (!this.confirmDivergenceDiscard) return;
+      if (action === "discard-newer-edits") await this.beginDivergenceResolution(true);
+      else {
+        this.confirmDivergenceDiscard = false;
+        this.focusIntent = "return";
+        if (action === "export-newer-edits") return "export";
+      }
+      return;
+    }
+    if ((snapshot.kind !== "read-only" && snapshot.kind !== "edit")
       || !snapshot.attention) return;
+    if (action === "retry-save" || action === "continue-editing") {
+      if (snapshot.attention.kind !== "save-failed") return;
+      if (action === "retry-save") await this.save();
+      else {
+        this.session.dismissSaveFailure();
+        this.safeMessage = null;
+        this.focusIntent = "return";
+      }
+      return;
+    }
+    if (action === "reconnect-publication" || action === "discard-publication") {
+      if (snapshot.attention.kind !== "publication-decision") return;
+      const adoption = snapshot.adoption;
+      const outcome = await (action === "reconnect-publication"
+        ? this.session.retryPublication() : this.session.discardPublication());
+      const current = this.current();
+      if ((current.kind !== "read-only" && current.kind !== "edit")
+        || current.adoption !== adoption) return;
+      if (outcome.status === "divergence-required") {
+        await this.beginDivergenceResolution();
+      } else if (outcome.status === "publication") {
+        this.safeMessage = outcome.publicationState === "target-published"
+          ? "Pending manual save published and verified."
+          : outcome.publicationState === "conflict"
+            ? "The target changed; divergence must be resolved without overwriting it."
+            : "The target is still unavailable; publication remains pending.";
+        this.focusIntent = outcome.publicationState === "target-published"
+          ? "return" : "publication-retry";
+      } else if (outcome.status === "publication-discarded") {
+        this.safeMessage = "Pending manual save explicitly discarded.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "failed") {
+        this.safeMessage = `${action === "reconnect-publication" ? "Publication retry"
+          : "Publication discard"} needs attention: ${this.catalogText(outcome.code)}`;
+        this.focusIntent = "publication-retry";
+      }
+      return;
+    }
     if (action === "confirm-lease" || action === "cancel-lease"
       || action === "migrate" || action === "compact"
       || action === "compaction-canceled") {
