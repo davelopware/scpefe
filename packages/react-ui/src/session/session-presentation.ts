@@ -250,7 +250,8 @@ export class SessionPresentation {
       } else if (outcome.status === "failed") {
         this.safeMessage = `${action === "reconnect-publication" ? "Publication retry"
           : "Publication discard"} needs attention: ${this.catalogText(outcome.code)}`;
-        this.focusIntent = "publication-retry";
+        this.focusIntent = action === "discard-publication"
+          ? "decision-action" : "publication-retry";
       }
       return;
     }

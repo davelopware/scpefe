@@ -451,7 +451,7 @@ test("discard failure keeps a locally saved candidate and retry focus", async ()
   });
   assert.equal(presentation.view().safeMessage,
     "Publication discard needs attention: safe failure");
-  assert.equal(presentation.view().focusIntent, "publication-retry");
+  assert.equal(presentation.view().focusIntent, "decision-action");
   assert.equal(JSON.stringify(presentation.view()).includes("private"), false);
   session.dispose();
 });
