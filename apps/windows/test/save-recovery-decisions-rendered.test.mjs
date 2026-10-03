@@ -310,6 +310,10 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
 
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    const savesBeforePasswords = saveAttempts;
+    await user.keyboard("{Control>}s{/Control}");
+    assert.equal(saveAttempts, savesBeforePasswords,
+      "shell shortcuts remain blocked while Passwords can request compaction");
     await user.click(ui.getByRole(dialog, "button", { name: "Compact history…" }));
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Permanently compact document history?" });

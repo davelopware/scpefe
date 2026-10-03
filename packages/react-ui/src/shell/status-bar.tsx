@@ -1,10 +1,12 @@
 import React from "react";
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
+import type { ShellCommands } from "./shell-commands.ts";
 
 /** Compact status projection for the current document session. */
 export function StatusBar<Doc extends SessionDocument>({ session, active, message }: {
   session: SnapshotSource<DocumentSessionSnapshot<Doc>>; active: boolean; message: string;
+  commands: ShellCommands<Doc>;
 }): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
   const opened = snapshot.kind === "read-only" || snapshot.kind === "edit"

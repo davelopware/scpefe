@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource } from "@scpefe/frontend-core";
-import { useSessionSnapshot } from "../use-session-snapshot.ts";
+import type { DocumentSessionSnapshot, SessionDocument } from "@scpefe/frontend-core";
+import type { ShellCommand, ShellCommands } from "./shell-commands.ts";
 
-const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> = [
+const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | null>]> = [
   ["File", [["new", "New", "Ctrl+N"], ["open", "Open…", "Ctrl+O"], null,
     ["save", "Save", "Ctrl+S"], ["backup", "Backup…"],
     ["export", "Export Plaintext…"], null, ["close", "Close", "Ctrl+W"],
@@ -15,41 +15,21 @@ const menuDefinitions: Array<[string, Array<[string, string, string?] | null>]> 
     ["profile", "Profile…"]]],
 ];
 
-/** Projects command eligibility from the same session snapshot as the editor. */
-export function MenuBar<Doc extends SessionDocument>({ session, active, profileReady,
-  blocked, run }: {
-  session: SnapshotSource<DocumentSessionSnapshot<Doc>>;
-  active: boolean;
-  profileReady: boolean;
-  blocked: boolean;
-  run(command: string, returnFocus: HTMLElement | null): void }) {
-  const snapshot = useSessionSnapshot(session);
-  const locked = snapshot.kind === "locked";
-  const commands = snapshot.kind === "read-only" || snapshot.kind === "edit"
-    ? snapshot.commands : null;
-  const enabled: Record<string, boolean> = {
-    new: profileReady, open: profileReady,
-    save: active && snapshot.kind === "edit" && commands?.save === true,
-    backup: active && commands?.backup === true,
-    export: active && commands?.export === true,
-    close: active || locked, exit: true,
-    edit: active && snapshot.kind === "read-only" && commands?.enterEdit === true,
-    undo: active && snapshot.kind === "edit" && commands?.undo === true,
-    redo: active && snapshot.kind === "edit" && commands?.redo === true,
-    find: active, replace: active,
-    lock: active, unlock: locked,
-    passwords: active, profile: profileReady,
-  };
+/** Presents shell commands without owning their eligibility or dispatch. */
+export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
+  snapshot: DocumentSessionSnapshot<Doc>;
+  commands: ShellCommands<Doc> }) {
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || (!event.ctrlKey && !event.metaKey)
-        || event.altKey || blocked) return;
-      const shortcuts: Record<string, string> = { n: "new", o: "open", s: "save",
+        || event.altKey) return;
+      const shortcuts: Record<string, ShellCommand> = { n: "new", o: "open", s: "save",
         w: "close", z: "undo", y: "redo", f: "find", h: "replace" };
       const command = shortcuts[event.key.toLowerCase()];
-      if (command && enabled[command]) {
+      if (command && commands.available(command)) {
         event.preventDefault();
-        run(command, document.activeElement as HTMLElement | null);
+        void commands.invoke(command, { returnFocus: document.activeElement as HTMLElement | null,
+          observedSnapshot: snapshot });
       }
     };
     window.addEventListener("keydown", shortcut);
@@ -111,10 +91,11 @@ export function MenuBar<Doc extends SessionDocument>({ session, active, profileR
         }}>{items.map((item, index) => item === null
           ? <hr key={index} role="separator" />
           : <button key={item[0]} type="button" role="menuitem"
-            disabled={!enabled[item[0]]} onClick={() => {
+            disabled={!commands.available(item[0])} onClick={() => {
               const returnFocus = triggers.current[name];
               returnFocus?.focus(); setOpen(null);
-              if (returnFocus) run(item[0], returnFocus);
+              if (returnFocus) void commands.invoke(item[0], { returnFocus,
+                observedSnapshot: snapshot });
               requestAnimationFrame(() => {
                 if (!document.querySelector('[role="dialog"]')) triggers.current[name]?.focus();
               });
