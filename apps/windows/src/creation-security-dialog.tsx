@@ -1,6 +1,6 @@
-import React, { useContext, useRef, useState, type Dispatch, type FormEvent,
+import React, { useRef, useState, type Dispatch, type FormEvent,
   type SetStateAction } from "react";
-import { DialogSuspensionContext, useModalFocus, usePasswordEntry } from "@scpefe/react-ui";
+import { FocusedDialog, usePasswordEntry } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -112,17 +112,8 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   const ownerRef = useRef<HTMLInputElement>(null);
   const irrecoverabilityRef = useRef<HTMLInputElement>(null);
   const recoveryStorageRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLElement>(null);
   const completedRef = useRef(false);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
-  const suspended = useContext(DialogSuspensionContext);
-
-  const focus = useModalFocus({ scopeRef: dialogRef, initialFocusRef: ownerRef,
-    active: !suspended,
-    returnFocus, onEscape: submitting ? undefined : cancel,
-    shouldRestoreFocus: () => !completedRef.current,
-    fallbackFocus: () => document.querySelector<HTMLElement>(
-      '[role="menubar"] > .menu > [role="menuitem"]') });
 
   function updateField<T>(field: ValidationField,
     setter: Dispatch<SetStateAction<T>>, value: T): void {
@@ -219,12 +210,10 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     if (!submitting) { passwords.reset(); void onCancel(); }
   }
 
-  return h("div", { className: "dialog-backdrop", onKeyDown: focus.onKeyDown },
-  h("section", { ref: dialogRef, className: "security-dialog", role: "dialog", "aria-modal": "true",
-    tabIndex: -1,
-    "aria-labelledby": "creation-security-title",
-    "aria-describedby": "creation-security-warning", "aria-busy": submitting },
-  h("h2", { id: "creation-security-title" }, "Secure new document"),
+  return h(FocusedDialog, { title: "Secure new document", className: "security-dialog",
+    describedBy: "creation-security-warning", busy: submitting,
+    initialFocus: ownerRef, returnFocus, close: submitting ? undefined : cancel,
+    shouldRestoreFocus: () => !completedRef.current },
   h("p", { id: "creation-security-warning", className: "warning" },
     "Lost passwords cannot be recovered. Without a valid owner or recovery password, the document is permanently irrecoverable."),
   h("form", { onSubmit: submit, noValidate: true },
@@ -280,7 +269,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     h("div", { className: "toolbar dialog-actions" },
       h("button", { type: "button", disabled: submitting, onClick: cancel }, "Cancel"),
       h("button", { type: "submit", disabled: submitting },
-        submitting ? "Creating…" : "Create")))));
+        submitting ? "Creating…" : "Create"))));
 }
 
 /* Starts target selection and mounts the security dialog only after selection. */
@@ -288,10 +277,6 @@ export function CreateDocumentControl({ onCreated, onError }:
   CreateDocumentControlProps): React.ReactElement {
   const [creating, setCreating] = useState(false);
   const launcherRef = useRef<HTMLButtonElement>(null);
-
-  function restoreLauncherFocus(): void {
-    globalThis.requestAnimationFrame?.(() => launcherRef.current?.focus());
-  }
 
   async function chooseTarget(): Promise<void> {
     try {
@@ -307,7 +292,6 @@ export function CreateDocumentControl({ onCreated, onError }:
     if (result) {
       setCreating(false);
       onCreated();
-      restoreLauncherFocus();
     }
   }
 

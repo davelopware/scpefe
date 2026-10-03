@@ -35,6 +35,7 @@ const { cleanup, render, waitFor, within } = await import("@testing-library/reac
 const userEvent = (await import("@testing-library/user-event")).default;
 const { CreateDocumentControl, CreationSecurityDialog } = await import(
   "../src/creation-security-dialog.tsx");
+const { FocusedDialog } = await import("@scpefe/react-ui");
 const { SafeBoundaryError } = await import("../src/error-boundary.mjs");
 
 after(() => {
@@ -84,12 +85,58 @@ test("mounted post-picker dialog is focused and has no initial-text field", asyn
   assert.equal(ui.queryByLabelText("Initial text") === null, true,
     "creation dialog has no initial-text field");
   assert.match(dialog.textContent, /lost passwords cannot be recovered/i);
+  assert.equal(dialog.classList.contains("app-dialog"), true);
+  assert.equal(dialog.classList.contains("security-dialog"), true);
+  assert.equal(dialog.querySelectorAll(".app-dialog-header > h2").length, 1);
+  assert.equal(dialog.querySelector(".app-dialog-body > p")?.id,
+    "creation-security-warning");
+  assert.equal(dialog.getAttribute("aria-describedby"), "creation-security-warning");
   await user.keyboard("{Shift>}{Tab}{/Shift}");
   assert.equal(dom.window.document.activeElement === ui.getByRole("button", { name: "Create" }),
     true, "Shift+Tab wraps to the final creation action");
   await user.keyboard("{Tab}");
   assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
     true, "Tab wraps back to the first creation field");
+});
+
+test("shared modal frame keeps its title outside a long scrolling body", async (t) => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const rendered = render(React.createElement(FocusedDialog,
+    { title: "Long decision" },
+    React.createElement("p", null, "Long content ".repeat(200)),
+    React.createElement("button", null, "Keep decision open")));
+  registerUnmount(t, rendered);
+  const ui = within(rendered.container);
+  const dialog = ui.getByRole("dialog", { name: "Long decision" });
+  const header = dialog.querySelector(".app-dialog-header");
+  const body = dialog.querySelector(".app-dialog-body");
+  assert.equal(header?.querySelector("h2")?.textContent, "Long decision");
+  assert.equal(body?.parentElement === dialog, true);
+  assert.equal(body?.textContent.includes("Long content"), true);
+  assert.equal(body?.contains(header), false);
+  const decision = ui.getByRole("button", { name: "Keep decision open" });
+  assert.equal(dom.window.document.activeElement === decision, true);
+  await user.keyboard("{Tab}");
+  assert.equal(dom.window.document.activeElement === decision, true,
+    "focus stays in the required decision");
+  await user.keyboard("{Escape}");
+  assert.equal(ui.getByRole("dialog", { name: "Long decision" }).isConnected, true,
+    "a required decision without close callback remains open");
+});
+
+test("shared modal frame uses the optional dismissal callback", async (t) => {
+  let closes = 0;
+  const user = userEvent.setup({ document: dom.window.document });
+  const rendered = render(React.createElement(FocusedDialog,
+    { title: "Dismissible decision", close: () => { closes += 1; } },
+    React.createElement("button", null, "Continue")));
+  registerUnmount(t, rendered);
+  const ui = within(rendered.container);
+  assert.ok(ui.getByRole("dialog", { name: "Dismissible decision" }));
+  assert.equal(dom.window.document.activeElement === ui.getByRole("button", { name: "Continue" }),
+    true);
+  await user.keyboard("{Escape}");
+  assert.equal(closes, 1);
 });
 
 test("mounted creation dialog reveals password pairs independently without changing drafts",
@@ -414,6 +461,46 @@ test("Cancel and Escape are keyboard-operable without invoking creation", async 
   await user.keyboard("{Escape}");
   assert.equal(cancelCalls, 2);
   assert.equal(createCalls, 0);
+});
+
+test("pending creation marks the shared frame busy and blocks cancellation", async (t) => {
+  let finishCreate;
+  let cancelCalls = 0;
+  const pending = new Promise((resolve) => { finishCreate = resolve; });
+  const { user, ui } = mountedDialog(t, () => pending,
+    () => { cancelCalls += 1; });
+  await enterOwner(ui, user);
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  const dialog = ui.getByRole("dialog", { name: "Secure new document" });
+  await waitFor(() => assert.equal(dialog.getAttribute("aria-busy"), "true"));
+  assert.equal(ui.getByRole("button", { name: "Cancel" }).disabled, true);
+  await user.keyboard("{Escape}");
+  assert.equal(cancelCalls, 0);
+  finishCreate();
+  await waitFor(() => assert.equal(dialog.getAttribute("aria-busy"), "false"));
+});
+
+test("successful creation closes its frame without restoring launcher focus", async (t) => {
+  let created = 0;
+  dom.window.scpefe = {
+    assessPasswordPolicy: async () => "accepted",
+    chooseCreateTarget: async () => ({ selected: true }),
+    cancelCreateTarget: async () => {},
+    createDocument: async () => ({ created: true }),
+  };
+  t.after(() => { delete dom.window.scpefe; });
+  const user = userEvent.setup({ document: dom.window.document });
+  const rendered = render(React.createElement(CreateDocumentControl,
+    { onCreated: () => { created += 1; }, onError: (error) => { throw error; } }));
+  registerUnmount(t, rendered);
+  const ui = within(rendered.container);
+  const launcher = ui.getByRole("button", { name: "Create encrypted document…" });
+  await user.click(launcher);
+  await enterOwner(ui, user);
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  await waitFor(() => assert.equal(ui.queryByRole("dialog"), null));
+  assert.equal(created, 1);
+  assert.equal(dom.window.document.activeElement === launcher, false);
 });
 
 test("mounted creation control runs picker first and picker cancellation opens no dialog",
