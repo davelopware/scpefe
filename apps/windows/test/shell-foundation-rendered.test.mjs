@@ -214,6 +214,8 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   listeners["external-open"]({ token: "queued-second" });
   assert.equal(ui.getAllByRole(document.body, "dialog").length, 1,
     "queued external opens do not interrupt recovery attention");
+  assert.match(status.textContent, /Recovered unsaved work/,
+    "queued requests do not replace the visible recovery status");
   await user.keyboard("{Control>}n{/Control}{Control>}o{/Control}{Alt>}f{/Alt}");
   assert.deepEqual(calls, ["new", "open"]);
   assert.equal(ui.queryByRole(document.body, "menu") === null, true,

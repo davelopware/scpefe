@@ -173,7 +173,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
     if (result.invitationRequired) {
       securityDialogs.current?.reset();
       session.adopt(result);
-      setMessage("Claim the invitation before its document replaces the current session.");
+      const message = presentation.invitationStaged().safeMessage;
+      if (message !== null) setMessage(message);
       return;
     }
     showOpenedResult(result, alreadyAdopted);
@@ -340,7 +341,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
-    <StatusBar session={session} active={activeDocument} message={message} /></div>
+    <StatusBar session={session} active={activeDocument}
+      message={presentation.statusMessage(message)} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}
@@ -350,7 +352,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       onMessage={setMessage} onFocusEditor={focusEditorAfterDialog}
       onVisibilityChange={setCreating}
       returnFocus={dialogReturnFocus.current} />
-    <ShellDialogs ref={shellDialogs} session={session} host={shellHost}
+    <ShellDialogs ref={shellDialogs} session={session} presentation={presentation} host={shellHost}
       completion={rendererLifecycleCompletion} dialog={dialog}
       active={activeDocument} returnFocus={dialogReturnFocus.current}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}

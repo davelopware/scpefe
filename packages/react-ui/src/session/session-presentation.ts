@@ -13,6 +13,7 @@ type PresentationSession = Pick<FullSession,
 type ProtectionAttention = Extract<NonNullable<
   DocumentSessionSnapshot<DocumentOpened>["attention"]>, { kind: "lifecycle-protection" }>;
 const QUEUED_OPEN_WAITING_MESSAGE = "Another open request is waiting for the current dialog.";
+const QUEUED_OPEN_ACTIVE_MESSAGE = "Another open request is waiting. Enter its document password to continue.";
 
 /** Host lifecycle challenge that takes priority over every form and decision. */
 export interface LifecycleProtectionDecision {
@@ -129,7 +130,7 @@ export class SessionPresentation {
       || (snapshot.kind === "read-only" || snapshot.kind === "edit")
         && snapshot.publication.resolving) return false;
     const activated = this.session.activateExternalOpen();
-    if (activated) this.safeMessage = null;
+    if (activated) this.safeMessage = QUEUED_OPEN_ACTIVE_MESSAGE;
     return activated;
   }
 
@@ -137,11 +138,48 @@ export class SessionPresentation {
   externalOpenQueued(waiting: boolean): string | null {
     const snapshot = this.current();
     if (!this.disposed && waiting && !snapshot.externalOpen?.active
-      && snapshot.attention?.kind !== "lifecycle-protection") {
+      && !this.view().blocked) {
       this.safeMessage = QUEUED_OPEN_WAITING_MESSAGE;
       return this.safeMessage;
     }
     return null;
+  }
+
+  /** Keeps a queued-open status from contradicting a newly selected decision. */
+  statusMessage(message: string): string {
+    if (this.current().externalOpen?.active && !this.view().blocked)
+      return QUEUED_OPEN_ACTIVE_MESSAGE;
+    return this.view().blocked && (message === QUEUED_OPEN_WAITING_MESSAGE
+      || message === QUEUED_OPEN_ACTIVE_MESSAGE) ? "" : message;
+  }
+
+  /** Presents the safe outcome after an active external request is canceled. */
+  externalOpenCanceled(): Pick<SessionPresentationView, "safeMessage" | "focusIntent"> {
+    this.current();
+    if (!this.disposed) {
+      const blocked = this.view().blocked;
+      this.safeMessage = blocked ? null
+        : "Open request canceled; the current document remains open.";
+    }
+    return this.view();
+  }
+
+  /** Presents admission after a candidate opens an invitation. */
+  invitationStaged(): Pick<SessionPresentationView, "safeMessage" | "focusIntent"> {
+    this.current();
+    if (!this.disposed) {
+      this.safeMessage = "Claim the invitation before its document replaces the current session.";
+    }
+    return this.view();
+  }
+
+  /** Expresses editor focus only when an adopted document has no decision to resolve. */
+  documentOpened(): Pick<SessionPresentationView, "safeMessage" | "focusIntent"> {
+    const snapshot = this.current();
+    const view = this.view();
+    return { safeMessage: view.safeMessage,
+      focusIntent: !this.disposed && (snapshot.kind === "read-only" || snapshot.kind === "edit")
+        && !view.blocked ? "return" : null };
   }
 
   view({ formActive = false }: { formActive?: boolean } = {}): SessionPresentationView {
@@ -202,7 +240,9 @@ export class SessionPresentation {
       openedDialog: this.confirmDivergenceDiscard ? null : openedDialog,
       blocked: selectedDecision !== null || this.confirmDivergenceDiscard,
       safeMessage: selectedDecision?.kind === "lifecycle-protection"
-        || snapshot.externalOpen?.active ? null : this.safeMessage,
+        || selectedDecision !== null && this.safeMessage === QUEUED_OPEN_WAITING_MESSAGE
+        ? null : snapshot.externalOpen?.active && selectedDecision === null
+        ? QUEUED_OPEN_ACTIVE_MESSAGE : this.safeMessage,
       focusIntent: selectedDecision?.kind === "lifecycle-protection"
         ? (selectedDecision.failureMessage ? "decision-action" : null)
         : this.focusIntent ?? (selectedDecision?.kind === "invitation-claim"

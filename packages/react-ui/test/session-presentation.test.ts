@@ -109,10 +109,8 @@ test("queued external opens wait behind a form and document attention, then reta
   const presentation = new SessionPresentation(session, () => "Safe failure.");
   session.queueExternalOpen({ token: "first" });
   session.queueExternalOpen({ token: "second" });
-  assert.equal(presentation.externalOpenQueued(true),
-    "Another open request is waiting for the current dialog.");
-  assert.equal(presentation.view().safeMessage,
-    "Another open request is waiting for the current dialog.");
+  assert.equal(presentation.externalOpenQueued(true), null);
+  assert.equal(presentation.view().safeMessage, null);
   assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
   assert.equal(presentation.activateQueuedExternalOpen(), false);
   assert.equal(presentation.view().openedDialog, "recovery");
@@ -121,18 +119,34 @@ test("queued external opens wait behind a form and document attention, then reta
   await presentation.act("discard-recovery");
   assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
   assert.equal(presentation.activateQueuedExternalOpen(), true);
-  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().safeMessage,
+    "Another open request is waiting. Enter its document password to continue.");
   assert.deepEqual(session.getSnapshot().externalOpen, { active: true, queued: 1 });
   assert.equal(presentation.externalOpenQueued(true), null);
-  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().safeMessage,
+    "Another open request is waiting. Enter its document password to continue.");
   assert.equal(presentation.activateQueuedExternalOpen(), false);
   assert.equal((await session.openExternal("wrong")).status, "failed");
   assert.equal(presentation.activateQueuedExternalOpen(), false);
   assert.deepEqual(session.getSnapshot().externalOpen, { active: true, queued: 1 });
   assert.deepEqual(await session.cancelExternalOpen(), { status: "external-canceled" });
+  assert.equal(presentation.externalOpenCanceled().safeMessage,
+    "Open request canceled; the current document remains open.");
   assert.equal(presentation.activateQueuedExternalOpen(), true);
   assert.equal((await session.openExternal("correct")).status, "opened");
   assert.deepEqual(attempted, ["first", "second"]);
+  session.dispose();
+});
+
+test("opened documents request editor focus without masking later decision focus", async () => {
+  const { session, presentation } = setup();
+  assert.equal(presentation.documentOpened().focusIntent, "return");
+  assert.equal(presentation.view().focusIntent, null);
+  await session.enterEditMode();
+  assert.equal(presentation.view().focusIntent, "edit-retry");
+  session.adopt({ ...opened, recovery: { content: "private", state: "unsaved",
+    updateTime: 1, cursor: { start: 0, end: 0 } } });
+  assert.equal(presentation.documentOpened().focusIntent, null);
   session.dispose();
 });
 
@@ -146,6 +160,45 @@ test("queued-open status waits while lifecycle protection has priority", () => {
   assert.equal(presentation.view().selectedDecision?.kind, "lifecycle-protection");
   assert.equal(presentation.externalOpenQueued(true), null);
   assert.equal(presentation.view().safeMessage, null);
+  session.dispose();
+});
+
+test("an active external-open prompt yields status to lifecycle protection", async () => {
+  let complete!: (value: null) => void;
+  const host = { openExternalDocument: () => new Promise<null>((resolve) => {
+    complete = resolve;
+  }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt(opened);
+  const presentation = new SessionPresentation(session, () => "Safe failure.");
+  session.queueExternalOpen({ token: "next" });
+  assert.equal(presentation.activateQueuedExternalOpen(), true);
+  const pending = session.openExternal("secret");
+  await Promise.resolve();
+  assert.equal(session.stageProtection({ token: "protect", operation: "external-open",
+    state: { dirty: true, provisional: false, pendingPublication: false,
+      recovered: false, conflict: false, unresolvedJournal: false,
+      activePublication: false } }), true);
+  assert.equal(presentation.view().selectedDecision?.kind, "lifecycle-protection");
+  assert.equal(presentation.statusMessage(
+    "Another open request is waiting. Enter its document password to continue."), "");
+  complete(null);
+  await pending;
+  session.dispose();
+});
+
+test("queued-open waiting status cannot overtake newly visible attention", async () => {
+  const { session, presentation } = setup();
+  session.queueExternalOpen({ token: "later" });
+  assert.equal(presentation.externalOpenQueued(true),
+    "Another open request is waiting for the current dialog.");
+  await session.enterEditMode();
+  assert.equal(presentation.view().selectedDecision?.kind, "edit-unavailable");
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.statusMessage(
+    "Another open request is waiting for the current dialog."), "");
   session.dispose();
 });
 
@@ -296,6 +349,8 @@ test("recovery waits behind a form, then restores unsaved work with a safe outco
 test("a staged invitation waits for the current form and stays actionable after it closes", () => {
   const { session, presentation } = setup();
   session.adopt({ readOnly: true, invitationRequired: true });
+  assert.equal(presentation.invitationStaged().safeMessage,
+    "Claim the invitation before its document replaces the current session.");
   const duringForm = presentation.view({ formActive: true });
   assert.equal(duringForm.selectedDecision, null);
   assert.equal(duringForm.blocked, false);
