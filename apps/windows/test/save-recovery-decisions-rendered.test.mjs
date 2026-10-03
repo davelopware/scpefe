@@ -314,6 +314,19 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await user.keyboard("{Control>}s{/Control}");
     assert.equal(saveAttempts, savesBeforePasswords,
       "shell shortcuts remain blocked while Passwords can request compaction");
+    const compactButton = ui.getByRole(dialog, "button", { name: "Compact history…" });
+    const retainedCompactClick = Object.values(compactButton)
+      .find((value) => value && typeof value === "object"
+        && typeof value.onClick === "function")?.onClick;
+    assert.equal(typeof retainedCompactClick, "function");
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    const { act } = await import("react");
+    await act(async () => { retainedCompactClick(); });
+    assert.equal(ui.queryByRole(document.body, "dialog"), null,
+      "a retained Passwords compaction callback cannot run after that dialog closes");
+    await command("Security", /Passwords/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
     await user.click(ui.getByRole(dialog, "button", { name: "Compact history…" }));
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Permanently compact document history?" });

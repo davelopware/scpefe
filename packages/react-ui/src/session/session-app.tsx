@@ -110,7 +110,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [, refreshPresentation] = useState(0);
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
-  const [dialog, setDialog] = useState<DialogName>(null);
+  const [dialog, setDialogState] = useState<DialogName>(null);
+  // Retained dialog callbacks must see a close before React commits the next render.
+  const currentDialog = useRef<DialogName>(null);
+  function setDialog(next: DialogName) {
+    currentDialog.current = next;
+    setDialogState(next);
+  }
   const [creating, setCreating] = useState(false);
   const creationFlow = useRef<CreationFlowHandle>(null);
   const shellDialogs = useRef<ShellDialogsHandle>(null);
@@ -193,7 +199,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
       modalBusy: modalBusy.current,
-      passwordsDialogActive: dialog === "passwords" && protection === null
+      passwordsDialogActive: currentDialog.current === "passwords" && protection === null
         && !creating && !presentationView.blocked }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
