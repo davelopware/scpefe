@@ -4,21 +4,23 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import type { ShellHost } from "../shell/shell-dialogs.tsx";
 import type { SessionEventsHost } from "./host-roles.ts";
 import type { DocumentOpened, Opened } from "./types.ts";
+import type { SessionPresentation } from "./session-presentation.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
 type EventSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>
   & Pick<FullSession, "getSnapshot" | "observeRecoveryDiscovery"
-    | "regularSavePublished" | "queueExternalOpen" | "activateExternalOpen"
+    | "regularSavePublished" | "queueExternalOpen"
     | "stageProtection">;
 type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
 
 /** Subscribes native lifecycle events and forwards only semantic presentation effects. */
-export function useSessionEvents({ session, events, shellHost, completion,
+export function useSessionEvents({ session, presentation, events, shellHost, completion,
   forwardJournalWarning, catalogText, safeRendererErrorMessage, modalBusy,
   returnFocus, canPresentQueued, onLocked, onRetained, onPresentExternal,
   onMessage }: {
   session: EventSession;
+  presentation: Pick<SessionPresentation, "activateQueuedExternalOpen">;
   events: SessionEventsHost;
   shellHost: Pick<ShellHost, "getUnresolvedJournalSummary">;
   completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
@@ -60,9 +62,6 @@ export function useSessionEvents({ session, events, shellHost, completion,
       if (modalBusy.current || (current.kind === "read-only" || current.kind === "edit")
         && current.publication.resolving) {
         onMessage("Another open request is waiting for the current dialog.");
-      } else {
-        returnFocus.current = document.activeElement as HTMLElement | null;
-        session.activateExternalOpen(); onPresentExternal();
       }
     });
     const stopJournalSummary = events.onUnresolvedJournalSummary(
@@ -90,8 +89,12 @@ export function useSessionEvents({ session, events, shellHost, completion,
   }, []);
   useEffect(() => {
     if (canPresentQueued && !externalOpen?.active && externalOpen?.queued) {
-      returnFocus.current = document.activeElement as HTMLElement | null;
-      session.activateExternalOpen(); onPresentExternal();
+      if (presentation.activateQueuedExternalOpen()) {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active !== document.body
+          && active.isConnected) returnFocus.current = active;
+        onPresentExternal();
+      }
     }
-  }, [canPresentQueued, externalOpen?.active, externalOpen?.queued, session]);
+  }, [canPresentQueued, externalOpen?.active, externalOpen?.queued, presentation]);
 }

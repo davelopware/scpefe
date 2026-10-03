@@ -9,7 +9,7 @@ type PresentationSession = Pick<FullSession,
   | "confirmLeaseTakeover" | "cancelLeaseTakeover" | "migrate"
   | "confirmCompaction" | "cancelCompaction" | "save" | "dismissSaveFailure"
   | "retryPublication" | "discardPublication" | "beginDivergenceResolution"
-  | "decideProtection">;
+  | "decideProtection" | "activateExternalOpen">;
 type ProtectionAttention = Extract<NonNullable<
   DocumentSessionSnapshot<DocumentOpened>["attention"]>, { kind: "lifecycle-protection" }>;
 
@@ -119,6 +119,15 @@ export class SessionPresentation {
 
   /** Rejects pending outcomes after the graphical presentation unmounts. */
   dispose(): void { this.disposed = true; this.clear(); }
+
+  /** Activates the next session-owned request only after current decisions clear. */
+  activateQueuedExternalOpen({ formActive = false }: { formActive?: boolean } = {}): boolean {
+    const snapshot = this.current();
+    if (this.disposed || formActive || this.view().blocked
+      || (snapshot.kind === "read-only" || snapshot.kind === "edit")
+        && snapshot.publication.resolving) return false;
+    return this.session.activateExternalOpen();
+  }
 
   view({ formActive = false }: { formActive?: boolean } = {}): SessionPresentationView {
     const snapshot = this.current();

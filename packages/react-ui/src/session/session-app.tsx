@@ -137,7 +137,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
                 : selected?.kind === "migration-decision" ? "migration" : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
     || presentationView.blocked;
-  useSessionEvents({ session, events, shellHost,
+  useSessionEvents({ session, presentation, events, shellHost,
     completion: rendererLifecycleCompletion,
     forwardJournalWarning: sessionStore.forwardJournalWarning,
     catalogText, safeRendererErrorMessage, modalBusy,

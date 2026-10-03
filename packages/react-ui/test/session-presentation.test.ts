@@ -75,6 +75,40 @@ test("a late retry cannot present an outcome from a replaced document", async ()
   session.dispose();
 });
 
+test("queued external opens wait behind a form and document attention, then retain FIFO authority", async () => {
+  const attempted: string[] = [];
+  const host = { openExternalDocument: async ({ token }: { token: string }) => {
+    attempted.push(token);
+    if (attempted.length === 1) throw new Error("private password failure");
+    return { ...opened, content: token };
+  }, cancelExternalOpen: async () => true,
+  discardRecoveredWork: async () => opened } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, recovery: { content: "private", state: "unsaved",
+    updateTime: 1, cursor: { start: 0, end: 0 } } });
+  const presentation = new SessionPresentation(session, () => "Safe failure.");
+  session.queueExternalOpen({ token: "first" });
+  session.queueExternalOpen({ token: "second" });
+  assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
+  assert.equal(presentation.activateQueuedExternalOpen(), false);
+  assert.equal(session.getSnapshot().externalOpen?.queued, 2);
+  await presentation.act("discard-recovery");
+  assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
+  assert.equal(presentation.activateQueuedExternalOpen(), true);
+  assert.deepEqual(session.getSnapshot().externalOpen, { active: true, queued: 1 });
+  assert.equal(presentation.activateQueuedExternalOpen(), false);
+  assert.equal((await session.openExternal("wrong")).status, "failed");
+  assert.equal(presentation.activateQueuedExternalOpen(), false);
+  assert.deepEqual(session.getSnapshot().externalOpen, { active: true, queued: 1 });
+  assert.deepEqual(await session.cancelExternalOpen(), { status: "external-canceled" });
+  assert.equal(presentation.activateQueuedExternalOpen(), true);
+  assert.equal((await session.openExternal("correct")).status, "opened");
+  assert.deepEqual(attempted, ["first", "second"]);
+  session.dispose();
+});
+
 test("lifecycle protection preempts a form, retries failure, and restores it on cancel", async () => {
   let attempts = 0;
   const host = { resolveProtection: async () => (++attempts === 1
