@@ -349,7 +349,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           <button disabled={!securityCommands?.changePassword}>Change password</button></form>
         {(securityCommands?.createInvitation || snapshot.pending === "invitation-create")
           && <form onSubmit={createInvitation}><h3>Invite another person</h3>
-            <label>Temporary label<input name="temporaryLabel" required /></label>
+            <label>Temporary label (required)<input name="temporaryLabel" required /></label>
             <label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password"
               aria-describedby={`temporary-password-policy${invitationPasswordError
                 ? " invitation-password-error" : ""}`}

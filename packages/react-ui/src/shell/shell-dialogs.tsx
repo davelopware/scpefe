@@ -5,6 +5,7 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import type { ClientSettings, DialogName, DocumentOpened, Opened,
   Profile, JournalSummary } from "../session/types.ts";
+import type { SessionPresentation } from "../session/session-presentation.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
@@ -35,11 +36,13 @@ export interface ShellDialogsHandle {
 }
 
 /** Owns local profile, target-password, and plaintext-export form state. */
-export function ShellDialogs({ session, host, completion, dialog, active,
+export function ShellDialogs({ session, presentation, host, completion, dialog, active,
   returnFocus, catalogText, safeRendererErrorMessage, closeWindow,
   onDialog, onMessage: setMessage, onProfileReady, onAdopted, onFocusEditor,
   onClose, ref }: {
   session: ShellSession;
+  presentation: Pick<SessionPresentation, "view" | "documentOpened"
+    | "externalOpenCanceled" | "invitationStaged">;
   host: ShellHost;
   completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
   dialog: DialogName;
@@ -94,23 +97,16 @@ export function ShellDialogs({ session, host, completion, dialog, active,
   }
   function showUnlock() { setOpenError(""); onDialog("unlock"); }
   function showExternalOpen() {
+    if (openPassword.current) openPassword.current.value = "";
+    setOpenError("");
+    setPendingOpenName("");
     onDialog("open");
-    setMessage("Another open request is waiting. Enter its document password to continue.");
+    const message = presentation.view().safeMessage;
+    if (message !== null) setMessage(message);
   }
   function showExport() { setExportError(""); onDialog("export"); }
   useImperativeHandle(ref, () => ({ chooseOpen, showUnlock, showExternalOpen,
     showExport, reset }));
-  function openedDialogName(value: Opened | null): string | null {
-    if (value?.invitationRequired) return "claim";
-    if (!value || value.invitationRequired) return null;
-    if (value.profileMismatch) return "profile-mismatch";
-    return null;
-  }
-  function sessionAttentionNeedsDialog(kind: string | undefined): boolean {
-    return kind === "head-mismatch" || kind === "unreadable-journal"
-      || kind === "recovery-decision" || kind === "publication-decision"
-      || kind === "migration-decision";
-  }
   function currentAdoption(): number | null {
     const current = session.getSnapshot();
     return current.kind === "read-only" || current.kind === "edit"
@@ -187,19 +183,16 @@ export function ShellDialogs({ session, host, completion, dialog, active,
       }
       if (outcome.status === "superseded") return;
       if (outcome.status === "invitation") {
-        setMessage("Claim the invitation before its document replaces the current session.");
+        const message = presentation.invitationStaged().safeMessage;
+        if (message !== null) setMessage(message);
       } else if (outcome.status === "opened") {
         const adopted = session.getSnapshot();
         if (adopted.kind !== "read-only" && adopted.kind !== "edit") return;
         onAdopted(adopted.document);
       } else return;
       setPendingOpenName(""); onDialog(null);
-      const adopted = session.getSnapshot();
-      if (outcome.status === "opened" && (adopted.kind === "read-only"
-          || adopted.kind === "edit") && openedDialogName(adopted.document) === null
-          && !sessionAttentionNeedsDialog(adopted.attention?.kind)) {
-        onFocusEditor();
-      }
+      if (outcome.status === "opened"
+        && presentation.documentOpened().focusIntent === "return") onFocusEditor();
     }
     catch (error) {
       setOpenError(safeRendererErrorMessage(error));
@@ -215,6 +208,8 @@ export function ShellDialogs({ session, host, completion, dialog, active,
         requestAnimationFrame(() => openPassword.current?.focus());
         return;
       }
+      const message = presentation.externalOpenCanceled().safeMessage;
+      if (message !== null) setMessage(message);
     } else if (dialog === "open") {
       try { await host.cancelOpenTarget(); }
       catch (error) {
@@ -242,14 +237,15 @@ export function ShellDialogs({ session, host, completion, dialog, active,
       if (adopted.kind !== "read-only" && adopted.kind !== "edit") return;
       onAdopted(adopted.document);
       onDialog(null);
-      if (openedDialogName(adopted.document) === null
-        && !sessionAttentionNeedsDialog(adopted.attention?.kind)) onFocusEditor();
+      if (presentation.documentOpened().focusIntent === "return") onFocusEditor();
     } else if (outcome.status === "invitation") {
       onDialog(null);
-      setMessage("Claim the invitation before its document replaces the current session.");
+      const message = presentation.invitationStaged().safeMessage;
+      if (message !== null) setMessage(message);
     } else if (outcome.status === "external-canceled") {
       onDialog(null);
-      setMessage("Open request canceled; the current document remains open.");
+      const message = presentation.externalOpenCanceled().safeMessage;
+      if (message !== null) setMessage(message);
     }
     session.observeRecoveryDiscovery(await host.getUnresolvedJournalSummary());
   }

@@ -3,17 +3,15 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "./focused-dialog.tsx";
 import type { DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
 import type { DocumentOpened, OpenedDialogName } from "../session/types.ts";
+import type { SessionPresentationView } from "../session/session-presentation.ts";
 
 /** Dialog-only view of the external session seam. */
-type DialogSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>> & {
-  dismissEditFailure(): void;
-  dismissSaveFailure(): void;
-  cancelCompaction(): unknown;
-};
+type DialogSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>;
 
 /** User gestures emitted by semantic attention dialogs. */
-export type DialogAction = "retry-edit" | "cancel-lease" | "confirm-lease"
-  | "retry-save" | "lock" | "migrate" | "open-passwords" | "accept-head"
+export type DialogAction = "retry-edit" | "continue-read-only"
+  | "cancel-lease" | "confirm-lease"
+  | "retry-save" | "continue-editing" | "lock" | "migrate" | "open-passwords" | "accept-head"
   | "discard-recovery" | "restore-recovery" | "discard-unreadable"
   | "discard-publication" | "reconnect-publication" | "compact"
   | "compaction-canceled" | "protection-cancel" | "protection-save"
@@ -22,53 +20,58 @@ export type DialogAction = "retry-edit" | "cancel-lease" | "confirm-lease"
 
 /** Focus targets used after a host command leaves an attention dialog open. */
 export interface DialogHostHandle {
-  focus(action: "edit" | "recovery" | "publication" | "migration"): void;
+  focus(intent: Exclude<SessionPresentationView["focusIntent"], "return" | "decision-action" | null>): void;
 }
 
 /** Renders every portable session attention as an accessible platform dialog. */
 export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialog,
-  decisionError, openedDialogError, confirmDivergenceDiscard, returnFocus, catalogText, onAction, ref }: {
+  returnFocus,
+  selectedDecision, focusIntent, onAction, ref }: {
   session: DialogSession;
   visibleOpenedDialog: OpenedDialogName;
   activeDocument: boolean;
   dialog: string | null;
-  decisionError: string;
-  openedDialogError: string;
-  confirmDivergenceDiscard: boolean;
   returnFocus: HTMLElement | null;
-  catalogText(code: string): string;
+  selectedDecision: SessionPresentationView["selectedDecision"];
+  focusIntent: SessionPresentationView["focusIntent"];
   onAction(action: DialogAction): void | Promise<void>;
   ref?: React.Ref<DialogHostHandle>;
 }): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
   const opened = snapshot.kind === "read-only" || snapshot.kind === "edit"
     ? snapshot.document : null;
-  const attention = snapshot.kind === "read-only" || snapshot.kind === "edit"
-    ? snapshot.attention : undefined;
-  const protection = snapshot.attention?.kind === "lifecycle-protection"
-    ? snapshot.attention : null;
-  const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
-  const editFailure = attention?.kind === "edit-unavailable"
-    ? catalogText(attention.code) : null;
-  const saveFailure = attention?.kind === "save-failed"
-    ? catalogText(attention.code) : null;
-  const publicationDecision = attention?.kind === "publication-decision" ? attention : null;
-  const recoveryDecision = attention?.kind === "recovery-decision" ? attention : null;
-  const headDecision = attention?.kind === "head-mismatch" ? attention : null;
-  const unreadableDecision = attention?.kind === "unreadable-journal" ? attention : null;
-  const migrationDecision = attention?.kind === "migration-decision" ? attention : null;
-  const compactionDecision = attention?.kind === "compaction-decision" ? attention : null;
+  const protection = selectedDecision?.kind === "lifecycle-protection"
+    ? selectedDecision : null;
+  const leaseDecision = selectedDecision?.kind === "lease-takeover" ? selectedDecision : null;
+  const editFailure = selectedDecision?.kind === "edit-unavailable"
+    ? selectedDecision.message : null;
+  const saveFailure = selectedDecision?.kind === "save-failed"
+    ? selectedDecision : null;
+  const publicationDecision = selectedDecision?.kind === "publication-decision"
+    ? selectedDecision : null;
+  const confirmDivergenceDiscard = selectedDecision?.kind === "newer-edits-confirmation";
+  const recoveryDecision = selectedDecision?.kind === "recovery-decision"
+    ? selectedDecision : null;
+  const headDecision = selectedDecision?.kind === "head-mismatch" ? selectedDecision : null;
+  const unreadableDecision = selectedDecision?.kind === "unreadable-journal"
+    ? selectedDecision : null;
+  const migrationDecision = selectedDecision?.kind === "migration-decision"
+    ? selectedDecision : null;
+  const compactionDecision = selectedDecision?.kind === "compaction-decision"
+    ? selectedDecision : null;
   const leaseBusy = snapshot.pending === "lease-confirm" || snapshot.pending === "lease-cancel"
     || ((snapshot.kind === "read-only" || snapshot.kind === "edit")
       && snapshot.queued !== undefined);
   const editRetryAction = useRef<HTMLButtonElement>(null);
+  const saveRetryAction = useRef<HTMLButtonElement>(null);
   const recoveryRestoreAction = useRef<HTMLButtonElement>(null);
   const publicationRetryAction = useRef<HTMLButtonElement>(null);
   const migrationRetryAction = useRef<HTMLButtonElement>(null);
-  useImperativeHandle(ref, () => ({ focus: (action) => {
-    const target = action === "edit" ? editRetryAction
-      : action === "recovery" ? recoveryRestoreAction
-        : action === "migration" ? migrationRetryAction : publicationRetryAction;
+  useImperativeHandle(ref, () => ({ focus: (intent) => {
+    const target = intent === "edit-retry" ? editRetryAction
+      : intent === "save-retry" ? saveRetryAction
+      : intent === "recovery-restore" ? recoveryRestoreAction
+        : intent === "migration-retry" ? migrationRetryAction : publicationRetryAction;
     target.current?.focus();
   } }), []);
   return <>
@@ -85,20 +88,21 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       </div>
     </FocusedDialog>}
     {editFailure && <FocusedDialog returnFocus={returnFocus}
-      title="Editing unavailable" initialFocus={editRetryAction}
-      close={() => session.dismissEditFailure()}>
+      title="Editing unavailable"
+      initialFocus={focusIntent === "edit-retry" ? editRetryAction : undefined}
+      close={() => void onAction("continue-read-only")}>
       <div className="warning" role="alert"><p>{editFailure}</p>
         <p>The document remains read-only.</p></div>
-      <div className="dialog-actions"><button onClick={() => session.dismissEditFailure()}>
-        Continue read-only</button><button ref={editRetryAction} autoFocus onClick={() => {
-          session.dismissEditFailure(); void onAction("retry-edit");
-        }}>Retry editing</button></div>
+      <div className="dialog-actions"><button onClick={() => void onAction("continue-read-only")}>
+        Continue read-only</button><button ref={editRetryAction} autoFocus
+        onClick={() => void onAction("retry-edit")}>Retry editing</button></div>
     </FocusedDialog>}
     {leaseDecision && <FocusedDialog returnFocus={returnFocus}
       title="Confirm editing-lease takeover">
       <div className="warning" role="alert"><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
         <p>Force takeover only after confirming that no other client is editing this document.</p></div>
-      {decisionError && <p className="dialog-error" role="alert">{decisionError}</p>}
+      {leaseDecision.errorMessage && <p className="dialog-error" role="alert">
+        {leaseDecision.errorMessage}</p>}
       <div className="dialog-actions"><button autoFocus disabled={leaseBusy}
         onClick={() => void onAction("cancel-lease")}>Cancel</button>
         <button disabled={leaseBusy} onClick={() => void onAction("confirm-lease")}>
@@ -106,40 +110,38 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       </button></div>
     </FocusedDialog>}
     {saveFailure && <FocusedDialog returnFocus={returnFocus}
-      title="Manual save failed" close={() => session.dismissSaveFailure()}>
-      <p className="dialog-error" role="alert">{saveFailure}</p>
+      title="Manual save failed" close={() => void onAction("continue-editing")}
+      initialFocus={focusIntent === "save-retry" ? saveRetryAction : undefined}>
+      <p className="dialog-error" role="alert">{saveFailure.message}</p>
       <p>The working copy and recovery journal remain available. No successful publication is being reported.</p>
-      <div className="dialog-actions"><button onClick={() => session.dismissSaveFailure()}>Continue editing</button>
-        <button autoFocus onClick={() => void onAction("retry-save")}>Retry manual save</button></div>
+      <div className="dialog-actions"><button onClick={() => void onAction("continue-editing")}>Continue editing</button>
+        <button ref={saveRetryAction} autoFocus onClick={() => void onAction("retry-save")}>Retry manual save</button></div>
     </FocusedDialog>}
-    {dialog === "compaction" && activeDocument && <FocusedDialog
+    {dialog === "compaction" && activeDocument && compactionDecision && <FocusedDialog
       returnFocus={returnFocus} title="Permanently compact document history?"
-      close={snapshot.pending === "compaction" ? undefined : () => {
-        session.cancelCompaction(); void onAction("open-passwords");
-      }}>
+      close={snapshot.pending === "compaction" ? undefined
+        : () => void onAction("compaction-canceled")}>
       <div className="warning" role="alert"><p>Compaction irreversibly removes older embedded history from this container.</p>
         <p>SCPEFE creates and verifies an exact backup first. Compaction cannot delete copies held by backups, sync tools, caches, or storage providers.</p></div>
-      {compactionDecision?.failureCode && <p className="dialog-error"
-        role="alert">{catalogText(compactionDecision.failureCode)}</p>}
-      <div className="dialog-actions"><button autoFocus onClick={() => {
-        session.cancelCompaction();
-        void onAction("open-passwords");
-        void onAction("compaction-canceled");
-      }} disabled={snapshot.pending === "compaction"}>Cancel</button><button
-        disabled={!compactionDecision || snapshot.pending === "compaction"}
+      {compactionDecision.failureMessage && <p className="dialog-error"
+        role="alert">{compactionDecision.failureMessage}</p>}
+      <div className="dialog-actions"><button autoFocus onClick={() =>
+        void onAction("compaction-canceled")}
+        disabled={snapshot.pending === "compaction"}>Cancel</button><button
+        disabled={snapshot.pending === "compaction"}
         onClick={() => void onAction("compact")}>
         Create verified backup and compact</button></div>
     </FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={returnFocus} title="Older container"
-      initialFocus={migrationDecision?.failureCode || migrationDecision?.canceled
+      initialFocus={focusIntent === "migration-retry"
         ? migrationRetryAction : undefined}>
       <div className="warning" role="alert"><p>Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first.</p>
         <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
       <div className="dialog-actions"><button onClick={() => void onAction("lock")}
         disabled={snapshot.pending === "migration"}>Keep read-only and close</button>
-        {migrationDecision?.failureCode && <p className="dialog-error" role="alert">
-          {catalogText(migrationDecision.failureCode)}</p>}
+        {migrationDecision?.failureMessage && <p className="dialog-error" role="alert">
+          {migrationDecision.failureMessage}</p>}
         {migrationDecision?.canceled && <p className="dialog-error" role="alert">
           Migration was canceled before publication. Retry to acquire fresh lease authorization.</p>}
         {!migrationDecision?.canMigrate && snapshot.pending === undefined
@@ -165,18 +167,18 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
           : headDecision.mismatchKind === "divergence"
             ? "The authenticated head diverged from the last trusted observation."
             : "The previous head observation could not be verified."}</p>
-      {headDecision.failureCode && <p className="dialog-error" role="alert">
-        {catalogText(headDecision.failureCode)}</p>}
+      {headDecision.failureMessage && <p className="dialog-error" role="alert">
+        {headDecision.failureMessage}</p>}
       <button disabled={snapshot.kind !== "read-only"
         && snapshot.kind !== "edit" || !snapshot.commands.acceptHeadMismatch}
         onClick={() => void onAction("accept-head")}>Accept current authenticated head</button>
     </FocusedDialog>}
     {visibleOpenedDialog === "recovery" && activeDocument && recoveryDecision && <FocusedDialog
       returnFocus={returnFocus} title="Recovered work"
-      initialFocus={recoveryDecision.failureCode ? recoveryRestoreAction : undefined}>
+      initialFocus={focusIntent === "recovery-restore" ? recoveryRestoreAction : undefined}>
       <p>Recovered work from {new Date(recoveryDecision.updateTime).toLocaleString()} is available as unsaved changes.</p>
-      {recoveryDecision.failureCode && <p className="dialog-error" role="alert">
-        {catalogText(recoveryDecision.failureCode)}</p>}
+      {recoveryDecision.failureMessage && <p className="dialog-error" role="alert">
+        {recoveryDecision.failureMessage}</p>}
       <div className="dialog-actions"><button disabled={snapshot.kind !== "read-only"
         && snapshot.kind !== "edit" || !snapshot.commands.recoveryDiscard}
         onClick={() => void onAction("discard-recovery")}>Discard recovered work</button>
@@ -187,8 +189,8 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       && <FocusedDialog returnFocus={returnFocus}
         title="Unreadable recovery journal">
         <p>The recovery journal for this document could not be read. Keep the document read-only or explicitly discard that journal before editing.</p>
-        {unreadableDecision.failureCode && <p className="dialog-error" role="alert">
-          {catalogText(unreadableDecision.failureCode)}</p>}
+        {unreadableDecision.failureMessage && <p className="dialog-error" role="alert">
+          {unreadableDecision.failureMessage}</p>}
         <div className="dialog-actions"><button onClick={() => void onAction("lock")}>Keep read-only and close</button>
           <button disabled={snapshot.kind !== "read-only"
             && snapshot.kind !== "edit" || !snapshot.commands.unreadableDiscard}
@@ -196,14 +198,13 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       </FocusedDialog>}
     {visibleOpenedDialog === "publication" && activeDocument && publicationDecision
       && <FocusedDialog returnFocus={returnFocus}
-        initialFocus={publicationDecision.failureCode || openedDialogError
+        initialFocus={publicationDecision.failureMessage
           ? publicationRetryAction : undefined}
         title={publicationDecision.state === "conflict" ? "Divergence needs resolution" : "Manual save pending publication"}>
         <p>{publicationDecision.state === "conflict" ? "The target changed. The locally saved candidate was preserved for divergence handling." : "This manual save is stored locally and has not reached its target."}</p>
-        {(publicationDecision.failureCode || openedDialogError)
+        {publicationDecision.failureMessage
           && <p className="dialog-error" role="alert">
-            {publicationDecision.failureCode
-              ? catalogText(publicationDecision.failureCode) : openedDialogError}</p>}
+            {publicationDecision.failureMessage}</p>}
         <div className="dialog-actions"><button disabled={snapshot.kind !== "read-only"
           && snapshot.kind !== "edit" || !snapshot.commands.publicationDiscard}
           onClick={() => void onAction("discard-publication")}>Discard pending save</button>
@@ -230,10 +231,10 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
         </ul>
         <p>Cancel keeps this document open. Save retries or seals recoverable work. Discard is permanent where policy permits it.</p>
       </div>
-      {protection.failureCode && <p className="dialog-error" role="alert">
-        {catalogText(protection.failureCode)}</p>}
+      {protection.failureMessage && <p className="dialog-error" role="alert">
+        {protection.failureMessage}</p>}
       <div className="dialog-actions"><button ref={(node) => {
-        if (node && !protection.failureCode) node.focus();
+        if (node && !protection.failureMessage) node.focus();
       }}
         disabled={protection.resolving} onClick={() => void onAction("protection-cancel")}>Keep current document open</button>
         <button disabled={protection.resolving} onClick={() => void onAction("protection-save")}>

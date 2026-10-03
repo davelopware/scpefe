@@ -5,14 +5,15 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
-import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
+import { DialogSuspensionContext } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
-import { useAttentionActions } from "./use-attention-actions.ts";
+import { SessionPresentation } from "./session-presentation.ts";
+import type { DialogAction } from "../dialogs/dialog-host.tsx";
 import { useSessionEvents } from "./use-session-events.ts";
-import type { DocumentOpened, Opened, DialogName, OpenedDialogName } from "./types.ts";
+import type { DocumentOpened, Opened, DialogName } from "./types.ts";
 import type { SessionHost, JournalTransportHost, SessionEventsHost,
   SecurityClipboardHost } from "./host-roles.ts";
 import type { ShellHost } from "../shell/shell-dialogs.tsx";
@@ -21,13 +22,6 @@ import type { CreationFormRequest, ProposedPasswordOutcome } from "../security/t
 
 function isDocumentOpened(value: Opened | null): value is DocumentOpened {
   return value !== null && value.invitationRequired !== true;
-}
-
-function openedDialogName(value: Opened | null): OpenedDialogName {
-  if (value?.invitationRequired) return "claim";
-  if (!isDocumentOpened(value)) return null;
-  if (value.profileMismatch) return "profile-mismatch";
-  return null;
 }
 
 type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
@@ -85,6 +79,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     };
   });
   const session = sessionStore.session;
+  const presentationMounted = useRef(true);
   useEffect(() => {
     rendererLifecycleCompletion.setSessionSource({
       getPendingWorkCount: session.getPendingWorkCount,
@@ -101,33 +96,20 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const working = sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit"
     ? sessionSnapshot.working : null;
   const dirty = working?.dirty ?? false;
-  const attention = sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit"
-    ? sessionSnapshot.attention : undefined;
-  const leaseDecision = attention?.kind === "lease-takeover" ? attention : null;
-  const editFailure = attention?.kind === "edit-unavailable"
-    ? catalogText(attention.code) : null;
-  const saveFailure = attention?.kind === "save-failed"
-    ? catalogText(attention.code) : null;
-  const publicationDecision = attention?.kind === "publication-decision"
-    ? attention : null;
-  const recoveryDecision = attention?.kind === "recovery-decision"
-    ? attention : null;
-  const headDecision = attention?.kind === "head-mismatch" ? attention : null;
-  const unreadableDecision = attention?.kind === "unreadable-journal" ? attention : null;
-  const migrationDecision = attention?.kind === "migration-decision" ? attention : null;
   const publicationResolving = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
   useEffect(() => () => {
+    presentationMounted.current = false;
+    presentation.dispose();
     session.dispose();
   }, [session]);
   const [message, setMessage] = useState("");
+  const [presentation] = useState(() => new SessionPresentation(session, catalogText));
+  const [, refreshPresentation] = useState(0);
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialog] = useState<DialogName>(null);
   const [creating, setCreating] = useState(false);
-  const invitationStaged = sessionSnapshot.invitationStaged === true;
-  const protection = sessionSnapshot.attention?.kind === "lifecycle-protection"
-    ? sessionSnapshot.attention : null;
   const creationFlow = useRef<CreationFlowHandle>(null);
   const shellDialogs = useRef<ShellDialogsHandle>(null);
   const securityDialogs = useRef<SecurityDialogsHandle>(null);
@@ -136,44 +118,44 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const dialogHost = useRef<DialogHostHandle>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
-  const attentionActions = useAttentionActions({ session,
-    completion: rendererLifecycleCompletion, catalogText, onMessage: setMessage,
-    onDialog: setDialog, onExport: () => shellDialogs.current?.showExport(),
-    onLocked: showLockedResult, dialogHost });
-  const { decisionError, openedDialogError, confirmDivergenceDiscard } = attentionActions;
-  const openedDialog = opened?.invitationRequired ? "claim"
-    : headDecision ? "head" : unreadableDecision ? "unreadable"
-      : recoveryDecision ? "recovery" : publicationDecision ? "publication"
-        : isDocumentOpened(opened) && opened.profileMismatch ? "profile-mismatch"
-        : migrationDecision ? "migration"
-        : openedDialogName(opened);
-  const visibleOpenedDialog = !creating && dialog === null && !confirmDivergenceDiscard
-    && leaseDecision === null && saveFailure === null
-    ? invitationStaged ? "claim" : openedDialog : null;
+  const presentationView = presentation.view({ formActive: creating
+    || (dialog !== null && dialog !== "compaction") });
+  const selected = presentationView.selectedDecision;
+  const protection = selected?.kind === "lifecycle-protection" ? selected : null;
+  const visibleOpenedDialog = dialog === null ? presentationView.openedDialog : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
-    || invitationStaged || confirmDivergenceDiscard
-    || editFailure !== null || leaseDecision !== null || saveFailure !== null;
-  useSessionEvents({ session, events, shellHost,
+    || presentationView.blocked;
+  useSessionEvents({ session, presentation, events, shellHost,
     completion: rendererLifecycleCompletion,
     forwardJournalWarning: sessionStore.forwardJournalWarning,
     catalogText, safeRendererErrorMessage, modalBusy,
     returnFocus: dialogReturnFocus,
-    canPresentQueued: !modalBusy.current && !creating && dialog === null
-      && openedDialog === null && !publicationResolving,
     onLocked: showLockedResult,
     onRetained: (document) => showOpenedResult(document),
-    onPresentExternal: () => shellDialogs.current?.showExternalOpen(),
     onMessage: setMessage,
   });
+  useEffect(() => {
+    if (!sessionSnapshot.externalOpen?.queued
+      || sessionSnapshot.externalOpen.active
+      || !presentation.activateQueuedExternalOpen({ formActive: creating || dialog !== null
+        || visibleOpenedDialog !== null })) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body
+      && active.isConnected) dialogReturnFocus.current = active;
+    shellDialogs.current?.showExternalOpen();
+  }, [sessionSnapshot.externalOpen?.active, sessionSnapshot.externalOpen?.queued,
+    presentationView.blocked, creating, dialog, publicationResolving]);
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
+    setDialog(null);
+    creationFlow.current?.reset();
+    shellDialogs.current?.reset();
     securityDialogs.current?.reset();
     if (!alreadyAdopted) session.adopt(result);
     const adopted = session.getSnapshot();
     if (adopted.kind === "read-only" || adopted.kind === "edit") {
       setEditorAdoption(adopted.adoption);
     }
-    attentionActions.reset();
     editorView.current?.reset();
     if (result.recovery) {
       const source = [result.recovery.authorName, result.recovery.deviceName]
@@ -181,14 +163,18 @@ export function SharedApp({ sessionHost, journalTransport, events,
       setMessage(`Recovered unsaved work${source ? ` from ${source}` : ""}. Restore or discard it before editing.`);
     } else if (result.lease?.active) {
       setMessage(`Editing lease held by ${result.lease.holderName || "another editor"} (${result.lease.holderEmail}) on ${result.lease.deviceName}.`);
-    }
+    } else setMessage("");
   }
 
   function showReplacementResult(result: Opened, alreadyAdopted = false) {
+    setDialog(null);
+    creationFlow.current?.reset();
+    shellDialogs.current?.reset();
     if (result.invitationRequired) {
       securityDialogs.current?.reset();
       session.adopt(result);
-      setMessage("Claim the invitation before its document replaces the current session.");
+      const message = presentation.invitationStaged().safeMessage;
+      if (message !== null) setMessage(message);
       return;
     }
     showOpenedResult(result, alreadyAdopted);
@@ -221,12 +207,29 @@ export function SharedApp({ sessionHost, journalTransport, events,
       shellDialogs.current?.showExport();
     } else if (command === "passwords" || command === "profile") {
       setDialog(command as DialogName);
-    } else if (command === "save") await attentionActions.save();
-    else if (command === "backup") await attentionActions.backup();
-    else if (command === "edit") await attentionActions.enterEditMode();
-    else if (command === "undo") attentionActions.moveHistory(-1);
-    else if (command === "redo") attentionActions.moveHistory(1);
-    else if (command === "lock") await attentionActions.lock();
+    } else if (command === "save") await runSave();
+    else if (command === "backup") {
+      const started = session.getSnapshot();
+      const adoption = started.kind === "read-only" || started.kind === "edit"
+        ? started.adoption : null;
+      const outcome = await session.backup();
+      const current = session.getSnapshot();
+      if (!presentationMounted.current || (current.kind === "read-only"
+        || current.kind === "edit" ? current.adoption : null) !== adoption) return;
+      if (outcome.status === "backup") setMessage(outcome.created
+        ? "Verified byte-identical backup replica created."
+        : "Backup canceled; the document and destination are unchanged.");
+      else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
+    }
+    else if (command === "edit") {
+      await presentation.enterEditMode();
+      refreshPresentation((revision) => revision + 1);
+      const safeMessage = presentation.view().safeMessage;
+      if (safeMessage !== null) setMessage(safeMessage);
+    }
+    else if (command === "undo") session.undo();
+    else if (command === "redo") session.redo();
+    else if (command === "lock") await lockDocument();
     else if (command === "unlock") shellDialogs.current?.showUnlock();
     else if (command === "close") {
       const outcome = await session.close();
@@ -241,11 +244,21 @@ export function SharedApp({ sessionHost, journalTransport, events,
     }
   }
 
+  async function lockDocument() {
+    const outcome = await session.lock();
+    if (!presentationMounted.current) return;
+    if (outcome.status === "locked") showLockedResult({
+      locked: true, journalSaved: true, warningCode: outcome.warningCode,
+    });
+    else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
+  }
+
   function showLockedResult(result: LockResult, closed = false) {
     document.querySelectorAll<HTMLInputElement>(
       "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
+      presentation.lockStarted();
       if (closed) session.closed();
       else session.lockStarted();
       setEditorAdoption(0);
@@ -254,7 +267,6 @@ export function SharedApp({ sessionHost, journalTransport, events,
       securityDialogs.current?.reset();
       creationFlow.current?.reset();
       setDialog(null);
-      attentionActions.reset();
       setMessage(result.warningCode ? catalogText(result.warningCode)
         : "Document locked. Use Security → Unlock to continue.");
     });
@@ -266,6 +278,55 @@ export function SharedApp({ sessionHost, journalTransport, events,
     securityDialogs.current?.reset();
     setDialog(null);
   };
+
+  async function runSave() {
+    await presentation.save();
+    if (!presentationMounted.current) return;
+    refreshPresentation((revision) => revision + 1);
+    const result = presentation.view();
+    if (result.safeMessage !== null) setMessage(result.safeMessage);
+  }
+
+  async function runDialogAction(action: DialogAction) {
+    if (action === "lock") { await lockDocument(); return; }
+    if (action === "open-passwords") { setDialog("passwords"); return; }
+    const actionElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
+    const started = session.getSnapshot();
+    const adoption = started.kind === "read-only" || started.kind === "edit"
+      ? started.adoption : null;
+    const nextDialog = action === "protection-cancel" || action === "protection-save"
+      || action === "protection-discard"
+      ? await rendererLifecycleCompletion.track(() => presentation.act(action))
+      : await presentation.act(action);
+    if (!presentationMounted.current) return;
+    const current = session.getSnapshot();
+    if ((current.kind === "read-only" || current.kind === "edit"
+      ? current.adoption : null) !== adoption) return;
+    refreshPresentation((revision) => revision + 1);
+    const result = presentation.view();
+    if (nextDialog === "passwords") setDialog(nextDialog);
+    if (nextDialog === "export") shellDialogs.current?.showExport();
+    const safeMessage = result.safeMessage;
+    if (safeMessage !== null) setMessage(safeMessage);
+    else if (action === "continue-editing") setMessage("");
+    const focusIfCurrent = (focus: () => void) => requestAnimationFrame(() => {
+      const latest = session.getSnapshot();
+      if (!presentationMounted.current || (latest.kind === "read-only"
+        || latest.kind === "edit" ? latest.adoption : null) !== adoption) return;
+      focus();
+    });
+    if (result.focusIntent === "decision-action") {
+      focusIfCurrent(() => { if (actionElement?.isConnected) actionElement.focus(); });
+    } else if (result.focusIntent === "migration-retry"
+      || result.focusIntent === "edit-retry"
+      || result.focusIntent === "recovery-restore"
+      || result.focusIntent === "publication-retry"
+      || result.focusIntent === "save-retry") {
+      const intent = result.focusIntent;
+      focusIfCurrent(() => dialogHost.current?.focus(intent));
+    }
+  }
 
   useEffect(() => {
     document.title = targetName
@@ -280,16 +341,19 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
-    <StatusBar session={session} active={activeDocument} message={message} /></div>
+    <StatusBar session={session} active={activeDocument}
+      message={presentation.statusMessage(message)} /></div>
+    <div hidden={protection !== null} inert={protection !== null}>
+    <DialogSuspensionContext.Provider value={protection !== null}>
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}
       completion={rendererLifecycleCompletion} Dialog={CreationSecurityDialog}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onAdopted={(document) => showOpenedResult(document, true)}
       onMessage={setMessage} onFocusEditor={focusEditorAfterDialog}
-      onVisibilityChange={setCreating} suppressed={protection !== null}
+      onVisibilityChange={setCreating}
       returnFocus={dialogReturnFocus.current} />
-    <ShellDialogs ref={shellDialogs} session={session} host={shellHost}
-      completion={rendererLifecycleCompletion} dialog={protection ? null : dialog}
+    <ShellDialogs ref={shellDialogs} session={session} presentation={presentation} host={shellHost}
+      completion={rendererLifecycleCompletion} dialog={dialog}
       active={activeDocument} returnFocus={dialogReturnFocus.current}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       closeWindow={closeWindow} onDialog={setDialog} onMessage={setMessage}
@@ -302,14 +366,15 @@ export function SharedApp({ sessionHost, journalTransport, events,
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onMessage={setMessage} onAdopted={(document) => showOpenedResult(document, true)}
       onClose={closeDialog} onOpenCompaction={() => setDialog("compaction")}
-      passwordsOpen={!protection && dialog === "passwords"}
+      passwordsOpen={dialog === "passwords"}
       claimVisible={!protection && visibleOpenedDialog === "claim"}
       activeDocument={activeDocument} returnFocus={dialogReturnFocus.current} />
+    </DialogSuspensionContext.Provider></div>
     <DialogHost ref={dialogHost} session={session} visibleOpenedDialog={visibleOpenedDialog}
-      activeDocument={activeDocument} dialog={dialog} decisionError={decisionError}
-      openedDialogError={openedDialogError}
-      confirmDivergenceDiscard={confirmDivergenceDiscard}
-      returnFocus={dialogReturnFocus.current} catalogText={catalogText}
-      onAction={attentionActions.run} />
+      activeDocument={activeDocument} dialog={dialog}
+      selectedDecision={presentationView.selectedDecision}
+      focusIntent={presentationView.focusIntent}
+      returnFocus={dialogReturnFocus.current}
+      onAction={runDialogAction} />
   </main>;
 }

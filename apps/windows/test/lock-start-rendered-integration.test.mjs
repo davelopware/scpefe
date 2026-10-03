@@ -471,7 +471,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     for (const event of ["blur", "minimize", "focus", "restore"]) fakeWindow.emit(event);
     await Promise.resolve();
     assert.equal(document.body.contains(dialog), true);
-    assert.equal(document.activeElement, focused);
+    assert.equal(document.activeElement === focused, true);
     assert.deepEqual([focused.selectionStart, focused.selectionEnd], [2, 5]);
     assert.equal(emittedChannels.slice(priorEmits).some((channel) =>
       channel === "document:lock-started" || channel === "document:locked"), false);
@@ -479,7 +479,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   };
   const driveDirect = async (entry, expectedState, windowPrevented = false) => {
     if (entry === "new") {
-      await command("File", /New/); assert.equal(ui.queryByRole(document.body, "dialog"), null);
+      await command("File", /New/); assert.equal(ui.queryByRole(document.body, "dialog") === null, true);
     } else if (entry === "open") {
       await command("File", /Open/);
       const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
@@ -498,7 +498,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       if (windowPrevented) await fakeWindow.lastClose;
       await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
     }
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     await waitScalar(() => ui.getByLabelText(document.body,
       "Document state").textContent === expectedState, `${entry} state ${expectedState}`);
   };
@@ -549,8 +549,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       `${entry} candidate adoption as the authoritative service`);
     await waitScalar(() => ui.getByLabelText(document.body,
       "Document state").textContent === expectedState, `${entry} state ${expectedState}`);
-    assert.notEqual(host.service, priorService, "the staged service became authoritative");
-    assert.equal(priorService.active, null, "the replaced service released its lease and secrets");
+    assert.equal(host.service !== priorService, true, "the staged service became authoritative");
+    assert.equal(priorService.active === null, true, "the replaced service released its lease and secrets");
     assert.equal(host.currentTarget, entry === "new" ? newTarget : otherTarget);
     const titlePattern = new RegExp(entry === "new"
       ? "new-document\\.scpefe" : "other\\.scpefe");
@@ -610,29 +610,42 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       ? ui.getByRole(document.body, "dialog", { name: title })
       : await ui.findByRole(document.body, "dialog", { name: title });
     const keep = ui.getByRole(protection, "button", { name: "Keep current document open" });
-    assert.equal(document.activeElement, keep);
+    assert.equal(document.activeElement === keep, true);
     if (externalRequest) keep.click();
     else await user.click(keep);
     if (externalRequest) await waitScalar(() =>
       host.externalRequests.current(externalRequest.token) === null,
     "external request cancellation after keeping the current document");
-    await ui.waitFor(() => assert.equal(
-      ui.queryByRole(document.body, "dialog", { name: title }), null));
-    const returned = ["new", "open"].includes(entry)
-      ? await ui.findByRole(document.body, "dialog")
-      : entry === "external" ? null : ui.queryByRole(document.body, "dialog");
-    if (returned) {
-      const cancel = ui.queryByRole(returned, "button", { name: "Cancel" });
-      if (cancel) await user.click(cancel);
-    }
+    await waitScalar(() => ui.queryByRole(document.body, "dialog",
+      { name: title }) === null, `${entry} protection dialog dismissed`);
     if (origin === "s5-new") {
+      // The canceled lifecycle can still restore the interrupted form.
       await awaitLifecycleCompletion("provisional New protection cancellation");
     }
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    const returned = ["new", "open"].includes(entry)
+      ? await ui.findByRole(document.body, "dialog",
+        { name: entry === "new" ? "Secure new document" : "Open document" })
+      : entry === "external" ? null : ui.queryByRole(document.body, "dialog");
+    if (returned) {
+      const cancel = ui.getByRole(returned, "button", { name: "Cancel" });
+      await user.click(cancel);
+    }
+    try {
+      await waitScalar(() => ui.queryByRole(document.body, "dialog") === null,
+        "dialog dismissed");
+    } catch (error) {
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')].map((dialog) => ({
+        name: dialog.getAttribute("aria-label") ?? dialog.querySelector("h2")?.textContent,
+        buttons: [...dialog.querySelectorAll("button")]
+          .map((button) => button.textContent?.trim()).slice(0, 8),
+      }));
+      throw new Error(`Dialog remained after ${entry} cancellation: ${JSON.stringify(dialogs)}`,
+        { cause: error });
+    }
   };
   if (origin === "tc-close-no-doc") {
     await command("File", /Close/);
-    assert.equal(ui.queryByRole(document.body, "dialog"), null);
+    assert.equal(ui.queryByRole(document.body, "dialog") === null, true);
     assert.equal(ui.getByLabelText(document.body, "Document state").textContent,
       "No document"); assert.equal(fakeWindow.closed, 0); return;
   }
@@ -647,7 +660,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       await driveSuccessfulReplacement(entry); return;
     } else if (entry === "close") {
       await command("File", /Close/);
-      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+      assert.equal(ui.queryByRole(document.body, "dialog") === null, true);
     } else if (entry === "exit") {
       await command("File", "Exit"); await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
     } else {
@@ -733,8 +746,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     assert.equal(host.service.active.pendingRecord.publication.candidateHash,
       restartCandidateHash);
     assert.equal(host.service.active.opened.publicationState, "pending-publication");
-    assert.equal(document.activeElement,
-      ui.getByRole(pending, "button", { name: "Retry publication" }));
+    assert.equal(document.activeElement ===
+      ui.getByRole(pending, "button", { name: "Retry publication" }), true);
     await new Promise((resolve) => setImmediate(resolve));
     return;
   }
@@ -899,7 +912,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     } else {
       await command("File", entry === "new" ? /New/ : entry === "open" ? /Open/
         : entry === "close" ? /Close/ : "Exit");
-      assert.equal(host.protections.pending, null,
+      assert.equal(host.protections.pending === null, true,
         "the blocking recovery modal makes the lifecycle command inapplicable");
       assert.deepEqual({ create: createPickerCalls, open: openPickerCalls }, pickerCounts,
         "no picker or host lifecycle entry ran behind the blocking modal");
@@ -953,6 +966,10 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
     const decision = await ui.findByRole(document.body, "dialog", { name: /before New/ });
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Secure new document" }) === null, true,
+      "the interrupted form is not actionable during protection");
+    assert.equal(document.querySelector('input[name="ownerPassword"]')?.value,
+      "owner password words", "the interrupted form keeps its draft while hidden");
     const priorEmits = emittedChannels.length;
     for (const event of ["blur", "minimize", "focus", "restore"]) fakeWindow.emit(event);
     assert.equal(document.body.contains(decision), true);
@@ -963,8 +980,16 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     assert.equal(host.service.active.working.content, "unsaved focus decision");
     await user.click(ui.getByRole(decision, "button",
       { name: "Keep current document open" }));
+    await waitScalar(() => document.querySelector(".security-dialog button[type='submit']")
+      ?.textContent === "Create", "interrupted New form ready after cancellation");
     const returned = await ui.findByRole(document.body, "dialog",
       { name: "Secure new document" });
+    assert.equal(ui.getByLabelText(returned, "Owner password").value,
+      "owner password words", "Cancel restores the interrupted form draft");
+    assert.equal(ui.getByLabelText(returned, "Confirm owner password").value,
+      "owner password words");
+    assert.equal(returned.contains(document.activeElement), true,
+      "Cancel restores focus inside the interrupted form");
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
     return;
   }
@@ -1144,7 +1169,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   if (origin.startsWith("rn-")) {
     await command("File", /New/);
     if (origin === "rn-picker-cancel") {
-      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+      assert.equal(ui.queryByRole(document.body, "dialog") === null, true);
       assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
       assert.equal(editor.value, "mounted secret plaintext"); return;
     }
@@ -1171,12 +1196,12 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       postAuthorizationFaultTarget = newTarget;
       await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
       await ui.findByText(protection, /document protection choice could not be completed/i);
-      assert.equal(host.service, service);
+      assert.equal(host.service === service, true);
       assert.equal(editor.value, "");
       assert.equal(service.active.dirty, false,
         "the authorized Save completed before the second revalidation failed");
-      assert.equal(document.activeElement,
-        ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+      assert.equal(document.activeElement ===
+        ui.getByRole(protection, "button", { name: "Manual save and continue" }), true);
       assert.equal(await fs.stat(newTarget).then(() => true, () => false), true,
         "the retryable candidate remains staged until the operator cancels replacement");
       await user.click(ui.getByRole(protection, "button",
@@ -1197,13 +1222,13 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   if (origin.startsWith("ro-")) {
     await command("File", /Open/);
     if (origin === "ro-picker-cancel") {
-      assert.equal(ui.queryByRole(document.body, "dialog"), null);
+      assert.equal(ui.queryByRole(document.body, "dialog") === null, true);
       assert.equal(editor.value, "mounted secret plaintext"); return;
     }
     let opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
     if (origin === "ro-dialog-cancel") {
       await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
-      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
       assert.equal(host.service === service, true); assert.equal(editor.value,
         "mounted secret plaintext"); return;
     }
@@ -1217,7 +1242,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (origin === "ro-invitation") {
       const claim = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
       await user.click(ui.getByRole(claim, "button", { name: "Cancel" }));
-      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+      await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
       assert.equal(host.service === service, true); assert.equal(editor.value,
         "mounted secret plaintext"); return;
     }
@@ -1235,8 +1260,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (origin === "ro-post-authorization-revalidation") {
       assert.equal(service.active.dirty, false,
         "the authorized Save completed before the second revalidation failed");
-      assert.equal(document.activeElement,
-        ui.getByRole(protection, "button", { name: "Manual save and continue" }));
+      assert.equal(document.activeElement ===
+        ui.getByRole(protection, "button", { name: "Manual save and continue" }), true);
       assert.equal(host.replacements.candidates.size, 1);
     }
     await user.click(ui.getByRole(protection, "button",
@@ -1328,10 +1353,14 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         assert.equal(host.externalRequests.current(request.token), null);
       } else {
         const returned = await ui.findByRole(document.body, "dialog");
+        await waitScalar(() => returned.querySelector("button[type='submit']")
+          ?.textContent === "Create" || entry !== "new",
+        "interrupted replacement form ready after protection cancellation");
         await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
       }
-      await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-      assert.equal(host.service, service);
+      await waitScalar(() => ui.queryByRole(document.body, "dialog") === null,
+        "dialog dismissed");
+      assert.equal(host.service === service, true);
       assert.equal(host.currentTarget, target);
       assert.equal(editor.value, "mounted secret plaintext");
       return;
@@ -1372,9 +1401,12 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         await user.click(ui.getByRole(protection, "button",
           { name: "Keep current document open" }));
         const returned = await ui.findByRole(document.body, "dialog");
+        await waitScalar(() => returned.querySelector("button[type='submit']")
+          ?.textContent === "Create" || entry !== "new",
+        "interrupted replacement form ready after retry cancellation");
         await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
-        await ui.waitFor(() => assert.equal(
-          document.querySelector("[role=dialog]") === null, true));
+        await waitScalar(() => document.querySelector("[role=dialog]") === null,
+          "dialog dismissed");
         return;
       }
       saveFault = false; discardFault = false; provisionalDiscardFault = false;
@@ -1406,7 +1438,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       await user.click(ui.getByRole(protection, "button",
         { name: "Keep current document open" }));
       await awaitLifecycleCompletion(`dirty Cancel ${entry}`);
-      await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
+      await waitScalar(() => document.querySelector("[role=dialog]") === null, "dialog dismissed");
       assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
       return;
     }
@@ -1428,8 +1460,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         await user.click(ui.getByRole(protection, "button",
           { name: "Keep current document open" }));
         await awaitLifecycleCompletion(`provisional retry Cancel ${entry}`);
-        await ui.waitFor(() => assert.equal(
-          document.querySelector("[role=dialog]") === null, true));
+        await waitScalar(() => document.querySelector("[role=dialog]") === null,
+          "dialog dismissed");
         assert.equal(fakeWindow.closed, 0); return;
       }
       saveFault = false; discardFault = false; provisionalDiscardFault = false;
@@ -1487,7 +1519,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       entry === "new" ? /before New/ : ["open", "external"].includes(entry)
         ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/ });
     await user.click(ui.getByRole(protection, "button", { name: "Manual save and continue" }));
-    assert.equal(host.service, priorService,
+    assert.equal(host.service === priorService, true,
       "authorization waits behind the held production lifecycle barrier");
     assert.equal(fakeWindow.closed, 0);
     if (request) assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
@@ -1496,11 +1528,11 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (entry === "new") await awaitLifecycleCompletion("held maintenance New replacement");
     if (entry === "new" || entry === "open" || entry === "external") {
       const expectedState = entry === "new" ? "Edit mode" : "Read-only";
-      await ui.waitFor(() => assert.notEqual(host.service, priorService));
+      await ui.waitFor(() => assert.equal(host.service !== priorService, true));
       await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
         "Document state").textContent, expectedState));
-      assert.notEqual(host.service, priorService);
-      assert.equal(priorService.active, null);
+      assert.equal(host.service !== priorService, true);
+      assert.equal(priorService.active === null, true);
       assert.equal(host.currentTarget, entry === "new" ? newTarget : otherTarget);
       if (request) {
         await ui.waitFor(() => assert.equal(host.externalRequests.current(request.token), null));
@@ -1547,7 +1579,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       assert.ok(document.body.contains(pending));
       assert.equal(host.service.active.opened.publicationState, "pending-publication");
       publicationUnavailable = false; await user.click(retry);
-      await ui.waitFor(() => assert.equal(document.querySelector("[role=dialog]") === null, true));
+      await waitScalar(() => document.querySelector("[role=dialog]") === null, "dialog dismissed");
       assert.equal(host.service.active.opened.publicationState, "target-published");
       assert.equal(await fs.readFile(target, "utf8"), "saved:mounted secret plaintext");
       return;
@@ -1559,7 +1591,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       await user.click(discard);
       await ui.findByText(protection,
         /document protection choice could not be completed/i);
-      assert.equal(document.activeElement, discard);
+      assert.equal(document.activeElement === discard, true);
       assert.equal(host.service.active.opened.publicationState, "pending-publication");
       assert.equal(fakeWindow.closed, 0);
       return;
@@ -1595,12 +1627,12 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     } else {
       await command("File", entry === "new" ? /New/ : entry === "open" ? /Open/
         : entry === "close" ? /Close/ : "Exit");
-      assert.equal(host.protections.pending, null,
+      assert.equal(host.protections.pending === null, true,
         "the pending-publication modal makes this menu command inapplicable");
       assert.deepEqual({ create: createPickerCalls, open: openPickerCalls }, pickerCounts,
         "no picker or host lifecycle entry ran behind the pending-publication modal");
     }
-    assert.equal(ui.getByRole(document.body, "dialog"), pending,
+    assert.equal(ui.getByRole(document.body, "dialog") === pending, true,
       "the real pending-publication decision remains authoritative");
     assert.equal(editor.value, "");
     assert.equal(fakeWindow.closed, 0);
@@ -1625,8 +1657,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     let protection = await ui.findByRole(document.body, "dialog",
       { name: new RegExp(`before ${origin === "close" ? "Close" : "Exit"}`) });
     const keep = ui.getByRole(protection, "button", { name: "Keep current document open" });
-    assert.equal(document.activeElement, keep); await user.click(keep);
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(document.activeElement === keep, true); await user.click(keep);
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     assert.equal(editor.value, "mounted secret plaintext"); assert.equal(fakeWindow.closed, 0);
     await command("File", origin === "close" ? /Close/ : "Exit");
     protection = await ui.findByRole(document.body, "dialog",
@@ -1649,9 +1681,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
     const returned = await ui.findByRole(document.body, "dialog", { name: "Open document" });
     assert.equal(editor.value, "");
-    assert.equal(host.service, service);
+    assert.equal(host.service === service, true);
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     assert.equal(editor.value, "mounted secret plaintext");
     return;
   }
@@ -1668,12 +1700,12 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
     assert.match(ui.getByRole(creation, "alert").textContent,
       /owner passwords do not match/i);
-    assert.equal(document.activeElement,
-      ui.getByLabelText(creation, "Confirm owner password"));
+    assert.equal(document.activeElement ===
+      ui.getByLabelText(creation, "Confirm owner password"), true);
     assert.equal(await fs.stat(newTarget).then(() => true, () => false), false);
     assert.equal(editor.value, "");
     await user.click(ui.getByRole(creation, "button", { name: "Cancel" }));
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     assert.equal(editor.value, "mounted secret plaintext");
     return;
   }
@@ -1700,7 +1732,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       await fs.stat(newTarget).then(() => true, () => false), false));
     assert.equal(editor.value, "");
     await user.click(ui.getByRole(returned, "button", { name: "Cancel" }));
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     await command("File", /New/);
     const retryCreation = await ui.findByRole(document.body, "dialog",
       { name: "Secure new document" });
@@ -1744,7 +1776,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented"]);
     assert.equal(host.externalRequests.current(request.token).token, request.token);
     await user.click(ui.getByRole(externalDialog, "button", { name: "Cancel" }));
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     assert.equal(editor.value, "mounted secret plaintext");
     assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "canceled"]);
     assert.equal(host.externalRequests.current(request.token), null);
@@ -1755,10 +1787,10 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     assert.equal(first.prevented, true);
     let protection = await ui.findByRole(document.body, "dialog", { name: /before Exit/ });
     assert.equal(editor.value, "");
-    assert.equal(document.activeElement, ui.getByRole(protection, "button",
-      { name: "Keep current document open" }));
+    assert.equal(document.activeElement === ui.getByRole(protection, "button",
+      { name: "Keep current document open" }), true);
     await user.click(ui.getByRole(protection, "button", { name: "Keep current document open" }));
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    await waitScalar(() => ui.queryByRole(document.body, "dialog") === null, "dialog dismissed");
     await fakeWindow.lastClose;
     assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "mounted secret plaintext");
     const second = fakeWindow.close(); assert.equal(second.prevented, true);
@@ -1769,7 +1801,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       /document protection choice could not be completed/i).textContent,
     /document protection choice could not be completed/i));
     assert.equal(fakeWindow.closed, 0); assert.equal(editor.value, "");
-    assert.equal(document.activeElement, save);
+    assert.equal(document.activeElement === save, true);
     saveFault = false; holdMaintenance = true; await user.click(save);
     await awaitHeldLifecycleCompletion(maintenanceEntered, () => releaseMaintenance(),
       "native window Exit save retry");

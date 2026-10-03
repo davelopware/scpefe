@@ -5,6 +5,7 @@ export type { FocusDomCapability, FocusKeyEvent, FocusScope,
   FocusScopeOptions } from "./focus-manager.ts";
 export { browserFocusDom, browserFocusManager } from "./browser-focus-dom.ts";
 export { useModalFocus } from "./use-modal-focus.ts";
+export { DialogSuspensionContext } from "./dialogs/focused-dialog.tsx";
 export type { ModalFocusOptions } from "./use-modal-focus.ts";
 export { useSessionSnapshot } from "./use-session-snapshot.ts";
 export { SharedApp } from "./session/session-app.tsx";

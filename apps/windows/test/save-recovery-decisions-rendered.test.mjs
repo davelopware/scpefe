@@ -174,6 +174,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       compactDocument: async (request) => {
         calls.push(["compact", request]); compactionAttempts += 1;
         if (compactionAttempts === 1) throw new Error("backup verification failed");
+        if (compactionAttempts === 2) return null;
         return { compacted: true, backupCreated: true,
           previousHead: "44".repeat(32), head: "55".repeat(32),
           opened: { ...base, readOnly: false } };
@@ -246,6 +247,22 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await user.click(action);
     await ui.waitFor(() => assert.equal(status("Document state"), "Read-only"));
     assert.equal(recoveryDiscards, 2);
+    await command("Security", "Profile…");
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Profile" });
+    const draftName = ui.getByLabelText(dialog, "Name");
+    await user.clear(draftName);
+    await user.type(draftName, "Local profile draft");
+    listeners.switch({ ...base, recovery: { content: "deferred private text",
+      state: "unsaved", updateTime: 2, cursor: { start: 0, end: 0 } } });
+    assert.equal(ui.queryByRole(document.body, "dialog", { name: "Recovered work" }), null);
+    assert.equal(draftName.value, "Local profile draft");
+    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
+    assert.equal(document.body.textContent.includes("deferred private text"), false);
+    await ui.waitFor(() => assert.equal(document.activeElement?.textContent?.trim(),
+      "Discard recovered work"));
+    await user.click(ui.getByRole(dialog, "button", { name: "Discard recovered work" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     await command("Security", "Lock");
     openResult = { ...base, recovery: { content: "recovered private text",
       state: "unsaved", updateTime: 1, cursor: { start: 3, end: 3 } } };
@@ -308,9 +325,18 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
     await user.click(ui.getByRole(dialog, "button",
       { name: "Create verified backup and compact" }));
+    await ui.waitFor(() => assert.match(
+      ui.getByRole(document.body, "status").textContent,
+      /Compaction canceled; document history is unchanged/));
+    assert.equal(document.body.contains(dialog), true);
+    assert.equal(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and compact" }).disabled, false);
+    await user.click(ui.getByRole(dialog, "button",
+      { name: "Create verified backup and compact" }));
     await ui.findByRole(document.body, "dialog", { name: "Passwords" });
     assert.deepEqual(calls.filter(([name]) => name === "compact"), [
       ["compact", { confirmed: true }], ["compact", { confirmed: true }],
+      ["compact", { confirmed: true }],
     ]);
     await user.click(ui.getByRole(document.body, "button", { name: "Close" }));
 
@@ -441,6 +467,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.equal(editor.value, "");
     assert.equal(document.body.textContent.includes("authenticated private text"), false);
     action = ui.getByRole(dialog, "button", { name: "Accept current authenticated head" });
+    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
     await user.click(action);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
       /operation could not be completed safely/i);
@@ -487,6 +514,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     assert.equal(document.body.textContent.includes("unreadable private target"), false);
     const discardUnreadable = ui.getByRole(dialog, "button",
       { name: "Discard unreadable journal" });
+    await ui.waitFor(() => assert.equal(document.activeElement?.textContent?.trim(),
+      "Keep read-only and close"));
     await user.click(discardUnreadable);
     assert.match((await ui.findByRole(dialog, "alert")).textContent,
       /operation could not be completed safely/i);

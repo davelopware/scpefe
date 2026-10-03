@@ -1,24 +1,25 @@
 import { useEffect, type RefObject } from "react";
 import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
-import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import type { ShellHost } from "../shell/shell-dialogs.tsx";
 import type { SessionEventsHost } from "./host-roles.ts";
 import type { DocumentOpened, Opened } from "./types.ts";
+import type { SessionPresentation } from "./session-presentation.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
 type EventSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>
   & Pick<FullSession, "getSnapshot" | "observeRecoveryDiscovery"
-    | "regularSavePublished" | "queueExternalOpen" | "activateExternalOpen"
+    | "regularSavePublished" | "queueExternalOpen"
     | "stageProtection">;
 type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
 
 /** Subscribes native lifecycle events and forwards only semantic presentation effects. */
-export function useSessionEvents({ session, events, shellHost, completion,
+export function useSessionEvents({ session, presentation, events, shellHost, completion,
   forwardJournalWarning, catalogText, safeRendererErrorMessage, modalBusy,
-  returnFocus, canPresentQueued, onLocked, onRetained, onPresentExternal,
+  returnFocus, onLocked, onRetained,
   onMessage }: {
   session: EventSession;
+  presentation: Pick<SessionPresentation, "externalOpenQueued">;
   events: SessionEventsHost;
   shellHost: Pick<ShellHost, "getUnresolvedJournalSummary">;
   completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
@@ -27,14 +28,10 @@ export function useSessionEvents({ session, events, shellHost, completion,
   safeRendererErrorMessage(error: unknown): string;
   modalBusy: RefObject<boolean>;
   returnFocus: RefObject<HTMLElement | null>;
-  canPresentQueued: boolean;
   onLocked(result: LockResult, closed?: boolean): void;
   onRetained(document: DocumentOpened): void;
-  onPresentExternal(): void;
   onMessage(message: string): void;
 }): void {
-  const snapshot = useSessionSnapshot(session);
-  const externalOpen = snapshot.externalOpen;
   useEffect(() => {
     void completion.track(() => shellHost.getUnresolvedJournalSummary()
       .then((summary) => { session.observeRecoveryDiscovery(summary); })
@@ -59,10 +56,8 @@ export function useSessionEvents({ session, events, shellHost, completion,
       const current = session.getSnapshot();
       if (modalBusy.current || (current.kind === "read-only" || current.kind === "edit")
         && current.publication.resolving) {
-        onMessage("Another open request is waiting for the current dialog.");
-      } else {
-        returnFocus.current = document.activeElement as HTMLElement | null;
-        session.activateExternalOpen(); onPresentExternal();
+        const waitingMessage = presentation.externalOpenQueued(true);
+        if (waitingMessage !== null) onMessage(waitingMessage);
       }
     });
     const stopJournalSummary = events.onUnresolvedJournalSummary(
@@ -88,10 +83,4 @@ export function useSessionEvents({ session, events, shellHost, completion,
       window.removeEventListener("pointerdown", activity);
     };
   }, []);
-  useEffect(() => {
-    if (canPresentQueued && !externalOpen?.active && externalOpen?.queued) {
-      returnFocus.current = document.activeElement as HTMLElement | null;
-      session.activateExternalOpen(); onPresentExternal();
-    }
-  }, [canPresentQueued, externalOpen?.active, externalOpen?.queued, session]);
 }

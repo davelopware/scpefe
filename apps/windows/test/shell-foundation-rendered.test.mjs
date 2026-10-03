@@ -43,6 +43,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     cancelAnimationFrame: (token) => animationFrames.delete(token),
     IS_REACT_ACT_ENVIRONMENT: true });
   const calls = [];
+  const canceledExternal = [];
   const listeners = {};
   let stoppedListeners = 0;
   const listen = (name, listener) => {
@@ -63,7 +64,9 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
       targetName: "notes.scpefe",
       recovery: { content: "recovered document", state: "unsaved", updateTime: 1,
         cursor: { start: 0, end: 0 } } }; },
-    openExternalDocument: async () => null, enterEditMode: async () => ({ content: "mounted document",
+    openExternalDocument: async () => null, cancelExternalOpen: async (request) => {
+      canceledExternal.push(request.token); return true;
+    }, enterEditMode: async () => ({ content: "mounted document",
       readOnly: false, canEdit: true, publicationState: "target-published" }),
     updateWorkingCopy: async () => ({}), saveDocument: async (content) => ({ saved: true, content,
       publicationState: "target-published" }), backupDocument: async () => ({ backedUp: true }),
@@ -207,16 +210,32 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   await user.click(choose);
   const recoveryDialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
   assert.equal(ui.getAllByRole(document.body, "dialog").length, 1);
+  listeners["external-open"]({ token: "queued-first" });
+  listeners["external-open"]({ token: "queued-second" });
+  assert.equal(ui.getAllByRole(document.body, "dialog").length, 1,
+    "queued external opens do not interrupt recovery attention");
+  assert.match(status.textContent, /Recovered unsaved work/,
+    "queued requests do not replace the visible recovery status");
   await user.keyboard("{Control>}n{/Control}{Control>}o{/Control}{Alt>}f{/Alt}");
   assert.deepEqual(calls, ["new", "open"]);
   assert.equal(ui.queryByRole(document.body, "menu") === null, true,
     "recovery modal shortcuts open no menu");
   await user.click(ui.getByRole(recoveryDialog, "button", { name: "Discard recovered work" }));
-  await ui.waitFor(() => assert.equal(
-    ui.queryByRole(document.body, "dialog") === null, true,
-    "discard closes the recovery dialog"));
-  await ui.waitFor(() => assert.equal(
-    document.activeElement?.getAttribute("aria-label"), "File"));
+  let queued = await ui.findByRole(document.body, "dialog",
+    { name: "Open requested document" });
+  assert.match(status.textContent,
+    /Another open request is waiting\. Enter its document password to continue\./,
+    "the active request replaces the earlier recovery and queued-waiting messages");
+  await ui.waitFor(() => assert.equal(document.activeElement ===
+    ui.getByLabelText(queued, "Password"), true));
+  await user.click(ui.getByRole(queued, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.deepEqual(canceledExternal, ["queued-first"]));
+  queued = await ui.findByRole(document.body, "dialog",
+    { name: "Open requested document" });
+  await user.click(ui.getByRole(queued, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.deepEqual(canceledExternal,
+    ["queued-first", "queued-second"]));
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
   assert.equal(editor.disabled, false); assert.equal(editor.readOnly, true);
   assert.equal(editor.value, "mounted document");
 
