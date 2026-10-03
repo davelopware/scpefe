@@ -1,0 +1,26 @@
+{
+  "before": {
+    "viewport": 380,
+    "dialogTop": 14,
+    "dialogBottom": 366,
+    "headerTop": 15,
+    "headerBottom": 61.890625,
+    "bodyTop": 61.890625,
+    "bodyHeight": 303,
+    "bodyScrollHeight": 1312,
+    "bodyScrollTop": 0,
+    "dialogScrollTop": 0
+  },
+  "after": {
+    "viewport": 380,
+    "dialogTop": 14,
+    "dialogBottom": 366,
+    "headerTop": 15,
+    "headerBottom": 61.890625,
+    "bodyTop": 61.890625,
+    "bodyHeight": 303,
+    "bodyScrollHeight": 1312,
+    "bodyScrollTop": 1000,
+    "dialogScrollTop": 0
+  }
+}

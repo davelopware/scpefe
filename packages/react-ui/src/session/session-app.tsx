@@ -4,11 +4,13 @@ import { DocumentSession, type WorkingCopyJournalHost } from "@scpefe/frontend-c
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
+import { createShellCommands, type ShellCommand } from "../shell/shell-commands.ts";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
 import { DialogSuspensionContext } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
+import { clearMountedPasswordFields } from "../security/password-entry.ts";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
 import { SessionPresentation } from "./session-presentation.ts";
 import type { DialogAction } from "../dialogs/dialog-host.tsx";
@@ -108,7 +110,17 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [, refreshPresentation] = useState(0);
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
-  const [dialog, setDialog] = useState<DialogName>(null);
+  const [dialog, setDialogState] = useState<DialogName>(null);
+  // Retained callbacks must see closes and new Passwords openings immediately.
+  const currentDialog = useRef<DialogName>(null);
+  const passwordsOpening = useRef(0);
+  function setDialog(next: DialogName) {
+    if (next === "passwords" && currentDialog.current !== "passwords") {
+      passwordsOpening.current += 1;
+    }
+    currentDialog.current = next;
+    setDialogState(next);
+  }
   const [creating, setCreating] = useState(false);
   const creationFlow = useRef<CreationFlowHandle>(null);
   const shellDialogs = useRef<ShellDialogsHandle>(null);
@@ -187,14 +199,23 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const activeDocument = isDocumentOpened(opened)
     && (sessionSnapshot.kind === "read-only" || sessionSnapshot.kind === "edit")
     && sessionSnapshot.adoption === editorAdoption;
+  const shellCommands = createShellCommands({ session,
+    facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
+      || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
+      modalBusy: modalBusy.current,
+      passwordsDialogActive: currentDialog.current === "passwords" && protection === null
+        && !creating && !presentationView.blocked,
+      passwordsOpening: passwordsOpening.current }),
+    run: runCommand,
+    track: (operation) => rendererLifecycleCompletion.track(operation),
+  });
   useEffect(() => {
     if (!replacementFocusPending.current || creating || dialog !== null
         || visibleOpenedDialog !== null || protection !== null || !activeDocument) return;
     replacementFocusPending.current = false;
     requestAnimationFrame(() => requestAnimationFrame(() => editorView.current?.focus()));
   }, [activeDocument, creating, dialog, protection, visibleOpenedDialog]);
-  async function runCommand(command: string, returnFocus?: HTMLElement | null) {
-    if (modalBusy.current) return;
+  async function runCommand(command: ShellCommand, returnFocus: HTMLElement | null) {
     if (returnFocus?.isConnected) dialogReturnFocus.current = returnFocus;
     if (command === "new") {
       await creationFlow.current?.open();
@@ -229,6 +250,9 @@ export function SharedApp({ sessionHost, journalTransport, events,
     }
     else if (command === "undo") session.undo();
     else if (command === "redo") session.redo();
+    else if (command === "compact") {
+      if (session.requestCompaction().status === "attention") setDialog("compaction");
+    }
     else if (command === "lock") await lockDocument();
     else if (command === "unlock") shellDialogs.current?.showUnlock();
     else if (command === "close") {
@@ -254,8 +278,9 @@ export function SharedApp({ sessionHost, journalTransport, events,
   }
 
   function showLockedResult(result: LockResult, closed = false) {
-    document.querySelectorAll<HTMLInputElement>(
-      "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
+    clearMountedPasswordFields();
+    document.querySelectorAll<HTMLInputElement>("input[readonly]")
+      .forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
       presentation.lockStarted();
@@ -334,14 +359,11 @@ export function SharedApp({ sessionHost, journalTransport, events,
   }, [targetName, dirty]);
 
   return <main className="app-shell"><div className="shell-chrome">
-    <MenuBar session={session} active={activeDocument} profileReady={profileReady}
-      blocked={modalBusy.current}
-      run={(command, returnFocus) =>
-      void rendererLifecycleCompletion.track(() => runCommand(command, returnFocus))} />
+    <MenuBar snapshot={sessionSnapshot} commands={shellCommands} />
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
-    <StatusBar session={session} active={activeDocument}
+    <StatusBar session={session} active={activeDocument} commands={shellCommands}
       message={presentation.statusMessage(message)} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
@@ -365,7 +387,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       PasswordPolicyStatus={PasswordPolicyStatus} CompactionControls={CompactionControls}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onMessage={setMessage} onAdopted={(document) => showOpenedResult(document, true)}
-      onClose={closeDialog} onOpenCompaction={() => setDialog("compaction")}
+      onClose={closeDialog} commands={shellCommands}
+      passwordsOpening={passwordsOpening.current}
       passwordsOpen={dialog === "passwords"}
       claimVisible={!protection && visibleOpenedDialog === "claim"}
       activeDocument={activeDocument} returnFocus={dialogReturnFocus.current} />

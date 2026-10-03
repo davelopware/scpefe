@@ -1,6 +1,6 @@
-import React, { useContext, useRef, useState, type Dispatch, type FormEvent,
+import React, { useRef, useState, type Dispatch, type FormEvent,
   type SetStateAction } from "react";
-import { DialogSuspensionContext, useModalFocus } from "@scpefe/react-ui";
+import { FocusedDialog, usePasswordEntry } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -94,12 +94,12 @@ function reportCreationDiagnostic(layer: Diagnostic["layer"], rule: string): voi
 /* Collects and validates creation secrets after a target has been selected. */
 export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   CreationSecurityDialogProps): React.ReactElement {
-  const [ownerPassword, setOwnerPassword] = useState("");
-  const [ownerConfirmation, setOwnerConfirmation] = useState("");
-  const [recoveryPassword, setRecoveryPassword] = useState("");
-  const [recoveryConfirmation, setRecoveryConfirmation] = useState("");
-  const [ownerRevealed, setOwnerRevealed] = useState(false);
-  const [recoveryRevealed, setRecoveryRevealed] = useState(false);
+  const passwords = usePasswordEntry(["owner", "ownerConfirmation",
+    "recovery", "recoveryConfirmation"] as const);
+  const ownerPassword = passwords.value("owner");
+  const ownerConfirmation = passwords.value("ownerConfirmation");
+  const recoveryPassword = passwords.value("recovery");
+  const recoveryConfirmation = passwords.value("recoveryConfirmation");
   const [understandsIrrecoverable, setUnderstandsIrrecoverable] = useState(false);
   const [storedRecoverySeparately, setStoredRecoverySeparately] = useState(false);
   const [error, setError] = useState("");
@@ -112,21 +112,16 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   const ownerRef = useRef<HTMLInputElement>(null);
   const irrecoverabilityRef = useRef<HTMLInputElement>(null);
   const recoveryStorageRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLElement>(null);
   const completedRef = useRef(false);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
-  const suspended = useContext(DialogSuspensionContext);
-
-  const focus = useModalFocus({ scopeRef: dialogRef, initialFocusRef: ownerRef,
-    active: !suspended,
-    returnFocus, onEscape: submitting ? undefined : cancel,
-    shouldRestoreFocus: () => !completedRef.current,
-    fallbackFocus: () => document.querySelector<HTMLElement>(
-      '[role="menubar"] > .menu > [role="menuitem"]') });
 
   function updateField<T>(field: ValidationField,
     setter: Dispatch<SetStateAction<T>>, value: T): void {
     setter(value);
+    clearFieldError(field);
+  }
+
+  function clearFieldError(field: ValidationField): void {
     if (invalidField === field) {
       setInvalidField("");
       setError("");
@@ -193,6 +188,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     setSubmitting(true);
     try {
       await onCreate(request);
+      passwords.reset();
       completedRef.current = true;
     } catch (submissionError) {
       setError(safeRendererErrorMessage(submissionError));
@@ -211,38 +207,35 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   }
 
   function cancel(): void {
-    if (!submitting) void onCancel();
+    if (!submitting) { passwords.reset(); void onCancel(); }
   }
 
-  return h("div", { className: "dialog-backdrop", onKeyDown: focus.onKeyDown },
-  h("section", { ref: dialogRef, className: "security-dialog", role: "dialog", "aria-modal": "true",
-    tabIndex: -1,
-    "aria-labelledby": "creation-security-title",
-    "aria-describedby": "creation-security-warning", "aria-busy": submitting },
-  h("h2", { id: "creation-security-title" }, "Secure new document"),
+  return h(FocusedDialog, { title: "Secure new document", className: "security-dialog",
+    describedBy: "creation-security-warning", busy: submitting,
+    initialFocus: ownerRef, returnFocus, close: submitting ? undefined : cancel,
+    shouldRestoreFocus: () => !completedRef.current },
   h("p", { id: "creation-security-warning", className: "warning" },
     "Lost passwords cannot be recovered. Without a valid owner or recovery password, the document is permanently irrecoverable."),
   h("form", { onSubmit: submit, noValidate: true },
     h(PasswordConfirmationFields, { kind: "owner", label: "Owner password",
-      confirmationLabel: "Confirm owner password", revealed: ownerRevealed,
-      required: true, value: ownerPassword, confirmationValue: ownerConfirmation,
-      inputRef: ownerRef, confirmationRef: ownerConfirmationRef,
+      confirmationLabel: "Confirm owner password", revealed: passwords.visible("owner"),
+      required: true, input: passwords.field("owner", ownerRef,
+        () => clearFieldError("owner")),
+      confirmation: passwords.field("ownerConfirmation", ownerConfirmationRef,
+        () => clearFieldError("ownerConfirmation")),
       invalidPassword: invalidField === "owner",
       invalidConfirmation: invalidField === "ownerConfirmation",
       errorDescriptionId: ERROR_ID,
       passwordError: errorDiagnostic?.layer === "creation-boundary"
         && errorDiagnostic.rule === "OWNER_PASSWORD_WEAK" ? error : "",
-      onValueChange: (value) => updateField("owner", setOwnerPassword, value),
-      onConfirmationChange: (value) => updateField(
-        "ownerConfirmation", setOwnerConfirmation, value),
-      onToggle: () => setOwnerRevealed((visible) => !visible) }),
+      onToggle: () => passwords.toggle("owner", "ownerConfirmation") }),
     h(PasswordConfirmationFields, { kind: "recovery",
       label: "Independent recovery password (strongly recommended)",
-      confirmationLabel: "Confirm recovery password", revealed: recoveryRevealed,
-      required: false, value: recoveryPassword,
-      inputRef: recoveryRef,
-      confirmationValue: recoveryConfirmation,
-      confirmationRef: recoveryConfirmationRef,
+      confirmationLabel: "Confirm recovery password", revealed: passwords.visible("recovery"),
+      required: false, input: passwords.field("recovery", recoveryRef,
+        () => clearFieldError("recovery")),
+      confirmation: passwords.field("recoveryConfirmation", recoveryConfirmationRef,
+        () => clearFieldError("recoveryConfirmation")),
       invalidPassword: invalidField === "recovery",
       invalidConfirmation: invalidField === "recoveryConfirmation",
       errorDescriptionId: ERROR_ID,
@@ -250,10 +243,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
         && errorDiagnostic.rule === "RECOVERY_PASSWORD_WEAK" ? error : "",
       comparePassword: ownerPassword,
       compareMessage: "Recovery password must differ from the owner password.",
-      onValueChange: (value) => updateField("recovery", setRecoveryPassword, value),
-      onConfirmationChange: (value) => updateField(
-        "recoveryConfirmation", setRecoveryConfirmation, value),
-      onToggle: () => setRecoveryRevealed((visible) => !visible) }),
+      onToggle: () => passwords.toggle("recovery", "recoveryConfirmation") }),
     h("small", null, "Leave both recovery fields empty to create a document without a recovery password. Store a recovery password safely offline and separately from the owner password and document."),
     h("label", { className: "check" },
       h("input", { name: "understandsIrrecoverable", type: "checkbox",
@@ -279,7 +269,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     h("div", { className: "toolbar dialog-actions" },
       h("button", { type: "button", disabled: submitting, onClick: cancel }, "Cancel"),
       h("button", { type: "submit", disabled: submitting },
-        submitting ? "Creating…" : "Create")))));
+        submitting ? "Creating…" : "Create"))));
 }
 
 /* Starts target selection and mounts the security dialog only after selection. */
@@ -287,10 +277,6 @@ export function CreateDocumentControl({ onCreated, onError }:
   CreateDocumentControlProps): React.ReactElement {
   const [creating, setCreating] = useState(false);
   const launcherRef = useRef<HTMLButtonElement>(null);
-
-  function restoreLauncherFocus(): void {
-    globalThis.requestAnimationFrame?.(() => launcherRef.current?.focus());
-  }
 
   async function chooseTarget(): Promise<void> {
     try {
@@ -306,7 +292,6 @@ export function CreateDocumentControl({ onCreated, onError }:
     if (result) {
       setCreating(false);
       onCreated();
-      restoreLauncherFocus();
     }
   }
 
