@@ -241,7 +241,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.getByLabelText(invitationForm, "May add passwords").checked, false);
     assert.equal(ui.getByLabelText(invitationForm, "May remove passwords").checked, false,
       "new invitations begin with least-privilege permission defaults");
-    await user.type(ui.getByLabelText(invitationForm, "Temporary label"), "New colleague");
+    await user.type(ui.getByLabelText(invitationForm, "Temporary label (required)"), "New colleague");
     await user.type(ui.getByLabelText(invitationForm,
       "Temporary passphrase (leave blank to generate)"), "predictable proposed password");
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
@@ -255,7 +255,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByLabelText(invitationForm, "May edit"));
     await user.click(ui.getByRole(invitationForm, "button", { name: "Create invitation" }));
     await ui.waitFor(() => assert.equal(invitationAttempts, 1));
-    assert.equal(ui.getByLabelText(invitationForm, "Temporary label").value,
+    assert.equal(ui.getByLabelText(invitationForm, "Temporary label (required)").value,
       "New colleague");
     const temporaryInput = ui.getByLabelText(invitationForm,
       "Temporary passphrase (leave blank to generate)");
@@ -291,7 +291,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       resolveInvitation = null;
       const form = ui.getByRole(dialog, "heading",
         { name: "Invite another person" }).closest("form");
-      await user.type(ui.getByLabelText(form, "Temporary label"), label);
+      await user.type(ui.getByLabelText(form, "Temporary label (required)"), label);
       await user.click(ui.getByRole(form, "button", { name: "Create invitation" }));
       await ui.waitFor(() => assert.equal(typeof resolveInvitation, "function"));
     }
@@ -342,7 +342,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "remove"), true));
     const dismissForm = ui.getByRole(dialog, "heading",
       { name: "Invite another person" }).closest("form");
-    await user.type(ui.getByLabelText(dismissForm, "Temporary label"), "Dismissed result");
+    await user.type(ui.getByLabelText(dismissForm, "Temporary label (required)"), "Dismissed result");
     await user.click(ui.getByRole(dismissForm, "button", { name: "Create invitation" }));
     await ui.findByLabelText(dialog, "One-time temporary passphrase");
     await user.keyboard("{Escape}");
