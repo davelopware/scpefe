@@ -364,3 +364,153 @@ test("a lock during compaction cancellation cannot reopen the password form", as
   assert.equal(presentation.view().safeMessage, null);
   session.dispose();
 });
+
+test("manual save failure stays actionable and retry reports a published target", async () => {
+  let attempt = 0;
+  const host = { saveDocument: async (content: string) => {
+    if (++attempt === 1) throw new Error("private target path");
+    return { saved: true, content,
+      publicationState: "target-published" as const };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false });
+  session.edit("new work");
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await presentation.save();
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "save-failed", message: "safe failure",
+  });
+  assert.equal(presentation.view({ formActive: true }).selectedDecision, null);
+  assert.equal(presentation.view().focusIntent, "save-retry");
+  assert.equal(JSON.stringify(presentation.view()).includes("private target path"), false);
+  await presentation.act("retry-save");
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage, "Manual save published and verified.");
+  session.dispose();
+});
+
+test("discarding a pending candidate reports the verified target outcome", async () => {
+  const host = { discardPendingPublication: async () => ({ ...opened,
+    content: "verified target" }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, content: "local candidate",
+    publicationState: "pending-publication" });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await presentation.act("discard-publication");
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage,
+    "Pending manual save explicitly discarded.");
+  assert.equal(presentation.view().focusIntent, "return");
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected target");
+  assert.equal(snapshot.working.text, "verified target");
+  session.dispose();
+});
+
+test("pending publication distinguishes unavailable, conflict, and published outcomes", async () => {
+  for (const state of ["pending-publication", "conflict", "target-published"] as const) {
+    const host = { reconnectPendingPublication: async () => ({ content: "candidate",
+      publicationState: state }) } as unknown as DocumentSessionHost<DocumentOpened>;
+    const session = new DocumentSession(host, { createJournalScope: () => "scope",
+      updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+    } as WorkingCopyJournalHost);
+    session.adopt({ ...opened, publicationState: "pending-publication" });
+    const presentation = new SessionPresentation(session, () => "safe failure");
+    assert.deepEqual(presentation.view().selectedDecision, {
+      kind: "publication-decision", state: "pending-publication", failureMessage: null,
+    });
+    await presentation.act("reconnect-publication");
+    assert.equal(presentation.view().safeMessage, state === "pending-publication"
+      ? "The target is still unavailable; publication remains pending."
+      : state === "conflict"
+        ? "The target changed; divergence must be resolved without overwriting it."
+        : "Pending manual save published and verified.");
+    assert.equal(presentation.view().selectedDecision?.kind,
+      state === "target-published" ? undefined : "publication-decision");
+    session.dispose();
+  }
+});
+
+test("discard failure keeps a locally saved candidate and retry focus", async () => {
+  const host = { discardPendingPublication: async () => {
+    throw new Error("private candidate contents");
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, publicationState: "pending-publication" });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await presentation.act("discard-publication");
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "publication-decision", state: "pending-publication",
+    failureMessage: "safe failure",
+  });
+  assert.equal(presentation.view().safeMessage,
+    "Publication discard needs attention: safe failure");
+  assert.equal(presentation.view().focusIntent, "decision-action");
+  assert.equal(JSON.stringify(presentation.view()).includes("private"), false);
+  session.dispose();
+});
+
+test("conflict with newer edits requires keep, export, or explicit discard before a merge draft", async () => {
+  let finishSave!: (result: { saved: true; content: string;
+    publicationState: "conflict" }) => void;
+  let acquisitions = 0;
+  const host = { saveDocument: () => new Promise((resolve) => { finishSave = resolve; }),
+    beginDivergenceResolution: async () => {
+      acquisitions += 1;
+      return { content: "merge draft", hasConflicts: true, ancestorRevision: "a",
+        localRevision: "l", currentRevision: "c" };
+    } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false });
+  session.edit("saved candidate");
+  const saving = session.save();
+  await Promise.resolve();
+  session.edit("newer private edit");
+  finishSave({ saved: true, content: "saved candidate", publicationState: "conflict" });
+  await saving;
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  await presentation.act("reconnect-publication");
+  assert.deepEqual(presentation.view().selectedDecision,
+    { kind: "newer-edits-confirmation" });
+  assert.equal(acquisitions, 0);
+  await presentation.act("keep-newer-edits");
+  assert.equal(presentation.view().selectedDecision?.kind, "publication-decision");
+  await presentation.act("reconnect-publication");
+  assert.equal(await presentation.act("export-newer-edits"), "export");
+  await presentation.act("reconnect-publication");
+  await presentation.act("discard-newer-edits");
+  assert.equal(acquisitions, 1);
+  assert.equal(presentation.view().safeMessage,
+    "Resolve every local/current marker, then save the merge.");
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(JSON.stringify(presentation.view()).includes("newer private edit"), false);
+  session.dispose();
+});
+
+test("late publication result cannot present a message or focus in another document", async () => {
+  let finish!: (result: { content: string; publicationState: "target-published" }) => void;
+  const host = { reconnectPendingPublication: () => new Promise((resolve) => {
+    finish = resolve;
+  }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, publicationState: "pending-publication" });
+  const presentation = new SessionPresentation(session, () => "safe failure");
+  const retry = presentation.act("reconnect-publication");
+  await Promise.resolve();
+  session.adopt({ ...opened, content: "new document" });
+  finish({ content: "candidate", publicationState: "target-published" });
+  await retry;
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().focusIntent, null);
+  session.dispose();
+});
