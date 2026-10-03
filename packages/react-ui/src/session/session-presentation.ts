@@ -8,7 +8,19 @@ type PresentationSession = Pick<FullSession,
   | "discardRecovery" | "acceptHeadMismatch" | "discardUnreadableJournal"
   | "confirmLeaseTakeover" | "cancelLeaseTakeover" | "migrate"
   | "confirmCompaction" | "cancelCompaction" | "save" | "dismissSaveFailure"
-  | "retryPublication" | "discardPublication" | "beginDivergenceResolution">;
+  | "retryPublication" | "discardPublication" | "beginDivergenceResolution"
+  | "decideProtection">;
+type ProtectionAttention = Extract<NonNullable<
+  DocumentSessionSnapshot<DocumentOpened>["attention"]>, { kind: "lifecycle-protection" }>;
+
+/** Host lifecycle challenge that takes priority over every form and decision. */
+export interface LifecycleProtectionDecision {
+  readonly kind: "lifecycle-protection";
+  readonly operation: ProtectionAttention["operation"];
+  readonly state: ProtectionAttention["state"];
+  readonly resolving: boolean;
+  readonly failureMessage: string | null;
+}
 
 /** The single edit-failure decision exposed to graphical renderers. */
 export interface EditUnavailableDecision {
@@ -56,7 +68,7 @@ export type AdmissionDecision = { readonly kind: "invitation-claim" }
 
 /** Observable graphical state for selected document attention. */
 export interface SessionPresentationView {
-  readonly selectedDecision: EditUnavailableDecision | SaveFailedDecision | PublicationDecision
+  readonly selectedDecision: LifecycleProtectionDecision | EditUnavailableDecision | SaveFailedDecision | PublicationDecision
     | NewerEditsDecision
     | DocumentAttentionDecision | AdmissionDecision | null;
   readonly blocked: boolean;
@@ -75,6 +87,8 @@ export class SessionPresentation {
   private compactionInFlight = false;
   private confirmDivergenceDiscard = false;
   private adoption: number | null = null;
+  private epoch = 0;
+  private disposed = false;
 
   constructor(private readonly session: PresentationSession,
     private readonly catalogText: (code: string) => string) {}
@@ -85,21 +99,36 @@ export class SessionPresentation {
       ? snapshot.adoption : null;
     if (this.adoption !== adoption) {
       this.adoption = adoption;
-      this.safeMessage = null;
-      this.focusIntent = null;
-      this.leaseError = null;
-      this.leaseInFlight = null;
-      this.compactionInFlight = false;
-      this.confirmDivergenceDiscard = false;
+      this.clear();
     }
     return snapshot;
   }
+
+  private clear(): void {
+    this.epoch += 1;
+    this.safeMessage = null;
+    this.focusIntent = null;
+    this.leaseError = null;
+    this.leaseInFlight = null;
+    this.compactionInFlight = false;
+    this.confirmDivergenceDiscard = false;
+  }
+
+  /** Invalidates pending presentation work at the lock-start safety point. */
+  lockStarted(): void { this.clear(); }
+
+  /** Rejects pending outcomes after the graphical presentation unmounts. */
+  dispose(): void { this.disposed = true; this.clear(); }
 
   view({ formActive = false }: { formActive?: boolean } = {}): SessionPresentationView {
     const snapshot = this.current();
     const attention = snapshot.kind === "read-only" || snapshot.kind === "edit"
       ? snapshot.attention : undefined;
-    const selectedDecision = formActive ? null
+    const selectedDecision = attention?.kind === "lifecycle-protection"
+      ? { kind: "lifecycle-protection" as const, operation: attention.operation,
+        state: attention.state, resolving: attention.resolving,
+        failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
+      : formActive ? null
       : snapshot.invitationStaged ? { kind: "invitation-claim" as const }
       : attention?.kind === "edit-unavailable"
       ? { kind: "edit-unavailable" as const, message: this.catalogText(attention.code) }
@@ -136,11 +165,14 @@ export class SessionPresentation {
         ? { kind: "publication-decision" as const, state: attention.state,
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : null;
-    return { selectedDecision: this.confirmDivergenceDiscard
+    return { selectedDecision: selectedDecision?.kind === "lifecycle-protection"
+      ? selectedDecision : this.confirmDivergenceDiscard
       ? { kind: "newer-edits-confirmation" } : selectedDecision,
       blocked: selectedDecision !== null || this.confirmDivergenceDiscard,
-      safeMessage: this.safeMessage,
-      focusIntent: this.focusIntent ?? (selectedDecision?.kind === "invitation-claim"
+      safeMessage: selectedDecision?.kind === "lifecycle-protection" ? null : this.safeMessage,
+      focusIntent: selectedDecision?.kind === "lifecycle-protection"
+        ? (selectedDecision.failureMessage ? "decision-action" : null)
+        : this.focusIntent ?? (selectedDecision?.kind === "invitation-claim"
         || selectedDecision?.kind === "profile-mismatch" ? "decision-action"
         : selectedDecision?.kind === "edit-unavailable" ? "edit-retry"
         : selectedDecision?.kind === "save-failed" ? "save-retry"
@@ -156,11 +188,13 @@ export class SessionPresentation {
   /** Presents the structured manual-save outcome for the current adoption. */
   async save(): Promise<void> {
     const snapshot = this.current();
-    if (snapshot.kind !== "read-only" && snapshot.kind !== "edit") return;
+    if (this.disposed || (snapshot.kind !== "read-only" && snapshot.kind !== "edit")) return;
     const adoption = snapshot.adoption;
+    const epoch = this.epoch;
     const outcome = await this.session.save();
     const current = this.current();
-    if ((current.kind !== "read-only" && current.kind !== "edit")
+    if (this.disposed || this.epoch !== epoch
+      || (current.kind !== "read-only" && current.kind !== "edit")
       || current.adoption !== adoption) return;
     if (outcome.status === "saved") {
       this.safeMessage = outcome.publicationState === "pending-publication"
@@ -182,9 +216,11 @@ export class SessionPresentation {
       || snapshot.attention?.kind !== "publication-decision"
       || snapshot.attention.state !== "conflict") return;
     const adoption = snapshot.adoption;
+    const epoch = this.epoch;
     const outcome = await this.session.beginDivergenceResolution({ discardUnsaved });
     const current = this.current();
-    if ((current.kind !== "read-only" && current.kind !== "edit")
+    if (this.disposed || this.epoch !== epoch
+      || (current.kind !== "read-only" && current.kind !== "edit")
       || current.adoption !== adoption) return;
     if (outcome.status === "unsaved-work") {
       this.confirmDivergenceDiscard = true;
@@ -207,6 +243,7 @@ export class SessionPresentation {
   }
 
   async act(action: "continue-read-only" | "retry-edit" | "retry-save"
+    | "protection-cancel" | "protection-save" | "protection-discard"
     | "continue-editing" | "restore-recovery"
     | "reconnect-publication" | "discard-publication"
     | "keep-newer-edits" | "export-newer-edits" | "discard-newer-edits"
@@ -214,6 +251,21 @@ export class SessionPresentation {
     | "confirm-lease" | "cancel-lease" | "migrate" | "compact"
     | "compaction-canceled"): Promise<"passwords" | "export" | void> {
     const snapshot = this.current();
+    if (this.disposed) return;
+    if (action === "protection-cancel" || action === "protection-save"
+      || action === "protection-discard") {
+      if (snapshot.attention?.kind !== "lifecycle-protection") return;
+      const epoch = this.epoch;
+      const outcome = await this.session.decideProtection(action === "protection-cancel"
+        ? "cancel" : action === "protection-save" ? "save" : "discard");
+      this.current();
+      if (this.disposed || this.epoch !== epoch) return;
+      if (outcome.status === "protection-canceled") {
+        this.safeMessage = "Action canceled; the current document remains open and usable.";
+        this.focusIntent = "return";
+      } else if (outcome.status === "failed") this.focusIntent = "decision-action";
+      return;
+    }
     if (action === "keep-newer-edits" || action === "export-newer-edits"
       || action === "discard-newer-edits") {
       if (!this.confirmDivergenceDiscard) return;
@@ -240,10 +292,12 @@ export class SessionPresentation {
     if (action === "reconnect-publication" || action === "discard-publication") {
       if (snapshot.attention.kind !== "publication-decision") return;
       const adoption = snapshot.adoption;
+      const epoch = this.epoch;
       const outcome = await (action === "reconnect-publication"
         ? this.session.retryPublication() : this.session.discardPublication());
       const current = this.current();
-      if ((current.kind !== "read-only" && current.kind !== "edit")
+      if (this.disposed || this.epoch !== epoch
+        || (current.kind !== "read-only" && current.kind !== "edit")
         || current.adoption !== adoption) return;
       if (outcome.status === "divergence-required") {
         await this.beginDivergenceResolution();
@@ -275,6 +329,7 @@ export class SessionPresentation {
         : action === "migrate" ? attention.kind !== "migration-decision"
           : attention.kind !== "compaction-decision") return;
       const adoption = snapshot.adoption;
+      const epoch = this.epoch;
       this.leaseError = null;
       if ((action === "confirm-lease" || action === "cancel-lease")
         && attention.kind === "lease-takeover") this.leaseInFlight = {
@@ -287,10 +342,11 @@ export class SessionPresentation {
         : action === "compact" ? this.session.confirmCompaction()
         : this.session.cancelCompaction());
       const current = this.current();
+      if (this.disposed || this.epoch !== epoch
+        || (current.kind !== "read-only" && current.kind !== "edit")
+        || current.adoption !== adoption) return;
       this.leaseInFlight = null;
       this.compactionInFlight = false;
-      if ((current.kind !== "read-only" && current.kind !== "edit")
-        || current.adoption !== adoption) return;
       if (outcome.status === "attention") {
         if (action === "confirm-lease") {
           this.leaseError = "The lease changed. Review the current holder before trying again.";
@@ -356,12 +412,14 @@ export class SessionPresentation {
         : action === "discard-unreadable" ? "unreadable-journal" : "recovery-decision";
       if (snapshot.attention.kind !== expected) return;
       const adoption = snapshot.adoption;
+      const epoch = this.epoch;
       const outcome = await (action === "restore-recovery" ? this.session.restoreRecovery()
         : action === "discard-recovery" ? this.session.discardRecovery()
         : action === "accept-head" ? this.session.acceptHeadMismatch()
         : this.session.discardUnreadableJournal());
       const current = this.current();
-      if ((current.kind !== "read-only" && current.kind !== "edit")
+      if (this.disposed || this.epoch !== epoch
+        || (current.kind !== "read-only" && current.kind !== "edit")
         || current.adoption !== adoption) return;
       if (outcome.status === "recovery") {
         this.safeMessage = "Recovered work restored as unsaved changes.";
@@ -385,6 +443,7 @@ export class SessionPresentation {
     }
     if (snapshot.attention.kind !== "edit-unavailable") return;
     const adoption = snapshot.adoption;
+    const epoch = this.epoch;
     this.session.dismissEditFailure();
     if (action === "continue-read-only") {
       this.safeMessage = null;
@@ -393,7 +452,8 @@ export class SessionPresentation {
     }
     const outcome = await this.session.enterEditMode();
     const current = this.current();
-    if ((current.kind !== "read-only" && current.kind !== "edit")
+    if (this.disposed || this.epoch !== epoch
+      || (current.kind !== "read-only" && current.kind !== "edit")
       || current.adoption !== adoption) return;
     if (outcome.status === "attention") {
       this.safeMessage = "Editing requires a confirmed lease takeover.";

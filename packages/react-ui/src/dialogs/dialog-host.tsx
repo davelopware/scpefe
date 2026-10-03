@@ -25,14 +25,13 @@ export interface DialogHostHandle {
 
 /** Renders every portable session attention as an accessible platform dialog. */
 export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialog,
-  returnFocus, catalogText,
+  returnFocus,
   selectedDecision, focusIntent, onAction, ref }: {
   session: DialogSession;
   visibleOpenedDialog: OpenedDialogName;
   activeDocument: boolean;
   dialog: string | null;
   returnFocus: HTMLElement | null;
-  catalogText(code: string): string;
   selectedDecision: SessionPresentationView["selectedDecision"];
   focusIntent: SessionPresentationView["focusIntent"];
   onAction(action: DialogAction): void | Promise<void>;
@@ -41,8 +40,8 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   const snapshot = useSessionSnapshot(session);
   const opened = snapshot.kind === "read-only" || snapshot.kind === "edit"
     ? snapshot.document : null;
-  const protection = snapshot.attention?.kind === "lifecycle-protection"
-    ? snapshot.attention : null;
+  const protection = selectedDecision?.kind === "lifecycle-protection"
+    ? selectedDecision : null;
   const leaseDecision = selectedDecision?.kind === "lease-takeover" ? selectedDecision : null;
   const editFailure = selectedDecision?.kind === "edit-unavailable"
     ? selectedDecision.message : null;
@@ -232,10 +231,10 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
         </ul>
         <p>Cancel keeps this document open. Save retries or seals recoverable work. Discard is permanent where policy permits it.</p>
       </div>
-      {protection.failureCode && <p className="dialog-error" role="alert">
-        {catalogText(protection.failureCode)}</p>}
+      {protection.failureMessage && <p className="dialog-error" role="alert">
+        {protection.failureMessage}</p>}
       <div className="dialog-actions"><button ref={(node) => {
-        if (node && !protection.failureCode) node.focus();
+        if (node && !protection.failureMessage) node.focus();
       }}
         disabled={protection.resolving} onClick={() => void onAction("protection-cancel")}>Keep current document open</button>
         <button disabled={protection.resolving} onClick={() => void onAction("protection-save")}>

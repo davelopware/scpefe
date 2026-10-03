@@ -187,7 +187,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     assert.doesNotMatch(Array.from(document.querySelectorAll("input"),
       (input) => input.value).join(" "), /sensitive lifecycle/,
       "protection dialogs unmount modeless search plaintext and controls");
-    assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
+    assert.equal(ui.getAllByRole(document.body, "dialog").length, 1,
+      "only the protection decision is actionable");
     assert.ok(ui.getAllByRole(dialog, "listitem").length >= 1);
     assert.equal(ui.getByRole(dialog, "alert").textContent.includes("silently lost"), true);
     const keep = ui.getByRole(dialog, "button", { name: "Keep current document open" });
@@ -199,6 +200,8 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     await user.click(keep);
     if (operation === "new") {
       const create = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
+      await ui.waitFor(() => assert.equal(ui.getByRole(create, "button",
+        { name: "Cancel" }).disabled, false));
       await user.click(ui.getByRole(create, "button", { name: "Cancel" }));
     } else if (operation === "open") {
       const open = await ui.findByRole(document.body, "dialog", { name: "Open document" });
@@ -216,12 +219,13 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
   await user.click(ui.getByRole(firstOpen, "button", { name: "Open" }));
   dialog = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
   listeners.external({ token: "queued-second" });
-  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1,
+  assert.equal(ui.getAllByRole(document.body, "dialog").length, 1,
     "a second request waits behind active protection");
   await user.click(ui.getByRole(dialog, "button", { name: "Keep current document open" }));
   const secondOpen = await ui.findByRole(document.body, "dialog",
     { name: "Open requested document" });
-  assert.notEqual(secondOpen, firstOpen);
+  assert.equal(ui.getByLabelText(secondOpen, "Password").value, "",
+    "the next request starts with an empty password field");
   await user.click(ui.getByRole(secondOpen, "button", { name: "Cancel" }));
   find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
   assert.equal(editor.value, "unsaved plaintext");

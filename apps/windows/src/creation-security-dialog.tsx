@@ -1,6 +1,6 @@
-import React, { useRef, useState, type Dispatch, type FormEvent,
+import React, { useContext, useRef, useState, type Dispatch, type FormEvent,
   type SetStateAction } from "react";
-import { useModalFocus } from "@scpefe/react-ui";
+import { DialogSuspensionContext, useModalFocus } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -115,8 +115,10 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   const dialogRef = useRef<HTMLElement>(null);
   const completedRef = useRef(false);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
+  const suspended = useContext(DialogSuspensionContext);
 
   const focus = useModalFocus({ scopeRef: dialogRef, initialFocusRef: ownerRef,
+    active: !suspended,
     returnFocus, onEscape: submitting ? undefined : cancel,
     shouldRestoreFocus: () => !completedRef.current,
     fallbackFocus: () => document.querySelector<HTMLElement>(

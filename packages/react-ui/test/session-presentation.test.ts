@@ -75,6 +75,117 @@ test("a late retry cannot present an outcome from a replaced document", async ()
   session.dispose();
 });
 
+test("lifecycle protection preempts a form, retries failure, and restores it on cancel", async () => {
+  let attempts = 0;
+  const host = { resolveProtection: async () => (++attempts === 1
+    ? { completed: false, retryToken: "retry", errorCode: "LIFECYCLE_FAILED" }
+    : { completed: true, proceed: false }) } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt(opened);
+  const presentation = new SessionPresentation(session, () => "Safe lifecycle failure.");
+  const protectedState = { dirty: true, provisional: false, pendingPublication: false,
+    recovered: false, conflict: false, unresolvedJournal: false,
+    activePublication: false };
+  assert.equal(session.stageProtection({ token: "first", operation: "exit",
+    state: protectedState }), true);
+  assert.deepEqual(presentation.view({ formActive: true }).selectedDecision, {
+    kind: "lifecycle-protection", operation: "exit", state: protectedState,
+    resolving: false, failureMessage: null,
+  });
+  await presentation.act("protection-save");
+  assert.equal(presentation.view({ formActive: true }).selectedDecision?.kind,
+    "lifecycle-protection");
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().focusIntent, "decision-action");
+  await presentation.act("protection-cancel");
+  assert.equal(presentation.view({ formActive: true }).selectedDecision, null);
+  assert.equal(presentation.view().safeMessage,
+    "Action canceled; the current document remains open and usable.");
+  assert.equal(presentation.view().focusIntent, "return");
+  session.dispose();
+});
+
+test("successful protection clears the prior presentation after document replacement", async () => {
+  const host = { saveDocument: async (content: string) => ({ saved: true, content,
+    publicationState: "target-published" as const }),
+  resolveProtection: async () => ({ completed: true, proceed: true }) } as
+    unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false });
+  session.edit("prior working copy");
+  const presentation = new SessionPresentation(session, () => "Safe failure.");
+  await presentation.save();
+  assert.equal(presentation.view().safeMessage, "Manual save published and verified.");
+  session.stageProtection({ token: "replacement", operation: "exit", state: {
+    dirty: true, provisional: false, pendingPublication: false, recovered: false,
+    conflict: false, unresolvedJournal: false, activePublication: false,
+  } });
+  assert.equal(presentation.view({ formActive: true }).selectedDecision?.kind,
+    "lifecycle-protection");
+  assert.equal(presentation.view({ formActive: true }).safeMessage, null);
+  await presentation.act("protection-discard");
+  session.adopt({ ...opened, content: "replacement" });
+  const next = presentation.view({ formActive: false });
+  assert.equal(next.selectedDecision, null);
+  assert.equal(next.safeMessage, null);
+  assert.equal(next.focusIntent, null);
+  session.dispose();
+});
+
+test("lock invalidates a pending protection result and clears presentation synchronously", async () => {
+  let finish!: (result: { completed: true; proceed: false }) => void;
+  const host = { resolveProtection: () => new Promise((resolve) => { finish = resolve; }) } as
+    unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt(opened);
+  const presentation = new SessionPresentation(session, () => "Safe failure.");
+  session.stageProtection({ token: "first", operation: "exit", state: {
+    dirty: true, provisional: false, pendingPublication: false, recovered: false,
+    conflict: false, unresolvedJournal: false, activePublication: false,
+  } });
+  const pending = presentation.act("protection-cancel");
+  presentation.lockStarted();
+  session.lockStarted();
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(presentation.view().safeMessage, null);
+  finish({ completed: true, proceed: false });
+  await pending;
+  assert.equal(presentation.view().focusIntent, null);
+  session.dispose();
+});
+
+test("unmount rejects a late save message and focus intent", async () => {
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  const host = { saveDocument: () => new Promise((resolve) => {
+    finish = resolve; started();
+  }) } as
+    unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, readOnly: false });
+  session.edit("new working copy");
+  const presentation = new SessionPresentation(session, () => "Safe failure.");
+  const pending = presentation.save();
+  await entered;
+  presentation.dispose();
+  finish({ saved: true, content: "new working copy",
+    publicationState: "target-published" });
+  await pending;
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().focusIntent, null);
+  session.dispose();
+});
+
 test("retry runs through the document session and exposes its safe outcome", async () => {
   const { session, presentation, succeed } = setup();
   await session.enterEditMode();

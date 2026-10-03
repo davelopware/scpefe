@@ -20,7 +20,7 @@ export interface CreationFlowHandle { open(): Promise<void>; reset(): void }
 /** Owns target selection and creation presentation without duplicating session policy. */
 export function CreationFlow({ session, targetHost, completion, Dialog,
   catalogText, safeRendererErrorMessage, onAdopted, onMessage, onFocusEditor,
-  onVisibilityChange, suppressed, returnFocus, ref }: {
+  onVisibilityChange, returnFocus, ref }: {
   session: CreationSession;
   targetHost: CreationTargetHost;
   completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
@@ -32,7 +32,6 @@ export function CreationFlow({ session, targetHost, completion, Dialog,
   onMessage(message: string): void;
   onFocusEditor(): void;
   onVisibilityChange(visible: boolean): void;
-  suppressed: boolean;
   returnFocus: HTMLElement | null;
   ref?: React.Ref<CreationFlowHandle>;
 }): React.ReactElement | null {
@@ -46,7 +45,7 @@ export function CreationFlow({ session, targetHost, completion, Dialog,
     } catch (error) { onMessage(safeRendererErrorMessage(error)); }
   }
   useImperativeHandle(ref, () => ({ open, reset: () => changeVisibility(false) }));
-  if (!creating || suppressed) return null;
+  if (!creating) return null;
   return <Dialog returnFocus={returnFocus} onCancel={() => completion.track(async () => {
     await targetHost.cancelCreateTarget(); changeVisibility(false);
   })} onCreate={(request) => completion.track(async () => {
