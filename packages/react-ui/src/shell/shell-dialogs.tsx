@@ -94,6 +94,9 @@ export function ShellDialogs({ session, host, completion, dialog, active,
   }
   function showUnlock() { setOpenError(""); onDialog("unlock"); }
   function showExternalOpen() {
+    if (openPassword.current) openPassword.current.value = "";
+    setOpenError("");
+    setPendingOpenName("");
     onDialog("open");
     setMessage("Another open request is waiting. Enter its document password to continue.");
   }

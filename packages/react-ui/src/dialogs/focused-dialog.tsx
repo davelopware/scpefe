@@ -1,12 +1,17 @@
-import React, { useId, useRef } from "react";
+import React, { createContext, useContext, useId, useRef } from "react";
 import { useModalFocus } from "../use-modal-focus.ts";
+
+/** Suspends a mounted form's modal focus while protection takes precedence. */
+export const DialogSuspensionContext = createContext(false);
 
 export function FocusedDialog({ title, children, close, initialFocus, returnFocus }: {
   title: string; children: React.ReactNode; close?: () => void;
   initialFocus?: React.RefObject<HTMLElement | null>; returnFocus?: HTMLElement | null }) {
   const dialog = useRef<HTMLElement>(null);
+  const suspended = useContext(DialogSuspensionContext);
   const titleId = useId();
   const focus = useModalFocus({ scopeRef: dialog, initialFocusRef: initialFocus,
+    active: !suspended,
     returnFocus, onEscape: close,
     fallbackFocus: () => document.querySelector<HTMLElement>(
       '[role="menubar"] > .menu > [role="menuitem"]') });

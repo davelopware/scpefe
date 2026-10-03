@@ -1,36 +1,37 @@
+import { useEffect, useRef } from "react";
 import type { DocumentSession } from "@scpefe/frontend-core";
 import type { DialogAction } from "../dialogs/dialog-host.tsx";
 import type { DialogName, DocumentOpened, Opened } from "./types.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
-type AttentionSession = Pick<FullSession, "getSnapshot" | "decideProtection" | "enterEditMode"
+type AttentionSession = Pick<FullSession, "getSnapshot" | "enterEditMode"
     | "lock" | "backup"
     | "undo" | "redo">;
 
 type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
 
 /** Handles remaining shell and lifecycle actions outside session presentation. */
-export function useAttentionActions({ session, completion, catalogText,
+export function useAttentionActions({ session, catalogText,
   onMessage: setMessage, onDialog, onLocked }: {
   session: AttentionSession;
-  completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
   catalogText(code: string): string;
   onMessage(message: string): void;
   onDialog(dialog: DialogName): void;
   onLocked(result: LockResult, closed?: boolean): void;
 }) {
-  async function decideProtection(decision: "cancel" | "save" | "discard") {
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  function currentAdoption(): number | null {
     const snapshot = session.getSnapshot();
-    if (snapshot.attention?.kind !== "lifecycle-protection") return;
-    const outcome = await session.decideProtection(decision);
-    if (outcome.status === "protection-canceled") {
-      setMessage("Action canceled; the current document remains open and usable.");
-    }
+    return snapshot.kind === "read-only" || snapshot.kind === "edit"
+      ? snapshot.adoption : null;
   }
 
   async function enterEditMode() {
+    const adoption = currentAdoption();
     const outcome = await session.enterEditMode();
+    if (!mounted.current || adoption !== currentAdoption()) return;
     if (outcome.status === "attention") {
       setMessage("Editing requires a confirmed lease takeover.");
     } else if (outcome.status === "edit-mode") setMessage("Edit mode entered.");
@@ -38,6 +39,7 @@ export function useAttentionActions({ session, completion, catalogText,
 
   async function lock() {
     const outcome = await session.lock();
+    if (!mounted.current) return;
     if (outcome.status === "locked") onLocked({
       locked: true, journalSaved: true, warningCode: outcome.warningCode,
     });
@@ -45,7 +47,9 @@ export function useAttentionActions({ session, completion, catalogText,
   }
 
   async function backup() {
+    const adoption = currentAdoption();
     const outcome = await session.backup();
+    if (!mounted.current || adoption !== currentAdoption()) return;
     if (outcome.status === "backup") setMessage(outcome.created
       ? "Verified byte-identical backup replica created."
       : "Backup canceled; the document and destination are unchanged.");
@@ -61,9 +65,6 @@ export function useAttentionActions({ session, completion, catalogText,
     switch (action) {
       case "lock": lock(); return;
       case "open-passwords": onDialog("passwords"); return;
-      case "protection-cancel": return completion.track(() => decideProtection("cancel"));
-      case "protection-save": return completion.track(() => decideProtection("save"));
-      case "protection-discard": return completion.track(() => decideProtection("discard"));
     }
   }
   return { run: handleDialogAction, enterEditMode, backup, lock, moveHistory };

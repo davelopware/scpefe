@@ -5,7 +5,7 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
-import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
+import { DialogSuspensionContext } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
@@ -80,6 +80,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     };
   });
   const session = sessionStore.session;
+  const presentationMounted = useRef(true);
   useEffect(() => {
     rendererLifecycleCompletion.setSessionSource({
       getPendingWorkCount: session.getPendingWorkCount,
@@ -99,6 +100,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const publicationResolving = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
   useEffect(() => () => {
+    presentationMounted.current = false;
+    presentation.dispose();
     session.dispose();
   }, [session]);
   const [message, setMessage] = useState("");
@@ -108,8 +111,6 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialog] = useState<DialogName>(null);
   const [creating, setCreating] = useState(false);
-  const protection = sessionSnapshot.attention?.kind === "lifecycle-protection"
-    ? sessionSnapshot.attention : null;
   const creationFlow = useRef<CreationFlowHandle>(null);
   const shellDialogs = useRef<ShellDialogsHandle>(null);
   const securityDialogs = useRef<SecurityDialogsHandle>(null);
@@ -119,12 +120,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
   const attentionActions = useAttentionActions({ session,
-    completion: rendererLifecycleCompletion, catalogText, onMessage: setMessage,
+    catalogText, onMessage: setMessage,
     onDialog: setDialog,
     onLocked: showLockedResult });
   const presentationView = presentation.view({ formActive: creating
     || (dialog !== null && dialog !== "compaction") });
   const selected = presentationView.selectedDecision;
+  const protection = selected?.kind === "lifecycle-protection" ? selected : null;
   const visibleOpenedDialog: OpenedDialogName = protection || creating || dialog !== null
     ? null : selected?.kind === "invitation-claim" ? "claim"
       : selected?.kind === "profile-mismatch" ? "profile-mismatch"
@@ -148,6 +150,9 @@ export function SharedApp({ sessionHost, journalTransport, events,
   });
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
+    setDialog(null);
+    creationFlow.current?.reset();
+    shellDialogs.current?.reset();
     securityDialogs.current?.reset();
     if (!alreadyAdopted) session.adopt(result);
     const adopted = session.getSnapshot();
@@ -161,10 +166,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
       setMessage(`Recovered unsaved work${source ? ` from ${source}` : ""}. Restore or discard it before editing.`);
     } else if (result.lease?.active) {
       setMessage(`Editing lease held by ${result.lease.holderName || "another editor"} (${result.lease.holderEmail}) on ${result.lease.deviceName}.`);
-    }
+    } else setMessage("");
   }
 
   function showReplacementResult(result: Opened, alreadyAdopted = false) {
+    setDialog(null);
+    creationFlow.current?.reset();
+    shellDialogs.current?.reset();
     if (result.invitationRequired) {
       securityDialogs.current?.reset();
       session.adopt(result);
@@ -226,6 +234,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
+      presentation.lockStarted();
       if (closed) session.closed();
       else session.lockStarted();
       setEditorAdoption(0);
@@ -248,13 +257,15 @@ export function SharedApp({ sessionHost, journalTransport, events,
 
   async function runSave() {
     await presentation.save();
+    if (!presentationMounted.current) return;
     refreshPresentation((revision) => revision + 1);
     const result = presentation.view();
     if (result.safeMessage !== null) setMessage(result.safeMessage);
   }
 
   async function runDialogAction(action: DialogAction) {
-    if (action === "continue-read-only" || action === "retry-edit"
+    if (action === "protection-cancel" || action === "protection-save"
+      || action === "protection-discard" || action === "continue-read-only" || action === "retry-edit"
       || action === "restore-recovery" || action === "discard-recovery"
       || action === "accept-head" || action === "discard-unreadable"
       || action === "confirm-lease" || action === "cancel-lease"
@@ -265,7 +276,17 @@ export function SharedApp({ sessionHost, journalTransport, events,
       || action === "export-newer-edits" || action === "discard-newer-edits") {
       const actionElement = document.activeElement instanceof HTMLElement
         ? document.activeElement : null;
-      const nextDialog = await presentation.act(action);
+      const started = session.getSnapshot();
+      const adoption = started.kind === "read-only" || started.kind === "edit"
+        ? started.adoption : null;
+      const nextDialog = action === "protection-cancel" || action === "protection-save"
+        || action === "protection-discard"
+        ? await rendererLifecycleCompletion.track(() => presentation.act(action))
+        : await presentation.act(action);
+      if (!presentationMounted.current) return;
+      const current = session.getSnapshot();
+      if ((current.kind === "read-only" || current.kind === "edit"
+        ? current.adoption : null) !== adoption) return;
       refreshPresentation((revision) => revision + 1);
       const result = presentation.view();
       if (nextDialog === "passwords") setDialog(nextDialog);
@@ -273,8 +294,14 @@ export function SharedApp({ sessionHost, journalTransport, events,
       const safeMessage = result.safeMessage;
       if (safeMessage !== null) setMessage(safeMessage);
       else if (action === "continue-editing") setMessage("");
+      const focusIfCurrent = (focus: () => void) => requestAnimationFrame(() => {
+        const latest = session.getSnapshot();
+        if (!presentationMounted.current || (latest.kind === "read-only"
+          || latest.kind === "edit" ? latest.adoption : null) !== adoption) return;
+        focus();
+      });
       if (result.focusIntent === "decision-action") {
-        requestAnimationFrame(() => actionElement?.focus());
+        focusIfCurrent(() => { if (actionElement?.isConnected) actionElement.focus(); });
       } else if (result.focusIntent === "migration-retry"
         || result.focusIntent === "edit-retry"
         || result.focusIntent === "recovery-restore"
@@ -284,7 +311,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
           : result.focusIntent === "edit-retry" ? "edit"
           : result.focusIntent === "recovery-restore" ? "recovery"
             : result.focusIntent === "save-retry" ? "save" : "publication";
-        requestAnimationFrame(() => dialogHost.current?.focus(target));
+        focusIfCurrent(() => dialogHost.current?.focus(target));
       }
       return;
     }
@@ -305,15 +332,17 @@ export function SharedApp({ sessionHost, journalTransport, events,
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
     <StatusBar session={session} active={activeDocument} message={message} /></div>
+    <div hidden={protection !== null} inert={protection !== null}>
+    <DialogSuspensionContext.Provider value={protection !== null}>
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}
       completion={rendererLifecycleCompletion} Dialog={CreationSecurityDialog}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onAdopted={(document) => showOpenedResult(document, true)}
       onMessage={setMessage} onFocusEditor={focusEditorAfterDialog}
-      onVisibilityChange={setCreating} suppressed={protection !== null}
+      onVisibilityChange={setCreating}
       returnFocus={dialogReturnFocus.current} />
     <ShellDialogs ref={shellDialogs} session={session} host={shellHost}
-      completion={rendererLifecycleCompletion} dialog={protection ? null : dialog}
+      completion={rendererLifecycleCompletion} dialog={dialog}
       active={activeDocument} returnFocus={dialogReturnFocus.current}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       closeWindow={closeWindow} onDialog={setDialog} onMessage={setMessage}
@@ -326,14 +355,15 @@ export function SharedApp({ sessionHost, journalTransport, events,
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onMessage={setMessage} onAdopted={(document) => showOpenedResult(document, true)}
       onClose={closeDialog} onOpenCompaction={() => setDialog("compaction")}
-      passwordsOpen={!protection && dialog === "passwords"}
+      passwordsOpen={dialog === "passwords"}
       claimVisible={!protection && visibleOpenedDialog === "claim"}
       activeDocument={activeDocument} returnFocus={dialogReturnFocus.current} />
+    </DialogSuspensionContext.Provider></div>
     <DialogHost ref={dialogHost} session={session} visibleOpenedDialog={visibleOpenedDialog}
       activeDocument={activeDocument} dialog={dialog}
       selectedDecision={presentationView.selectedDecision}
       focusIntent={presentationView.focusIntent}
-      returnFocus={dialogReturnFocus.current} catalogText={catalogText}
+      returnFocus={dialogReturnFocus.current}
       onAction={runDialogAction} />
   </main>;
 }
