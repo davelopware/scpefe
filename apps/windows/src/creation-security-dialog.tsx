@@ -1,6 +1,6 @@
 import React, { useContext, useRef, useState, type Dispatch, type FormEvent,
   type SetStateAction } from "react";
-import { DialogSuspensionContext, useModalFocus } from "@scpefe/react-ui";
+import { DialogSuspensionContext, useModalFocus, usePasswordEntry } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -94,12 +94,12 @@ function reportCreationDiagnostic(layer: Diagnostic["layer"], rule: string): voi
 /* Collects and validates creation secrets after a target has been selected. */
 export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   CreationSecurityDialogProps): React.ReactElement {
-  const [ownerPassword, setOwnerPassword] = useState("");
-  const [ownerConfirmation, setOwnerConfirmation] = useState("");
-  const [recoveryPassword, setRecoveryPassword] = useState("");
-  const [recoveryConfirmation, setRecoveryConfirmation] = useState("");
-  const [ownerRevealed, setOwnerRevealed] = useState(false);
-  const [recoveryRevealed, setRecoveryRevealed] = useState(false);
+  const passwords = usePasswordEntry(["owner", "ownerConfirmation",
+    "recovery", "recoveryConfirmation"] as const);
+  const ownerPassword = passwords.value("owner");
+  const ownerConfirmation = passwords.value("ownerConfirmation");
+  const recoveryPassword = passwords.value("recovery");
+  const recoveryConfirmation = passwords.value("recoveryConfirmation");
   const [understandsIrrecoverable, setUnderstandsIrrecoverable] = useState(false);
   const [storedRecoverySeparately, setStoredRecoverySeparately] = useState(false);
   const [error, setError] = useState("");
@@ -127,6 +127,10 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   function updateField<T>(field: ValidationField,
     setter: Dispatch<SetStateAction<T>>, value: T): void {
     setter(value);
+    clearFieldError(field);
+  }
+
+  function clearFieldError(field: ValidationField): void {
     if (invalidField === field) {
       setInvalidField("");
       setError("");
@@ -193,6 +197,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     setSubmitting(true);
     try {
       await onCreate(request);
+      passwords.reset();
       completedRef.current = true;
     } catch (submissionError) {
       setError(safeRendererErrorMessage(submissionError));
@@ -211,7 +216,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   }
 
   function cancel(): void {
-    if (!submitting) void onCancel();
+    if (!submitting) { passwords.reset(); void onCancel(); }
   }
 
   return h("div", { className: "dialog-backdrop", onKeyDown: focus.onKeyDown },
@@ -224,25 +229,24 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     "Lost passwords cannot be recovered. Without a valid owner or recovery password, the document is permanently irrecoverable."),
   h("form", { onSubmit: submit, noValidate: true },
     h(PasswordConfirmationFields, { kind: "owner", label: "Owner password",
-      confirmationLabel: "Confirm owner password", revealed: ownerRevealed,
-      required: true, value: ownerPassword, confirmationValue: ownerConfirmation,
-      inputRef: ownerRef, confirmationRef: ownerConfirmationRef,
+      confirmationLabel: "Confirm owner password", revealed: passwords.visible("owner"),
+      required: true, input: passwords.field("owner", ownerRef,
+        () => clearFieldError("owner")),
+      confirmation: passwords.field("ownerConfirmation", ownerConfirmationRef,
+        () => clearFieldError("ownerConfirmation")),
       invalidPassword: invalidField === "owner",
       invalidConfirmation: invalidField === "ownerConfirmation",
       errorDescriptionId: ERROR_ID,
       passwordError: errorDiagnostic?.layer === "creation-boundary"
         && errorDiagnostic.rule === "OWNER_PASSWORD_WEAK" ? error : "",
-      onValueChange: (value) => updateField("owner", setOwnerPassword, value),
-      onConfirmationChange: (value) => updateField(
-        "ownerConfirmation", setOwnerConfirmation, value),
-      onToggle: () => setOwnerRevealed((visible) => !visible) }),
+      onToggle: () => passwords.toggle("owner", "ownerConfirmation") }),
     h(PasswordConfirmationFields, { kind: "recovery",
       label: "Independent recovery password (strongly recommended)",
-      confirmationLabel: "Confirm recovery password", revealed: recoveryRevealed,
-      required: false, value: recoveryPassword,
-      inputRef: recoveryRef,
-      confirmationValue: recoveryConfirmation,
-      confirmationRef: recoveryConfirmationRef,
+      confirmationLabel: "Confirm recovery password", revealed: passwords.visible("recovery"),
+      required: false, input: passwords.field("recovery", recoveryRef,
+        () => clearFieldError("recovery")),
+      confirmation: passwords.field("recoveryConfirmation", recoveryConfirmationRef,
+        () => clearFieldError("recoveryConfirmation")),
       invalidPassword: invalidField === "recovery",
       invalidConfirmation: invalidField === "recoveryConfirmation",
       errorDescriptionId: ERROR_ID,
@@ -250,10 +254,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
         && errorDiagnostic.rule === "RECOVERY_PASSWORD_WEAK" ? error : "",
       comparePassword: ownerPassword,
       compareMessage: "Recovery password must differ from the owner password.",
-      onValueChange: (value) => updateField("recovery", setRecoveryPassword, value),
-      onConfirmationChange: (value) => updateField(
-        "recoveryConfirmation", setRecoveryConfirmation, value),
-      onToggle: () => setRecoveryRevealed((visible) => !visible) }),
+      onToggle: () => passwords.toggle("recovery", "recoveryConfirmation") }),
     h("small", null, "Leave both recovery fields empty to create a document without a recovery password. Store a recovery password safely offline and separately from the owner password and document."),
     h("label", { className: "check" },
       h("input", { name: "understandsIrrecoverable", type: "checkbox",

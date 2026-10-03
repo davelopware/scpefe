@@ -9,6 +9,7 @@ import { DialogSuspensionContext } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
+import { clearMountedPasswordFields } from "../security/password-entry.ts";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
 import { SessionPresentation } from "./session-presentation.ts";
 import type { DialogAction } from "../dialogs/dialog-host.tsx";
@@ -254,8 +255,9 @@ export function SharedApp({ sessionHost, journalTransport, events,
   }
 
   function showLockedResult(result: LockResult, closed = false) {
-    document.querySelectorAll<HTMLInputElement>(
-      "input[type='password'], input[readonly]").forEach((input) => { input.value = ""; });
+    clearMountedPasswordFields();
+    document.querySelectorAll<HTMLInputElement>("input[readonly]")
+      .forEach((input) => { input.value = ""; });
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushSync(() => {
       presentation.lockStarted();

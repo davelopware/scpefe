@@ -3,6 +3,7 @@ import React, { type FormEvent, useEffect, useImperativeHandle, useRef,
 import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
+import { usePasswordEntry } from "../security/password-entry.ts";
 import type { ClientSettings, DialogName, DocumentOpened, Opened,
   Profile, JournalSummary } from "../session/types.ts";
 import type { SessionPresentation } from "../session/session-presentation.ts";
@@ -73,6 +74,7 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
   const [exportError, setExportError] = useState("");
   const profileConfirmation = useRef<HTMLButtonElement>(null);
   const openPassword = useRef<HTMLInputElement>(null);
+  const passwords = usePasswordEntry(["open"] as const);
   const exportAction = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     void completion.track(() => host.getProfile().then((value) => {
@@ -83,6 +85,7 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
       .catch((error: unknown) => setMessage(safeRendererErrorMessage(error))));
   }, []);
   function reset() {
+    passwords.reset();
     setPendingProfile(null); setProfileError(""); setOpenError("");
     setPendingOpenName(""); setExportError("");
   }
@@ -97,7 +100,7 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
   }
   function showUnlock() { setOpenError(""); onDialog("unlock"); }
   function showExternalOpen() {
-    if (openPassword.current) openPassword.current.value = "";
+    passwords.reset();
     setOpenError("");
     setPendingOpenName("");
     onDialog("open");
@@ -190,7 +193,7 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
         if (adopted.kind !== "read-only" && adopted.kind !== "edit") return;
         onAdopted(adopted.document);
       } else return;
-      setPendingOpenName(""); onDialog(null);
+      passwords.reset(); setPendingOpenName(""); onDialog(null);
       if (outcome.status === "opened"
         && presentation.documentOpened().focusIntent === "return") onFocusEditor();
     }
@@ -236,13 +239,16 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
       const adopted = session.getSnapshot();
       if (adopted.kind !== "read-only" && adopted.kind !== "edit") return;
       onAdopted(adopted.document);
+      passwords.reset();
       onDialog(null);
       if (presentation.documentOpened().focusIntent === "return") onFocusEditor();
     } else if (outcome.status === "invitation") {
+      passwords.reset();
       onDialog(null);
       const message = presentation.invitationStaged().safeMessage;
       if (message !== null) setMessage(message);
     } else if (outcome.status === "external-canceled") {
+      passwords.reset();
       onDialog(null);
       const message = presentation.externalOpenCanceled().safeMessage;
       if (message !== null) setMessage(message);
@@ -300,7 +306,7 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
       {pendingOpenName && <p>Selected target: <strong>{pendingOpenName}</strong></p>}
       <form onSubmit={(event) => { void completion.track(() =>
         (externalOpen?.active ? openExternal : open)(event)); }}><label>Password
-        <input ref={openPassword} name="password" type="password" required
+        <input {...passwords.field("open", openPassword)} name="password" required
           aria-describedby={openError ? "open-password-error" : undefined} /></label>
         {openError && <p id="open-password-error" className="dialog-error" role="alert">
           {openError}</p>}

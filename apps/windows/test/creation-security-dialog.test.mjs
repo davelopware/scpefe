@@ -127,6 +127,31 @@ test("mounted creation dialog reveals password pairs independently without chang
         "recovery secret words", "recovery secret words"]);
   });
 
+test("revealed creation secrets survive failure and clear on success or cancel", async (t) => {
+  let attempts = 0;
+  let canceledValue = null;
+  const { user, ui } = mountedDialog(t, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("Publication failed safely");
+  }, () => {
+    canceledValue = ui.getByLabelText("Owner password").value;
+  });
+  await enterOwner(ui, user);
+  await user.click(ui.getByRole("button", { name: "Show owner passwords" }));
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  assert.equal(attempts, 1);
+  assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
+  assert.equal(ui.getByLabelText("Owner password").type, "text");
+  await user.click(ui.getByRole("button", { name: "Create" }));
+  assert.equal(attempts, 2);
+  assert.equal(ui.getByLabelText("Owner password").value, "");
+  assert.equal(ui.getByLabelText("Owner password").type, "password");
+  await user.type(ui.getByLabelText("Owner password"), "another owner secret");
+  await user.click(ui.getByRole("button", { name: "Show owner passwords" }));
+  await user.click(ui.getByRole("button", { name: "Cancel" }));
+  assert.equal(canceledValue, "", "cancel clears a mounted revealed field first");
+});
+
 test("password fields expose requirements and live confirmation feedback", async (t) => {
   const { user, ui } = mountedDialog(t);
   assert.match(ui.getByLabelText("Owner password").ownerDocument

@@ -4,6 +4,7 @@ import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { SlotAdministration } from "./slot-administration.tsx";
+import { usePasswordEntry } from "./password-entry.ts";
 import type { DocumentOpened, ManagedSlot, Opened } from "../session/types.ts";
 import type { ProposedPasswordOutcome } from "./types.ts";
 
@@ -54,12 +55,15 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   const [invitationBusy, setInvitationBusy] = useState(false);
   const [invitationPasswordError, setInvitationPasswordError] = useState(false);
   const [claimError, setClaimError] = useState("");
-  const [currentPasswordDraft, setCurrentPasswordDraft] = useState("");
-  const [newPasswordDraft, setNewPasswordDraft] = useState("");
-  const [newPasswordConfirmationDraft, setNewPasswordConfirmationDraft] = useState("");
-  const [temporaryPasswordDraft, setTemporaryPasswordDraft] = useState("");
-  const [claimPasswordDraft, setClaimPasswordDraft] = useState("");
-  const [claimConfirmationDraft, setClaimConfirmationDraft] = useState("");
+  const entry = usePasswordEntry(["currentPassword", "newPassword",
+    "newPasswordConfirmation", "temporaryPassword", "claimPassword",
+    "claimConfirmation"] as const);
+  const currentPasswordDraft = entry.value("currentPassword");
+  const newPasswordDraft = entry.value("newPassword");
+  const newPasswordConfirmationDraft = entry.value("newPasswordConfirmation");
+  const temporaryPasswordDraft = entry.value("temporaryPassword");
+  const claimPasswordDraft = entry.value("claimPassword");
+  const claimConfirmationDraft = entry.value("claimConfirmation");
   const securityPresentationEpoch = useRef(0);
   const invitationSubmission = useRef<number | null>(null);
   const invitationSubmissionSequence = useRef(0);
@@ -68,9 +72,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
     invitationSubmission.current = null;
     setPasswordError(""); setInvitationPassphrase(null); setInvitationError("");
     setInvitationBusy(false); setInvitationPasswordError(false); setClaimError("");
-    setCurrentPasswordDraft(""); setNewPasswordDraft("");
-    setNewPasswordConfirmationDraft(""); setTemporaryPasswordDraft("");
-    setClaimPasswordDraft(""); setClaimConfirmationDraft("");
+    entry.reset();
   }
   useImperativeHandle(ref, () => ({ reset }));
   useEffect(() => () => { securityPresentationEpoch.current += 1;
@@ -105,6 +107,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
       const outcome = await session.claimInvitation({ newPassword: password,
         newPasswordConfirmation: String(data.get("newPasswordConfirmation")) });
       if (outcome.status === "invitation-claimed") {
+        entry.reset("claimPassword", "claimConfirmation");
         form.reset();
         const adopted = session.getSnapshot();
         if (adopted.kind === "read-only" || adopted.kind === "edit") {
@@ -126,7 +129,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
       const outcome = await session.cancelInvitationClaim();
       if (outcome.status === "claim-canceled") {
         setClaimError("");
-        setClaimPasswordDraft(""); setClaimConfirmationDraft("");
+        entry.reset("claimPassword", "claimConfirmation");
         setMessage("Invitation claim canceled; the current session is unchanged.");
       } else if (outcome.status === "failed") {
         setClaimError(catalogText(outcome.code));
@@ -169,9 +172,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         newPasswordConfirmation: confirmation,
       });
       if (outcome.status === "password-changed") {
+        entry.reset("currentPassword", "newPassword", "newPasswordConfirmation");
         form.reset();
-        setCurrentPasswordDraft(""); setNewPasswordDraft("");
-        setNewPasswordConfirmationDraft("");
         setMessage("Password changed and the updated document was published safely.");
       } else if (outcome.status === "failed") {
         setPasswordError(catalogText(outcome.code));
@@ -244,8 +246,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
       if (outcome.status === "invitation-created") {
         setInvitationError("");
         setInvitationPasswordError(false);
+        entry.reset("temporaryPassword");
         form.reset();
-        setTemporaryPasswordDraft("");
       } else if (outcome.status === "failed") {
         setInvitationError(catalogText(outcome.code));
         const fieldAssignable = outcome.code === "WEAK_PASSWORD"
@@ -334,14 +336,13 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           <p>{opened.recoverySlot
             ? "This is the recovery/master slot. Store its replacement safely offline and do not use it routinely."
             : "Changing this password re-wraps the existing document key; it does not rotate a possibly compromised document key."}</p>
-          <label>Current password<input name="currentPassword" type="password" required autoFocus
-            value={currentPasswordDraft} onChange={(event) => setCurrentPasswordDraft(event.target.value)} /></label>
-          <label>New password<input name="newPassword" type="password" required
-            aria-describedby="change-password-policy" value={newPasswordDraft}
-            onChange={(event) => setNewPasswordDraft(event.target.value)} /></label>
-          <label>Confirm new password<input name="newPasswordConfirmation" type="password" required
-            aria-describedby="change-password-policy" value={newPasswordConfirmationDraft}
-            onChange={(event) => setNewPasswordConfirmationDraft(event.target.value)} /></label>
+          <label>Current password<input {...entry.field("currentPassword")}
+            name="currentPassword" required autoFocus /></label>
+          <label>New password<input {...entry.field("newPassword")} name="newPassword" required
+            aria-describedby="change-password-policy" /></label>
+          <label>Confirm new password<input {...entry.field("newPasswordConfirmation")}
+            name="newPasswordConfirmation" required
+            aria-describedby="change-password-policy" /></label>
           <PasswordPolicyStatus id="change-password-policy" password={newPasswordDraft}
             confirmation={newPasswordConfirmationDraft} comparePassword={currentPasswordDraft}
             compareMessage="New password must differ from the current password." />
@@ -350,11 +351,11 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         {(securityCommands?.createInvitation || snapshot.pending === "invitation-create")
           && <form onSubmit={createInvitation}><h3>Invite another person</h3>
             <label>Temporary label (required)<input name="temporaryLabel" required /></label>
-            <label>Temporary passphrase (leave blank to generate)<input name="temporaryPassword" type="password"
+            <label>Temporary passphrase (leave blank to generate)<input
+              {...entry.field("temporaryPassword")} name="temporaryPassword"
               aria-describedby={`temporary-password-policy${invitationPasswordError
                 ? " invitation-password-error" : ""}`}
-              value={temporaryPasswordDraft}
-              onChange={(event) => setTemporaryPasswordDraft(event.target.value)} /></label>
+            /></label>
             <PasswordPolicyStatus id="temporary-password-policy" password={temporaryPasswordDraft}
               optionalBlankGenerates={true} />
             <label className="check"><input name="canEdit" type="checkbox" /> May edit</label>
@@ -381,12 +382,14 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
     {claimVisible && <FocusedDialog returnFocus={returnFocus}
       title="Claim invitation">
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
-      <form onSubmit={claimInvitation}><label>New password<input name="newPassword" type="password"
+      <form onSubmit={claimInvitation}><label>New password<input
+        {...entry.field("claimPassword")} name="newPassword"
         required autoFocus aria-describedby="claim-password-policy"
-        value={claimPasswordDraft} onChange={(event) => setClaimPasswordDraft(event.target.value)} /></label>
-        <label>Confirm new password<input name="newPasswordConfirmation" type="password"
+        /></label>
+        <label>Confirm new password<input {...entry.field("claimConfirmation")}
+          name="newPasswordConfirmation"
           required aria-describedby="claim-password-policy"
-          value={claimConfirmationDraft} onChange={(event) => setClaimConfirmationDraft(event.target.value)} /></label>
+          /></label>
         <PasswordPolicyStatus id="claim-password-policy" password={claimPasswordDraft}
           confirmation={claimConfirmationDraft} />
         {claimError && <p className="dialog-error" role="alert">{claimError}</p>}
