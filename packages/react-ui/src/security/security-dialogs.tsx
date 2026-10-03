@@ -23,7 +23,7 @@ export interface SecurityDialogsHandle { reset(): void }
 export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   proposedPasswordRejectionMessage, PasswordPolicyStatus, CompactionControls,
   catalogText, safeRendererErrorMessage, onMessage: setMessage, onAdopted,
-  onClose, commands, passwordsOpen, claimVisible, activeDocument,
+  onClose, commands, passwordsOpening, passwordsOpen, claimVisible, activeDocument,
   returnFocus, ref }: {
   session: SecuritySession;
   clipboard: { copyInvitationPassphrase(password: string): Promise<boolean> };
@@ -39,6 +39,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   onAdopted(document: DocumentOpened): void;
   onClose(): void;
   commands: ShellCommands<DocumentOpened>;
+  passwordsOpening: number;
   passwordsOpen: boolean;
   claimVisible: boolean;
   activeDocument: boolean;
@@ -372,9 +373,11 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
         <SlotAdministration opened={opened} commands={securityCommands ?? {
           updateSlotPermissions: false, removeSlot: false }}
-          canCompact={commands.available("compact", "passwords")} onUpdate={updateManagedSlot}
+          canCompact={commands.available("compact", { kind: "passwords",
+            opening: passwordsOpening })} onUpdate={updateManagedSlot}
           onRemove={removeManagedSlot} CompactionControls={CompactionControls} onCompact={async () => {
-            await commands.invoke("compact", { origin: "passwords", observedSnapshot: snapshot });
+            await commands.invoke("compact", { origin: { kind: "passwords",
+              opening: passwordsOpening }, observedSnapshot: snapshot });
           }} />
         <div className="dialog-actions"><button onClick={closePasswords}
           disabled={invitationBusy}>Close</button></div></>}

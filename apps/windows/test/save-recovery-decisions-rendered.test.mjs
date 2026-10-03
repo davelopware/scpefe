@@ -327,6 +327,9 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       "a retained Passwords compaction callback cannot run after that dialog closes");
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    await act(async () => { retainedCompactClick(); });
+    assert.equal(ui.getByRole(document.body, "dialog", { name: "Passwords" }) === dialog,
+      true, "the previous opening's callback cannot compact after Passwords reopens");
     await user.click(ui.getByRole(dialog, "button", { name: "Compact history…" }));
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Permanently compact document history?" });

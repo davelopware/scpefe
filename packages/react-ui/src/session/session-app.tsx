@@ -111,9 +111,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialogState] = useState<DialogName>(null);
-  // Retained dialog callbacks must see a close before React commits the next render.
+  // Retained callbacks must see closes and new Passwords openings immediately.
   const currentDialog = useRef<DialogName>(null);
+  const passwordsOpening = useRef(0);
   function setDialog(next: DialogName) {
+    if (next === "passwords" && currentDialog.current !== "passwords") {
+      passwordsOpening.current += 1;
+    }
     currentDialog.current = next;
     setDialogState(next);
   }
@@ -200,7 +204,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
       modalBusy: modalBusy.current,
       passwordsDialogActive: currentDialog.current === "passwords" && protection === null
-        && !creating && !presentationView.blocked }),
+        && !creating && !presentationView.blocked,
+      passwordsOpening: passwordsOpening.current }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -383,6 +388,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onMessage={setMessage} onAdopted={(document) => showOpenedResult(document, true)}
       onClose={closeDialog} commands={shellCommands}
+      passwordsOpening={passwordsOpening.current}
       passwordsOpen={dialog === "passwords"}
       claimVisible={!protection && visibleOpenedDialog === "claim"}
       activeDocument={activeDocument} returnFocus={dialogReturnFocus.current} />

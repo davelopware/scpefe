@@ -5,8 +5,9 @@ export type ShellCommand = "new" | "open" | "save" | "backup" | "export" | "clos
   | "exit" | "edit" | "undo" | "redo" | "find" | "replace" | "lock"
   | "unlock" | "passwords" | "profile" | "compact";
 
-/** The Passwords origin permits only its existing compaction control. */
-export type CommandOrigin = "shell" | "passwords";
+/** The Passwords origin is valid only for the dialog opening that created it. */
+export type CommandOrigin = "shell" | { readonly kind: "passwords";
+  readonly opening: number };
 
 /** Presentation facts read at invocation rather than stored as command state. */
 export interface ShellCommandFacts {
@@ -14,6 +15,7 @@ export interface ShellCommandFacts {
   profileReady: boolean;
   modalBusy: boolean;
   passwordsDialogActive: boolean;
+  passwordsOpening: number;
 }
 
 /** One eligibility and invocation path for menus, shortcuts, status and Passwords. */
@@ -36,8 +38,9 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
 }): ShellCommands<Doc> {
   function available(command: ShellCommand, origin: CommandOrigin = "shell") {
     const view = facts();
-    if (origin === "passwords") {
-      if (command !== "compact" || !view.passwordsDialogActive) return false;
+    if (origin !== "shell") {
+      if (command !== "compact" || !view.passwordsDialogActive
+        || origin.opening !== view.passwordsOpening) return false;
     } else if (view.modalBusy) return false;
     const snapshot = session.getSnapshot();
     const active = (snapshot.kind === "read-only" || snapshot.kind === "edit")

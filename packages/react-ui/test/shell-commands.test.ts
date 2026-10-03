@@ -13,7 +13,7 @@ function snapshot(kind: "edit" | "locked", adoption = 1,
 test("menu, shortcut and status callers share current eligibility and tracked invocation", async () => {
   let current = snapshot("edit");
   const facts: ShellCommandFacts = { activeAdoption: 1, profileReady: true,
-    modalBusy: false, passwordsDialogActive: false };
+    modalBusy: false, passwordsDialogActive: false, passwordsOpening: 0 };
   const calls: Array<[ShellCommand, HTMLElement | null]> = [];
   let tracked = 0;
   const commands = createShellCommands({ session: { getSnapshot: () => current,
@@ -47,25 +47,36 @@ test("menu, shortcut and status callers share current eligibility and tracked in
 test("only active Passwords may request currently eligible compaction", async () => {
   let current = snapshot("edit");
   const facts: ShellCommandFacts = { activeAdoption: 1, profileReady: true,
-    modalBusy: true, passwordsDialogActive: true };
+    modalBusy: true, passwordsDialogActive: true, passwordsOpening: 1 };
   const calls: ShellCommand[] = [];
   const commands = createShellCommands({ session: { getSnapshot: () => current,
     subscribe: () => () => {} }, facts: () => facts,
     run: (command) => { calls.push(command); },
     track: async (operation) => { await operation(); } });
   const visible = current;
+  const openingA = { kind: "passwords" as const, opening: 1 };
   assert.equal(commands.available("compact"), false);
-  assert.equal(commands.available("compact", "passwords"), true);
-  assert.equal(await commands.invoke("save", { origin: "passwords" }), false);
-  assert.equal(await commands.invoke("compact", { origin: "passwords",
+  assert.equal(commands.available("compact", openingA), true);
+  assert.equal(await commands.invoke("save", { origin: openingA }), false);
+  assert.equal(await commands.invoke("compact", { origin: openingA,
+    observedSnapshot: visible }), true);
+  facts.passwordsDialogActive = false;
+  assert.equal(await commands.invoke("compact", { origin: openingA }), false);
+  facts.passwordsDialogActive = true;
+  facts.passwordsOpening = 2;
+  assert.equal(await commands.invoke("compact", { origin: openingA,
+    observedSnapshot: visible }), false,
+    "a callback from the previous Passwords opening cannot act in the next one");
+  const openingB = { kind: "passwords" as const, opening: 2 };
+  assert.equal(await commands.invoke("compact", { origin: openingB,
     observedSnapshot: visible }), true);
   current = snapshot("edit", 1, false);
-  assert.equal(await commands.invoke("compact", { origin: "passwords" }), false,
+  assert.equal(await commands.invoke("compact", { origin: openingB }), false,
     "a changed session command result blocks the open dialog control");
   current = snapshot("edit", 2);
-  assert.equal(await commands.invoke("compact", { origin: "passwords",
+  assert.equal(await commands.invoke("compact", { origin: openingB,
     observedSnapshot: visible }), false);
   facts.passwordsDialogActive = false;
-  assert.equal(await commands.invoke("compact", { origin: "passwords" }), false);
-  assert.deepEqual(calls, ["compact"]);
+  assert.equal(await commands.invoke("compact", { origin: openingB }), false);
+  assert.deepEqual(calls, ["compact", "compact"]);
 });
