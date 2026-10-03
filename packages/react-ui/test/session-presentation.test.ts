@@ -45,6 +45,24 @@ test("edit failure is one selected decision with safe text and retry focus", asy
   session.dispose();
 });
 
+test("entering Edit mode presents the session outcome and drops a late prior-document result", async () => {
+  const { session, presentation, challenge, defer } = setup();
+  challenge();
+  await presentation.enterEditMode();
+  assert.equal(presentation.view().selectedDecision?.kind, "lease-takeover");
+  assert.equal(presentation.view().safeMessage, "Editing requires a confirmed lease takeover.");
+  session.adopt(opened);
+  const finish = defer();
+  const pending = presentation.enterEditMode();
+  await Promise.resolve();
+  session.adopt({ ...opened, content: "next document" });
+  finish();
+  await pending;
+  assert.equal(presentation.view().safeMessage, null);
+  assert.equal(presentation.view().focusIntent, null);
+  session.dispose();
+});
+
 test("retry exposes the takeover message without leaking its authorization", async () => {
   const { session, presentation, challenge } = setup();
   await session.enterEditMode();
@@ -91,8 +109,13 @@ test("queued external opens wait behind a form and document attention, then reta
   const presentation = new SessionPresentation(session, () => "Safe failure.");
   session.queueExternalOpen({ token: "first" });
   session.queueExternalOpen({ token: "second" });
+  presentation.externalOpenQueued(true);
+  assert.equal(presentation.view().safeMessage,
+    "Another open request is waiting for the current dialog.");
   assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);
   assert.equal(presentation.activateQueuedExternalOpen(), false);
+  assert.equal(presentation.view().openedDialog, "recovery");
+  assert.equal(presentation.view({ formActive: true }).openedDialog, null);
   assert.equal(session.getSnapshot().externalOpen?.queued, 2);
   await presentation.act("discard-recovery");
   assert.equal(presentation.activateQueuedExternalOpen({ formActive: true }), false);

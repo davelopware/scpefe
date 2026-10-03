@@ -1,6 +1,5 @@
 import { useEffect, type RefObject } from "react";
 import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
-import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import type { ShellHost } from "../shell/shell-dialogs.tsx";
 import type { SessionEventsHost } from "./host-roles.ts";
 import type { DocumentOpened, Opened } from "./types.ts";
@@ -17,10 +16,10 @@ type LockResult = { locked: true; journalSaved: boolean; warningCode: string | n
 /** Subscribes native lifecycle events and forwards only semantic presentation effects. */
 export function useSessionEvents({ session, presentation, events, shellHost, completion,
   forwardJournalWarning, catalogText, safeRendererErrorMessage, modalBusy,
-  returnFocus, canPresentQueued, onLocked, onRetained, onPresentExternal,
+  returnFocus, onLocked, onRetained,
   onMessage }: {
   session: EventSession;
-  presentation: Pick<SessionPresentation, "activateQueuedExternalOpen">;
+  presentation: Pick<SessionPresentation, "externalOpenQueued">;
   events: SessionEventsHost;
   shellHost: Pick<ShellHost, "getUnresolvedJournalSummary">;
   completion: { track<T>(operation: () => T | Promise<T>): Promise<T> };
@@ -29,14 +28,10 @@ export function useSessionEvents({ session, presentation, events, shellHost, com
   safeRendererErrorMessage(error: unknown): string;
   modalBusy: RefObject<boolean>;
   returnFocus: RefObject<HTMLElement | null>;
-  canPresentQueued: boolean;
   onLocked(result: LockResult, closed?: boolean): void;
   onRetained(document: DocumentOpened): void;
-  onPresentExternal(): void;
   onMessage(message: string): void;
 }): void {
-  const snapshot = useSessionSnapshot(session);
-  const externalOpen = snapshot.externalOpen;
   useEffect(() => {
     void completion.track(() => shellHost.getUnresolvedJournalSummary()
       .then((summary) => { session.observeRecoveryDiscovery(summary); })
@@ -61,7 +56,7 @@ export function useSessionEvents({ session, presentation, events, shellHost, com
       const current = session.getSnapshot();
       if (modalBusy.current || (current.kind === "read-only" || current.kind === "edit")
         && current.publication.resolving) {
-        onMessage("Another open request is waiting for the current dialog.");
+        presentation.externalOpenQueued(true);
       }
     });
     const stopJournalSummary = events.onUnresolvedJournalSummary(
@@ -87,14 +82,4 @@ export function useSessionEvents({ session, presentation, events, shellHost, com
       window.removeEventListener("pointerdown", activity);
     };
   }, []);
-  useEffect(() => {
-    if (canPresentQueued && !externalOpen?.active && externalOpen?.queued) {
-      if (presentation.activateQueuedExternalOpen()) {
-        const active = document.activeElement;
-        if (active instanceof HTMLElement && active !== document.body
-          && active.isConnected) returnFocus.current = active;
-        onPresentExternal();
-      }
-    }
-  }, [canPresentQueued, externalOpen?.active, externalOpen?.queued, presentation]);
 }

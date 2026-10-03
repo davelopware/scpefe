@@ -1,5 +1,5 @@
 import type { DocumentSession, DocumentSessionSnapshot } from "@scpefe/frontend-core";
-import type { DocumentOpened, Opened } from "./types.ts";
+import type { DocumentOpened, Opened, OpenedDialogName } from "./types.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
@@ -72,6 +72,7 @@ export interface SessionPresentationView {
     | NewerEditsDecision
     | DocumentAttentionDecision | AdmissionDecision | null;
   readonly blocked: boolean;
+  readonly openedDialog: OpenedDialogName;
   readonly safeMessage: string | null;
   readonly focusIntent: "edit-retry" | "save-retry" | "recovery-restore" | "decision-action"
     | "migration-retry" | "publication-retry" | "return" | null;
@@ -129,6 +130,14 @@ export class SessionPresentation {
     return this.session.activateExternalOpen();
   }
 
+  /** Reports a queued open waiting behind the current graphical decision. */
+  externalOpenQueued(waiting: boolean): void {
+    this.current();
+    if (!this.disposed && waiting) {
+      this.safeMessage = "Another open request is waiting for the current dialog.";
+    }
+  }
+
   view({ formActive = false }: { formActive?: boolean } = {}): SessionPresentationView {
     const snapshot = this.current();
     const attention = snapshot.kind === "read-only" || snapshot.kind === "edit"
@@ -174,9 +183,17 @@ export class SessionPresentation {
         ? { kind: "publication-decision" as const, state: attention.state,
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : null;
+    const openedDialog: OpenedDialogName = selectedDecision?.kind === "invitation-claim" ? "claim"
+      : selectedDecision?.kind === "profile-mismatch" ? "profile-mismatch"
+      : selectedDecision?.kind === "head-mismatch" ? "head"
+      : selectedDecision?.kind === "unreadable-journal" ? "unreadable"
+      : selectedDecision?.kind === "recovery-decision" ? "recovery"
+      : selectedDecision?.kind === "publication-decision" ? "publication"
+      : selectedDecision?.kind === "migration-decision" ? "migration" : null;
     return { selectedDecision: selectedDecision?.kind === "lifecycle-protection"
       ? selectedDecision : this.confirmDivergenceDiscard
       ? { kind: "newer-edits-confirmation" } : selectedDecision,
+      openedDialog: this.confirmDivergenceDiscard ? null : openedDialog,
       blocked: selectedDecision !== null || this.confirmDivergenceDiscard,
       safeMessage: selectedDecision?.kind === "lifecycle-protection" ? null : this.safeMessage,
       focusIntent: selectedDecision?.kind === "lifecycle-protection"
@@ -215,6 +232,24 @@ export class SessionPresentation {
     } else if (outcome.status === "failed") {
       this.safeMessage = `Manual save failed; changes remain recoverable: ${this.catalogText(outcome.code)}`;
       this.focusIntent = "save-retry";
+    }
+  }
+
+  /** Requests Edit mode and presents only an outcome for the current document. */
+  async enterEditMode(): Promise<void> {
+    const snapshot = this.current();
+    if (this.disposed || (snapshot.kind !== "read-only" && snapshot.kind !== "edit")) return;
+    const adoption = snapshot.adoption;
+    const epoch = this.epoch;
+    const outcome = await this.session.enterEditMode();
+    const current = this.current();
+    if (this.disposed || this.epoch !== epoch
+      || (current.kind !== "read-only" && current.kind !== "edit")
+      || current.adoption !== adoption) return;
+    if (outcome.status === "attention") {
+      this.safeMessage = "Editing requires a confirmed lease takeover.";
+    } else if (outcome.status === "edit-mode") {
+      this.safeMessage = "Edit mode entered.";
     }
   }
 

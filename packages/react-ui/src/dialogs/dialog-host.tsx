@@ -20,7 +20,7 @@ export type DialogAction = "retry-edit" | "continue-read-only"
 
 /** Focus targets used after a host command leaves an attention dialog open. */
 export interface DialogHostHandle {
-  focus(action: "edit" | "save" | "recovery" | "publication" | "migration"): void;
+  focus(intent: Exclude<SessionPresentationView["focusIntent"], "return" | "decision-action" | null>): void;
 }
 
 /** Renders every portable session attention as an accessible platform dialog. */
@@ -67,11 +67,11 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   const recoveryRestoreAction = useRef<HTMLButtonElement>(null);
   const publicationRetryAction = useRef<HTMLButtonElement>(null);
   const migrationRetryAction = useRef<HTMLButtonElement>(null);
-  useImperativeHandle(ref, () => ({ focus: (action) => {
-    const target = action === "edit" ? editRetryAction
-      : action === "save" ? saveRetryAction
-      : action === "recovery" ? recoveryRestoreAction
-        : action === "migration" ? migrationRetryAction : publicationRetryAction;
+  useImperativeHandle(ref, () => ({ focus: (intent) => {
+    const target = intent === "edit-retry" ? editRetryAction
+      : intent === "save-retry" ? saveRetryAction
+      : intent === "recovery-restore" ? recoveryRestoreAction
+        : intent === "migration-retry" ? migrationRetryAction : publicationRetryAction;
     target.current?.focus();
   } }), []);
   return <>

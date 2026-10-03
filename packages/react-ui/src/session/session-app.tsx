@@ -10,11 +10,10 @@ import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
-import { useAttentionActions } from "./use-attention-actions.ts";
 import { SessionPresentation } from "./session-presentation.ts";
 import type { DialogAction } from "../dialogs/dialog-host.tsx";
 import { useSessionEvents } from "./use-session-events.ts";
-import type { DocumentOpened, Opened, DialogName, OpenedDialogName } from "./types.ts";
+import type { DocumentOpened, Opened, DialogName } from "./types.ts";
 import type { SessionHost, JournalTransportHost, SessionEventsHost,
   SecurityClipboardHost } from "./host-roles.ts";
 import type { ShellHost } from "../shell/shell-dialogs.tsx";
@@ -119,22 +118,11 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const dialogHost = useRef<DialogHostHandle>(null);
   const dialogReturnFocus = useRef<HTMLElement | null>(null);
   const modalBusy = useRef(false);
-  const attentionActions = useAttentionActions({ session,
-    catalogText, onMessage: setMessage,
-    onDialog: setDialog,
-    onLocked: showLockedResult });
   const presentationView = presentation.view({ formActive: creating
     || (dialog !== null && dialog !== "compaction") });
   const selected = presentationView.selectedDecision;
   const protection = selected?.kind === "lifecycle-protection" ? selected : null;
-  const visibleOpenedDialog: OpenedDialogName = protection || creating || dialog !== null
-    ? null : selected?.kind === "invitation-claim" ? "claim"
-      : selected?.kind === "profile-mismatch" ? "profile-mismatch"
-        : selected?.kind === "head-mismatch" ? "head"
-          : selected?.kind === "unreadable-journal" ? "unreadable"
-            : selected?.kind === "recovery-decision" ? "recovery"
-              : selected?.kind === "publication-decision" ? "publication"
-                : selected?.kind === "migration-decision" ? "migration" : null;
+  const visibleOpenedDialog = dialog === null ? presentationView.openedDialog : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
     || presentationView.blocked;
   useSessionEvents({ session, presentation, events, shellHost,
@@ -142,12 +130,21 @@ export function SharedApp({ sessionHost, journalTransport, events,
     forwardJournalWarning: sessionStore.forwardJournalWarning,
     catalogText, safeRendererErrorMessage, modalBusy,
     returnFocus: dialogReturnFocus,
-    canPresentQueued: !modalBusy.current && !publicationResolving,
     onLocked: showLockedResult,
     onRetained: (document) => showOpenedResult(document),
-    onPresentExternal: () => shellDialogs.current?.showExternalOpen(),
     onMessage: setMessage,
   });
+  useEffect(() => {
+    if (!sessionSnapshot.externalOpen?.queued
+      || sessionSnapshot.externalOpen.active
+      || !presentation.activateQueuedExternalOpen({ formActive: creating || dialog !== null
+        || visibleOpenedDialog !== null })) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body
+      && active.isConnected) dialogReturnFocus.current = active;
+    shellDialogs.current?.showExternalOpen();
+  }, [sessionSnapshot.externalOpen?.active, sessionSnapshot.externalOpen?.queued,
+    presentationView.blocked, creating, dialog, publicationResolving]);
 
   function showOpenedResult(result: DocumentOpened, alreadyAdopted = false) {
     setDialog(null);
@@ -210,11 +207,28 @@ export function SharedApp({ sessionHost, journalTransport, events,
     } else if (command === "passwords" || command === "profile") {
       setDialog(command as DialogName);
     } else if (command === "save") await runSave();
-    else if (command === "backup") await attentionActions.backup();
-    else if (command === "edit") await attentionActions.enterEditMode();
-    else if (command === "undo") attentionActions.moveHistory(-1);
-    else if (command === "redo") attentionActions.moveHistory(1);
-    else if (command === "lock") await attentionActions.lock();
+    else if (command === "backup") {
+      const started = session.getSnapshot();
+      const adoption = started.kind === "read-only" || started.kind === "edit"
+        ? started.adoption : null;
+      const outcome = await session.backup();
+      const current = session.getSnapshot();
+      if (!presentationMounted.current || (current.kind === "read-only"
+        || current.kind === "edit" ? current.adoption : null) !== adoption) return;
+      if (outcome.status === "backup") setMessage(outcome.created
+        ? "Verified byte-identical backup replica created."
+        : "Backup canceled; the document and destination are unchanged.");
+      else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
+    }
+    else if (command === "edit") {
+      await presentation.enterEditMode();
+      refreshPresentation((revision) => revision + 1);
+      const safeMessage = presentation.view().safeMessage;
+      if (safeMessage !== null) setMessage(safeMessage);
+    }
+    else if (command === "undo") session.undo();
+    else if (command === "redo") session.redo();
+    else if (command === "lock") await lockDocument();
     else if (command === "unlock") shellDialogs.current?.showUnlock();
     else if (command === "close") {
       const outcome = await session.close();
@@ -227,6 +241,15 @@ export function SharedApp({ sessionHost, journalTransport, events,
       const outcome = await session.exit();
       if (outcome.status === "failed") setMessage(catalogText(outcome.code));
     }
+  }
+
+  async function lockDocument() {
+    const outcome = await session.lock();
+    if (!presentationMounted.current) return;
+    if (outcome.status === "locked") showLockedResult({
+      locked: true, journalSaved: true, warningCode: outcome.warningCode,
+    });
+    else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
   }
 
   function showLockedResult(result: LockResult, closed = false) {
@@ -264,58 +287,44 @@ export function SharedApp({ sessionHost, journalTransport, events,
   }
 
   async function runDialogAction(action: DialogAction) {
-    if (action === "protection-cancel" || action === "protection-save"
-      || action === "protection-discard" || action === "continue-read-only" || action === "retry-edit"
-      || action === "restore-recovery" || action === "discard-recovery"
-      || action === "accept-head" || action === "discard-unreadable"
-      || action === "confirm-lease" || action === "cancel-lease"
-      || action === "migrate" || action === "compact"
-      || action === "compaction-canceled" || action === "retry-save"
-      || action === "continue-editing" || action === "discard-publication"
-      || action === "reconnect-publication" || action === "keep-newer-edits"
-      || action === "export-newer-edits" || action === "discard-newer-edits") {
-      const actionElement = document.activeElement instanceof HTMLElement
-        ? document.activeElement : null;
-      const started = session.getSnapshot();
-      const adoption = started.kind === "read-only" || started.kind === "edit"
-        ? started.adoption : null;
-      const nextDialog = action === "protection-cancel" || action === "protection-save"
-        || action === "protection-discard"
-        ? await rendererLifecycleCompletion.track(() => presentation.act(action))
-        : await presentation.act(action);
-      if (!presentationMounted.current) return;
-      const current = session.getSnapshot();
-      if ((current.kind === "read-only" || current.kind === "edit"
-        ? current.adoption : null) !== adoption) return;
-      refreshPresentation((revision) => revision + 1);
-      const result = presentation.view();
-      if (nextDialog === "passwords") setDialog(nextDialog);
-      if (nextDialog === "export") shellDialogs.current?.showExport();
-      const safeMessage = result.safeMessage;
-      if (safeMessage !== null) setMessage(safeMessage);
-      else if (action === "continue-editing") setMessage("");
-      const focusIfCurrent = (focus: () => void) => requestAnimationFrame(() => {
-        const latest = session.getSnapshot();
-        if (!presentationMounted.current || (latest.kind === "read-only"
-          || latest.kind === "edit" ? latest.adoption : null) !== adoption) return;
-        focus();
-      });
-      if (result.focusIntent === "decision-action") {
-        focusIfCurrent(() => { if (actionElement?.isConnected) actionElement.focus(); });
-      } else if (result.focusIntent === "migration-retry"
-        || result.focusIntent === "edit-retry"
-        || result.focusIntent === "recovery-restore"
-        || result.focusIntent === "publication-retry"
-        || result.focusIntent === "save-retry") {
-        const target = result.focusIntent === "migration-retry" ? "migration"
-          : result.focusIntent === "edit-retry" ? "edit"
-          : result.focusIntent === "recovery-restore" ? "recovery"
-            : result.focusIntent === "save-retry" ? "save" : "publication";
-        focusIfCurrent(() => dialogHost.current?.focus(target));
-      }
-      return;
+    if (action === "lock") { await lockDocument(); return; }
+    if (action === "open-passwords") { setDialog("passwords"); return; }
+    const actionElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
+    const started = session.getSnapshot();
+    const adoption = started.kind === "read-only" || started.kind === "edit"
+      ? started.adoption : null;
+    const nextDialog = action === "protection-cancel" || action === "protection-save"
+      || action === "protection-discard"
+      ? await rendererLifecycleCompletion.track(() => presentation.act(action))
+      : await presentation.act(action);
+    if (!presentationMounted.current) return;
+    const current = session.getSnapshot();
+    if ((current.kind === "read-only" || current.kind === "edit"
+      ? current.adoption : null) !== adoption) return;
+    refreshPresentation((revision) => revision + 1);
+    const result = presentation.view();
+    if (nextDialog === "passwords") setDialog(nextDialog);
+    if (nextDialog === "export") shellDialogs.current?.showExport();
+    const safeMessage = result.safeMessage;
+    if (safeMessage !== null) setMessage(safeMessage);
+    else if (action === "continue-editing") setMessage("");
+    const focusIfCurrent = (focus: () => void) => requestAnimationFrame(() => {
+      const latest = session.getSnapshot();
+      if (!presentationMounted.current || (latest.kind === "read-only"
+        || latest.kind === "edit" ? latest.adoption : null) !== adoption) return;
+      focus();
+    });
+    if (result.focusIntent === "decision-action") {
+      focusIfCurrent(() => { if (actionElement?.isConnected) actionElement.focus(); });
+    } else if (result.focusIntent === "migration-retry"
+      || result.focusIntent === "edit-retry"
+      || result.focusIntent === "recovery-restore"
+      || result.focusIntent === "publication-retry"
+      || result.focusIntent === "save-retry") {
+      const intent = result.focusIntent;
+      focusIfCurrent(() => dialogHost.current?.focus(intent));
     }
-    await attentionActions.run(action);
   }
 
   useEffect(() => {
@@ -331,7 +340,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
-    <StatusBar session={session} active={activeDocument} message={message} /></div>
+    <StatusBar session={session} active={activeDocument}
+      message={presentationView.safeMessage ?? message} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}
