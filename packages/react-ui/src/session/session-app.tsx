@@ -25,13 +25,6 @@ function isDocumentOpened(value: Opened | null): value is DocumentOpened {
   return value !== null && value.invitationRequired !== true;
 }
 
-function openedDialogName(value: Opened | null): OpenedDialogName {
-  if (value?.invitationRequired) return "claim";
-  if (!isDocumentOpened(value)) return null;
-  if (value.profileMismatch) return "profile-mismatch";
-  return null;
-}
-
 type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
 /** Small platform capabilities required to mount the shared session view. */
 export interface SharedAppProps {
@@ -115,7 +108,6 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialog] = useState<DialogName>(null);
   const [creating, setCreating] = useState(false);
-  const invitationStaged = sessionSnapshot.invitationStaged === true;
   const protection = sessionSnapshot.attention?.kind === "lifecycle-protection"
     ? sessionSnapshot.attention : null;
   const creationFlow = useRef<CreationFlowHandle>(null);
@@ -133,33 +125,22 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const presentationView = presentation.view({ formActive: creating
     || (dialog !== null && dialog !== "compaction") });
   const selected = presentationView.selectedDecision;
-  const confirmDivergenceDiscard = selected?.kind === "newer-edits-confirmation";
-  const saveFailure = selected?.kind === "save-failed" ? selected : null;
-  const publicationDecision = selected?.kind === "publication-decision" ? selected : null;
-  const leaseDecision = selected?.kind === "lease-takeover" ? selected : null;
-  const migrationDecision = selected?.kind === "migration-decision" ? selected : null;
-  const recoveryDecision = selected?.kind === "recovery-decision" ? selected : null;
-  const headDecision = selected?.kind === "head-mismatch" ? selected : null;
-  const unreadableDecision = selected?.kind === "unreadable-journal" ? selected : null;
-  const openedDialog = opened?.invitationRequired ? "claim"
-    : headDecision ? "head" : unreadableDecision ? "unreadable"
-      : recoveryDecision ? "recovery" : publicationDecision ? "publication"
-        : isDocumentOpened(opened) && opened.profileMismatch ? "profile-mismatch"
-        : migrationDecision ? "migration"
-        : openedDialogName(opened);
-  const visibleOpenedDialog = !creating && dialog === null && !confirmDivergenceDiscard
-    && leaseDecision === null && saveFailure === null
-    ? invitationStaged ? "claim" : openedDialog : null;
+  const visibleOpenedDialog: OpenedDialogName = protection || creating || dialog !== null
+    ? null : selected?.kind === "invitation-claim" ? "claim"
+      : selected?.kind === "profile-mismatch" ? "profile-mismatch"
+        : selected?.kind === "head-mismatch" ? "head"
+          : selected?.kind === "unreadable-journal" ? "unreadable"
+            : selected?.kind === "recovery-decision" ? "recovery"
+              : selected?.kind === "publication-decision" ? "publication"
+                : selected?.kind === "migration-decision" ? "migration" : null;
   modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
-    || invitationStaged || confirmDivergenceDiscard
-    || presentationView.blocked || leaseDecision !== null || saveFailure !== null;
+    || presentationView.blocked;
   useSessionEvents({ session, events, shellHost,
     completion: rendererLifecycleCompletion,
     forwardJournalWarning: sessionStore.forwardJournalWarning,
     catalogText, safeRendererErrorMessage, modalBusy,
     returnFocus: dialogReturnFocus,
-    canPresentQueued: !modalBusy.current && !creating && dialog === null
-      && openedDialog === null && !publicationResolving,
+    canPresentQueued: !modalBusy.current && !publicationResolving,
     onLocked: showLockedResult,
     onRetained: (document) => showOpenedResult(document),
     onPresentExternal: () => shellDialogs.current?.showExternalOpen(),

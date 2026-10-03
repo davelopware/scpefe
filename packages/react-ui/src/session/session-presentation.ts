@@ -50,11 +50,15 @@ export type DocumentAttentionDecision =
   | { readonly kind: "unreadable-journal";
     readonly failureMessage: string | null };
 
+/** Admission required before an invitation or claimed slot can be used normally. */
+export type AdmissionDecision = { readonly kind: "invitation-claim" }
+  | { readonly kind: "profile-mismatch" };
+
 /** Observable graphical state for selected document attention. */
 export interface SessionPresentationView {
   readonly selectedDecision: EditUnavailableDecision | SaveFailedDecision | PublicationDecision
     | NewerEditsDecision
-    | DocumentAttentionDecision | null;
+    | DocumentAttentionDecision | AdmissionDecision | null;
   readonly blocked: boolean;
   readonly safeMessage: string | null;
   readonly focusIntent: "edit-retry" | "save-retry" | "recovery-restore" | "decision-action"
@@ -95,9 +99,10 @@ export class SessionPresentation {
     const snapshot = this.current();
     const attention = snapshot.kind === "read-only" || snapshot.kind === "edit"
       ? snapshot.attention : undefined;
-    const selectedDecision = attention?.kind === "edit-unavailable"
+    const selectedDecision = formActive ? null
+      : snapshot.invitationStaged ? { kind: "invitation-claim" as const }
+      : attention?.kind === "edit-unavailable"
       ? { kind: "edit-unavailable" as const, message: this.catalogText(attention.code) }
-      : formActive ? null
       : attention?.kind === "save-failed"
         ? { kind: "save-failed" as const, message: this.catalogText(attention.code) }
       : this.compactionInFlight || snapshot.pending === "compaction"
@@ -107,6 +112,10 @@ export class SessionPresentation {
       : attention?.kind === "lease-takeover"
         ? { kind: "lease-takeover" as const, holderName: attention.holderName,
           operation: attention.operation, errorMessage: this.leaseError }
+      : (snapshot.kind === "read-only" || snapshot.kind === "edit")
+        && snapshot.document.profileMismatch
+        && (!attention || attention.kind === "migration-decision")
+        ? { kind: "profile-mismatch" as const }
       : attention?.kind === "migration-decision"
         ? { kind: "migration-decision" as const, canMigrate: attention.canMigrate,
           canceled: attention.canceled === true,
@@ -131,7 +140,9 @@ export class SessionPresentation {
       ? { kind: "newer-edits-confirmation" } : selectedDecision,
       blocked: selectedDecision !== null || this.confirmDivergenceDiscard,
       safeMessage: this.safeMessage,
-      focusIntent: this.focusIntent ?? (selectedDecision?.kind === "edit-unavailable" ? "edit-retry"
+      focusIntent: this.focusIntent ?? (selectedDecision?.kind === "invitation-claim"
+        || selectedDecision?.kind === "profile-mismatch" ? "decision-action"
+        : selectedDecision?.kind === "edit-unavailable" ? "edit-retry"
         : selectedDecision?.kind === "save-failed" ? "save-retry"
         : selectedDecision?.kind === "recovery-decision" && selectedDecision.failureMessage
           ? "recovery-restore"

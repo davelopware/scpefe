@@ -108,6 +108,36 @@ test("recovery waits behind a form, then restores unsaved work with a safe outco
   session.dispose();
 });
 
+test("a staged invitation waits for the current form and stays actionable after it closes", () => {
+  const { session, presentation } = setup();
+  session.adopt({ readOnly: true, invitationRequired: true });
+  const duringForm = presentation.view({ formActive: true });
+  assert.equal(duringForm.selectedDecision, null);
+  assert.equal(duringForm.blocked, false);
+  const afterForm = presentation.view();
+  assert.deepEqual(afterForm.selectedDecision, { kind: "invitation-claim" });
+  assert.equal(afterForm.blocked, true);
+  assert.equal(afterForm.focusIntent, "decision-action");
+  session.dispose();
+});
+
+test("profile mismatch waits for the form and follows current document attention", () => {
+  const { session, presentation } = setup();
+  const profileMismatch = { editingBlocked: true as const, slotName: "Ada",
+    slotEmail: "ada@example.test", profileName: "Bea",
+    profileEmail: "bea@example.test" };
+  session.adopt({ ...opened, profileMismatch,
+    recovery: { content: "private", state: "unsaved", updateTime: 42,
+      cursor: { start: 0, end: 0 } } });
+  assert.equal(presentation.view({ formActive: true }).selectedDecision, null);
+  assert.equal(presentation.view().selectedDecision?.kind, "recovery-decision");
+  session.adopt({ ...opened, profileMismatch });
+  assert.deepEqual(presentation.view().selectedDecision,
+    { kind: "profile-mismatch" });
+  assert.equal(presentation.view().blocked, true);
+  session.dispose();
+});
+
 test("head and unreadable-journal decisions keep read-only authority and safe failure text", async () => {
   for (const decision of ["head", "unreadable"] as const) {
     let calls = 0;
