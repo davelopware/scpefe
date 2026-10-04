@@ -3,7 +3,7 @@ import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource } from "@
 /** Commands exposed by the shared shell. */
 export type ShellCommand = "new" | "open" | "save" | "backup" | "export" | "close"
   | "exit" | "edit" | "undo" | "redo" | "find" | "replace" | "lock"
-  | "unlock" | "passwords" | "profile" | "compact";
+  | "unlock" | "passwords" | "profile" | "compact" | "about";
 
 /** Presentation facts read at invocation rather than stored as command state. */
 export interface ShellCommandFacts {
@@ -38,7 +38,7 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
     const commands = active ? snapshot.commands : null;
     switch (command) {
       case "new": case "open": case "profile": return view.profileReady;
-      case "exit": return true;
+      case "exit": case "about": return true;
       case "close": return active || snapshot.kind === "locked";
       case "unlock": return snapshot.kind === "locked";
       case "save": return active && commands?.save === true;
