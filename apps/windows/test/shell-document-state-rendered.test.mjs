@@ -113,6 +113,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   dom.window[Symbol.for("scpefe.renderer.mount")] = (root) => { mountedRoot = root; };
   const assets = await fs.readdir(new URL("../dist/assets/", import.meta.url));
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
+  const stylesheet = assets.find((entry) => /^index-.*\.css$/.test(entry));
+  const style = document.createElement("style");
+  style.textContent = await fs.readFile(new URL(`../dist/assets/${stylesheet}`, import.meta.url), "utf8");
+  document.head.append(style);
   await import(`${pathToFileURL(path.resolve("dist/assets", script)).href}?shell-document-state`);
   assert.ok(mountedRoot);
   const ui = await import("@testing-library/dom");
@@ -138,6 +142,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
   await ui.waitFor(() => assert.equal(document.title, "SCPEFE"));
   assert.equal(statusValue("Document state"), "No document");
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Unlock document" }), null);
   assert.equal(editor.disabled, true);
   assert.match(ui.getByRole(document.body, "note").textContent, /File → New or File → Open/);
   assert.equal((await menuItem("Security", "Unlock")).disabled, true);
@@ -147,6 +152,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.type(ui.getByLabelText(openDialog, "Password"), "correct password");
   await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Unlock document" }), null);
   assert.equal(statusValue("Working copy state"), "Clean");
   assert.equal(statusValue("Publication state"), "Published");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
@@ -369,14 +375,29 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(document.body.textContent.includes(plaintext), false);
   assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
   assert.equal(statusValue("Document state"), "Locked");
+  const lockedButton = ui.getByRole(document.body, "button", { name: "Unlock document" });
+  assert.equal(lockedButton.textContent, "Locked");
+  assert.equal(lockedButton.disabled, false);
+  assert.equal(getComputedStyle(lockedButton).fontWeight, "700");
+  assert.equal(getComputedStyle(lockedButton).color, "rgb(155, 28, 28)");
   assert.equal(statusValue("Publication state"), "Pending publication");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
   assert.match(ui.getByRole(document.body, "note").textContent, /Security → Unlock/);
   assert.equal((await menuItem("Security", "Lock")).disabled, true);
   assert.equal((await menuItem("Security", "Unlock")).disabled, false);
 
+  await user.click(lockedButton);
+  let reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  assert.equal(lockedButton.disabled, true,
+    "the status control shares the menu command's modal eligibility");
+  assert.equal(document.activeElement, ui.getByLabelText(reopenDialog, "Password"));
+  await user.click(ui.getByRole(reopenDialog, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.equal(document.activeElement, lockedButton,
+    "cancel returns focus to the status control"));
+  assert.equal(lockedButton.disabled, false);
+
   await command("Security", "Unlock");
-  const reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
   const unlockPassword = ui.getByLabelText(reopenDialog, "Password");
   const unlockAction = ui.getByRole(reopenDialog, "button", { name: "Unlock" });
   assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), true);
@@ -399,6 +420,13 @@ test("mounted shell presents truthful document states, history, failures, and se
     "manual lock removes protected modeless search state");
   assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
   assert.equal(statusValue("Document state"), "Locked");
+  const keyboardUnlock = ui.getByRole(document.body, "button", { name: "Unlock document" });
+  keyboardUnlock.focus();
+  await user.keyboard("{Enter}");
+  const keyboardDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  assert.equal(document.activeElement, ui.getByLabelText(keyboardDialog, "Password"));
+  await user.click(ui.getByRole(keyboardDialog, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.equal(document.activeElement, keyboardUnlock));
 
   mountedRoot.unmount();
   mountedRoot = null;
