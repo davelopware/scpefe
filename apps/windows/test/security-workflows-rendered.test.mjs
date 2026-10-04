@@ -204,10 +204,9 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
     let fileMenu = ui.getByRole(document.body, "menu", { name: "File" });
     assert.equal(ui.getByRole(fileMenu, "menuitem", {
-      name: "History Compaction…" }).disabled, true,
-    "read-only sessions cannot compact history");
+      name: "History Compaction…" }).disabled, false,
+    "an eligible slot acquires edit mode on open");
     await user.keyboard("{Escape}");
-    await command("Edit", "Edit Contents");
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
     fileMenu = ui.getByRole(document.body, "menu", { name: "File" });
     assert.equal(ui.getByRole(fileMenu, "menuitem", {
@@ -427,7 +426,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(profile.name, "Ada", "canceling a failed later profile edit retains the profile");
     await command("Security", "Lock");
-    openResult = readOnly;
+    openResult = { ...readOnly, canEdit: false, canAddPasswords: false,
+      canRemovePasswords: false };
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
     await user.type(ui.getByLabelText(dialog, "Password"), "owner password words");
