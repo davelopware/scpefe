@@ -213,8 +213,12 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     "the open password receives initial focus");
   const choose = ui.getByRole(dialog, "button", { name: "Open" });
   choose.focus(); await user.keyboard("{Tab}");
+  assert.equal(document.activeElement === ui.getByRole(dialog, "button",
+    { name: "Close Open document" }), true,
+  "Tab wraps from the final action to the header close control");
+  await user.keyboard("{Tab}");
   assert.equal(document.activeElement === password, true,
-    "Tab wraps from the final action to the password field");
+    "Tab moves from the close control to the password field");
   await user.type(password, "correct password");
   await user.click(choose);
   const recoveryDialog = await ui.findByRole(document.body, "dialog", { name: "Recovered work" });
@@ -306,6 +310,16 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(ui.getByLabelText(find, "Replace with").value, sensitiveReplacement);
   await ui.waitFor(() => assert.equal(document.activeElement, ui.getByLabelText(find, "Find")),
     { message: "ordinary modal cancellation restores modeless search focus" });
+  const findClose = ui.getByRole(find, "button", { name: "Close Find and replace" });
+  assert.equal(find.querySelector(".app-dialog-header")?.contains(findClose), true);
+  assert.equal(find.querySelector(".modeless-dialog-body")?.contains(findClose), false);
+  await user.click(findClose);
+  assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
+  await ui.waitFor(() => assert.equal(document.activeElement, editor),
+    { message: "the modeless close control restores editor focus" });
+  await user.keyboard("{Control>}f{/Control}");
+  find = await ui.findByRole(document.body, "dialog", { name: "Find and replace" });
+  assert.equal(ui.getByLabelText(find, "Find").value, sensitiveFind);
   await user.click(ui.getByRole(document.body, "menuitem", { name: "Security" }));
   await user.click(ui.getByRole(ui.getByRole(document.body, "menu", { name: "Security" }),
     "menuitem", { name: "Lock" }));

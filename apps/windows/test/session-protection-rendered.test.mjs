@@ -194,10 +194,12 @@ test("mounted lifecycle protection is accessible, retryable, and retains the ses
     const keep = ui.getByRole(dialog, "button", { name: "Keep current document open" });
     await ui.waitFor(() => assert.equal(document.activeElement?.textContent,
       "Keep current document open"));
-    await user.keyboard("{Escape}");
-    assert.equal(ui.getByRole(document.body, "dialog", { name: /Protect/ }) === dialog, true,
-      "Escape cannot accidentally dismiss a destructive decision");
-    await user.click(keep);
+    const close = ui.getByRole(dialog, "button",
+      { name: `Close Protect current document before ${operation === "external-open"
+        ? "Open" : operation[0].toUpperCase() + operation.slice(1)}` });
+    if (operation === "close") await user.click(close);
+    else if (operation === "exit") await user.keyboard("{Escape}");
+    else await user.click(keep);
     if (operation === "new") {
       const create = await ui.findByRole(document.body, "dialog", { name: "Secure new document" });
       await ui.waitFor(() => assert.equal(ui.getByRole(create, "button",

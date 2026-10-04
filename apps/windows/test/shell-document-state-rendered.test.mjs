@@ -427,6 +427,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(document.activeElement, unlockPassword,
     "shared focus scope selects the unlock password");
   unlockAction.focus(); await user.keyboard("{Tab}");
+  assert.equal(document.activeElement, ui.getByRole(reopenDialog, "button",
+    { name: "Close Unlock document" }),
+  "Tab wraps to the header close control");
+  await user.keyboard("{Tab}");
   assert.equal(document.activeElement, unlockPassword,
     "Tab wraps within the unlock dialog");
   await user.type(unlockPassword, "correct password");
