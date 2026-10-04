@@ -1,4 +1,4 @@
-import React, { type FormEvent, useEffect, useImperativeHandle, useRef,
+import React, { type FormEvent, type KeyboardEvent, useEffect, useImperativeHandle, useRef,
   useState } from "react";
 import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
@@ -15,6 +15,12 @@ type SecuritySession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>
   & Pick<FullSession, "getSnapshot" | "claimInvitation" | "cancelInvitationClaim"
     | "changePassword" | "createInvitation" | "reconcileIdentity"
     | "updateSlotPermissions" | "removeSlot">;
+type PasswordTab = "change" | "slots" | "invite";
+const passwordTabs: readonly { id: PasswordTab; label: string }[] = [
+  { id: "change", label: "Change Password" },
+  { id: "slots", label: "Password Slots" },
+  { id: "invite", label: "Invite Collaborator" },
+];
 
 /** Synchronous clearing of controlled secret drafts at a lifecycle boundary. */
 export interface SecurityDialogsHandle { reset(): void }
@@ -54,6 +60,9 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   const [invitationBusy, setInvitationBusy] = useState(false);
   const [invitationPasswordError, setInvitationPasswordError] = useState(false);
   const [claimError, setClaimError] = useState("");
+  const [selectedTab, setSelectedTab] = useState<PasswordTab>("change");
+  const tabRefs = useRef<Record<PasswordTab, HTMLButtonElement | null>>({
+    change: null, slots: null, invite: null });
   const entry = usePasswordEntry(["currentPassword", "newPassword",
     "newPasswordConfirmation", "temporaryPassword", "claimPassword",
     "claimConfirmation"] as const);
@@ -66,11 +75,71 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   const securityPresentationEpoch = useRef(0);
   const invitationSubmission = useRef<number | null>(null);
   const invitationSubmissionSequence = useRef(0);
+  const availableTabs: Record<PasswordTab, boolean> = {
+    change: Boolean(securityCommands?.changePassword
+      || (snapshot.pending === "password-change" && selectedTab === "change")),
+    slots: Boolean(securityCommands?.updateSlotPermissions || securityCommands?.removeSlot
+      || ((snapshot.pending === "permissions-update" || snapshot.pending === "slot-remove")
+        && selectedTab === "slots")),
+    invite: Boolean(securityCommands?.createInvitation
+      || (snapshot.pending === "invitation-create" && selectedTab === "invite")),
+  };
+  const activeTab = availableTabs[selectedTab] ? selectedTab
+    : passwordTabs.find(({ id }) => availableTabs[id])?.id ?? null;
+  const previousTab = useRef<PasswordTab | null>(null);
+  function clearTabDraft(tab: PasswordTab) {
+    if (tab === "change") {
+      entry.reset("currentPassword", "newPassword", "newPasswordConfirmation");
+      setPasswordError("");
+    } else if (tab === "invite") {
+      entry.reset("temporaryPassword");
+      setInvitationError(""); setInvitationPasswordError(false);
+    } else setPasswordError("");
+  }
+  useEffect(() => {
+    if (!passwordsOpen || invitationPassphrase) {
+      previousTab.current = null;
+      return;
+    }
+    if (opened?.profileMismatch) {
+      if (previousTab.current) {
+        clearTabDraft(previousTab.current);
+        entry.reset("currentPassword", "newPassword", "newPasswordConfirmation",
+          "temporaryPassword");
+      }
+      previousTab.current = null;
+      return;
+    }
+    const previous = previousTab.current;
+    previousTab.current = activeTab;
+    if (previous && previous !== activeTab) {
+      clearTabDraft(previous);
+      setSelectedTab(activeTab ?? "change");
+      tabRefs.current[activeTab ?? "change"]?.focus();
+    }
+  }, [activeTab, passwordsOpen, invitationPassphrase, opened?.profileMismatch]);
+  function selectTab(tab: PasswordTab) {
+    if (availableTabs[tab] && !invitationBusy && !invitationPassphrase) {
+      setSelectedTab(tab);
+      tabRefs.current[tab]?.focus();
+    }
+  }
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    const available = passwordTabs.filter(({ id }) => availableTabs[id]).map(({ id }) => id);
+    if (!activeTab || available.length < 2 || invitationBusy) return;
+    const index = available.indexOf(activeTab);
+    const next = event.key === "ArrowRight" ? available[(index + 1) % available.length]
+      : event.key === "ArrowLeft" ? available[(index - 1 + available.length) % available.length]
+      : event.key === "Home" ? available[0]
+      : event.key === "End" ? available[available.length - 1] : null;
+    if (next) { event.preventDefault(); selectTab(next); }
+  }
   function reset() {
     securityPresentationEpoch.current += 1;
     invitationSubmission.current = null;
     setPasswordError(""); setInvitationPassphrase(null); setInvitationError("");
     setInvitationBusy(false); setInvitationPasswordError(false); setClaimError("");
+    setSelectedTab("change"); previousTab.current = null;
     entry.reset();
   }
   useImperativeHandle(ref, () => ({ reset }));
@@ -305,6 +374,20 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
 
   return <>    {passwordsOpen && activeDocument && opened && <FocusedDialog returnFocus={returnFocus}
       title="Passwords" close={invitationBusy ? undefined : closePasswords}>
+      <div className="password-tabs" role="tablist" aria-label="Password actions">
+        {passwordTabs.map(({ id, label }) => {
+          const disabled = !availableTabs[id] || Boolean(invitationPassphrase)
+            || Boolean(opened.profileMismatch) || invitationBusy;
+          return <button key={id} ref={(button) => { tabRefs.current[id] = button; }}
+            id={`password-tab-${id}`} type="button" role="tab"
+            aria-controls={!invitationPassphrase && !opened.profileMismatch
+              ? `password-panel-${id}` : undefined}
+            aria-selected={!invitationPassphrase && !opened.profileMismatch && activeTab === id}
+            tabIndex={activeTab === id && !disabled ? 0 : -1}
+            disabled={disabled} onClick={() => selectTab(id)}
+            onKeyDown={onTabKeyDown}>{label}</button>;
+        })}
+      </div>
       {invitationPassphrase ? <section aria-labelledby="invitation-result-title">
         <h3 id="invitation-result-title">Invitation created</h3>
         <p className="warning">Send this temporary passphrase through a separate secure channel. It is shown only now and cannot be recovered after Done.</p>
@@ -331,6 +414,9 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         </section>
         {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
         <div className="dialog-actions"><button onClick={closePasswords}>Close</button></div></> : <>
+        <section id="password-panel-change" role="tabpanel"
+          aria-labelledby="password-tab-change" tabIndex={0} hidden={activeTab !== "change"}>
+        {activeTab === "change" && <>
         <form onSubmit={changePassword}><h3>Change this password</h3>
           <p>{opened.recoverySlot
             ? "This is the recovery/master slot. Store its replacement safely offline and do not use it routinely."
@@ -338,7 +424,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           <PasswordField label="Current password" visible={entry.visible("currentPassword")}
             onToggle={() => entry.toggle("currentPassword")}
             input={{ ...entry.field("currentPassword"), id: "current-password",
-              name: "currentPassword", required: true, autoFocus: true }} />
+              name: "currentPassword", required: true }} />
           <PasswordField label="New password" visible={entry.visible("newPassword")}
             onToggle={() => entry.toggle("newPassword")}
             input={{ ...entry.field("newPassword"), id: "new-password",
@@ -355,8 +441,12 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
             compareMessage="New password must differ from the current password." />
           {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
           <button disabled={!securityCommands?.changePassword}>Change password</button></form>
-        {(securityCommands?.createInvitation || snapshot.pending === "invitation-create")
-          && <form onSubmit={createInvitation}><h3>Invite another person</h3>
+        </>}
+        </section>
+        <section id="password-panel-invite" role="tabpanel"
+          aria-labelledby="password-tab-invite" tabIndex={0} hidden={activeTab !== "invite"}>
+          {activeTab === "invite" && <>
+          <form onSubmit={createInvitation}><h3>Invite another person</h3>
             <label>Temporary label (required)<input name="temporaryLabel" required /></label>
             <PasswordField label="Temporary passphrase (leave blank to generate)"
               visibilityName="temporary passphrase" visible={entry.visible("temporaryPassword")}
@@ -374,13 +464,21 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
               ? "invitation-password-error" : undefined} className="dialog-error"
               role="alert">{invitationError}</p>}
             {invitationBusy && <p role="status">Finishing invitation publication…</p>}
-            <button disabled={invitationBusy}>
-              Create invitation</button></form>}
+            <button disabled={invitationBusy || !securityCommands?.createInvitation}>
+              Create invitation</button></form></>}
+        </section>
         {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
+        <section id="password-panel-slots" role="tabpanel"
+          aria-labelledby="password-tab-slots" tabIndex={0} hidden={activeTab !== "slots"}>
+        {activeTab === "slots" && <>
         <SlotAdministration opened={opened} commands={securityCommands ?? {
           updateSlotPermissions: false, removeSlot: false }}
           onUpdate={updateManagedSlot} onRemove={removeManagedSlot} />
+        {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
+        </>}
+        </section>
+        {!activeTab && <p role="status">Password actions are currently unavailable.</p>}
         <div className="dialog-actions"><button onClick={closePasswords}
           disabled={invitationBusy}>Close</button></div></>}
       </FocusedDialog>}
