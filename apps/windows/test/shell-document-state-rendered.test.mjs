@@ -72,6 +72,7 @@ test("mounted shell presents truthful document states, history, failures, and se
     chooseOpenTarget: async () => ({ selected: true, name: "safe-notes.scpefe" }),
     cancelOpenTarget: async () => {},
     openSelectedDocument: async () => ({ ...opened }),
+    closeDocument: async () => true,
     unlockDocument: async () => ({ ...opened }),
     openExternalDocument: async () => null,
     enterEditMode: async () => {
@@ -112,6 +113,10 @@ test("mounted shell presents truthful document states, history, failures, and se
   dom.window[Symbol.for("scpefe.renderer.mount")] = (root) => { mountedRoot = root; };
   const assets = await fs.readdir(new URL("../dist/assets/", import.meta.url));
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
+  const stylesheet = assets.find((entry) => /^index-.*\.css$/.test(entry));
+  const style = document.createElement("style");
+  style.textContent = await fs.readFile(new URL(`../dist/assets/${stylesheet}`, import.meta.url), "utf8");
+  document.head.append(style);
   await import(`${pathToFileURL(path.resolve("dist/assets", script)).href}?shell-document-state`);
   assert.ok(mountedRoot);
   const ui = await import("@testing-library/dom");
@@ -137,6 +142,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   const editor = ui.getByRole(document.body, "textbox", { name: "Document text" });
   await ui.waitFor(() => assert.equal(document.title, "SCPEFE"));
   assert.equal(statusValue("Document state"), "No document");
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Unlock document" }), null);
   assert.equal(editor.disabled, true);
   assert.match(ui.getByRole(document.body, "note").textContent, /File → New or File → Open/);
   assert.equal((await menuItem("Security", "Unlock")).disabled, true);
@@ -146,14 +152,36 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.type(ui.getByLabelText(openDialog, "Password"), "correct password");
   await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Unlock document" }), null);
+  const editStatus = ui.getByRole(document.body, "button", { name: "Edit document contents" });
+  assert.equal(editStatus.textContent, "Read-only");
+  assert.equal(editStatus.disabled, false);
+  assert.equal(getComputedStyle(editStatus).fontWeight, "700");
+  assert.equal(getComputedStyle(editStatus).color, "rgb(155, 28, 28)");
   assert.equal(statusValue("Working copy state"), "Clean");
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Save document" }), null);
   assert.equal(statusValue("Publication state"), "Published");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
   assert.equal(document.title.includes("/"), false);
   assert.equal(editor.value, opened.content);
   assert.equal(editor.readOnly, true);
   assert.equal((await menuItem("File", /Save/)).disabled, true);
-  assert.equal((await menuItem("Edit", "Edit Contents")).disabled, false);
+  assert.equal((await menuItem("Edit", "Edit Contents")).disabled, editStatus.disabled);
+
+  await command("File", /Close/);
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "No document"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Edit document contents" }), null);
+  assert.equal(ui.getByRole(document.body, "status").textContent.includes("Security → Unlock"),
+    false, "Close does not offer Unlock when there is no document");
+  assert.match(ui.getByRole(document.body, "note").textContent,
+    /File → New or File → Open/);
+  assert.equal((await menuItem("Security", "Lock")).disabled, true);
+  assert.equal((await menuItem("Security", "Unlock")).disabled, true);
+  await command("File", /Open/);
+  const reopened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+  await user.type(ui.getByLabelText(reopened, "Password"), "correct password");
+  await user.click(ui.getByRole(reopened, "button", { name: "Open" }));
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
 
   editor.focus();
   await user.keyboard("{Control>}f{/Control}");
@@ -177,8 +205,11 @@ test("mounted shell presents truthful document states, history, failures, and se
     "Ctrl+H focuses Replace with even when mutation is read-only");
   assert.equal(ui.getByRole(findDialog, "button", { name: "Replace" }).disabled, true);
 
-  await command("Edit", "Edit Contents");
+  const readOnlyButton = ui.getByRole(document.body, "button", { name: "Edit document contents" });
+  await user.click(readOnlyButton);
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
+  assert.equal(readOnlyButton.disabled, true,
+    "the status control shares the menu command's modal eligibility");
   assert.match(ui.getByRole(failure, "alert").textContent,
     /operation could not be completed safely/i);
   assert.equal(document.activeElement?.textContent.trim(), "Retry editing");
@@ -190,8 +221,11 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(ui.getByLabelText(findDialog, "Find").value, "line",
     "the remounted modeless dialog restores its in-memory search value");
 
-  await command("Edit", "Edit Contents");
+  assert.equal(readOnlyButton.disabled, false);
+  readOnlyButton.focus();
+  await user.keyboard("{Enter}");
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Edit document contents" }), null);
   assert.equal(editor.readOnly, false);
   assert.equal((await menuItem("File", /Save/)).disabled, true,
     "clean editable work cannot be saved");
@@ -238,6 +272,12 @@ test("mounted shell presents truthful document states, history, failures, and se
   ui.fireEvent.change(editor, { target: { value: `${opened.content}!`,
     selectionStart: opened.content.length + 1, selectionEnd: opened.content.length + 1 } });
   await ui.waitFor(() => assert.equal(statusValue("Working copy state"), "Dirty"));
+  const dirtyButton = ui.getByRole(document.body, "button", { name: "Save document" });
+  assert.equal(dirtyButton.textContent, "Dirty");
+  assert.equal(dirtyButton.disabled, (await menuItem("File", /Save/)).disabled);
+  assert.equal(getComputedStyle(dirtyButton).fontWeight, "700");
+  assert.equal(getComputedStyle(dirtyButton).color, "inherit",
+    "Dirty uses the status bar's normal text color");
   await ui.waitFor(() => assert.equal(document.title, "*safe-notes.scpefe — SCPEFE"));
   assert.equal((await menuItem("File", /Save/)).disabled, false);
   assert.equal((await menuItem("File", /Backup/)).disabled, true,
@@ -248,14 +288,18 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.keyboard("{Control>}z{/Control}");
   assert.equal(editor.value, opened.content);
   assert.equal(statusValue("Working copy state"), "Clean");
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Save document" }), null);
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
   assert.equal((await menuItem("Edit", /Redo/)).disabled, false);
   editor.focus();
   await user.keyboard("{Control>}y{/Control}");
   assert.equal(editor.value, `${opened.content}!`);
   assert.equal(statusValue("Working copy state"), "Dirty");
-  await command("File", /Save/);
+  const saveStatus = ui.getByRole(document.body, "button", { name: "Save document" });
+  saveStatus.focus();
+  await user.keyboard("{Enter}");
   await ui.waitFor(() => assert.equal(statusValue("Working copy state"), "Clean"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Save document" }), null);
   assert.equal(savedContent, `${opened.content}!`);
   assert.equal(statusValue("Publication state"), "Published");
 
@@ -354,20 +398,39 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(document.body.textContent.includes(plaintext), false);
   assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
   assert.equal(statusValue("Document state"), "Locked");
+  const lockedButton = ui.getByRole(document.body, "button", { name: "Unlock document" });
+  assert.equal(lockedButton.textContent, "Locked");
+  assert.equal(lockedButton.disabled, false);
+  assert.equal(getComputedStyle(lockedButton).fontWeight, "700");
+  assert.equal(getComputedStyle(lockedButton).color, "rgb(155, 28, 28)");
   assert.equal(statusValue("Publication state"), "Pending publication");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
   assert.match(ui.getByRole(document.body, "note").textContent, /Security → Unlock/);
   assert.equal((await menuItem("Security", "Lock")).disabled, true);
   assert.equal((await menuItem("Security", "Unlock")).disabled, false);
 
+  await user.click(lockedButton);
+  let reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  assert.equal(lockedButton.disabled, true,
+    "the status control shares the menu command's modal eligibility");
+  assert.equal(document.activeElement, ui.getByLabelText(reopenDialog, "Password"));
+  await user.click(ui.getByRole(reopenDialog, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.equal(document.activeElement, lockedButton,
+    "cancel returns focus to the status control"));
+  assert.equal(lockedButton.disabled, false);
+
   await command("Security", "Unlock");
-  const reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  reopenDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
   const unlockPassword = ui.getByLabelText(reopenDialog, "Password");
   const unlockAction = ui.getByRole(reopenDialog, "button", { name: "Unlock" });
   assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), true);
   assert.equal(document.activeElement, unlockPassword,
     "shared focus scope selects the unlock password");
   unlockAction.focus(); await user.keyboard("{Tab}");
+  assert.equal(document.activeElement, ui.getByRole(reopenDialog, "button",
+    { name: "Close Unlock document" }),
+  "Tab wraps to the header close control");
+  await user.keyboard("{Tab}");
   assert.equal(document.activeElement, unlockPassword,
     "Tab wraps within the unlock dialog");
   await user.type(unlockPassword, "correct password");
@@ -384,6 +447,13 @@ test("mounted shell presents truthful document states, history, failures, and se
     "manual lock removes protected modeless search state");
   assert.equal(ui.queryByRole(document.body, "dialog", { name: "Find and replace" }), null);
   assert.equal(statusValue("Document state"), "Locked");
+  const keyboardUnlock = ui.getByRole(document.body, "button", { name: "Unlock document" });
+  keyboardUnlock.focus();
+  await user.keyboard("{Enter}");
+  const keyboardDialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
+  assert.equal(document.activeElement, ui.getByLabelText(keyboardDialog, "Password"));
+  await user.click(ui.getByRole(keyboardDialog, "button", { name: "Cancel" }));
+  await ui.waitFor(() => assert.equal(document.activeElement, keyboardUnlock));
 
   mountedRoot.unmount();
   mountedRoot = null;

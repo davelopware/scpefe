@@ -98,7 +98,8 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
         onClick={() => void onAction("retry-edit")}>Retry editing</button></div>
     </FocusedDialog>}
     {leaseDecision && <FocusedDialog returnFocus={returnFocus}
-      title="Confirm editing-lease takeover">
+      title="Confirm editing-lease takeover" close={leaseBusy ? undefined
+        : () => void onAction("cancel-lease")}>
       <div className="warning" role="alert"><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
         <p>Force takeover only after confirming that no other client is editing this document.</p></div>
       {leaseDecision.errorMessage && <p className="dialog-error" role="alert">
@@ -134,6 +135,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
     </FocusedDialog>}
     {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
       returnFocus={returnFocus} title="Older container"
+      close={snapshot.pending === "migration" ? undefined : () => void onAction("lock")}
       initialFocus={focusIntent === "migration-retry"
         ? migrationRetryAction : undefined}>
       <div className="warning" role="alert"><p>Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first.</p>
@@ -187,7 +189,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
           onClick={() => void onAction("restore-recovery")}>Restore unsaved work</button></div></FocusedDialog>}
     {visibleOpenedDialog === "unreadable" && activeDocument && unreadableDecision
       && <FocusedDialog returnFocus={returnFocus}
-        title="Unreadable recovery journal">
+        title="Unreadable recovery journal" close={() => void onAction("lock")}>
         <p>The recovery journal for this document could not be read. Keep the document read-only or explicitly discard that journal before editing.</p>
         {unreadableDecision.failureMessage && <p className="dialog-error" role="alert">
           {unreadableDecision.failureMessage}</p>}
@@ -213,6 +215,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
             onClick={() => void onAction("reconnect-publication")}>Retry publication</button></div></FocusedDialog>}
     </>}
     {protection && <FocusedDialog returnFocus={returnFocus}
+      close={protection.resolving ? undefined : () => void onAction("protection-cancel")}
       title={protection.operation === "new" ? "Protect current document before New"
         : protection.operation === "open" || protection.operation === "external-open"
           ? "Protect current document before Open"

@@ -1,28 +1,21 @@
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource } from "@scpefe/frontend-core";
 
-/** Commands exposed by the shared shell, including the current Passwords trigger. */
+/** Commands exposed by the shared shell. */
 export type ShellCommand = "new" | "open" | "save" | "backup" | "export" | "close"
   | "exit" | "edit" | "undo" | "redo" | "find" | "replace" | "lock"
   | "unlock" | "passwords" | "profile" | "compact";
-
-/** The Passwords origin is valid only for the dialog opening that created it. */
-export type CommandOrigin = "shell" | { readonly kind: "passwords";
-  readonly opening: number };
 
 /** Presentation facts read at invocation rather than stored as command state. */
 export interface ShellCommandFacts {
   activeAdoption: number | null;
   profileReady: boolean;
   modalBusy: boolean;
-  passwordsDialogActive: boolean;
-  passwordsOpening: number;
 }
 
-/** One eligibility and invocation path for menus, shortcuts, status and Passwords. */
+/** One eligibility and invocation path for menus, shortcuts and status. */
 export interface ShellCommands<Doc extends SessionDocument> {
-  available(command: ShellCommand, origin?: CommandOrigin): boolean;
+  available(command: ShellCommand): boolean;
   invoke(command: ShellCommand, options?: {
-    origin?: CommandOrigin;
     returnFocus?: HTMLElement | null;
     observedSnapshot?: DocumentSessionSnapshot<Doc>;
   }): Promise<boolean>;
@@ -36,12 +29,9 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
   run(command: ShellCommand, returnFocus: HTMLElement | null): void | Promise<void>;
   track(operation: () => void | Promise<void>): Promise<void>;
 }): ShellCommands<Doc> {
-  function available(command: ShellCommand, origin: CommandOrigin = "shell") {
+  function available(command: ShellCommand) {
     const view = facts();
-    if (origin !== "shell") {
-      if (command !== "compact" || !view.passwordsDialogActive
-        || origin.opening !== view.passwordsOpening) return false;
-    } else if (view.modalBusy) return false;
+    if (view.modalBusy) return false;
     const snapshot = session.getSnapshot();
     const active = (snapshot.kind === "read-only" || snapshot.kind === "edit")
       && snapshot.adoption === view.activeAdoption;
@@ -65,7 +55,7 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
     available,
     async invoke(command, options = {}) {
       if (options.observedSnapshot && options.observedSnapshot !== session.getSnapshot()) return false;
-      if (!available(command, options.origin)) return false;
+      if (!available(command)) return false;
       await track(() => run(command, options.returnFocus ?? null));
       return true;
     },

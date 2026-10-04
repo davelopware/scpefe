@@ -298,8 +298,9 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await ui.waitFor(() => assert.equal(editor.value, "recovered private text"));
     assert.equal(status("Working copy state"), "Dirty");
 
-    editor.focus();
-    await user.keyboard("{Control>}s{/Control}");
+    const dirtySave = ui.getByRole(document.body, "button", { name: "Save document" });
+    assert.equal(dirtySave.disabled, false);
+    await user.click(dirtySave);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Manual save failed" });
     assert.match(ui.getByRole(dialog, "alert").textContent,
       /operation could not be completed safely/i);
@@ -313,31 +314,18 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     const savesBeforePasswords = saveAttempts;
     await user.keyboard("{Control>}s{/Control}");
     assert.equal(saveAttempts, savesBeforePasswords,
-      "shell shortcuts remain blocked while Passwords can request compaction");
-    const compactButton = ui.getByRole(dialog, "button", { name: "Compact history…" });
-    const retainedCompactClick = Object.values(compactButton)
-      .find((value) => value && typeof value === "object"
-        && typeof value.onClick === "function")?.onClick;
-    assert.equal(typeof retainedCompactClick, "function");
+      "shell shortcuts remain blocked while Passwords is open");
+    assert.equal(ui.queryByRole(dialog, "heading", { name: "History compaction" }), null);
     await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-    const { act } = await import("react");
-    await act(async () => { retainedCompactClick(); });
-    assert.equal(ui.queryByRole(document.body, "dialog"), null,
-      "a retained Passwords compaction callback cannot run after that dialog closes");
-    await command("Security", /Passwords/);
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
-    await act(async () => { retainedCompactClick(); });
-    assert.equal(ui.getByRole(document.body, "dialog", { name: "Passwords" }) === dialog,
-      true, "the previous opening's callback cannot compact after Passwords reopens");
-    await user.click(ui.getByRole(dialog, "button", { name: "Compact history…" }));
+    await command("File", "History Compaction…");
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Permanently compact document history?" });
     assert.match(ui.getByRole(dialog, "alert").textContent, /exact backup/);
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     assert.match(ui.getByRole(document.body, "status").textContent, /Compaction canceled/);
-    await user.click(ui.getByRole(dialog, "button", { name: "Compact history…" }));
+    await command("File", "History Compaction…");
     dialog = await ui.findByRole(document.body, "dialog",
       { name: "Permanently compact document history?" });
     await user.click(ui.getByRole(dialog, "button",
@@ -353,13 +341,13 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Create verified backup and compact" }).disabled, false);
     await user.click(ui.getByRole(dialog, "button",
       { name: "Create verified backup and compact" }));
-    await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.match(ui.getByRole(document.body, "status").textContent,
+      /Verified backup created and document history compacted/);
     assert.deepEqual(calls.filter(([name]) => name === "compact"), [
       ["compact", { confirmed: true }], ["compact", { confirmed: true }],
       ["compact", { confirmed: true }],
     ]);
-    await user.click(ui.getByRole(document.body, "button", { name: "Close" }));
-
     openResult = base;
     await command("Security", "Lock");
     await command("Security", "Unlock");

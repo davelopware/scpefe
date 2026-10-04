@@ -553,7 +553,7 @@ test("host-canceled compaction keeps the current decision available for retry", 
   });
   assert.equal(presentation.view().safeMessage,
     "Compaction canceled; document history is unchanged.");
-  assert.equal(await presentation.act("compact"), "passwords");
+  assert.equal(await presentation.act("compact"), undefined);
   assert.equal(attempts, 2);
   assert.equal(presentation.view().selectedDecision, null);
   session.dispose();
@@ -610,14 +610,14 @@ test("migration and compaction success return to the current document presentati
     canRemovePasswords: true });
   const compact = new SessionPresentation(compactSession, () => "safe failure");
   assert.equal(compactSession.requestCompaction().status, "attention");
-  assert.equal(await compact.act("compact"), "passwords");
+  assert.equal(await compact.act("compact"), undefined);
   assert.equal(compact.view().selectedDecision, null);
   assert.equal(compact.view().safeMessage,
     "Verified backup created and document history compacted.");
   compactSession.dispose();
 });
 
-test("a lock during compaction cancellation cannot reopen the password form", async () => {
+test("a lock during compaction cancellation cannot revive the decision", async () => {
   const host = { compactDocument: async () => null } as
     unknown as DocumentSessionHost<DocumentOpened>;
   const session = new DocumentSession(host, { createJournalScope: () => "scope",

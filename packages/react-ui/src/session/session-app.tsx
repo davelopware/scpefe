@@ -47,7 +47,6 @@ export interface SharedAppProps {
   proposedPasswordRejectionMessage(result: ProposedPasswordOutcome, label?: string): string;
   CreationSecurityDialog: React.ComponentType<{ onCreate(request: CreationFormRequest): Promise<void>;
     onCancel(): void | Promise<void>; returnFocus?: HTMLElement | null }>;
-  CompactionControls: React.ComponentType<{ onCompact(): Promise<void> }>;
   PasswordPolicyStatus: React.ComponentType<{ id: string; password: string;
     confirmation?: string; optionalBlankGenerates?: boolean;
     comparePassword?: string; compareMessage?: string }>;
@@ -57,7 +56,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   shellHost, creationTargetHost, securityClipboard,
   completion: rendererLifecycleCompletion,
   catalogText, safeRendererErrorMessage, closeWindow, assessProposedPassword,
-  proposedPasswordRejectionMessage, CreationSecurityDialog, CompactionControls,
+  proposedPasswordRejectionMessage, CreationSecurityDialog,
   PasswordPolicyStatus }: SharedAppProps) {
   const [sessionStore] = useState(() => {
     let journalSequence = 0;
@@ -111,14 +110,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialogState] = useState<DialogName>(null);
-  // Retained callbacks must see closes and new Passwords openings immediately.
-  const currentDialog = useRef<DialogName>(null);
-  const passwordsOpening = useRef(0);
   function setDialog(next: DialogName) {
-    if (next === "passwords" && currentDialog.current !== "passwords") {
-      passwordsOpening.current += 1;
-    }
-    currentDialog.current = next;
     setDialogState(next);
   }
   const [creating, setCreating] = useState(false);
@@ -202,10 +194,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const shellCommands = createShellCommands({ session,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
-      modalBusy: modalBusy.current,
-      passwordsDialogActive: currentDialog.current === "passwords" && protection === null
-        && !creating && !presentationView.blocked,
-      passwordsOpening: passwordsOpening.current }),
+      modalBusy: modalBusy.current }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -292,7 +281,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       securityDialogs.current?.reset();
       creationFlow.current?.reset();
       setDialog(null);
-      setMessage(result.warningCode ? catalogText(result.warningCode)
+      setMessage(closed ? "" : result.warningCode ? catalogText(result.warningCode)
         : "Document locked. Use Security → Unlock to continue.");
     });
     dialogReturnFocus.current = null;
@@ -330,7 +319,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       ? current.adoption : null) !== adoption) return;
     refreshPresentation((revision) => revision + 1);
     const result = presentation.view();
-    if (nextDialog === "passwords") setDialog(nextDialog);
+    if ((action === "compact" || action === "compaction-canceled")
+      && result.selectedDecision?.kind !== "compaction-decision") setDialog(null);
     if (nextDialog === "export") shellDialogs.current?.showExport();
     const safeMessage = result.safeMessage;
     if (safeMessage !== null) setMessage(safeMessage);
@@ -384,11 +374,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <SecurityDialogs ref={securityDialogs} session={session}
       clipboard={securityClipboard} assessProposedPassword={assessProposedPassword}
       proposedPasswordRejectionMessage={proposedPasswordRejectionMessage}
-      PasswordPolicyStatus={PasswordPolicyStatus} CompactionControls={CompactionControls}
+      PasswordPolicyStatus={PasswordPolicyStatus}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
       onMessage={setMessage} onAdopted={(document) => showOpenedResult(document, true)}
-      onClose={closeDialog} commands={shellCommands}
-      passwordsOpening={passwordsOpening.current}
+      onClose={closeDialog}
       passwordsOpen={dialog === "passwords"}
       claimVisible={!protection && visibleOpenedDialog === "claim"}
       activeDocument={activeDocument} returnFocus={dialogReturnFocus.current} />
