@@ -76,6 +76,30 @@ async function enterOwner(ui, user, confirmation = "owner password words") {
     "I understand that lost passwords cannot be recovered."));
 }
 
+test("generate fills and reveals each new-document secret without submitting", async (t) => {
+  let submissions = 0;
+  const { user, ui } = mountedDialog(t, async () => { submissions += 1; });
+  const owner = ui.getByLabelText("Owner password");
+  const ownerConfirmation = ui.getByLabelText("Confirm owner password");
+  const recovery = ui.getByLabelText("Independent recovery password (strongly recommended)");
+  const recoveryConfirmation = ui.getByLabelText("Confirm recovery password");
+  await user.click(ui.getByRole("button", { name: "Generate owner passphrase" }));
+  await waitFor(() => assert.match(owner.value, /^[a-z]+(?: [a-z]+){7}$/));
+  assert.equal(owner.value, ownerConfirmation.value);
+  assert.equal(owner.type, "text");
+  assert.equal(ownerConfirmation.type, "text");
+  const firstOwner = owner.value;
+  await user.click(ui.getByRole("button", { name: "Generate owner passphrase" }));
+  await waitFor(() => assert.notEqual(owner.value, firstOwner));
+  await user.click(ui.getByRole("button", { name: "Generate recovery passphrase" }));
+  await waitFor(() => assert.match(recovery.value, /^[a-z]+(?: [a-z]+){7}$/));
+  assert.equal(recovery.value, recoveryConfirmation.value);
+  assert.notEqual(recovery.value, owner.value);
+  assert.equal(recovery.type, "text");
+  assert.equal(recoveryConfirmation.type, "text");
+  assert.equal(submissions, 0);
+});
+
 test("mounted post-picker dialog is focused and has no initial-text field", async (t) => {
   const { user, ui } = mountedDialog(t);
   const dialog = ui.getByRole("dialog", { name: "Secure new document" });
