@@ -159,6 +159,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(getComputedStyle(editStatus).fontWeight, "700");
   assert.equal(getComputedStyle(editStatus).color, "rgb(155, 28, 28)");
   assert.equal(statusValue("Working copy state"), "Clean");
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Save document" }), null);
   assert.equal(statusValue("Publication state"), "Published");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
   assert.equal(document.title.includes("/"), false);
@@ -271,6 +272,12 @@ test("mounted shell presents truthful document states, history, failures, and se
   ui.fireEvent.change(editor, { target: { value: `${opened.content}!`,
     selectionStart: opened.content.length + 1, selectionEnd: opened.content.length + 1 } });
   await ui.waitFor(() => assert.equal(statusValue("Working copy state"), "Dirty"));
+  const dirtyButton = ui.getByRole(document.body, "button", { name: "Save document" });
+  assert.equal(dirtyButton.textContent, "Dirty");
+  assert.equal(dirtyButton.disabled, (await menuItem("File", /Save/)).disabled);
+  assert.equal(getComputedStyle(dirtyButton).fontWeight, "700");
+  assert.equal(getComputedStyle(dirtyButton).color, "inherit",
+    "Dirty uses the status bar's normal text color");
   await ui.waitFor(() => assert.equal(document.title, "*safe-notes.scpefe — SCPEFE"));
   assert.equal((await menuItem("File", /Save/)).disabled, false);
   assert.equal((await menuItem("File", /Backup/)).disabled, true,
@@ -281,14 +288,18 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.keyboard("{Control>}z{/Control}");
   assert.equal(editor.value, opened.content);
   assert.equal(statusValue("Working copy state"), "Clean");
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Save document" }), null);
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
   assert.equal((await menuItem("Edit", /Redo/)).disabled, false);
   editor.focus();
   await user.keyboard("{Control>}y{/Control}");
   assert.equal(editor.value, `${opened.content}!`);
   assert.equal(statusValue("Working copy state"), "Dirty");
-  await command("File", /Save/);
+  const saveStatus = ui.getByRole(document.body, "button", { name: "Save document" });
+  saveStatus.focus();
+  await user.keyboard("{Enter}");
   await ui.waitFor(() => assert.equal(statusValue("Working copy state"), "Clean"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Save document" }), null);
   assert.equal(savedContent, `${opened.content}!`);
   assert.equal(statusValue("Publication state"), "Published");
 
