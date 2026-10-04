@@ -38,7 +38,7 @@ export interface ShellDialogsHandle {
 
 /** Owns local profile, target-password, and plaintext-export form state. */
 export function ShellDialogs({ session, presentation, host, completion, dialog, active,
-  returnFocus, catalogText, safeRendererErrorMessage, closeWindow,
+  returnFocus, catalogText, safeRendererErrorMessage, closeWindow, sourceCommit,
   onDialog, onMessage: setMessage, onProfileReady, onAdopted, onFocusEditor,
   onClose, ref }: {
   session: ShellSession;
@@ -52,6 +52,7 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
   catalogText(code: string): string;
   safeRendererErrorMessage(error: unknown): string;
   closeWindow(): void;
+  sourceCommit: string;
   onDialog(dialog: DialogName): void;
   onMessage(message: string): void;
   onProfileReady(ready: boolean): void;
@@ -271,7 +272,17 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
     }
   }
 
-  return <>    {dialog === "profile" && <FocusedDialog returnFocus={returnFocus}
+  return <>
+    {dialog === "about" && <FocusedDialog returnFocus={returnFocus}
+      title="About SCPEFE" close={closeShellDialog}>
+      <p>SCPEFE</p>
+      <p>Source: <a href="https://github.com/davelopware/scpefe" target="_blank"
+        rel="noopener noreferrer">github.com/davelopware/scpefe</a></p>
+      <p>Source commit: <code>{sourceCommit}</code></p>
+      <div className="dialog-actions"><button type="button" onClick={closeShellDialog}>
+        Close</button></div>
+    </FocusedDialog>}
+    {dialog === "profile" && <FocusedDialog returnFocus={returnFocus}
       title={profile ? "Profile" : "Set up this client"}
       close={profile ? closeShellDialog : undefined}><p>Name, email, and device name identify this client locally. This profile is self-asserted and is not an authenticated account.</p>
       {pendingProfile ? <div className="warning" role="alert">

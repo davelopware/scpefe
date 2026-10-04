@@ -11,6 +11,8 @@ import { RENDERER_LIFECYCLE_COMPLETION,
 import { catalogText, safeRendererErrorMessage } from "./error-boundary.mjs";
 import "./styles.css";
 
+declare const __SCPEFE_SOURCE_COMMIT__: string;
+
 type WindowsFrontendHost = SessionHost & JournalTransportHost & SessionEventsHost
   & ShellHost & CreationTargetHost & SecurityClipboardHost
   & PasswordPolicyHost & Required<Pick<SessionHost, "createDocument">>;
@@ -28,6 +30,7 @@ export function mountApp(host: HTMLElement): Root {
     completion={completion}
     catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
     closeWindow={() => window.close()}
+    sourceCommit={__SCPEFE_SOURCE_COMMIT__}
     assessProposedPassword={assessProposedPassword}
     proposedPasswordRejectionMessage={proposedPasswordRejectionMessage}
     CreationSecurityDialog={CreationSecurityDialog}

@@ -14,6 +14,7 @@ const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | nu
   ["Security", [["lock", "Lock"], ["unlock", "Unlock"], null,
     ["passwords", "Passwords…"],
     ["profile", "Profile…"]]],
+  ["Help", [["about", "About"]]],
 ];
 
 /** Presents shell commands without owning their eligibility or dispatch. */
