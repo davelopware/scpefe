@@ -307,7 +307,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   }
 
   return <>    {passwordsOpen && activeDocument && opened && <FocusedDialog returnFocus={returnFocus}
-      title="Passwords" close={closePasswords}>
+      title="Passwords" close={invitationBusy ? undefined : closePasswords}>
       {invitationPassphrase ? <section aria-labelledby="invitation-result-title">
         <h3 id="invitation-result-title">Invitation created</h3>
         <p className="warning">Send this temporary passphrase through a separate secure channel. It is shown only now and cannot be recovered after Done.</p>
@@ -383,7 +383,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           disabled={invitationBusy}>Close</button></div></>}
       </FocusedDialog>}
     {claimVisible && <FocusedDialog returnFocus={returnFocus}
-      title="Claim invitation">
+      title="Claim invitation" close={() => void cancelInvitationClaim()}>
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
       <form onSubmit={claimInvitation}><label>New password<input
         {...entry.field("claimPassword")} name="newPassword"

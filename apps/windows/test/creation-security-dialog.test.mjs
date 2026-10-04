@@ -88,12 +88,20 @@ test("mounted post-picker dialog is focused and has no initial-text field", asyn
   assert.equal(dialog.classList.contains("app-dialog"), true);
   assert.equal(dialog.classList.contains("security-dialog"), true);
   assert.equal(dialog.querySelectorAll(".app-dialog-header > h2").length, 1);
+  const close = ui.getByRole("button", { name: "Close Secure new document" });
+  assert.equal(dialog.querySelector(".app-dialog-header")?.contains(close), true);
+  assert.equal(dialog.querySelector(".app-dialog-body")?.contains(close), false);
   assert.equal(dialog.querySelector(".app-dialog-body > p")?.id,
     "creation-security-warning");
   assert.equal(dialog.getAttribute("aria-describedby"), "creation-security-warning");
   await user.keyboard("{Shift>}{Tab}{/Shift}");
+  assert.equal(dom.window.document.activeElement === close, true,
+    "Shift+Tab reaches the fixed header close control");
+  await user.keyboard("{Shift>}{Tab}{/Shift}");
   assert.equal(dom.window.document.activeElement === ui.getByRole("button", { name: "Create" }),
     true, "Shift+Tab wraps to the final creation action");
+  await user.keyboard("{Tab}");
+  assert.equal(dom.window.document.activeElement === close, true);
   await user.keyboard("{Tab}");
   assert.equal(dom.window.document.activeElement === ui.getByLabelText("Owner password"),
     true, "Tab wraps back to the first creation field");
@@ -114,6 +122,8 @@ test("shared modal frame keeps its title outside a long scrolling body", async (
   assert.equal(body?.parentElement === dialog, true);
   assert.equal(body?.textContent.includes("Long content"), true);
   assert.equal(body?.contains(header), false);
+  assert.equal(ui.queryByRole("button", { name: "Close Long decision" }), null,
+    "required decisions have no close control");
   const decision = ui.getByRole("button", { name: "Keep decision open" });
   assert.equal(dom.window.document.activeElement === decision, true);
   await user.keyboard("{Tab}");
@@ -135,8 +145,15 @@ test("shared modal frame uses the optional dismissal callback", async (t) => {
   assert.ok(ui.getByRole("dialog", { name: "Dismissible decision" }));
   assert.equal(dom.window.document.activeElement === ui.getByRole("button", { name: "Continue" }),
     true);
-  await user.keyboard("{Escape}");
+  const close = ui.getByRole("button", { name: "Close Dismissible decision" });
+  assert.equal(close.closest(".app-dialog-header")?.contains(close), true);
+  await user.keyboard("{Shift>}{Tab}{/Shift}");
+  assert.equal(dom.window.document.activeElement === close, true,
+    "the header close control is keyboard reachable");
+  await user.keyboard("{Enter}");
   assert.equal(closes, 1);
+  await user.keyboard("{Escape}");
+  assert.equal(closes, 2);
 });
 
 test("mounted creation dialog reveals password pairs independently without changing drafts",
@@ -450,7 +467,7 @@ for (const [code, label, otherLabel] of [
   });
 }
 
-test("Cancel and Escape are keyboard-operable without invoking creation", async (t) => {
+test("Cancel, Escape, and the header close button share creation cleanup", async (t) => {
   let createCalls = 0;
   let cancelCalls = 0;
   const { user, ui } = mountedDialog(t, async () => { createCalls += 1; },
@@ -460,6 +477,11 @@ test("Cancel and Escape are keyboard-operable without invoking creation", async 
   ui.getByLabelText("Owner password").focus();
   await user.keyboard("{Escape}");
   assert.equal(cancelCalls, 2);
+  await user.type(ui.getByLabelText("Owner password"), "draft secret");
+  await user.click(ui.getByRole("button", { name: "Close Secure new document" }));
+  assert.equal(cancelCalls, 3);
+  assert.equal(ui.getByLabelText("Owner password").value, "",
+    "the header control clears the same secret draft as Cancel");
   assert.equal(createCalls, 0);
 });
 
@@ -474,6 +496,7 @@ test("pending creation marks the shared frame busy and blocks cancellation", asy
   const dialog = ui.getByRole("dialog", { name: "Secure new document" });
   await waitFor(() => assert.equal(dialog.getAttribute("aria-busy"), "true"));
   assert.equal(ui.getByRole("button", { name: "Cancel" }).disabled, true);
+  assert.equal(ui.queryByRole("button", { name: "Close Secure new document" }), null);
   await user.keyboard("{Escape}");
   assert.equal(cancelCalls, 0);
   finishCreate();

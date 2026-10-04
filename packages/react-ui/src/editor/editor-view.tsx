@@ -180,7 +180,10 @@ export function EditorView({ session, active, locked, blocked, onMessage,
     {findOpen && active && !blocked && <section className="modeless-dialog" role="dialog"
       aria-modal="false" aria-labelledby="find-replace-title" onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); closeFind(); }
-      }}><h2 id="find-replace-title">Find and replace</h2>
+      }}><div className="app-dialog-header"><h2 id="find-replace-title">Find and replace</h2>
+        <button type="button" className="dialog-close" aria-label="Close Find and replace"
+          onClick={closeFind}>×</button></div>
+      <div className="modeless-dialog-body">
       <label>Find<input ref={findInput} value={findText}
         onChange={(event) => { setFindText(event.target.value); setFindStatus(""); }} /></label>
       <label>Replace with<input ref={replaceInput} value={replaceText}
@@ -192,7 +195,7 @@ export function EditorView({ session, active, locked, blocked, onMessage,
         <button type="button" disabled={readOnly || !findText}
           onClick={replaceAll}>Replace all</button>
         <button type="button" onClick={closeFind}>Close</button></div>
-      <p className="modeless-status" role="status" aria-live="polite">{findStatus}</p>
+      <p className="modeless-status" role="status" aria-live="polite">{findStatus}</p></div>
     </section>}
   </section>;
 }
