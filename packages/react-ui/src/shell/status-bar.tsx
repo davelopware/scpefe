@@ -4,7 +4,7 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import type { ShellCommands } from "./shell-commands.ts";
 
 /** Compact status projection for the current document session. */
-export function StatusBar<Doc extends SessionDocument>({ session, active, message }: {
+export function StatusBar<Doc extends SessionDocument>({ session, active, message, commands }: {
   session: SnapshotSource<DocumentSessionSnapshot<Doc>>; active: boolean; message: string;
   commands: ShellCommands<Doc>;
 }): React.ReactElement {
@@ -25,7 +25,13 @@ export function StatusBar<Doc extends SessionDocument>({ session, active, messag
         : publicationState === "provisional" ? "Provisional publication" : "Published";
   const total = snapshot.discovery?.total ?? 0;
   return <footer className="status-bar" role="status" aria-live="polite" aria-atomic="true">
-    <span aria-label="Document state">{state}</span>
+    <span aria-label="Document state">{locked
+      ? <button type="button" className="status-unlock" aria-label="Unlock document"
+        disabled={!commands.available("unlock")}
+        onClick={(event) => { void commands.invoke("unlock", {
+          returnFocus: event.currentTarget, observedSnapshot: snapshot,
+        }); }}>Locked</button>
+      : state}</span>
     <span aria-label="Working copy state">{cleanliness}</span>
     {active && <span aria-label="Recovery journal state">
       {working?.journal.failed ? "Checkpoint needs attention"

@@ -36,6 +36,8 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .modeless-status { min-height: 1.4em; margin: 0; color: GrayText; }
 .status-bar { min-height: 1.8rem; display: flex; gap: 1.5rem; padding: .25rem .65rem;
   border-top: 1px solid #8c939b; background: #f1f3f5; color: #17202a; white-space: nowrap; overflow: hidden; }
+.status-unlock { border: 0; padding: 0; background: transparent; color: #9b1c1c;
+  font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
 .status-bar span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
   padding: 1rem; background: rgb(24 32 42 / .55); }
