@@ -35,11 +35,10 @@ Before capturing UI review evidence, read and follow `docs/agents/ui-screenshots
 
 ## Multi-issue implementation runs
 
-For a blocker-linked issue range implemented with subagents:
+For any run implementing multiple GitHub issues, follow `docs/agents/multi-issue-runs.md`:
 
-1. Use `codex/dev-sub-agents` as the single integration branch and open one draft PR from it covering the full range.
-2. Establish a blocker-first order. Run concurrently only tickets whose blockers are already integrated and verified.
-3. Start a fresh implementer subagent for each issue on its own branch and isolated `/tmp` worktree based on the latest integration head. Scope each implementation assignment to one issue.
-4. After implementation stops, use a fresh subagent for each stage: verify that issue, merge its branch, then test the resulting integration branch. Hand each agent the issue number, relevant branch and commit SHA, current checkpoint, and concise results from the prior stage. Keep the orchestrator context to these bounded handoffs; inspect implementation details there only to resolve a reported ambiguity or failure.
-5. Push the tested integration commit, then close the issue with a comment naming that commit, the passing integration gate, and the draft PR. Treat closed issues as the durable resume checkpoint.
-6. Remove completed issue branches and worktrees after integration. Preserve failed or incomplete work for diagnosis instead of merging or closing it.
+1. Use `codex/dev-sub-agents` as the single integration branch and open one draft PR for the run. Work through issues in blocker-first order, one issue at a time, with only one active subagent.
+2. Give each issue its own branch and isolated `/tmp` worktree based on the latest tested, pushed integration commit. Use a fresh subagent for each stage: implement, independently verify, merge, integration test, and publish. Reuse an agent only to correct failed tests in its own task.
+3. Keep the coordinator to bounded handoffs and status. Inspect implementation details only to resolve a reported ambiguity or failure.
+4. Finish each issue's committed, verified, merged, integration-tested, pushed, and closed checkpoint before starting the next. Preserve incomplete work for diagnosis.
+5. Before marking the PR ready for review, provide a validated downloadable Windows preview built from the exact final PR commit. After merge, verify issue closure and clean up merged branches and worktrees while preserving the preview.
