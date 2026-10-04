@@ -278,6 +278,18 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       assert.equal(input.type, "password");
     }
     await user.type(ui.getByLabelText(dialog, "Current password"), "current password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Generate passphrase" }));
+    const changedDraft = ui.getByLabelText(dialog, "New password");
+    await ui.waitFor(() => assert.match(changedDraft.value, /^[a-z]+(?: [a-z]+){7}$/));
+    assert.equal(changedDraft.value,
+      ui.getByLabelText(dialog, "Confirm new password").value);
+    assert.equal(changedDraft.type, "text");
+    assert.equal(ui.getByLabelText(dialog, "Confirm new password").type, "text");
+    assert.equal(ui.getByLabelText(dialog, "Current password").value,
+      "current password words");
+    assert.equal(passwordAttempts, 0);
+    await user.clear(changedDraft);
+    await user.clear(ui.getByLabelText(dialog, "Confirm new password"));
     await user.type(ui.getByLabelText(dialog, "New password"),
       "predictable proposed password");
     await user.type(ui.getByLabelText(dialog, "Confirm new password"),
@@ -323,6 +335,11 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(invitationForm, "button", { name: "Show temporary passphrase" }));
     assert.equal(temporary.type, "text");
     await user.click(ui.getByRole(invitationForm, "button", { name: "Hide temporary passphrase" }));
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Generate passphrase" }));
+    await ui.waitFor(() => assert.match(temporary.value, /^[a-z]+(?: [a-z]+){7}$/));
+    assert.equal(temporary.type, "text");
+    assert.equal(invitationAttempts, 0);
+    await user.clear(temporary);
     await user.type(ui.getByLabelText(invitationForm, "Temporary label (required)"), "New colleague");
     await user.type(ui.getByLabelText(invitationForm,
       "Temporary passphrase (leave blank to generate)"), "predictable proposed password");
@@ -584,6 +601,15 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       assert.equal(input.type, "text");
       await user.click(ui.getByRole(dialog, "button", { name: `Hide ${name.toLowerCase()}` }));
     }
+    await user.click(ui.getByRole(dialog, "button", { name: "Generate passphrase" }));
+    const claimDraft = ui.getByLabelText(dialog, "New password");
+    await ui.waitFor(() => assert.match(claimDraft.value, /^[a-z]+(?: [a-z]+){7}$/));
+    assert.equal(claimDraft.value, ui.getByLabelText(dialog, "Confirm new password").value);
+    assert.equal(claimDraft.type, "text");
+    assert.equal(ui.getByLabelText(dialog, "Confirm new password").type, "text");
+    assert.equal(claimAttempts, 0);
+    await user.clear(claimDraft);
+    await user.clear(ui.getByLabelText(dialog, "Confirm new password"));
     await user.type(ui.getByLabelText(dialog, "New password"), "界界界界");
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));

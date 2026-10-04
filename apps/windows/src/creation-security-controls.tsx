@@ -13,6 +13,8 @@ interface PasswordConfirmationFieldsProps {
   required: boolean;
   onToggle(): void;
   onToggleConfirmation(): void;
+  onGenerate(): void;
+  generating?: boolean;
   input: ComponentProps<"input">;
   confirmation: ComponentProps<"input">;
   comparePassword?: string;
@@ -26,6 +28,7 @@ interface PasswordConfirmationFieldsProps {
 /* Renders a password and confirmation pair with independent visibility controls. */
 export function PasswordConfirmationFields({ kind, label, confirmationLabel,
   revealed, confirmationRevealed, required, onToggle, onToggleConfirmation,
+  onGenerate, generating = false,
   input, confirmation,
   comparePassword = "", compareMessage = "", invalidPassword = false,
   invalidConfirmation = false, errorDescriptionId = "", passwordError = "" }:
@@ -42,6 +45,9 @@ export function PasswordConfirmationFields({ kind, label, confirmationLabel,
           ? `${statusId} ${errorDescriptionId}` : statusId,
         "aria-invalid": invalidPassword ? "true" : undefined,
       } }),
+    h("button", { type: "button", onClick: onGenerate, disabled: generating,
+      "aria-label": `Generate ${kind} passphrase` },
+    generating ? "Generating…" : "Generate passphrase"),
     h(PasswordField, { label: confirmationLabel,
       visibilityName: `${kind} password confirmation`, visible: confirmationRevealed,
       onToggle: onToggleConfirmation,

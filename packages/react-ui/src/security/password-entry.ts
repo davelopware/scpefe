@@ -61,10 +61,13 @@ export function usePasswordEntry<Field extends string>(fields: readonly Field[])
     });
   }
 
-  function replace(name: Field, candidate: string, confirmation?: Field): void {
+  function replace(name: Field, candidate: string, confirmation?: Field,
+    reveal = false): void {
     setDrafts((current) => ({ ...current,
-      [name]: { ...current[name], value: candidate },
-      ...(confirmation ? { [confirmation]: { ...current[confirmation], value: candidate } } : {}),
+      [name]: { ...current[name], value: candidate,
+        visible: reveal || current[name].visible },
+      ...(confirmation ? { [confirmation]: { ...current[confirmation], value: candidate,
+        visible: reveal || current[confirmation].visible } } : {}),
     }));
   }
 

@@ -6,6 +6,7 @@ import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { SlotAdministration } from "./slot-administration.tsx";
 import { usePasswordEntry } from "./password-entry.ts";
 import { PasswordField } from "./password-field.tsx";
+import { generateAcceptedPassphrase } from "./passphrase-generator.ts";
 import type { DocumentOpened, ManagedSlot, Opened } from "../session/types.ts";
 import type { ProposedPasswordOutcome } from "./types.ts";
 
@@ -66,6 +67,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   const entry = usePasswordEntry(["currentPassword", "newPassword",
     "newPasswordConfirmation", "temporaryPassword", "claimPassword",
     "claimConfirmation"] as const);
+  const [generating, setGenerating] = useState<"change" | "invite" | "claim" | null>(null);
+  const generationToken = useRef(0);
   const currentPasswordDraft = entry.value("currentPassword");
   const newPasswordDraft = entry.value("newPassword");
   const newPasswordConfirmationDraft = entry.value("newPasswordConfirmation");
@@ -90,6 +93,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
     && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7);
   const previousTab = useRef<PasswordTab | null>(null);
   function clearTabDraft(tab: PasswordTab) {
+    generationToken.current += 1;
+    setGenerating(null);
     if (tab === "change") {
       entry.reset("currentPassword", "newPassword", "newPasswordConfirmation");
       setPasswordError("");
@@ -137,6 +142,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
     if (next) { event.preventDefault(); selectTab(next); }
   }
   function reset() {
+    generationToken.current += 1;
+    setGenerating(null);
     securityPresentationEpoch.current += 1;
     invitationSubmission.current = null;
     setPasswordError(""); setInvitationPassphrase(null); setInvitationError("");
@@ -146,10 +153,38 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   }
   useImperativeHandle(ref, () => ({ reset }));
   useEffect(() => () => { securityPresentationEpoch.current += 1;
+    generationToken.current += 1;
     invitationSubmission.current = null; }, []);
   function closePasswords() {
     if (invitationSubmission.current !== null) return;
     reset(); onClose();
+  }
+  async function generate(kind: "change" | "invite" | "claim"): Promise<void> {
+    const token = ++generationToken.current;
+    setGenerating(kind);
+    const field = kind === "change" ? "newPassword"
+      : kind === "invite" ? "temporaryPassword" : "claimPassword";
+    const confirmation = kind === "change" ? "newPasswordConfirmation"
+      : kind === "claim" ? "claimConfirmation" : undefined;
+    const excluded = [entry.value(field),
+      ...(kind === "change" ? [currentPasswordDraft] : [])];
+    try {
+      const candidate = await generateAcceptedPassphrase(assessProposedPassword, excluded);
+      if (generationToken.current !== token) return;
+      entry.replace(field, candidate, confirmation, true);
+      if (kind === "change") setPasswordError("");
+      else if (kind === "invite") {
+        setInvitationError(""); setInvitationPasswordError(false);
+      } else setClaimError("");
+    } catch {
+      if (generationToken.current !== token) return;
+      const message = "Could not generate a passphrase. Try again.";
+      if (kind === "change") setPasswordError(message);
+      else if (kind === "invite") setInvitationError(message);
+      else setClaimError(message);
+    } finally {
+      if (generationToken.current === token) setGenerating(null);
+    }
   }
   async function claimInvitation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -195,6 +230,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   }
 
   async function cancelInvitationClaim() {
+    generationToken.current += 1;
+    setGenerating(null);
     try {
       const outcome = await session.cancelInvitationClaim();
       if (outcome.status === "claim-canceled") {
@@ -437,6 +474,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
             input={{ ...entry.field("newPassword"), id: "new-password",
               name: "newPassword", required: true,
               "aria-describedby": "change-password-policy" }} />
+          <button type="button" disabled={Boolean(generating)}
+            onClick={() => { void generate("change"); }}>Generate passphrase</button>
           <PasswordField label="Confirm new password"
             visible={entry.visible("newPasswordConfirmation")}
             onToggle={() => entry.toggle("newPasswordConfirmation")}
@@ -447,7 +486,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
             confirmation={newPasswordConfirmationDraft} comparePassword={currentPasswordDraft}
             compareMessage="New password must differ from the current password." />
           {passwordError && <p className="dialog-error" role="alert">{passwordError}</p>}
-          <button disabled={!securityCommands?.changePassword}>Change password</button></form>
+          <button disabled={Boolean(generating) || !securityCommands?.changePassword}>
+            Change password</button></form>
         </>}
         </section>
         <section id="password-panel-invite" role="tabpanel"
@@ -464,6 +504,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
                 name: "temporaryPassword",
                 "aria-describedby": `temporary-password-policy${invitationPasswordError
                   ? " invitation-password-error" : ""}` }} />
+            <button type="button" disabled={Boolean(generating) || invitationBusy}
+              onClick={() => { void generate("invite"); }}>Generate passphrase</button>
             <PasswordPolicyStatus id="temporary-password-policy" password={temporaryPasswordDraft}
               optionalBlankGenerates={true} />
             <label className="check"><input name="canEdit" type="checkbox" /> May edit</label>
@@ -473,7 +515,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
               ? "invitation-password-error" : undefined} className="dialog-error"
               role="alert">{invitationError}</p>}
             {invitationBusy && <p role="status">Finishing invitation publication…</p>}
-            <button disabled={invitationBusy || !securityCommands?.createInvitation}>
+            <button disabled={Boolean(generating) || invitationBusy
+              || !securityCommands?.createInvitation}>
               Create invitation</button></form></>}
         </section>
         <section id="password-panel-slots" role="tabpanel"
@@ -497,6 +540,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         input={{ ...entry.field("claimPassword"), id: "claim-password",
           name: "newPassword", required: true, autoFocus: true,
           "aria-describedby": "claim-password-policy" }} />
+        <button type="button" disabled={Boolean(generating)}
+          onClick={() => { void generate("claim"); }}>Generate passphrase</button>
         <PasswordField label="Confirm new password"
           visible={entry.visible("claimConfirmation")}
           onToggle={() => entry.toggle("claimConfirmation")}
@@ -506,7 +551,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         <PasswordPolicyStatus id="claim-password-policy" password={claimPasswordDraft}
           confirmation={claimConfirmationDraft} />
         {claimError && <p className="dialog-error" role="alert">{claimError}</p>}
-        <button>Replace password and claim identity</button></form>
+        <button disabled={Boolean(generating)}>
+          Replace password and claim identity</button></form>
       <button onClick={() => void cancelInvitationClaim()}>Cancel</button></FocusedDialog>}
   </>;
 }
