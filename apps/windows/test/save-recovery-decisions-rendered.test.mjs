@@ -627,7 +627,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     finishMigration({ migrated: true, backupCreated: true,
       compatibilityCode: "MIGRATION_COMPATIBILITY",
       opened: { ...base, readOnly: false, content: "stale migrated text" } });
-    await ui.waitFor(() => assert.equal(status("Document state"), "Read-only"));
+    await ui.waitFor(() => assert.equal(status("Document state"), "Edit mode"));
     assert.equal(editor.value, "sealed text");
     assert.equal(document.body.textContent.includes("stale migrated text"), false);
   });

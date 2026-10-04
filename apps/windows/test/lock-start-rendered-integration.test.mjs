@@ -150,8 +150,11 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
           { revisionId: initialRevision, parentRevisionIds: [] }]
         : [{ revisionId: revision, parentRevisionIds: [] }]);
     const invitation = origin === "ro-invitation" && bytes.toString() === "other-container";
+    const viewOnly = origin.startsWith("s1-") && bytes.toString() === "container";
     return { content: invitation ? "" : openedContent(bytes), readOnly: true,
-    canEdit: !invitation, canAddPasswords: !invitation, canRemovePasswords: !invitation,
+    canEdit: !invitation && !viewOnly,
+    canAddPasswords: !invitation && !viewOnly,
+    canRemovePasswords: !invitation && !viewOnly,
     ...(invitation ? { mustBeChanged: true,
       slotIdentityName: "Temporary colleague label",
       slotIdentityEmail: "invited@example.test", profileName: "Document author",
@@ -544,7 +547,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       await user.type(ui.getByLabelText(opened, "Password"), "password words");
       await user.click(ui.getByRole(opened, "button", { name: "Open" }));
     }
-    const expectedState = entry === "new" ? "Edit mode" : "Read-only";
+    const expectedState = "Edit mode";
     await waitScalar(() => host.service !== priorService,
       `${entry} candidate adoption as the authoritative service`);
     await waitScalar(() => ui.getByLabelText(document.body,
@@ -718,8 +721,11 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await awaitHeldLifecycleCompletion(initialReadEntered, () => releaseInitialRead(),
       "initial document Open");
   } else await awaitLifecycleCompletion("initial document Open");
+  const initiallyReadOnly = origin.startsWith("s1-") || origin.startsWith("s7-")
+    || origin.startsWith("s8-") || origin.startsWith("rw-")
+    || origin.startsWith("cf-") || origin === "pp-restart";
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
-    "Document state").textContent, "Read-only"));
+    "Document state").textContent, initiallyReadOnly ? "Read-only" : "Edit mode"));
   if (origin === "focus-active") {
     await command("File", /New/);
     const creation = await ui.findByRole(document.body, "dialog",
@@ -938,8 +944,10 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     }
     await driveDirect(entry, "Read-only"); return;
   }
-  await command("Edit", "Edit Contents");
-  await awaitLifecycleCompletion("entering edit mode");
+  if (initiallyReadOnly) {
+    await command("Edit", "Edit Contents");
+    await awaitLifecycleCompletion("entering edit mode");
+  }
   await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
     "Document state").textContent, "Edit mode"));
   service = host.service;
@@ -1527,7 +1535,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (stagedSubmit) await stagedSubmit;
     if (entry === "new") await awaitLifecycleCompletion("held maintenance New replacement");
     if (entry === "new" || entry === "open" || entry === "external") {
-      const expectedState = entry === "new" ? "Edit mode" : "Read-only";
+      const expectedState = "Edit mode";
       await ui.waitFor(() => assert.equal(host.service !== priorService, true));
       await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
         "Document state").textContent, expectedState));
