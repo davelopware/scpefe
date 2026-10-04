@@ -224,7 +224,7 @@ Browsing, comparing, and restoring historical revisions is a future feature and 
 
 ### 8.1 Read-only and edit modes
 
-Every document initially opens in read-only mode after password entry. Merely viewing never acquires an editing lease. The user explicitly enters edit mode, which acquires the advisory lease. A successful save remains in edit mode and retains the lease; the lease is normally released when edit mode ends or the application exits.
+After successful open or unlock, a claimed edit-capable slot automatically attempts to acquire the advisory lease and enter edit mode. On success, the editor is immediately writable. A view-only slot, unclaimed invitation, identity mismatch, or unresolved document attention remains read-only. If lease acquisition requires a decision or fails, the document remains usable read-only while the existing explanation or decision is shown. **Edit → Edit Contents** remains available for an eligible read-only session. A successful save remains in edit mode and retains the lease; the lease is normally released when edit mode ends or the application exits.
 
 The normal workflow edits an internal working copy. The shared `.scpefe` file is updated by a manual save or, when enabled, a regular provisional save. The UI must make unsaved and provisionally autosaved changes unmistakable.
 

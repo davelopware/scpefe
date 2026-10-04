@@ -108,8 +108,8 @@ Password-slot permissions are cooperative policy for conforming clients. They ar
 | Term | Canonical meaning |
 |---|---|
 | Locked | No document password/key or plaintext editing state is available to the UI. |
-| Unlocked | A password slot has opened the document. An unlocked document initially remains in read-only mode. |
-| Read-only mode | Unlocked viewing without an editing lease. This is the default open mode. |
+| Unlocked | A password slot has opened the document. An eligible editor slot attempts edit mode as part of opening or unlocking. |
+| Read-only mode | Unlocked viewing without an editing lease. View-only and editing-blocked sessions remain here; an editor slot also remains here if lease acquisition needs a decision or fails. |
 | Edit mode | The document session owns or has reacquired the advisory editing lease and permits changes allowed by the slot policy. |
 | Editing lease | Encrypted advisory shared state identifying the edit session permitted to publish changes. It is not a guaranteed distributed lock. |
 | Lease session ID | A random identifier for one acquisition of an editing lease. |
@@ -125,6 +125,8 @@ closed → locked → unlocked/read-only → edit mode
                     ↑                 ↓
                     └──── re-lock ────┘
 ```
+
+After an eligible editor slot opens or unlocks the document, the session attempts the read-only to edit-mode transition automatically. The same lease rules and explicit takeover decisions apply as when the user chooses **Edit Contents**.
 
 Re-locking stops heartbeat refresh but does not immediately erase the lease from the container. A returning session resumes a valid lease or transparently reacquires an unchanged, unclaimed expired lease.
 
@@ -175,7 +177,7 @@ working copy ──recovery checkpoint──> local work journal
 - A document has one owner slot, zero or one recovery/master slot, and no more than eight ordinary slots total.
 - Every password slot wraps the same document key.
 - At most one provisional revision exists after the last sealed revision.
-- A conforming application opens a document in read-only mode and enters edit mode only after lease acquisition.
+- A conforming application permits editing only after lease acquisition. An eligible editor slot attempts that acquisition once on open or unlock; blocked and view-only sessions remain read-only.
 - A client stores at most one local work journal per document.
 - Shared durable state belongs in the container; client recovery state belongs in app-private storage.
 - Persistent adjacent files are not required. Explicit backup replicas and short-lived transaction files are the documented exceptions.
