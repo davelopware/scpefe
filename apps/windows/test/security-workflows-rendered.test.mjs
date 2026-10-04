@@ -492,10 +492,20 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await command("Edit", "Edit Contents");
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
-    assert.match(ui.getByRole(dialog, "note").textContent,
-      /limit of eight ordinary password slots/);
+    const limitNote = dialog.querySelector("#password-slot-limit");
+    assert.match(limitNote.textContent, /limit of eight ordinary password slots/);
+    assert.equal(limitNote.closest("[role='tabpanel']")?.id, "password-panel-invite",
+      "the capacity warning belongs to the invitation panel");
+    assert.equal(ui.queryByRole(dialog, "note"), null,
+      "the capacity warning is hidden while Change Password is selected");
     assert.equal(ui.queryByRole(dialog, "heading", { name: "Invite another person" }), null);
-    assert.equal(ui.getByRole(dialog, "tab", { name: "Invite Collaborator" }).disabled, true);
+    const disabledInvite = ui.getByRole(dialog, "tab", { name: "Invite Collaborator" });
+    assert.equal(disabledInvite.disabled, true);
+    assert.equal(disabledInvite.getAttribute("aria-describedby"), limitNote.id);
+    assert.match(disabledInvite.title, /limit of eight ordinary password slots/);
+    await user.click(ui.getByRole(dialog, "tab", { name: "Password Slots" }));
+    assert.equal(ui.queryByRole(dialog, "note"), null,
+      "the invitation warning stays hidden on Password Slots");
     await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
 
     listeners.locked({ locked: true, journalSaved: true, warning: null });

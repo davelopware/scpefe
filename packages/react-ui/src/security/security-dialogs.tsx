@@ -86,6 +86,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   };
   const activeTab = availableTabs[selectedTab] ? selectedTab
     : passwordTabs.find(({ id }) => availableTabs[id])?.id ?? null;
+  const invitationSlotLimitReached = Boolean(opened && !opened.readOnly
+    && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7);
   const previousTab = useRef<PasswordTab | null>(null);
   function clearTabDraft(tab: PasswordTab) {
     if (tab === "change") {
@@ -382,6 +384,11 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
             id={`password-tab-${id}`} type="button" role="tab"
             aria-controls={!invitationPassphrase && !opened.profileMismatch
               ? `password-panel-${id}` : undefined}
+            aria-describedby={id === "invite" && invitationSlotLimitReached
+              && !invitationPassphrase && !opened.profileMismatch
+              ? "password-slot-limit" : undefined}
+            title={id === "invite" && invitationSlotLimitReached
+              ? "The limit of eight ordinary password slots has been reached." : undefined}
             aria-selected={!invitationPassphrase && !opened.profileMismatch && activeTab === id}
             tabIndex={activeTab === id && !disabled ? 0 : -1}
             disabled={disabled} onClick={() => selectTab(id)}
@@ -445,6 +452,8 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         </section>
         <section id="password-panel-invite" role="tabpanel"
           aria-labelledby="password-tab-invite" tabIndex={0} hidden={activeTab !== "invite"}>
+          {invitationSlotLimitReached && <p id="password-slot-limit" role="note">
+            The limit of eight ordinary password slots has been reached.</p>}
           {activeTab === "invite" && <>
           <form onSubmit={createInvitation}><h3>Invite another person</h3>
             <label>Temporary label (required)<input name="temporaryLabel" required /></label>
@@ -467,8 +476,6 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
             <button disabled={invitationBusy || !securityCommands?.createInvitation}>
               Create invitation</button></form></>}
         </section>
-        {!opened.readOnly && opened.canAddPasswords && (opened.managedSlots?.length ?? 0) >= 7
-          && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
         <section id="password-panel-slots" role="tabpanel"
           aria-labelledby="password-tab-slots" tabIndex={0} hidden={activeTab !== "slots"}>
         {activeTab === "slots" && <>
