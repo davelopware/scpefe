@@ -75,7 +75,17 @@ input, select, button { padding: .45rem .6rem; }
 .dialog-error { color: #9b1c1c; font-weight: 600; }
 .password-policy { margin: 0; color: #7a2e0b; font-size: .92rem; }
 .password-policy.pass { color: #176b35; font-weight: 600; }
-.slot-administration { margin-top: 1rem; }
+.password-tabs { display: flex; flex-wrap: wrap; gap: .35rem; border-bottom: 1px solid GrayText;
+  margin-bottom: 1rem; }
+.password-tabs [role="tab"] { border: 1px solid transparent; border-bottom: .2rem solid transparent;
+  border-radius: .25rem .25rem 0 0; color: CanvasText; background: transparent;
+  font: inherit; cursor: pointer; }
+.password-tabs [role="tab"][aria-selected="true"] { border-color: GrayText;
+  border-bottom-color: Highlight; font-weight: 700; }
+.password-tabs [role="tab"]:disabled { color: GrayText; cursor: default; opacity: .6; }
+.password-tabs [role="tab"]:focus-visible { outline: 2px solid Highlight;
+  outline-offset: -2px; }
+.slot-administration { margin-top: 0; }
 .managed-slots { display: grid; gap: 1rem; padding: 0; list-style: none; }
 .managed-slot { display: grid; gap: .7rem; padding: .75rem 0; border-top: 1px solid GrayText; }
 .managed-slot h4, .managed-slot p { margin: 0; }

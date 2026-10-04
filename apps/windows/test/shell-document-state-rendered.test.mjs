@@ -313,10 +313,12 @@ test("mounted shell presents truthful document states, history, failures, and se
   await command("Security", "Passwords…");
   let passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
   const changePasswordLabels = ["Current password", "New password", "Confirm new password"];
-  for (const label of [...changePasswordLabels,
-    "Temporary passphrase (leave blank to generate)"]) {
+  for (const label of changePasswordLabels) {
     await user.type(ui.getByLabelText(passwordsDialog, label), "private draft words");
   }
+  await user.click(ui.getByRole(passwordsDialog, "tab", { name: "Invite Collaborator" }));
+  await user.type(ui.getByLabelText(passwordsDialog,
+    "Temporary passphrase (leave blank to generate)"), "private draft words");
   listeners.lockStarted();
   assert.equal(passwordsDialog.isConnected, false,
     "lock start removes the mounted password dialog");
@@ -334,6 +336,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.click(ui.getByRole(passwordsDialog, "button", { name: "Close" }));
   await command("Security", "Passwords…");
   passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+  await user.click(ui.getByRole(passwordsDialog, "tab", { name: "Invite Collaborator" }));
   assert.equal(ui.getByLabelText(passwordsDialog,
     "Temporary passphrase (leave blank to generate)").value, "",
     "the temporary passphrase must not return after edit mode is reacquired");
