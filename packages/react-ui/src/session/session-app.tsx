@@ -292,7 +292,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       securityDialogs.current?.reset();
       creationFlow.current?.reset();
       setDialog(null);
-      setMessage(result.warningCode ? catalogText(result.warningCode)
+      setMessage(closed ? "" : result.warningCode ? catalogText(result.warningCode)
         : "Document locked. Use Security → Unlock to continue.");
     });
     dialogReturnFocus.current = null;

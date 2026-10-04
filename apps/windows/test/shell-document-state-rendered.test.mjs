@@ -72,6 +72,7 @@ test("mounted shell presents truthful document states, history, failures, and se
     chooseOpenTarget: async () => ({ selected: true, name: "safe-notes.scpefe" }),
     cancelOpenTarget: async () => {},
     openSelectedDocument: async () => ({ ...opened }),
+    closeDocument: async () => true,
     unlockDocument: async () => ({ ...opened }),
     openExternalDocument: async () => null,
     enterEditMode: async () => {
@@ -154,6 +155,20 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(editor.readOnly, true);
   assert.equal((await menuItem("File", /Save/)).disabled, true);
   assert.equal((await menuItem("Edit", "Edit Contents")).disabled, false);
+
+  await command("File", /Close/);
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "No document"));
+  assert.equal(ui.getByRole(document.body, "status").textContent.includes("Security → Unlock"),
+    false, "Close does not offer Unlock when there is no document");
+  assert.match(ui.getByRole(document.body, "note").textContent,
+    /File → New or File → Open/);
+  assert.equal((await menuItem("Security", "Lock")).disabled, true);
+  assert.equal((await menuItem("Security", "Unlock")).disabled, true);
+  await command("File", /Open/);
+  const reopened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
+  await user.type(ui.getByLabelText(reopened, "Password"), "correct password");
+  await user.click(ui.getByRole(reopened, "button", { name: "Open" }));
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
 
   editor.focus();
   await user.keyboard("{Control>}f{/Control}");
