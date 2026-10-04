@@ -5,7 +5,8 @@ import type { ShellCommand, ShellCommands } from "./shell-commands.ts";
 const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | null>]> = [
   ["File", [["new", "New", "Ctrl+N"], ["open", "Open…", "Ctrl+O"], null,
     ["save", "Save", "Ctrl+S"], ["backup", "Backup…"],
-    ["export", "Export Plaintext…"], null, ["close", "Close", "Ctrl+W"],
+    ["export", "Export Plaintext…"], ["compact", "History Compaction…"], null,
+    ["close", "Close", "Ctrl+W"],
     ["exit", "Exit"]]],
   ["Edit", [["edit", "Edit Contents"], null, ["undo", "Undo", "Ctrl+Z"],
     ["redo", "Redo", "Ctrl+Y"], null, ["find", "Find…", "Ctrl+F"],

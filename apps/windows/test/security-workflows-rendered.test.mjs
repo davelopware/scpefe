@@ -57,6 +57,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     let reconcileAttempts = 0;
     let claimAttempts = 0;
     let canceledClaims = 0;
+    let compactionAttempts = 0;
     let resolveClaim;
     let deferInvitation = false;
     let resolveInvitation;
@@ -151,7 +152,11 @@ test("mounted security dialogs gate profile, filter administration, and clear on
         calls.push(["reconcile"]); serviceOpened = {
         ...readOnly, slotIdentityName: profile.name, slotIdentityEmail: profile.email,
       }; return serviceOpened; },
-      compactDocument: async () => null, migrateDocument: async () => null,
+      compactDocument: async () => {
+        compactionAttempts += 1;
+        return compactionAttempts === 1 ? null : { opened: editable,
+          previousHead: "previous", head: "compacted" };
+      }, migrateDocument: async () => null,
       backupDocument: async () => null, exportPlaintext: async () => null,
       updateWorkingCopy: async () => ({}), lock: async () => { editing = false;
         return { locked: true, journalSaved: true, warning: null }; },
@@ -196,9 +201,51 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     dialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
     await user.type(ui.getByLabelText(dialog, "Password"), "current password words");
     await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
+    await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
+    let fileMenu = ui.getByRole(document.body, "menu", { name: "File" });
+    assert.equal(ui.getByRole(fileMenu, "menuitem", {
+      name: "History Compaction…" }).disabled, true,
+    "read-only sessions cannot compact history");
+    await user.keyboard("{Escape}");
     await command("Edit", "Edit Contents");
+    await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
+    fileMenu = ui.getByRole(document.body, "menu", { name: "File" });
+    assert.equal(ui.getByRole(fileMenu, "menuitem", {
+      name: "History Compaction…" }).disabled, false);
+    await user.click(ui.getByRole(fileMenu, "menuitem", { name: "History Compaction…" }));
+    dialog = await ui.findByRole(document.body, "dialog", {
+      name: "Permanently compact document history?" });
+    assert.match(dialog.textContent, /creates and verifies an exact backup first/);
+    await user.keyboard("{Escape}");
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "File",
+      "canceling the confirmation restores focus to File");
+    await command("File", "History Compaction…");
+    dialog = await ui.findByRole(document.body, "dialog", {
+      name: "Permanently compact document history?" });
+    await user.click(ui.getByRole(dialog, "button", {
+      name: "Create verified backup and compact" }));
+    assert.ok(ui.getByRole(document.body, "dialog", {
+      name: "Permanently compact document history?" }),
+    "canceling backup selection retains the confirmation for retry");
+    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "File");
+    await command("File", "History Compaction…");
+    dialog = await ui.findByRole(document.body, "dialog", {
+      name: "Permanently compact document history?" });
+    await user.click(ui.getByRole(dialog, "button", {
+      name: "Create verified backup and compact" }));
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(compactionAttempts, 2);
+    await ui.waitFor(() => assert.equal(
+      document.activeElement?.getAttribute("aria-label"), "File",
+      "successful compaction restores focus to File"));
+    assert.match(ui.getByRole(document.body, "status").textContent,
+      /Verified backup created and document history compacted/);
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    assert.equal(ui.queryByRole(dialog, "heading", { name: "History compaction" }), null);
     assert.equal(ui.getByLabelText(dialog, "New password").getAttribute("minlength"), null);
     assert.equal(ui.getByLabelText(dialog, "Confirm new password")
       .getAttribute("minlength"), null);
@@ -417,7 +464,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       "every authenticated slot may change its own password");
     assert.equal(ui.queryByRole(dialog, "heading", { name: "Invite another person" }), null);
     assert.equal(ui.queryByRole(dialog, "button", { name: "Remove this password slot…" }), null);
-    assert.equal(ui.queryByRole(dialog, "button", { name: "Compact history…" }), null);
+    assert.equal(ui.queryByRole(dialog, "heading", { name: "History compaction" }), null);
     assert.equal(ui.getByRole(dialog, "group", { name: /Permissions for Grace/ }).disabled,
       true, "view-only slots cannot change another slot's permissions");
     await user.click(ui.getByRole(dialog, "button", { name: "Close" }));

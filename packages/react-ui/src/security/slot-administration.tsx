@@ -53,16 +53,12 @@ function ManagedSlotControls({ slot, canUpdate, canRemove, onUpdate, onRemove }:
   </li>;
 }
 
-export function SlotAdministration({ opened, commands, canCompact, onUpdate, onRemove,
-  onCompact, CompactionControls }: {
+export function SlotAdministration({ opened, commands, onUpdate, onRemove }: {
   opened: DocumentOpened;
   commands: Pick<SessionCommands, "updateSlotPermissions" | "removeSlot">;
-  canCompact: boolean;
   onUpdate(slot: ManagedSlot, canEdit: boolean, canAddPasswords: boolean,
     canRemovePasswords: boolean): Promise<void>;
   onRemove(slot: ManagedSlot): Promise<void>;
-  onCompact(): Promise<void>;
-  CompactionControls: React.ComponentType<{ onCompact(): Promise<void> }>;
 }) {
   const slots = opened.managedSlots ?? [];
   const canUpdate = commands.updateSlotPermissions;
@@ -71,7 +67,6 @@ export function SlotAdministration({ opened, commands, canCompact, onUpdate, onR
     <h2 id="slot-administration-heading">Password-slot administration</h2>
     <p>The permanent owner remains a full administrator and cannot be demoted or removed. The recovery password is also permanent and is never listed as an ordinary slot.</p>
     {opened.readOnly && <p>Enter edit mode to publish permission changes or remove a slot.</p>}
-    {canCompact && <CompactionControls onCompact={onCompact} />}
     <p className="warning">Removing a slot affects only this updated document and does not revoke older copies or information already obtained.</p>
     {slots.length === 0 ? <p>No ordinary invitation slots exist.</p>
       : <ul className="managed-slots">{slots.map((slot) =>

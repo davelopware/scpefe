@@ -3,7 +3,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { SharedApp, type SessionHost, type JournalTransportHost,
   type SessionEventsHost, type ShellHost, type CreationTargetHost,
   type SecurityClipboardHost } from "@scpefe/react-ui";
-import { CompactionControls } from "./compaction-controls.mjs";
 import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
   proposedPasswordRejectionMessage, type PasswordPolicyHost } from "./password-policy.ts";
@@ -32,7 +31,6 @@ export function mountApp(host: HTMLElement): Root {
     assessProposedPassword={assessProposedPassword}
     proposedPasswordRejectionMessage={proposedPasswordRejectionMessage}
     CreationSecurityDialog={CreationSecurityDialog}
-    CompactionControls={CompactionControls}
     PasswordPolicyStatus={PasswordPolicyStatus} />);
   return root;
 }

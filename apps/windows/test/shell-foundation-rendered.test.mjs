@@ -127,9 +127,11 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   const file = ui.getByRole(document.body, "menu", { name: "File" });
   assert.deepEqual(ui.getAllByRole(file, "menuitem").map((item) => item.textContent),
     ["NewCtrl+N", "Open…Ctrl+O", "SaveCtrl+S", "Backup…", "Export Plaintext…",
-      "CloseCtrl+W", "Exit"]);
+      "History Compaction…", "CloseCtrl+W", "Exit"]);
   assert.equal(ui.getAllByRole(file, "separator").length, 2);
   assert.equal(ui.getByRole(file, "menuitem", { name: /Save/ }).disabled, true);
+  assert.equal(ui.getByRole(file, "menuitem", { name: "History Compaction…" }).disabled,
+    true);
   assert.equal(ui.getByRole(file, "menuitem", { name: /Close/ }).disabled, true);
   await user.click(file);
   assert.equal(ui.getByRole(document.body, "menu", { name: "File" }) === file, true,
