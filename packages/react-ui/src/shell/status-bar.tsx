@@ -38,7 +38,13 @@ export function StatusBar<Doc extends SessionDocument>({ session, active, messag
             returnFocus: event.currentTarget, observedSnapshot: snapshot,
           }); }}>Read-only</button>
       : state}</span>
-    <span aria-label="Working copy state">{cleanliness}</span>
+    <span aria-label="Working copy state">{working?.dirty
+      ? <button type="button" className="status-dirty" aria-label="Save document"
+        disabled={!commands.available("save")}
+        onClick={(event) => { void commands.invoke("save", {
+          returnFocus: event.currentTarget, observedSnapshot: snapshot,
+        }); }}>Dirty</button>
+      : cleanliness}</span>
     {active && <span aria-label="Recovery journal state">
       {working?.journal.failed ? "Checkpoint needs attention"
         : working?.journal.pending ? "Checkpoint pending" : "Checkpoint ready"}

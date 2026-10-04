@@ -298,8 +298,9 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await ui.waitFor(() => assert.equal(editor.value, "recovered private text"));
     assert.equal(status("Working copy state"), "Dirty");
 
-    editor.focus();
-    await user.keyboard("{Control>}s{/Control}");
+    const dirtySave = ui.getByRole(document.body, "button", { name: "Save document" });
+    assert.equal(dirtySave.disabled, false);
+    await user.click(dirtySave);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Manual save failed" });
     assert.match(ui.getByRole(dialog, "alert").textContent,
       /operation could not be completed safely/i);
