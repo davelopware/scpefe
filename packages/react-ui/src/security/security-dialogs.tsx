@@ -7,7 +7,6 @@ import { SlotAdministration } from "./slot-administration.tsx";
 import { usePasswordEntry } from "./password-entry.ts";
 import type { DocumentOpened, ManagedSlot, Opened } from "../session/types.ts";
 import type { ProposedPasswordOutcome } from "./types.ts";
-import type { ShellCommands } from "../shell/shell-commands.ts";
 
 type FullSession = DocumentSession<DocumentOpened,
   Extract<Opened, { invitationRequired: true }>>;
@@ -21,9 +20,9 @@ export interface SecurityDialogsHandle { reset(): void }
 
 /** Owns password, invitation, and slot administration presentation for one session. */
 export function SecurityDialogs({ session, clipboard, assessProposedPassword,
-  proposedPasswordRejectionMessage, PasswordPolicyStatus, CompactionControls,
+  proposedPasswordRejectionMessage, PasswordPolicyStatus,
   catalogText, safeRendererErrorMessage, onMessage: setMessage, onAdopted,
-  onClose, commands, passwordsOpening, passwordsOpen, claimVisible, activeDocument,
+  onClose, passwordsOpen, claimVisible, activeDocument,
   returnFocus, ref }: {
   session: SecuritySession;
   clipboard: { copyInvitationPassphrase(password: string): Promise<boolean> };
@@ -32,14 +31,11 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
   PasswordPolicyStatus: React.ComponentType<{ id: string; password: string;
     confirmation?: string; optionalBlankGenerates?: boolean;
     comparePassword?: string; compareMessage?: string }>;
-  CompactionControls: React.ComponentType<{ onCompact(): Promise<void> }>;
   catalogText(code: string): string;
   safeRendererErrorMessage(error: unknown): string;
   onMessage(message: string): void;
   onAdopted(document: DocumentOpened): void;
   onClose(): void;
-  commands: ShellCommands<DocumentOpened>;
-  passwordsOpening: number;
   passwordsOpen: boolean;
   claimVisible: boolean;
   activeDocument: boolean;
@@ -373,12 +369,7 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           && <p role="note">The limit of eight ordinary password slots has been reached.</p>}
         <SlotAdministration opened={opened} commands={securityCommands ?? {
           updateSlotPermissions: false, removeSlot: false }}
-          canCompact={commands.available("compact", { kind: "passwords",
-            opening: passwordsOpening })} onUpdate={updateManagedSlot}
-          onRemove={removeManagedSlot} CompactionControls={CompactionControls} onCompact={async () => {
-            await commands.invoke("compact", { origin: { kind: "passwords",
-              opening: passwordsOpening }, observedSnapshot: snapshot });
-          }} />
+          onUpdate={updateManagedSlot} onRemove={removeManagedSlot} />
         <div className="dialog-actions"><button onClick={closePasswords}
           disabled={invitationBusy}>Close</button></div></>}
       </FocusedDialog>}
