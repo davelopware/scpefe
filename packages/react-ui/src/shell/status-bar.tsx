@@ -31,6 +31,12 @@ export function StatusBar<Doc extends SessionDocument>({ session, active, messag
         onClick={(event) => { void commands.invoke("unlock", {
           returnFocus: event.currentTarget, observedSnapshot: snapshot,
         }); }}>Locked</button>
+      : state === "Read-only"
+        ? <button type="button" className="status-edit" aria-label="Edit document contents"
+          disabled={!commands.available("edit")}
+          onClick={(event) => { void commands.invoke("edit", {
+            returnFocus: event.currentTarget, observedSnapshot: snapshot,
+          }); }}>Read-only</button>
       : state}</span>
     <span aria-label="Working copy state">{cleanliness}</span>
     {active && <span aria-label="Recovery journal state">

@@ -153,6 +153,11 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
   assert.equal(ui.queryByRole(document.body, "button", { name: "Unlock document" }), null);
+  const editStatus = ui.getByRole(document.body, "button", { name: "Edit document contents" });
+  assert.equal(editStatus.textContent, "Read-only");
+  assert.equal(editStatus.disabled, false);
+  assert.equal(getComputedStyle(editStatus).fontWeight, "700");
+  assert.equal(getComputedStyle(editStatus).color, "rgb(155, 28, 28)");
   assert.equal(statusValue("Working copy state"), "Clean");
   assert.equal(statusValue("Publication state"), "Published");
   await ui.waitFor(() => assert.equal(document.title, "safe-notes.scpefe — SCPEFE"));
@@ -160,10 +165,11 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(editor.value, opened.content);
   assert.equal(editor.readOnly, true);
   assert.equal((await menuItem("File", /Save/)).disabled, true);
-  assert.equal((await menuItem("Edit", "Edit Contents")).disabled, false);
+  assert.equal((await menuItem("Edit", "Edit Contents")).disabled, editStatus.disabled);
 
   await command("File", /Close/);
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "No document"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Edit document contents" }), null);
   assert.equal(ui.getByRole(document.body, "status").textContent.includes("Security → Unlock"),
     false, "Close does not offer Unlock when there is no document");
   assert.match(ui.getByRole(document.body, "note").textContent,
@@ -198,8 +204,11 @@ test("mounted shell presents truthful document states, history, failures, and se
     "Ctrl+H focuses Replace with even when mutation is read-only");
   assert.equal(ui.getByRole(findDialog, "button", { name: "Replace" }).disabled, true);
 
-  await command("Edit", "Edit Contents");
+  const readOnlyButton = ui.getByRole(document.body, "button", { name: "Edit document contents" });
+  await user.click(readOnlyButton);
   const failure = await ui.findByRole(document.body, "dialog", { name: "Editing unavailable" });
+  assert.equal(readOnlyButton.disabled, true,
+    "the status control shares the menu command's modal eligibility");
   assert.match(ui.getByRole(failure, "alert").textContent,
     /operation could not be completed safely/i);
   assert.equal(document.activeElement?.textContent.trim(), "Retry editing");
@@ -211,8 +220,11 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.equal(ui.getByLabelText(findDialog, "Find").value, "line",
     "the remounted modeless dialog restores its in-memory search value");
 
-  await command("Edit", "Edit Contents");
+  assert.equal(readOnlyButton.disabled, false);
+  readOnlyButton.focus();
+  await user.keyboard("{Enter}");
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
+  assert.equal(ui.queryByRole(document.body, "button", { name: "Edit document contents" }), null);
   assert.equal(editor.readOnly, false);
   assert.equal((await menuItem("File", /Save/)).disabled, true,
     "clean editable work cannot be saved");
