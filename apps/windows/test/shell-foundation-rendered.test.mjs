@@ -131,7 +131,16 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(ui.getAllByRole(file, "separator").length, 2);
   assert.equal(ui.getByRole(file, "menuitem", { name: /Save/ }).disabled, true);
   assert.equal(ui.getByRole(file, "menuitem", { name: /Close/ }).disabled, true);
-  ui.fireEvent.keyDown(file, { key: "Escape" });
+  await user.click(file);
+  assert.equal(ui.getByRole(document.body, "menu", { name: "File" }) === file, true,
+    "clicking within an open menu keeps it open");
+  await user.click(workspace);
+  assert.equal(ui.queryByRole(document.body, "menu") === null, true,
+    "clicking the document workspace dismisses the open submenu");
+  assert.equal(ui.getByRole(document.body, "menuitem", { name: "File" })
+    .getAttribute("aria-expanded"), "false");
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
+  ui.fireEvent.keyDown(ui.getByRole(document.body, "menu", { name: "File" }), { key: "Escape" });
   assert.equal(document.activeElement?.getAttribute("aria-label"), "File",
     "Escape returns focus to the File trigger");
 
@@ -244,7 +253,10 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   assert.equal(ui.getByRole(openedFileMenu, "menuitem", { name: /Save/ }).disabled, true);
   assert.equal(ui.getByRole(openedFileMenu, "menuitem", { name: /Backup/ }).disabled, false);
   assert.equal(ui.getByRole(openedFileMenu, "menuitem", { name: /Export Plaintext/ }).disabled, false);
-  ui.fireEvent.keyDown(openedFileMenu, { key: "Escape" });
+  editor.focus();
+  assert.equal(document.activeElement === editor, true);
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "menu") === null, true,
+    "moving focus into the document dismisses the open submenu"));
   await user.click(ui.getByRole(document.body, "menuitem", { name: "Security" }));
   const openedSecurityMenu = ui.getByRole(document.body, "menu", { name: "Security" });
   assert.equal(ui.getByRole(openedSecurityMenu, "menuitem", { name: "Lock" }).disabled, false);

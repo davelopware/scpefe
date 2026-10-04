@@ -36,8 +36,23 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
     return () => window.removeEventListener("keydown", shortcut);
   });
   const [open, setOpen] = useState<string | null>(null);
+  const bar = useRef<HTMLElement | null>(null);
   const triggers = useRef<Record<string, HTMLButtonElement | null>>({});
   const menus = useRef<Record<string, HTMLDivElement | null>>({});
+  useEffect(() => {
+    if (open === null) return;
+    const closeIfOutside = (event: Event) => {
+      if (event.target instanceof Node && !bar.current?.contains(event.target)) {
+        setOpen(null);
+      }
+    };
+    document.addEventListener("pointerdown", closeIfOutside);
+    document.addEventListener("focusin", closeIfOutside);
+    return () => {
+      document.removeEventListener("pointerdown", closeIfOutside);
+      document.removeEventListener("focusin", closeIfOutside);
+    };
+  }, [open]);
   const focusFirst = (name: string) => requestAnimationFrame(() =>
     menus.current[name]?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus());
   const openMenu = (name: string) => { setOpen(name); focusFirst(name); };
@@ -53,7 +68,7 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
     window.addEventListener("keydown", accessKey);
     return () => window.removeEventListener("keydown", accessKey);
   }, []);
-  return <nav className="menu-bar" role="menubar" aria-label="Application menu">
+  return <nav className="menu-bar" role="menubar" aria-label="Application menu" ref={bar}>
     {menuDefinitions.map(([name, items], menuIndex) => <div className="menu" key={name}>
       <button type="button" role="menuitem" aria-label={name} aria-haspopup="menu"
         aria-expanded={open === name} ref={(node) => { triggers.current[name] = node; }}
