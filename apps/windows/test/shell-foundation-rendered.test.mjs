@@ -234,6 +234,16 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   const password = ui.getByLabelText(dialog, "Password");
   assert.equal(document.activeElement === password, true,
     "the open password receives initial focus");
+  assert.equal(password.type, "password");
+  await user.type(password, "draft");
+  await user.click(ui.getByRole(dialog, "button", { name: "Show password" }));
+  assert.equal(password.type, "text");
+  assert.equal(password.value, "draft");
+  assert.equal(document.activeElement === password, true,
+    "pointer toggling retains the password field focus");
+  await user.click(ui.getByRole(dialog, "button", { name: "Hide password" }));
+  assert.equal(password.type, "password");
+  await user.clear(password);
   const choose = ui.getByRole(dialog, "button", { name: "Open" });
   choose.focus(); await user.keyboard("{Tab}");
   assert.equal(document.activeElement === ui.getByRole(dialog, "button",

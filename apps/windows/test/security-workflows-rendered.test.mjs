@@ -249,6 +249,14 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.getByLabelText(dialog, "New password").getAttribute("minlength"), null);
     assert.equal(ui.getByLabelText(dialog, "Confirm new password")
       .getAttribute("minlength"), null);
+    for (const name of ["Current password", "New password", "Confirm new password"]) {
+      const input = ui.getByLabelText(dialog, name);
+      assert.equal(input.type, "password");
+      await user.click(ui.getByRole(dialog, "button", { name: `Show ${name.toLowerCase()}` }));
+      assert.equal(input.type, "text");
+      await user.click(ui.getByRole(dialog, "button", { name: `Hide ${name.toLowerCase()}` }));
+      assert.equal(input.type, "password");
+    }
     await user.type(ui.getByLabelText(dialog, "Current password"), "current password words");
     await user.type(ui.getByLabelText(dialog, "New password"),
       "predictable proposed password");
@@ -288,6 +296,12 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.getByLabelText(invitationForm, "May add passwords").checked, false);
     assert.equal(ui.getByLabelText(invitationForm, "May remove passwords").checked, false,
       "new invitations begin with least-privilege permission defaults");
+    const temporary = ui.getByLabelText(invitationForm,
+      "Temporary passphrase (leave blank to generate)");
+    assert.equal(temporary.type, "password");
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Show temporary passphrase" }));
+    assert.equal(temporary.type, "text");
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Hide temporary passphrase" }));
     await user.type(ui.getByLabelText(invitationForm, "Temporary label (required)"), "New colleague");
     await user.type(ui.getByLabelText(invitationForm,
       "Temporary passphrase (leave blank to generate)"), "predictable proposed password");
@@ -513,6 +527,13 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.type(ui.getByLabelText(dialog, "Password"), "invitation password words");
     await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
     dialog = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
+    for (const name of ["New password", "Confirm new password"]) {
+      const input = ui.getByLabelText(dialog, name);
+      assert.equal(input.type, "password");
+      await user.click(ui.getByRole(dialog, "button", { name: `Show ${name.toLowerCase()}` }));
+      assert.equal(input.type, "text");
+      await user.click(ui.getByRole(dialog, "button", { name: `Hide ${name.toLowerCase()}` }));
+    }
     await user.type(ui.getByLabelText(dialog, "New password"), "界界界界");
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));

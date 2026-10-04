@@ -688,7 +688,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByLabelText(creation,
       "I will store the recovery password independently."));
-    await user.click(ui.getByRole(creation, "button", { name: "Show owner passwords" }));
+    await user.click(ui.getByRole(creation, "button", { name: "Show owner password" }));
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
     assert.match(ui.getByRole(creation, "alert").textContent, /owner passwords do not match/i);
     await assertFocusPreserved(creation, "Confirm owner password");

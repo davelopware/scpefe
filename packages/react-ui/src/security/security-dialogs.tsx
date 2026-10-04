@@ -5,6 +5,7 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { SlotAdministration } from "./slot-administration.tsx";
 import { usePasswordEntry } from "./password-entry.ts";
+import { PasswordField } from "./password-field.tsx";
 import type { DocumentOpened, ManagedSlot, Opened } from "../session/types.ts";
 import type { ProposedPasswordOutcome } from "./types.ts";
 
@@ -334,13 +335,21 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
           <p>{opened.recoverySlot
             ? "This is the recovery/master slot. Store its replacement safely offline and do not use it routinely."
             : "Changing this password re-wraps the existing document key; it does not rotate a possibly compromised document key."}</p>
-          <label>Current password<input {...entry.field("currentPassword")}
-            name="currentPassword" required autoFocus /></label>
-          <label>New password<input {...entry.field("newPassword")} name="newPassword" required
-            aria-describedby="change-password-policy" /></label>
-          <label>Confirm new password<input {...entry.field("newPasswordConfirmation")}
-            name="newPasswordConfirmation" required
-            aria-describedby="change-password-policy" /></label>
+          <PasswordField label="Current password" visible={entry.visible("currentPassword")}
+            onToggle={() => entry.toggle("currentPassword")}
+            input={{ ...entry.field("currentPassword"), id: "current-password",
+              name: "currentPassword", required: true, autoFocus: true }} />
+          <PasswordField label="New password" visible={entry.visible("newPassword")}
+            onToggle={() => entry.toggle("newPassword")}
+            input={{ ...entry.field("newPassword"), id: "new-password",
+              name: "newPassword", required: true,
+              "aria-describedby": "change-password-policy" }} />
+          <PasswordField label="Confirm new password"
+            visible={entry.visible("newPasswordConfirmation")}
+            onToggle={() => entry.toggle("newPasswordConfirmation")}
+            input={{ ...entry.field("newPasswordConfirmation"),
+              id: "new-password-confirmation", name: "newPasswordConfirmation",
+              required: true, "aria-describedby": "change-password-policy" }} />
           <PasswordPolicyStatus id="change-password-policy" password={newPasswordDraft}
             confirmation={newPasswordConfirmationDraft} comparePassword={currentPasswordDraft}
             compareMessage="New password must differ from the current password." />
@@ -349,11 +358,13 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
         {(securityCommands?.createInvitation || snapshot.pending === "invitation-create")
           && <form onSubmit={createInvitation}><h3>Invite another person</h3>
             <label>Temporary label (required)<input name="temporaryLabel" required /></label>
-            <label>Temporary passphrase (leave blank to generate)<input
-              {...entry.field("temporaryPassword")} name="temporaryPassword"
-              aria-describedby={`temporary-password-policy${invitationPasswordError
-                ? " invitation-password-error" : ""}`}
-            /></label>
+            <PasswordField label="Temporary passphrase (leave blank to generate)"
+              visibilityName="temporary passphrase" visible={entry.visible("temporaryPassword")}
+              onToggle={() => entry.toggle("temporaryPassword")}
+              input={{ ...entry.field("temporaryPassword"), id: "temporary-password",
+                name: "temporaryPassword",
+                "aria-describedby": `temporary-password-policy${invitationPasswordError
+                  ? " invitation-password-error" : ""}` }} />
             <PasswordPolicyStatus id="temporary-password-policy" password={temporaryPasswordDraft}
               optionalBlankGenerates={true} />
             <label className="check"><input name="canEdit" type="checkbox" /> May edit</label>
@@ -376,14 +387,17 @@ export function SecurityDialogs({ session, clipboard, assessProposedPassword,
     {claimVisible && <FocusedDialog returnFocus={returnFocus}
       title="Claim invitation" close={() => void cancelInvitationClaim()}>
       <p>Choose a private replacement password to claim this invitation with your configured local profile. Document content remains locked until the claim is safely published.</p>
-      <form onSubmit={claimInvitation}><label>New password<input
-        {...entry.field("claimPassword")} name="newPassword"
-        required autoFocus aria-describedby="claim-password-policy"
-        /></label>
-        <label>Confirm new password<input {...entry.field("claimConfirmation")}
-          name="newPasswordConfirmation"
-          required aria-describedby="claim-password-policy"
-          /></label>
+      <form onSubmit={claimInvitation}><PasswordField label="New password"
+        visible={entry.visible("claimPassword")} onToggle={() => entry.toggle("claimPassword")}
+        input={{ ...entry.field("claimPassword"), id: "claim-password",
+          name: "newPassword", required: true, autoFocus: true,
+          "aria-describedby": "claim-password-policy" }} />
+        <PasswordField label="Confirm new password"
+          visible={entry.visible("claimConfirmation")}
+          onToggle={() => entry.toggle("claimConfirmation")}
+          input={{ ...entry.field("claimConfirmation"), id: "claim-password-confirmation",
+            name: "newPasswordConfirmation", required: true,
+            "aria-describedby": "claim-password-policy" }} />
         <PasswordPolicyStatus id="claim-password-policy" password={claimPasswordDraft}
           confirmation={claimConfirmationDraft} />
         {claimError && <p className="dialog-error" role="alert">{claimError}</p>}

@@ -4,6 +4,7 @@ import type { DocumentSession, DocumentSessionSnapshot, SnapshotSource } from "@
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { usePasswordEntry } from "../security/password-entry.ts";
+import { PasswordField } from "../security/password-field.tsx";
 import type { ClientSettings, DialogName, DocumentOpened, Opened,
   Profile, JournalSummary } from "../session/types.ts";
 import type { SessionPresentation } from "../session/session-presentation.ts";
@@ -316,9 +317,11 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
       initialFocus={openPassword}>
       {pendingOpenName && <p>Selected target: <strong>{pendingOpenName}</strong></p>}
       <form onSubmit={(event) => { void completion.track(() =>
-        (externalOpen?.active ? openExternal : open)(event)); }}><label>Password
-        <input {...passwords.field("open", openPassword)} name="password" required
-          aria-describedby={openError ? "open-password-error" : undefined} /></label>
+        (externalOpen?.active ? openExternal : open)(event)); }}><PasswordField label="Password"
+        visible={passwords.visible("open")} onToggle={() => passwords.toggle("open")}
+        input={{ ...passwords.field("open", openPassword), id: "open-password",
+          name: "password", required: true,
+          "aria-describedby": openError ? "open-password-error" : undefined }} />
         {openError && <p id="open-password-error" className="dialog-error" role="alert">
           {openError}</p>}
         <div className="dialog-actions"><button type="button" onClick={() => {
