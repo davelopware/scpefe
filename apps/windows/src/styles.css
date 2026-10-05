@@ -61,6 +61,13 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .app-dialog-body { min-height: 0; overflow-y: auto; padding: 1.25rem; }
 .app-dialog form, .app-dialog fieldset { display: grid; gap: .75rem; }
 label { display: grid; gap: .25rem; }
+.password-entry { display: grid; gap: .25rem; }
+.password-field { position: relative; display: block; }
+.password-field > input { width: 100%; padding-right: 3rem; }
+.password-visibility { position: absolute; inset: 0 0 0 auto; display: grid;
+  place-items: center; width: 2.7rem; padding: 0; border: 0; color: CanvasText;
+  background: transparent; cursor: pointer; }
+.password-visibility:hover { background: color-mix(in srgb, Highlight 12%, transparent); }
 input, select, button { padding: .45rem .6rem; }
 .check { display: flex; align-items: center; gap: .4rem; }
 .dialog-actions, .toolbar { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
@@ -68,7 +75,17 @@ input, select, button { padding: .45rem .6rem; }
 .dialog-error { color: #9b1c1c; font-weight: 600; }
 .password-policy { margin: 0; color: #7a2e0b; font-size: .92rem; }
 .password-policy.pass { color: #176b35; font-weight: 600; }
-.slot-administration { margin-top: 1rem; }
+.password-tabs { display: flex; flex-wrap: wrap; gap: .35rem; border-bottom: 1px solid GrayText;
+  margin-bottom: 1rem; }
+.password-tabs [role="tab"] { border: 1px solid transparent; border-bottom: .2rem solid transparent;
+  border-radius: .25rem .25rem 0 0; color: CanvasText; background: transparent;
+  font: inherit; cursor: pointer; }
+.password-tabs [role="tab"][aria-selected="true"] { border-color: GrayText;
+  border-bottom-color: Highlight; font-weight: 700; }
+.password-tabs [role="tab"]:disabled { color: GrayText; cursor: default; opacity: .6; }
+.password-tabs [role="tab"]:focus-visible { outline: 2px solid Highlight;
+  outline-offset: -2px; }
+.slot-administration { margin-top: 0; }
 .managed-slots { display: grid; gap: 1rem; padding: 0; list-style: none; }
 .managed-slot { display: grid; gap: .7rem; padding: .75rem 0; border-top: 1px solid GrayText; }
 .managed-slot h4, .managed-slot p { margin: 0; }

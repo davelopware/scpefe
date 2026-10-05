@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
@@ -106,7 +107,7 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   const status = ui.getByRole(document.body, "status");
   assert.equal(status.getAttribute("aria-live"), "polite");
   assert.equal(status.getAttribute("aria-atomic"), "true");
-  for (const name of ["File", "Edit", "Security"]) {
+  for (const name of ["File", "Edit", "Security", "Help"]) {
     const trigger = ui.getByRole(document.body, "menuitem", { name });
     assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
     assert.equal(trigger.getAttribute("aria-expanded"), "false");
@@ -158,6 +159,26 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
     ["Lock", "Unlock", "Passwords…", "Profile…"]);
   assert.equal(ui.getAllByRole(securityMenu, "separator").length, 1);
   ui.fireEvent.keyDown(securityMenu, { key: "Escape" });
+
+  await user.click(ui.getByRole(document.body, "menuitem", { name: "Help" }));
+  const helpMenu = ui.getByRole(document.body, "menu", { name: "Help" });
+  assert.deepEqual(ui.getAllByRole(helpMenu, "menuitem").map((item) => item.textContent),
+    ["About"]);
+  await user.click(ui.getByRole(helpMenu, "menuitem", { name: "About" }));
+  const aboutDialog = await ui.findByRole(document.body, "dialog", { name: "About SCPEFE" });
+  assert.equal(aboutDialog.getAttribute("aria-modal"), "true");
+  const repository = ui.getByRole(aboutDialog, "link", {
+    name: "github.com/davelopware/scpefe" });
+  assert.equal(repository.href, "https://github.com/davelopware/scpefe");
+  assert.equal(repository.target, "_blank");
+  const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"],
+    { encoding: "utf8" }).trim();
+  assert.match(aboutDialog.textContent, /SCPEFE/);
+  assert.match(aboutDialog.textContent, new RegExp(sourceCommit));
+  assert.equal(document.querySelector(".shell-chrome").hasAttribute("inert"), true);
+  await user.keyboard("{Escape}");
+  await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog") === null, true));
+  await ui.waitFor(() => assert.equal(document.activeElement?.getAttribute("aria-label"), "Help"));
 
   await user.keyboard("{Alt>}s{/Alt}");
   const keyboardSecurityMenu = await ui.findByRole(document.body, "menu", { name: "Security" });
@@ -213,6 +234,16 @@ test("mounted shell provides ordered accessible menus, keyboard operation, dialo
   const password = ui.getByLabelText(dialog, "Password");
   assert.equal(document.activeElement === password, true,
     "the open password receives initial focus");
+  assert.equal(password.type, "password");
+  await user.type(password, "draft");
+  await user.click(ui.getByRole(dialog, "button", { name: "Show password" }));
+  assert.equal(password.type, "text");
+  assert.equal(password.value, "draft");
+  assert.equal(document.activeElement === password, true,
+    "pointer toggling retains the password field focus");
+  await user.click(ui.getByRole(dialog, "button", { name: "Hide password" }));
+  assert.equal(password.type, "password");
+  await user.clear(password);
   const choose = ui.getByRole(dialog, "button", { name: "Open" });
   choose.focus(); await user.keyboard("{Tab}");
   assert.equal(document.activeElement === ui.getByRole(dialog, "button",

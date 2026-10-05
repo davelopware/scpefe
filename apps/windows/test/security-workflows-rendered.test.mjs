@@ -145,7 +145,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       removeSlot: async (value) => { removalAttempts += 1;
         if (removalAttempts === 1) throw new Error("Removal publication failed safely");
         calls.push(["remove", value]);
-        serviceOpened = { ...editable, managedSlots: [] };
+        serviceOpened = { ...editable, readOnly: true, canEdit: false,
+          canAddPasswords: false, canRemovePasswords: false, managedSlots: [] };
         return { removed: true, warningCode: "SLOT_REMOVED", opened: serviceOpened }; },
       reconcileIdentity: async () => { reconcileAttempts += 1;
         if (reconcileAttempts === 1) throw new Error("Reconciliation publication failed safely");
@@ -204,10 +205,9 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
     let fileMenu = ui.getByRole(document.body, "menu", { name: "File" });
     assert.equal(ui.getByRole(fileMenu, "menuitem", {
-      name: "History Compaction…" }).disabled, true,
-    "read-only sessions cannot compact history");
+      name: "History Compaction…" }).disabled, false,
+    "an eligible slot acquires edit mode on open");
     await user.keyboard("{Escape}");
-    await command("Edit", "Edit Contents");
     await user.click(ui.getByRole(document.body, "menuitem", { name: "File" }));
     fileMenu = ui.getByRole(document.body, "menu", { name: "File" });
     assert.equal(ui.getByRole(fileMenu, "menuitem", {
@@ -245,11 +245,51 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       /Verified backup created and document history compacted/);
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+    const tabs = ui.getAllByRole(dialog, "tab");
+    assert.deepEqual(tabs.map((tab) => tab.textContent),
+      ["Change Password", "Password Slots", "Invite Collaborator"]);
+    assert.deepEqual(tabs.map((tab) => tab.disabled), [false, false, false]);
+    assert.equal(tabs[0].getAttribute("aria-selected"), "true");
+    assert.equal(ui.getByRole(dialog, "tabpanel").getAttribute("aria-labelledby"), tabs[0].id);
+    await user.keyboard("{ArrowRight}");
+    assert.equal(tabs[1].getAttribute("aria-selected"), "true");
+    assert.equal(document.activeElement, tabs[1]);
+    await user.keyboard("{End}");
+    assert.equal(tabs[2].getAttribute("aria-selected"), "true");
+    await user.keyboard("{Home}");
+    assert.equal(tabs[0].getAttribute("aria-selected"), "true");
+    await user.type(ui.getByLabelText(dialog, "Current password"), "discard this draft");
+    await user.click(tabs[1]);
+    assert.equal(ui.queryByLabelText(dialog, "Current password"), null,
+      "only the selected section is mounted");
+    await user.click(tabs[0]);
+    assert.equal(ui.getByLabelText(dialog, "Current password").value, "",
+      "switching tabs clears a hidden password draft");
     assert.equal(ui.queryByRole(dialog, "heading", { name: "History compaction" }), null);
     assert.equal(ui.getByLabelText(dialog, "New password").getAttribute("minlength"), null);
     assert.equal(ui.getByLabelText(dialog, "Confirm new password")
       .getAttribute("minlength"), null);
+    for (const name of ["Current password", "New password", "Confirm new password"]) {
+      const input = ui.getByLabelText(dialog, name);
+      assert.equal(input.type, "password");
+      await user.click(ui.getByRole(dialog, "button", { name: `Show ${name.toLowerCase()}` }));
+      assert.equal(input.type, "text");
+      await user.click(ui.getByRole(dialog, "button", { name: `Hide ${name.toLowerCase()}` }));
+      assert.equal(input.type, "password");
+    }
     await user.type(ui.getByLabelText(dialog, "Current password"), "current password words");
+    await user.click(ui.getByRole(dialog, "button", { name: "Generate passphrase" }));
+    const changedDraft = ui.getByLabelText(dialog, "New password");
+    await ui.waitFor(() => assert.match(changedDraft.value, /^[a-z]+(?: [a-z]+){7}$/));
+    assert.equal(changedDraft.value,
+      ui.getByLabelText(dialog, "Confirm new password").value);
+    assert.equal(changedDraft.type, "text");
+    assert.equal(ui.getByLabelText(dialog, "Confirm new password").type, "text");
+    assert.equal(ui.getByLabelText(dialog, "Current password").value,
+      "current password words");
+    assert.equal(passwordAttempts, 0);
+    await user.clear(changedDraft);
+    await user.clear(ui.getByLabelText(dialog, "Confirm new password"));
     await user.type(ui.getByLabelText(dialog, "New password"),
       "predictable proposed password");
     await user.type(ui.getByLabelText(dialog, "Confirm new password"),
@@ -282,12 +322,24 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.getByLabelText(dialog, "Current password").value, "",
       "successful password change clears secrets immediately");
 
+    await user.click(ui.getByRole(dialog, "tab", { name: "Invite Collaborator" }));
     const invitationForm = ui.getByRole(dialog, "heading",
       { name: "Invite another person" }).closest("form");
     assert.equal(ui.getByLabelText(invitationForm, "May edit").checked, false);
     assert.equal(ui.getByLabelText(invitationForm, "May add passwords").checked, false);
     assert.equal(ui.getByLabelText(invitationForm, "May remove passwords").checked, false,
       "new invitations begin with least-privilege permission defaults");
+    const temporary = ui.getByLabelText(invitationForm,
+      "Temporary passphrase (leave blank to generate)");
+    assert.equal(temporary.type, "password");
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Show temporary passphrase" }));
+    assert.equal(temporary.type, "text");
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Hide temporary passphrase" }));
+    await user.click(ui.getByRole(invitationForm, "button", { name: "Generate passphrase" }));
+    await ui.waitFor(() => assert.match(temporary.value, /^[a-z]+(?: [a-z]+){7}$/));
+    assert.equal(temporary.type, "text");
+    assert.equal(invitationAttempts, 0);
+    await user.clear(temporary);
     await user.type(ui.getByLabelText(invitationForm, "Temporary label (required)"), "New colleague");
     await user.type(ui.getByLabelText(invitationForm,
       "Temporary passphrase (leave blank to generate)"), "predictable proposed password");
@@ -366,6 +418,20 @@ test("mounted security dialogs gate profile, filter administration, and clear on
       true, "Escape cannot discard a passphrase while publication is pending");
     await finishDeferredInvitation("escape-race-secret");
 
+    const dismissForm = ui.getByRole(dialog, "heading",
+      { name: "Invite another person" }).closest("form");
+    await user.type(ui.getByLabelText(dismissForm, "Temporary label (required)"), "Dismissed result");
+    await user.click(ui.getByRole(dismissForm, "button", { name: "Create invitation" }));
+    await ui.findByLabelText(dialog, "One-time temporary passphrase");
+    await user.keyboard("{Escape}");
+    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
+    assert.equal(document.body.textContent.includes("generated invitation secret"), false,
+      "Escape dismisses and clears the one-time secret");
+
+    await command("Security", /Passwords/);
+    dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+
+    await user.click(ui.getByRole(dialog, "tab", { name: "Password Slots" }));
     const permissionGroup = ui.getByRole(dialog, "group",
       { name: /Permissions for Grace/ });
     await user.click(ui.getByLabelText(permissionGroup, "May add passwords"));
@@ -387,15 +453,16 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(retryRemovalAlert, "button",
       { name: "Confirm slot removal" }));
     await ui.waitFor(() => assert.equal(calls.some(([name]) => name === "remove"), true));
-    const dismissForm = ui.getByRole(dialog, "heading",
-      { name: "Invite another person" }).closest("form");
-    await user.type(ui.getByLabelText(dismissForm, "Temporary label (required)"), "Dismissed result");
-    await user.click(ui.getByRole(dismissForm, "button", { name: "Create invitation" }));
-    await ui.findByLabelText(dialog, "One-time temporary passphrase");
-    await user.keyboard("{Escape}");
-    await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
-    assert.equal(document.body.textContent.includes("generated invitation secret"), false,
-      "Escape dismisses and clears the one-time secret");
+    await ui.waitFor(() => assert.equal(ui.getByRole(dialog, "tab",
+      { name: "Change Password" }).getAttribute("aria-selected"), "true"));
+    assert.equal(ui.getByRole(dialog, "tab", { name: "Password Slots" }).disabled, true);
+    assert.equal(ui.getByRole(dialog, "tab", { name: "Invite Collaborator" }).disabled, true);
+    assert.equal(ui.queryByRole(dialog, "group", { name: /Permissions for Grace/ }), null,
+      "permission loss removes the slot draft without publishing it");
+    assert.equal(document.activeElement,
+      ui.getByRole(dialog, "tab", { name: "Change Password" }),
+      "focus follows the available tab after permission loss");
+    await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
 
     await command("Security", /Profile/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Profile" });
@@ -413,7 +480,8 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(profile.name, "Ada", "canceling a failed later profile edit retains the profile");
     await command("Security", "Lock");
-    openResult = readOnly;
+    openResult = { ...readOnly, canEdit: false, canAddPasswords: false,
+      canRemovePasswords: false };
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
     await user.type(ui.getByLabelText(dialog, "Password"), "owner password words");
@@ -441,9 +509,20 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await command("Edit", "Edit Contents");
     await command("Security", /Passwords/);
     dialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
-    assert.match(ui.getByRole(dialog, "note").textContent,
-      /limit of eight ordinary password slots/);
+    const limitNote = dialog.querySelector("#password-slot-limit");
+    assert.match(limitNote.textContent, /limit of eight ordinary password slots/);
+    assert.equal(limitNote.closest("[role='tabpanel']")?.id, "password-panel-invite",
+      "the capacity warning belongs to the invitation panel");
+    assert.equal(ui.queryByRole(dialog, "note"), null,
+      "the capacity warning is hidden while Change Password is selected");
     assert.equal(ui.queryByRole(dialog, "heading", { name: "Invite another person" }), null);
+    const disabledInvite = ui.getByRole(dialog, "tab", { name: "Invite Collaborator" });
+    assert.equal(disabledInvite.disabled, true);
+    assert.equal(disabledInvite.getAttribute("aria-describedby"), limitNote.id);
+    assert.match(disabledInvite.title, /limit of eight ordinary password slots/);
+    await user.click(ui.getByRole(dialog, "tab", { name: "Password Slots" }));
+    assert.equal(ui.queryByRole(dialog, "note"), null,
+      "the invitation warning stays hidden on Password Slots");
     await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
 
     listeners.locked({ locked: true, journalSaved: true, warning: null });
@@ -465,8 +544,10 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     assert.equal(ui.queryByRole(dialog, "heading", { name: "Invite another person" }), null);
     assert.equal(ui.queryByRole(dialog, "button", { name: "Remove this password slot…" }), null);
     assert.equal(ui.queryByRole(dialog, "heading", { name: "History compaction" }), null);
-    assert.equal(ui.getByRole(dialog, "group", { name: /Permissions for Grace/ }).disabled,
-      true, "view-only slots cannot change another slot's permissions");
+    assert.equal(ui.getByRole(dialog, "tab", { name: "Password Slots" }).disabled,
+      true, "view-only slots cannot administer another slot");
+    assert.equal(ui.getByRole(dialog, "tab", { name: "Invite Collaborator" }).disabled,
+      true, "view-only slots cannot create invitations");
     await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
     listeners.locked({ locked: true, journalSaved: true, warning: null });
     openResult = { ...readOnly, recoverySlot: true, canEdit: true,
@@ -513,6 +594,22 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.type(ui.getByLabelText(dialog, "Password"), "invitation password words");
     await user.click(ui.getByRole(dialog, "button", { name: "Open" }));
     dialog = await ui.findByRole(document.body, "dialog", { name: "Claim invitation" });
+    for (const name of ["New password", "Confirm new password"]) {
+      const input = ui.getByLabelText(dialog, name);
+      assert.equal(input.type, "password");
+      await user.click(ui.getByRole(dialog, "button", { name: `Show ${name.toLowerCase()}` }));
+      assert.equal(input.type, "text");
+      await user.click(ui.getByRole(dialog, "button", { name: `Hide ${name.toLowerCase()}` }));
+    }
+    await user.click(ui.getByRole(dialog, "button", { name: "Generate passphrase" }));
+    const claimDraft = ui.getByLabelText(dialog, "New password");
+    await ui.waitFor(() => assert.match(claimDraft.value, /^[a-z]+(?: [a-z]+){7}$/));
+    assert.equal(claimDraft.value, ui.getByLabelText(dialog, "Confirm new password").value);
+    assert.equal(claimDraft.type, "text");
+    assert.equal(ui.getByLabelText(dialog, "Confirm new password").type, "text");
+    assert.equal(claimAttempts, 0);
+    await user.clear(claimDraft);
+    await user.clear(ui.getByLabelText(dialog, "Confirm new password"));
     await user.type(ui.getByLabelText(dialog, "New password"), "界界界界");
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));

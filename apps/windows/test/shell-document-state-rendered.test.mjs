@@ -77,7 +77,7 @@ test("mounted shell presents truthful document states, history, failures, and se
     openExternalDocument: async () => null,
     enterEditMode: async () => {
       editAttempts += 1;
-      if (editAttempts === 1) throw new Error("Editing lease is held by another session.");
+      if (editAttempts <= 3) throw new Error("Editing lease is held by another session.");
       return { ...opened, readOnly: false };
     },
     updateWorkingCopy: async (working) => {
@@ -151,6 +151,9 @@ test("mounted shell presents truthful document states, history, failures, and se
   const openDialog = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.type(ui.getByLabelText(openDialog, "Password"), "correct password");
   await user.click(ui.getByRole(openDialog, "button", { name: "Open" }));
+  let automaticFailure = await ui.findByRole(document.body, "dialog",
+    { name: "Editing unavailable" });
+  await user.click(ui.getByRole(automaticFailure, "button", { name: "Continue read-only" }));
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
   assert.equal(ui.queryByRole(document.body, "button", { name: "Unlock document" }), null);
   const editStatus = ui.getByRole(document.body, "button", { name: "Edit document contents" });
@@ -181,6 +184,9 @@ test("mounted shell presents truthful document states, history, failures, and se
   const reopened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
   await user.type(ui.getByLabelText(reopened, "Password"), "correct password");
   await user.click(ui.getByRole(reopened, "button", { name: "Open" }));
+  automaticFailure = await ui.findByRole(document.body, "dialog",
+    { name: "Editing unavailable" });
+  await user.click(ui.getByRole(automaticFailure, "button", { name: "Continue read-only" }));
   await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
 
   editor.focus();
@@ -212,7 +218,8 @@ test("mounted shell presents truthful document states, history, failures, and se
     "the status control shares the menu command's modal eligibility");
   assert.match(ui.getByRole(failure, "alert").textContent,
     /operation could not be completed safely/i);
-  assert.equal(document.activeElement?.textContent.trim(), "Retry editing");
+  assert.equal(failure.contains(document.activeElement), true,
+    "the retry decision keeps keyboard focus inside its dialog");
   assert.equal(editor.readOnly, true);
   assert.equal(statusValue("Document state"), "Read-only");
   await user.click(ui.getByRole(failure, "button", { name: "Continue read-only" }));
@@ -306,10 +313,12 @@ test("mounted shell presents truthful document states, history, failures, and se
   await command("Security", "Passwords…");
   let passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
   const changePasswordLabels = ["Current password", "New password", "Confirm new password"];
-  for (const label of [...changePasswordLabels,
-    "Temporary passphrase (leave blank to generate)"]) {
+  for (const label of changePasswordLabels) {
     await user.type(ui.getByLabelText(passwordsDialog, label), "private draft words");
   }
+  await user.click(ui.getByRole(passwordsDialog, "tab", { name: "Invite Collaborator" }));
+  await user.type(ui.getByLabelText(passwordsDialog,
+    "Temporary passphrase (leave blank to generate)"), "private draft words");
   listeners.lockStarted();
   assert.equal(passwordsDialog.isConnected, false,
     "lock start removes the mounted password dialog");
@@ -317,7 +326,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   const draftUnlock = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
   await user.type(ui.getByLabelText(draftUnlock, "Password"), "correct password");
   await user.click(ui.getByRole(draftUnlock, "button", { name: "Unlock" }));
-  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Read-only"));
+  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
   await command("Security", "Passwords…");
   passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
   for (const label of changePasswordLabels) {
@@ -325,10 +334,9 @@ test("mounted shell presents truthful document states, history, failures, and se
       `${label} must not return when the dialog remounts after lock start`);
   }
   await user.click(ui.getByRole(passwordsDialog, "button", { name: "Close" }));
-  await command("Edit", "Edit Contents");
-  await ui.waitFor(() => assert.equal(statusValue("Document state"), "Edit mode"));
   await command("Security", "Passwords…");
   passwordsDialog = await ui.findByRole(document.body, "dialog", { name: "Passwords" });
+  await user.click(ui.getByRole(passwordsDialog, "tab", { name: "Invite Collaborator" }));
   assert.equal(ui.getByLabelText(passwordsDialog,
     "Temporary passphrase (leave blank to generate)").value, "",
     "the temporary passphrase must not return after edit mode is reacquired");

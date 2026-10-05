@@ -569,6 +569,17 @@ export class DocumentSession<Doc extends SessionDocument,
     return Object.freeze({ status: "opened" });
   }
 
+  /** Tries the normal lease transition once for a newly authenticated document. */
+  private async adoptAuthenticated(result: Doc | Invite): Promise<DocumentSessionOutcome<Doc>> {
+    const outcome = this.adopt(result);
+    if (outcome.status !== "opened" || this.snapshot.kind !== "read-only"
+      || !this.snapshot.commands.enterEdit) return outcome;
+    const generation = this.generation;
+    const adoption = this.snapshot.adoption;
+    const edit = await this.runEditOperation(generation, undefined, "edit", adoption);
+    return edit.status === "superseded" ? edit : outcome;
+  }
+
   /** Applies a host-authorized metadata or mode update without replacing local edits. */
   refreshDocument(document: Doc): boolean {
     const current = this.snapshot;
@@ -1632,7 +1643,7 @@ export class DocumentSession<Doc extends SessionDocument,
           this.publishExternalOpen();
           return Object.freeze({ status: "external-canceled" });
         }
-        return this.adopt(result);
+        return this.adoptAuthenticated(result);
       } catch (error) {
         password = "";
         if (generation !== this.generation || adoption !== this.currentAdoption()
@@ -1730,12 +1741,12 @@ export class DocumentSession<Doc extends SessionDocument,
           code: hostFailureCode(error) }));
       }
       password = "";
-      return operation.then((result) => {
+      return operation.then(async (result) => {
         if (generation !== this.generation || adoption !== this.currentAdoption()) {
           return Object.freeze({ status: "superseded" });
         }
         if (result.invitationRequired === true) this.clearPending();
-        return this.adopt(result);
+        return this.adoptAuthenticated(result);
       }, (error) => {
         if (generation !== this.generation || adoption !== this.currentAdoption()) {
           return Object.freeze({ status: "superseded" });
@@ -1768,12 +1779,12 @@ export class DocumentSession<Doc extends SessionDocument,
           code: hostFailureCode(error) }));
       }
       password = "";
-      return operation.then((result) => {
+      return operation.then(async (result) => {
         if (generation !== this.generation || adoption !== this.currentAdoption()) {
           return Object.freeze({ status: "superseded" });
         }
         if (result.invitationRequired === true) this.clearPending();
-        return this.adopt(result);
+        return this.adoptAuthenticated(result);
       }, (error) => {
         if (generation !== this.generation || adoption !== this.currentAdoption()) {
           return Object.freeze({ status: "superseded" });
@@ -2047,6 +2058,7 @@ export class DocumentSession<Doc extends SessionDocument,
       && !document.profileMismatch;
     const commands: SessionCommands = Object.freeze({
       enterEdit: document.readOnly && document.canEdit === true
+        && pending === undefined
         && (document.publicationState === undefined
           || document.publicationState === "target-published")
         && !document.recovery && !document.headMismatch && !document.profileMismatch

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor,
+  shell } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -152,6 +153,10 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   window = new BrowserWindow({ width: 920, height: 700,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(here, "..", "dist", "preload.cjs") } });
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === "https://github.com/davelopware/scpefe") void shell.openExternal(url);
+    return { action: "deny" };
+  });
   const userData = app.getPath("userData");
   const serviceFactory = (callbacks) => new DocumentService({ native, fs,
     profilePath: path.join(userData, "profile.json"),

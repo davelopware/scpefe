@@ -1083,7 +1083,7 @@ test("queued cancellation consumes visible takeover before host revocation start
   session.dispose();
 });
 
-test("successful adoption publishes one immutable read-only lifecycle snapshot", async () => {
+test("successful open enters edit mode after one lease acquisition", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
   const closed = session.getSnapshot();
@@ -1096,16 +1096,126 @@ test("successful adoption publishes one immutable read-only lifecycle snapshot",
   const result = await session.openSelected("one-time password");
   assert.equal(result.status, "opened");
   const current = session.getSnapshot();
-  assert.equal(current.kind, "read-only");
-  if (current.kind !== "read-only") throw new Error("expected read-only session");
+  assert.equal(current.kind, "edit");
+  if (current.kind !== "edit") throw new Error("expected edit session");
   assert.equal(current.document.content, "private text");
-  assert.equal(current.document.readOnly, true);
+  assert.equal(current.document.readOnly, false);
   assert.equal(current.adoption, 1);
   assert.equal(Object.isFrozen(current), true);
   assert.equal(Object.isFrozen(current.document), true);
-  assert.equal(changes, 2, "pending open and adopted document each publish once");
+  assert.deepEqual(host.editRequests, [{}]);
+  assert.equal(changes, 5, "open, adoption, lease request, and edit completion publish state");
   stop();
   session.dispose();
+});
+
+test("automatic lease entry respects slot and unresolved-attention gates", async () => {
+  const blocked: OpenedDocument[] = [
+    { ...opened(), canEdit: false },
+    { ...opened(), profileMismatch: { name: "other" } },
+    { ...opened(), recovery: { content: "recovered", state: "unsaved", updateTime: 1,
+      cursor: { start: 0, end: 0 } } },
+    { ...opened(), headMismatch: { kind: "rollback", title: "changed",
+      explanation: "review", editingBlocked: true } },
+    { ...opened(), unreadableJournal: true },
+    { ...opened(), migrationRequired: true, migrationCanEdit: true },
+    { ...opened(), publicationState: "pending-publication" },
+  ];
+  for (const document of blocked) {
+    const host = new Host();
+    host.openResult = document;
+    const session = new DocumentSession(host, new Journal());
+    assert.deepEqual(await session.openSelected("password"), { status: "opened" });
+    assert.equal(session.getSnapshot().kind, "read-only");
+    assert.deepEqual(host.editRequests, []);
+    session.dispose();
+  }
+  const host = new Host();
+  host.openResult = { readOnly: true, invitationRequired: true };
+  const session = new DocumentSession(host, new Journal());
+  assert.deepEqual(await session.openSelected("password"), { status: "invitation" });
+  assert.deepEqual(host.editRequests, []);
+  session.dispose();
+});
+
+test("automatic lease decision and failure leave manual editing eligible", async () => {
+  const host = new Host();
+  host.editResult = { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Remote editor", authorization: "one-shot" };
+  const session = new DocumentSession(host, new Journal());
+  assert.deepEqual(await session.openSelected("password"), { status: "opened" });
+  let state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("expected read-only");
+  assert.deepEqual(state.attention, { kind: "lease-takeover", operation: "edit",
+    holderName: "Remote editor" });
+  assert.equal(state.commands.enterEdit, true);
+  assert.deepEqual(host.editRequests, [{}]);
+  assert.equal(JSON.stringify(state).includes("one-shot"), false);
+  assert.deepEqual(await session.cancelLeaseTakeover(), { status: "canceled", revoked: true });
+  host.enterEditMode = async () => { throw new Error("private path"); };
+  assert.deepEqual(await session.enterEditMode(),
+    { status: "failed", code: "OPERATION_FAILED" });
+  state = session.getSnapshot();
+  if (state.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(state.commands.enterEdit, true);
+  assert.deepEqual(state.attention, { kind: "edit-unavailable", code: "OPERATION_FAILED" });
+  session.dispose();
+});
+
+test("an in-flight automatic lease does not duplicate or restore edit mode after lock", async () => {
+  const host = new Host();
+  let finish!: (document: OpenedDocument) => void;
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  let attempts = 0;
+  host.enterEditMode = () => {
+    attempts += 1;
+    started();
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const session = new DocumentSession(host, new Journal());
+  const opening = session.openSelected("password");
+  await begun;
+  const acquiring = session.getSnapshot();
+  if (acquiring.kind !== "read-only") throw new Error("expected lease acquisition");
+  assert.equal(acquiring.pending, "edit");
+  assert.equal(acquiring.commands.enterEdit, false);
+  const duplicate = session.enterEditMode();
+  session.lockStarted();
+  finish(opened("stale text", false));
+  assert.deepEqual(await opening, { status: "superseded" });
+  assert.deepEqual(await duplicate, { status: "superseded" });
+  assert.equal(attempts, 1);
+  assert.equal(session.getSnapshot().kind, "locked");
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("stale text"), false);
+  session.dispose();
+});
+
+test("replacement and close discard an in-flight automatic lease result", async () => {
+  for (const terminal of ["replacement", "close"] as const) {
+    const host = new Host();
+    let finish!: (document: OpenedDocument) => void;
+    let started!: () => void;
+    const begun = new Promise<void>((resolve) => { started = resolve; });
+    let attempts = 0;
+    host.enterEditMode = () => {
+      attempts += 1;
+      started();
+      return new Promise((resolve) => { finish = resolve; });
+    };
+    const session = new DocumentSession(host, new Journal());
+    const opening = session.openSelected("password");
+    await begun;
+    if (terminal === "replacement") session.adopt({ ...opened("replacement"), canEdit: false });
+    else session.closed();
+    finish(opened("stale edit", false));
+    assert.deepEqual(await opening, { status: "superseded" });
+    assert.equal(attempts, 1);
+    const state = session.getSnapshot();
+    assert.equal(state.kind, terminal === "replacement" ? "read-only" : "closed");
+    assert.equal(JSON.stringify(state).includes("stale edit"), false);
+    session.dispose();
+  }
 });
 
 test("lock start immediately drops working text and retains only target identity for unlock", async () => {
@@ -1121,10 +1231,11 @@ test("lock start immediately drops working text and retains only target identity
   assert.equal("working" in locked, false);
   assert.equal(JSON.stringify(locked).includes("private text"), false);
   host.openResult = opened("reopened text");
+  host.editResult = opened("reopened text", false);
   assert.equal((await session.unlock("another password")).status, "opened");
   const reopened = session.getSnapshot();
-  assert.equal(reopened.kind, "read-only");
-  if (reopened.kind === "read-only") assert.equal(reopened.document.content, "reopened text");
+  assert.equal(reopened.kind, "edit");
+  if (reopened.kind === "edit") assert.equal(reopened.document.content, "reopened text");
   assert.equal(session.refreshDocument(opened("reopened text", false)), true);
   const editing = session.getSnapshot();
   assert.equal(editing.kind, "edit");
@@ -1153,8 +1264,8 @@ test("invitation staging retains the current document until claim succeeds", asy
   const outcome = await session.openSelected("invitation password");
   assert.equal(outcome.status, "invitation");
   const retained = session.getSnapshot();
-  assert.equal(retained.kind, "read-only");
-  if (retained.kind === "read-only" && current.kind === "read-only") {
+  assert.equal(retained.kind, "edit");
+  if (retained.kind === "edit" && current.kind === "edit") {
     assert.equal(retained.document, current.document,
       "the old session remains authoritative while invitation claim is pending");
     assert.equal(retained.pending, undefined);
@@ -1256,7 +1367,7 @@ test("close leaves the session intact while host protection is pending, then cle
   await session.openSelected("password");
   host.closeDocument = async () => false;
   assert.equal((await session.close()).status, "pending");
-  assert.equal(session.getSnapshot().kind, "read-only");
+  assert.equal(session.getSnapshot().kind, "edit");
   host.closeDocument = async () => true;
   assert.equal((await session.close()).status, "closed");
   assert.equal(session.getSnapshot().kind, "closed");
@@ -1615,9 +1726,10 @@ test("external open requests stay ordered and replace only after host authorizat
   assert.equal(state.document.content, "current");
   assert.equal(state.externalOpen?.active, true, "failed authentication stays retryable");
   host.openExternalDocument = async () => opened("replacement");
+  host.editResult = opened("replacement", false);
   assert.deepEqual(await session.openExternal("correct password"), { status: "opened" });
   state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("replacement expected");
+  if (state.kind !== "edit") throw new Error("replacement expected");
   assert.equal(state.document.content, "replacement");
   assert.equal(state.externalOpen?.queued, 1);
   assert.equal(session.activateExternalOpen(), true);

@@ -43,6 +43,7 @@ export interface SharedAppProps {
   catalogText(code: string, operation?: string): string;
   safeRendererErrorMessage(error: unknown): string;
   closeWindow(): void;
+  sourceCommit: string;
   assessProposedPassword(password: string): Promise<ProposedPasswordOutcome>;
   proposedPasswordRejectionMessage(result: ProposedPasswordOutcome, label?: string): string;
   CreationSecurityDialog: React.ComponentType<{ onCreate(request: CreationFormRequest): Promise<void>;
@@ -55,7 +56,7 @@ export interface SharedAppProps {
 export function SharedApp({ sessionHost, journalTransport, events,
   shellHost, creationTargetHost, securityClipboard,
   completion: rendererLifecycleCompletion,
-  catalogText, safeRendererErrorMessage, closeWindow, assessProposedPassword,
+  catalogText, safeRendererErrorMessage, closeWindow, sourceCommit, assessProposedPassword,
   proposedPasswordRejectionMessage, CreationSecurityDialog,
   PasswordPolicyStatus }: SharedAppProps) {
   const [sessionStore] = useState(() => {
@@ -215,7 +216,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
         returnFocus?.isConnected ? returnFocus : document.activeElement as HTMLElement | null);
     } else if (command === "export") {
       shellDialogs.current?.showExport();
-    } else if (command === "passwords" || command === "profile") {
+    } else if (command === "passwords" || command === "profile" || command === "about") {
       setDialog(command as DialogName);
     } else if (command === "save") await runSave();
     else if (command === "backup") {
@@ -368,7 +369,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       completion={rendererLifecycleCompletion} dialog={dialog}
       active={activeDocument} returnFocus={dialogReturnFocus.current}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}
-      closeWindow={closeWindow} onDialog={setDialog} onMessage={setMessage}
+      closeWindow={closeWindow} sourceCommit={sourceCommit}
+      onDialog={setDialog} onMessage={setMessage}
       onProfileReady={setProfileReady} onAdopted={(document) => showReplacementResult(document, true)}
       onFocusEditor={focusEditorAfterDialog} onClose={closeDialog} />
     <SecurityDialogs ref={securityDialogs} session={session}

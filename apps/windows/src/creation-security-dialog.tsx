@@ -1,6 +1,7 @@
-import React, { useRef, useState, type Dispatch, type FormEvent,
+import React, { useEffect, useRef, useState, type Dispatch, type FormEvent,
   type SetStateAction } from "react";
-import { FocusedDialog, usePasswordEntry } from "@scpefe/react-ui";
+import { FocusedDialog, generateAcceptedPassphrase,
+  usePasswordEntry } from "@scpefe/react-ui";
 import { validateCreateFormRequest } from "./contracts.mjs";
 import { PasswordConfirmationFields } from "./creation-security-controls.tsx";
 import { safeRendererErrorMessage } from "./error-boundary.mjs";
@@ -106,6 +107,8 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   const [errorDiagnostic, setErrorDiagnostic] = useState<Diagnostic | null>(null);
   const [invalidField, setInvalidField] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [generating, setGenerating] = useState<"owner" | "recovery" | null>(null);
+  const generationToken = useRef(0);
   const ownerConfirmationRef = useRef<HTMLInputElement>(null);
   const recoveryConfirmationRef = useRef<HTMLInputElement>(null);
   const recoveryRef = useRef<HTMLInputElement>(null);
@@ -114,6 +117,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   const recoveryStorageRef = useRef<HTMLInputElement>(null);
   const completedRef = useRef(false);
   const hasRecovery = recoveryPassword.length > 0 || recoveryConfirmation.length > 0;
+  useEffect(() => () => { generationToken.current += 1; }, []);
 
   function updateField<T>(field: ValidationField,
     setter: Dispatch<SetStateAction<T>>, value: T): void {
@@ -126,6 +130,27 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
       setInvalidField("");
       setError("");
       setErrorDiagnostic(null);
+    }
+  }
+
+  async function generate(kind: "owner" | "recovery"): Promise<void> {
+    const token = ++generationToken.current;
+    setGenerating(kind);
+    try {
+      const candidate = await generateAcceptedPassphrase(assessProposedPassword,
+        kind === "owner" ? [ownerPassword, recoveryPassword]
+          : [recoveryPassword, ownerPassword]);
+      if (generationToken.current !== token) return;
+      passwords.replace(kind, candidate, kind === "owner"
+        ? "ownerConfirmation" : "recoveryConfirmation", true);
+      clearFieldError(kind);
+      clearFieldError(kind === "owner" ? "ownerConfirmation" : "recoveryConfirmation");
+    } catch {
+      if (generationToken.current !== token) return;
+      setError("Could not generate a passphrase. Try again.");
+      setErrorDiagnostic(null);
+    } finally {
+      if (generationToken.current === token) setGenerating(null);
     }
   }
 
@@ -188,6 +213,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
     setSubmitting(true);
     try {
       await onCreate(request);
+      generationToken.current += 1;
       passwords.reset();
       completedRef.current = true;
     } catch (submissionError) {
@@ -207,7 +233,11 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   }
 
   function cancel(): void {
-    if (!submitting) { passwords.reset(); void onCancel(); }
+    if (!submitting) {
+      generationToken.current += 1;
+      setGenerating(null);
+      passwords.reset(); void onCancel();
+    }
   }
 
   return h(FocusedDialog, { title: "Secure new document", className: "security-dialog",
@@ -219,6 +249,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   h("form", { onSubmit: submit, noValidate: true },
     h(PasswordConfirmationFields, { kind: "owner", label: "Owner password",
       confirmationLabel: "Confirm owner password", revealed: passwords.visible("owner"),
+      confirmationRevealed: passwords.visible("ownerConfirmation"),
       required: true, input: passwords.field("owner", ownerRef,
         () => clearFieldError("owner")),
       confirmation: passwords.field("ownerConfirmation", ownerConfirmationRef,
@@ -228,10 +259,14 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
       errorDescriptionId: ERROR_ID,
       passwordError: errorDiagnostic?.layer === "creation-boundary"
         && errorDiagnostic.rule === "OWNER_PASSWORD_WEAK" ? error : "",
-      onToggle: () => passwords.toggle("owner", "ownerConfirmation") }),
+      onToggle: () => passwords.toggle("owner"),
+      onGenerate: () => { void generate("owner"); },
+      generating: Boolean(generating) || submitting,
+      onToggleConfirmation: () => passwords.toggle("ownerConfirmation") }),
     h(PasswordConfirmationFields, { kind: "recovery",
       label: "Independent recovery password (strongly recommended)",
       confirmationLabel: "Confirm recovery password", revealed: passwords.visible("recovery"),
+      confirmationRevealed: passwords.visible("recoveryConfirmation"),
       required: false, input: passwords.field("recovery", recoveryRef,
         () => clearFieldError("recovery")),
       confirmation: passwords.field("recoveryConfirmation", recoveryConfirmationRef,
@@ -243,7 +278,10 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
         && errorDiagnostic.rule === "RECOVERY_PASSWORD_WEAK" ? error : "",
       comparePassword: ownerPassword,
       compareMessage: "Recovery password must differ from the owner password.",
-      onToggle: () => passwords.toggle("recovery", "recoveryConfirmation") }),
+      onToggle: () => passwords.toggle("recovery"),
+      onGenerate: () => { void generate("recovery"); },
+      generating: Boolean(generating) || submitting,
+      onToggleConfirmation: () => passwords.toggle("recoveryConfirmation") }),
     h("small", null, "Leave both recovery fields empty to create a document without a recovery password. Store a recovery password safely offline and separately from the owner password and document."),
     h("label", { className: "check" },
       h("input", { name: "understandsIrrecoverable", type: "checkbox",
@@ -268,7 +306,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
       "data-error-rule": errorDiagnostic?.rule }, error),
     h("div", { className: "toolbar dialog-actions" },
       h("button", { type: "button", disabled: submitting, onClick: cancel }, "Cancel"),
-      h("button", { type: "submit", disabled: submitting },
+      h("button", { type: "submit", disabled: submitting || Boolean(generating) },
         submitting ? "Creating…" : "Create"))));
 }
 

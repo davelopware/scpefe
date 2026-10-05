@@ -76,6 +76,30 @@ async function enterOwner(ui, user, confirmation = "owner password words") {
     "I understand that lost passwords cannot be recovered."));
 }
 
+test("generate fills and reveals each new-document secret without submitting", async (t) => {
+  let submissions = 0;
+  const { user, ui } = mountedDialog(t, async () => { submissions += 1; });
+  const owner = ui.getByLabelText("Owner password");
+  const ownerConfirmation = ui.getByLabelText("Confirm owner password");
+  const recovery = ui.getByLabelText("Independent recovery password (strongly recommended)");
+  const recoveryConfirmation = ui.getByLabelText("Confirm recovery password");
+  await user.click(ui.getByRole("button", { name: "Generate owner passphrase" }));
+  await waitFor(() => assert.match(owner.value, /^[a-z]+(?: [a-z]+){7}$/));
+  assert.equal(owner.value, ownerConfirmation.value);
+  assert.equal(owner.type, "text");
+  assert.equal(ownerConfirmation.type, "text");
+  const firstOwner = owner.value;
+  await user.click(ui.getByRole("button", { name: "Generate owner passphrase" }));
+  await waitFor(() => assert.notEqual(owner.value, firstOwner));
+  await user.click(ui.getByRole("button", { name: "Generate recovery passphrase" }));
+  await waitFor(() => assert.match(recovery.value, /^[a-z]+(?: [a-z]+){7}$/));
+  assert.equal(recovery.value, recoveryConfirmation.value);
+  assert.notEqual(recovery.value, owner.value);
+  assert.equal(recovery.type, "text");
+  assert.equal(recoveryConfirmation.type, "text");
+  assert.equal(submissions, 0);
+});
+
 test("mounted post-picker dialog is focused and has no initial-text field", async (t) => {
   const { user, ui } = mountedDialog(t);
   const dialog = ui.getByRole("dialog", { name: "Secure new document" });
@@ -156,7 +180,7 @@ test("shared modal frame uses the optional dismissal callback", async (t) => {
   assert.equal(closes, 2);
 });
 
-test("mounted creation dialog reveals password pairs independently without changing drafts",
+test("mounted creation dialog reveals each password field independently without changing drafts",
   async (t) => {
     const { user, ui } = mountedDialog(t);
     const owner = ui.getByLabelText("Owner password");
@@ -171,19 +195,25 @@ test("mounted creation dialog reveals password pairs independently without chang
     assert.deepEqual(inputs.map((input) => input.type),
       ["password", "password", "password", "password"]);
 
-    const ownerToggle = ui.getByRole("button", { name: "Show owner passwords" });
+    const ownerToggle = ui.getByRole("button", { name: "Show owner password" });
     ownerToggle.focus();
     await user.keyboard("{Enter}");
-    assert.equal(ui.getByRole("button", { name: "Hide owner passwords" })
+    assert.equal(ui.getByRole("button", { name: "Hide owner password" })
       .getAttribute("aria-pressed"), "true");
     assert.deepEqual(inputs.map((input) => input.type),
-      ["text", "text", "password", "password"]);
+      ["text", "password", "password", "password"]);
 
-    await user.click(ui.getByRole("button", { name: "Show recovery passwords" }));
+    await user.click(ui.getByRole("button", { name: "Show owner password confirmation" }));
+    await user.click(ui.getByRole("button", { name: "Show recovery password" }));
+    assert.deepEqual(inputs.map((input) => input.type),
+      ["text", "text", "text", "password"]);
+    await user.click(ui.getByRole("button", { name: "Show recovery password confirmation" }));
     assert.deepEqual(inputs.map((input) => input.type),
       ["text", "text", "text", "text"]);
-    await user.click(ui.getByRole("button", { name: "Hide owner passwords" }));
-    await user.click(ui.getByRole("button", { name: "Hide recovery passwords" }));
+    await user.click(ui.getByRole("button", { name: "Hide owner password" }));
+    await user.click(ui.getByRole("button", { name: "Hide owner password confirmation" }));
+    await user.click(ui.getByRole("button", { name: "Hide recovery password" }));
+    await user.click(ui.getByRole("button", { name: "Hide recovery password confirmation" }));
     assert.deepEqual(inputs.map((input) => input.type),
       ["password", "password", "password", "password"]);
     assert.deepEqual(inputs.map((input) => input.value),
@@ -201,7 +231,7 @@ test("revealed creation secrets survive failure and clear on success or cancel",
     canceledValue = ui.getByLabelText("Owner password").value;
   });
   await enterOwner(ui, user);
-  await user.click(ui.getByRole("button", { name: "Show owner passwords" }));
+  await user.click(ui.getByRole("button", { name: "Show owner password" }));
   await user.click(ui.getByRole("button", { name: "Create" }));
   assert.equal(attempts, 1);
   assert.equal(ui.getByLabelText("Owner password").value, "owner password words");
@@ -211,7 +241,7 @@ test("revealed creation secrets survive failure and clear on success or cancel",
   assert.equal(ui.getByLabelText("Owner password").value, "");
   assert.equal(ui.getByLabelText("Owner password").type, "password");
   await user.type(ui.getByLabelText("Owner password"), "another owner secret");
-  await user.click(ui.getByRole("button", { name: "Show owner passwords" }));
+  await user.click(ui.getByRole("button", { name: "Show owner password" }));
   await user.click(ui.getByRole("button", { name: "Cancel" }));
   assert.equal(canceledValue, "", "cancel clears a mounted revealed field first");
 });
