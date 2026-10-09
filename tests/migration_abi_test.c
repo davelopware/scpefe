@@ -230,6 +230,40 @@ static int migration_round_trip(const char *root)
     CHECK(memcmp(saved_lease.session_id, session, sizeof(session)) == 0);
     scpefe_unlocked_container_destroy(after);
 
+    /* Rotation upgrades the selected migrated wrapper without losing guests. */
+    static const char rotated_owner[] =
+        "dfc132af-600b-4d41-a1d8-0d55bbaee117";
+    size_t rotated_size = 0;
+    CHECK(scpefe_password_container_change_password(saved, saved_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        (const uint8_t *)rotated_owner, sizeof(rotated_owner) - 1,
+        NULL, 0, &rotated_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *rotated = (uint8_t *)malloc(rotated_size);
+    CHECK(rotated != NULL);
+    CHECK(scpefe_password_container_change_password(saved, saved_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        (const uint8_t *)rotated_owner, sizeof(rotated_owner) - 1,
+        rotated, rotated_size, &rotated_size) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_password_container_unlock(rotated, rotated_size,
+        (const uint8_t *)owner, sizeof(owner) - 1, &after)
+        == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+    CHECK(after == NULL);
+    CHECK(scpefe_password_container_unlock(rotated, rotated_size,
+        (const uint8_t *)rotated_owner, sizeof(rotated_owner) - 1, &after)
+        == SCPEFE_STATUS_OK);
+    after_view.struct_size = sizeof(after_view);
+    CHECK(scpefe_unlocked_container_view(after, &after_view) == SCPEFE_STATUS_OK);
+    CHECK(memcmp(after_view.document_id, document_id, sizeof(document_id)) == 0);
+    scpefe_unlocked_container_destroy(after);
+    CHECK(scpefe_password_container_unlock(rotated, rotated_size,
+        (const uint8_t *)guest, sizeof(guest) - 1, &after) == SCPEFE_STATUS_OK);
+    saved_lease.struct_size = sizeof(saved_lease);
+    CHECK(scpefe_unlocked_container_editing_lease(after, &saved_lease)
+        == SCPEFE_STATUS_OK);
+    CHECK(saved_lease.active == 1 && saved_lease.heartbeat_counter == 1);
+    scpefe_unlocked_container_destroy(after);
+    free(rotated);
+
     request.password = (const uint8_t *)guest;
     request.password_size = sizeof(guest) - 1;
     CHECK(scpefe_migrate_document(&request, NULL, 0, &migrated_size)

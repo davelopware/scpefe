@@ -52,7 +52,7 @@ public:
         bool allow_identity_only = false
     );
 
-    /* Re-wraps the slot selected by its current password with a strong new password. */
+    /* Re-wraps the selected slot and authenticates a rewritten container candidate. */
     static std::vector<std::uint8_t> change_password(
         const std::uint8_t *container,
         std::size_t container_size,

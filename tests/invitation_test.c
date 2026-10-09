@@ -344,6 +344,27 @@ static int legacy_metadata(const char *root)
             && managed.permissions_known == (int)index
             && managed.identity_known == (int)index
             && managed.must_be_changed_known == (int)index);
+        if (index == 0) {
+            uint8_t id[SCPEFE_SLOT_ID_SIZE];
+            uint8_t *updated = NULL;
+            size_t updated_size = 0;
+            memcpy(id, managed.slot_id, sizeof(id));
+            scpefe_unlocked_container_destroy(unlocked);
+            unlocked = NULL;
+            CHECK(update_permissions(container, size, owner, id, 1, 0, 0,
+                &updated, &updated_size) == SCPEFE_STATUS_OK);
+            CHECK(same_document(container, size, updated, updated_size,
+                owner) == 0);
+            CHECK(scpefe_password_container_unlock(updated, updated_size,
+                (const uint8_t *)owner, strlen(owner), &unlocked)
+                == SCPEFE_STATUS_OK);
+            managed.struct_size = sizeof(managed);
+            CHECK(scpefe_unlocked_container_managed_slot(unlocked, 0, &managed)
+                == SCPEFE_STATUS_OK);
+            CHECK(!managed.slot_id_known && managed.permissions_known
+                && !managed.identity_known && !managed.must_be_changed_known);
+            free(updated);
+        }
         scpefe_unlocked_container_destroy(unlocked);
         free(container);
     }
@@ -443,6 +464,111 @@ static int rewritten_invitation_sequence(void)
     CHECK(slot.must_be_changed && !slot.can_edit);
     CHECK(access(claimed, claimed_size, claimed_password, &slot) == 0);
     CHECK(!slot.must_be_changed && slot.can_edit);
+    {
+        static const char rotated_password[] =
+            "dfc132af-600b-4d41-a1d8-0d55bbaee015";
+        uint8_t *rotated = NULL, *reconciled = NULL;
+        uint8_t *updated = NULL, *removed = NULL;
+        size_t rotated_size = 0, reconciled_size = 0;
+        size_t updated_size = 0, removed_size = 0;
+        uint8_t second_id[SCPEFE_SLOT_ID_SIZE];
+        scpefe_unlocked_container *second_unlocked = NULL;
+        scpefe_unlocked_slot_access_v1 second_access = {0};
+        CHECK(change(claimed, claimed_size, claimed_password,
+            rotated_password, &rotated, &rotated_size) == SCPEFE_STATUS_OK);
+        CHECK(same_document(claimed, claimed_size, rotated, rotated_size,
+            owner) == 0);
+        CHECK(same_role(claimed, claimed_size, claimed_password,
+            rotated, rotated_size, rotated_password) == 0);
+        CHECK(same_slot_id(claimed, claimed_size, rotated, rotated_size,
+            second) == 0);
+        CHECK(scpefe_password_container_unlock(rotated, rotated_size,
+            (const uint8_t *)claimed_password, strlen(claimed_password),
+            &second_unlocked) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(second_unlocked == NULL);
+        CHECK(reconcile(rotated, rotated_size, rotated_password,
+            "Grace Reconciled", "grace-new@example.test",
+            &reconciled, &reconciled_size) == SCPEFE_STATUS_OK);
+        CHECK(same_document(rotated, rotated_size, reconciled,
+            reconciled_size, owner) == 0);
+        CHECK(identity_is(reconciled, reconciled_size, rotated_password,
+            "Grace Reconciled", "grace-new@example.test") == 0);
+        CHECK(same_slot_id(rotated, rotated_size, reconciled,
+            reconciled_size, second) == 0);
+        CHECK(scpefe_password_container_unlock(reconciled, reconciled_size,
+            (const uint8_t *)second, strlen(second), &second_unlocked)
+            == SCPEFE_STATUS_OK);
+        second_access.struct_size = sizeof(second_access);
+        CHECK(scpefe_unlocked_container_slot_access(second_unlocked,
+            &second_access) == SCPEFE_STATUS_OK);
+        memcpy(second_id, second_access.slot_id, sizeof(second_id));
+        scpefe_unlocked_container_destroy(second_unlocked);
+        second_unlocked = NULL;
+        CHECK(change(reconciled, reconciled_size,
+            "wrong credential for rotation", extra,
+            &updated, &updated_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(reconcile(reconciled, reconciled_size,
+            "wrong credential for identity", "Wrong", "wrong@example.test",
+            &updated, &updated_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(update_permissions(reconciled, reconciled_size,
+            "wrong administrator credential", second_id, 1, 0, 0,
+            &updated, &updated_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(remove_slot(reconciled, reconciled_size,
+            "wrong administrator credential", second_id,
+            &updated, &updated_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        {
+            uint8_t *tampered = (uint8_t *)malloc(reconciled_size);
+            CHECK(tampered != NULL);
+            memcpy(tampered, reconciled, reconciled_size);
+            tampered[reconciled_size - 1] ^= 1;
+            CHECK(change(tampered, reconciled_size, owner, extra,
+                &updated, &updated_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+            CHECK(reconcile(tampered, reconciled_size, rotated_password,
+                "Grace", "grace@example.test", &updated, &updated_size)
+                == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+            CHECK(update_permissions(tampered, reconciled_size, owner,
+                second_id, 1, 0, 0, &updated, &updated_size)
+                == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+            CHECK(remove_slot(tampered, reconciled_size, owner, second_id,
+                &updated, &updated_size) == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+            free(tampered);
+        }
+        CHECK(update_permissions(reconciled, reconciled_size, owner,
+            second_id, 1, 0, 0, &updated, &updated_size)
+            == SCPEFE_STATUS_OK);
+        {
+            const scpefe_slot_permissions_update_v1 short_update = {
+                sizeof(short_update), reconciled, reconciled_size,
+                (const uint8_t *)owner, strlen(owner),
+                second_id, sizeof(second_id), 1, 0, 0
+            };
+            size_t required = 0;
+            uint8_t marker = 0xa5;
+            CHECK(scpefe_password_container_update_slot_permissions(
+                &short_update, &marker, 0, &required)
+                == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+            CHECK(required == updated_size && marker == 0xa5);
+        }
+        CHECK(same_document(reconciled, reconciled_size, updated,
+            updated_size, owner) == 0);
+        CHECK(same_slot_id(reconciled, reconciled_size, updated,
+            updated_size, rotated_password) == 0);
+        CHECK(access(updated, updated_size, second, &slot) == 0);
+        CHECK(slot.can_edit && slot.must_be_changed);
+        CHECK(remove_slot(updated, updated_size, owner, second_id,
+            &removed, &removed_size) == SCPEFE_STATUS_OK);
+        CHECK(same_document(updated, updated_size, removed,
+            removed_size, owner) == 0);
+        CHECK(same_slot_id(updated, updated_size, removed,
+            removed_size, rotated_password) == 0);
+        CHECK(access(removed, removed_size, recovery, &slot) == 0);
+        CHECK(slot.recovery_slot);
+        CHECK(scpefe_password_container_unlock(removed, removed_size,
+            (const uint8_t *)second, strlen(second), &second_unlocked)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(second_unlocked == NULL);
+        free(removed); free(updated); free(reconciled); free(rotated);
+    }
     {
         size_t record_size = 0, required = 12345;
         const uint8_t *record = invitation_record(
@@ -809,6 +935,31 @@ int main(int argc, char **argv)
             == SCPEFE_STATUS_OK && slot.recovery_slot);
         memcpy(recovery_id, slot.slot_id, sizeof(recovery_id));
         scpefe_unlocked_container_destroy(unlocked); unlocked = NULL;
+        {
+            uint8_t *promoted = NULL, *self_demoted = NULL;
+            uint8_t *self_removed = NULL;
+            size_t promoted_size = 0, demoted_size = 0, self_removed_size = 0;
+            CHECK(update_permissions(claimed, claimed_size, owner, managed_id,
+                1, 1, 1, &promoted, &promoted_size) == SCPEFE_STATUS_OK);
+            CHECK(update_permissions(promoted, promoted_size, replacement,
+                managed_id, 0, 0, 0, &self_demoted, &demoted_size)
+                == SCPEFE_STATUS_OK);
+            CHECK(same_document(promoted, promoted_size, self_demoted,
+                demoted_size, owner) == 0);
+            CHECK(access(self_demoted, demoted_size, replacement, &slot) == 0);
+            CHECK(!slot.can_edit && !slot.can_add_passwords
+                && !slot.can_remove_passwords);
+            CHECK(remove_slot(promoted, promoted_size, replacement, managed_id,
+                &self_removed, &self_removed_size) == SCPEFE_STATUS_OK);
+            CHECK(same_document(promoted, promoted_size, self_removed,
+                self_removed_size, owner) == 0);
+            CHECK(scpefe_password_container_unlock(self_removed,
+                self_removed_size, (const uint8_t *)replacement,
+                strlen(replacement), &unlocked)
+                == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+            CHECK(unlocked == NULL);
+            free(self_removed); free(self_demoted); free(promoted);
+        }
         CHECK(remove_slot(claimed, claimed_size, owner, owner_id,
             &removed, &removed_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
         CHECK(remove_slot(claimed, claimed_size, owner, recovery_id,
