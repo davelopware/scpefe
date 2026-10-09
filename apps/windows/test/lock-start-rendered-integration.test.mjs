@@ -558,6 +558,13 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     const titlePattern = new RegExp(entry === "new"
       ? "new-document\\.scpefe" : "other\\.scpefe");
     await waitScalar(() => titlePattern.test(document.title), `${entry} safe document title`);
+    if (entry !== "new") {
+      const dialogName = entry === "open" ? "Open document" : "Open requested document";
+      await waitScalar(() => ui.queryByRole(document.body, "dialog",
+        { name: dialogName }) === null, `${entry} password dialog dismissed`);
+      await waitScalar(() => editor.value === "other plaintext",
+        `${entry} replacement editor content`);
+    }
     assert.equal(editor.value, entry === "new" ? "" : "other plaintext");
     if (entry === "new" && origin === "s0-new" && nativeOverride === null) {
       assert.equal(createdInput.ownerPassword, "defenistration is the root of");
