@@ -19,7 +19,10 @@ void clear_string(std::string &value) noexcept
 void move_string_without_allocation(
     std::string &destination, std::string &source) noexcept
 {
-    if (source.size() <= destination.capacity()) {
+    // Inline strings need a byte copy so their source storage can be wiped.
+    // Heap-backed identities transfer ownership even when the destination
+    // already has enough capacity to hold their bytes.
+    if (source.size() <= std::string{}.capacity()) {
         destination.resize(source.size());
         if (!source.empty()) {
             std::memcpy(destination.data(), source.data(), source.size());

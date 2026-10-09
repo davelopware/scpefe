@@ -32,7 +32,7 @@ struct WipeWatch {
     bool wiped{};
 };
 
-static std::array<WipeWatch, 12> watches;
+static std::array<WipeWatch, 15> watches;
 
 extern "C" void sodium_memzero(void *buffer, std::size_t size)
 {
@@ -127,6 +127,28 @@ int main()
     expect_owned(short_owner, long_identity, 'L');
     short_owner = std::move(short_owner);
     expect_owned(short_owner, long_identity, 'L');
+
+    auto long_destination = populated(std::string(256, 'D'), 'D');
+    auto long_assignment_source = populated(long_identity, 'L');
+    const char *assigned_name = long_assignment_source.identity_name.data();
+    const char *assigned_email = long_assignment_source.identity_email.data();
+    watches[11] = {long_destination.identity_name.data(), 256, 'D'};
+    watches[12] = {long_destination.identity_email.data(), 256, 'D'};
+    watches[13] = {long_destination.slot_id.data(),
+        long_destination.slot_id.size(), 'D'};
+    watches[14] = {long_destination.actual_slot_id.data(),
+        long_destination.actual_slot_id.size(), 'D'};
+    long_destination = std::move(long_assignment_source);
+    expect_cleared(long_assignment_source);
+    expect_owned(long_destination, long_identity, 'L');
+    CHECK(long_destination.identity_name.data() == assigned_name);
+    CHECK(long_destination.identity_email.data() == assigned_email);
+    CHECK(watches[11].wiped && watches[12].wiped
+        && watches[13].wiped && watches[14].wiped);
+    watches[11] = {};
+    watches[12] = {};
+    watches[13] = {};
+    watches[14] = {};
 
     {
         auto short_lifetime = populated(short_identity, 'S');
