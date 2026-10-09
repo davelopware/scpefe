@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CHECK(value) do { if (!(value)) return __LINE__; } while (0)
+#define CHECK(value) do { if (!(value)) { \
+    fprintf(stderr, "invitation check failed at line %d: %s\n", \
+        __LINE__, #value); return __LINE__; \
+} } while (0)
 
 static uint32_t read_u32(const uint8_t *input)
 {
@@ -347,8 +350,142 @@ static int legacy_metadata(const char *root)
     return 0;
 }
 
+/* Exercises invitations on a rewritten head and lease through the public ABI. */
+static int rewritten_invitation_sequence(void)
+{
+    static const char owner[] = "owner passphrase with independent words";
+    static const char recovery[] = "offline recovery passphrase is different";
+    static const char first[] = "dfc132af-600b-4d41-a1d8-0d55bbaee011";
+    static const char second[] = "dfc132af-600b-4d41-a1d8-0d55bbaee012";
+    static const char claimed_password[] = "dfc132af-600b-4d41-a1d8-0d55bbaee013";
+    static const char extra[] = "dfc132af-600b-4d41-a1d8-0d55bbaee014";
+    const scpefe_new_document_v1 document = {
+        sizeof(document), "Ada", 3, "ada@example.test", 16, "Desk", 4,
+        "initial", 7, 1000,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        (const uint8_t *)recovery, sizeof(recovery) - 1
+    };
+    size_t original_size = 0, acquired_size = 0, saved_size = 0;
+    size_t refreshed_size = 0, first_size = 0, second_size = 0;
+    size_t claimed_size = 0;
+    uint8_t *original = NULL, *acquired = NULL, *saved = NULL;
+    uint8_t *refreshed = NULL, *with_first = NULL, *with_second = NULL;
+    uint8_t *claimed = NULL;
+    scpefe_unlocked_slot_access_v1 slot = {0};
+    uint8_t session[SCPEFE_LEASE_SESSION_ID_SIZE];
+    memset(session, 0x5a, sizeof(session));
+    CHECK(scpefe_new_document_create(&document, NULL, 0, &original_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    original = (uint8_t *)malloc(original_size);
+    CHECK(original != NULL);
+    CHECK(scpefe_new_document_create(&document, original, original_size,
+        &original_size) == SCPEFE_STATUS_OK);
+    scpefe_editing_lease_v1 lease = {
+        sizeof(lease), 1, session, sizeof(session), 1, 2000, 600000,
+        "Ada", 3, "ada@example.test", 16, "Desk", 4
+    };
+    scpefe_editing_lease_update_v1 update = {
+        sizeof(update), original, original_size,
+        (const uint8_t *)owner, sizeof(owner) - 1, lease
+    };
+    CHECK(scpefe_editing_lease_update(&update, NULL, 0, &acquired_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    acquired = (uint8_t *)malloc(acquired_size);
+    CHECK(acquired != NULL);
+    CHECK(scpefe_editing_lease_update(&update, acquired, acquired_size,
+        &acquired_size) == SCPEFE_STATUS_OK);
+    const scpefe_manual_save_v1 save = {
+        sizeof(save), acquired, acquired_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        "Ada", 3, "ada@example.test", 16, "Desk", 4,
+        "changed head", strlen("changed head"), 3000
+    };
+    CHECK(scpefe_manual_save(&save, NULL, 0, &saved_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    saved = (uint8_t *)malloc(saved_size);
+    CHECK(saved != NULL);
+    CHECK(scpefe_manual_save(&save, saved, saved_size, &saved_size)
+        == SCPEFE_STATUS_OK);
+    lease.heartbeat_counter = 2;
+    lease.holder_utc_ms = 4000;
+    update.container = saved;
+    update.container_size = saved_size;
+    update.lease = lease;
+    CHECK(scpefe_editing_lease_update(&update, NULL, 0, &refreshed_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    refreshed = (uint8_t *)malloc(refreshed_size);
+    CHECK(refreshed != NULL);
+    CHECK(scpefe_editing_lease_update(&update, refreshed, refreshed_size,
+        &refreshed_size) == SCPEFE_STATUS_OK);
+    CHECK(add(refreshed, refreshed_size, owner, first, 1, 0,
+        &with_first, &first_size) == SCPEFE_STATUS_OK);
+    CHECK(add(with_first, first_size, owner, second, 0, 0,
+        &with_second, &second_size) == SCPEFE_STATUS_OK);
+    CHECK(claim(with_second, second_size, first, claimed_password,
+        &claimed, &claimed_size) == SCPEFE_STATUS_OK);
+    CHECK(same_document(refreshed, refreshed_size, with_first, first_size,
+        owner) == 0);
+    CHECK(same_document(with_first, first_size, with_second, second_size,
+        owner) == 0);
+    CHECK(same_document(with_second, second_size, claimed, claimed_size,
+        owner) == 0);
+    CHECK(same_slot_id(with_second, second_size, claimed, claimed_size,
+        owner) == 0);
+    CHECK(same_slot_id(with_second, second_size, claimed, claimed_size,
+        recovery) == 0);
+    CHECK(same_slot_id(with_second, second_size, claimed, claimed_size,
+        second) == 0);
+    CHECK(access(claimed, claimed_size, owner, &slot) == 0);
+    CHECK(!slot.recovery_slot && slot.can_add_passwords);
+    CHECK(access(claimed, claimed_size, recovery, &slot) == 0);
+    CHECK(slot.recovery_slot);
+    CHECK(access(claimed, claimed_size, second, &slot) == 0);
+    CHECK(slot.must_be_changed && !slot.can_edit);
+    CHECK(access(claimed, claimed_size, claimed_password, &slot) == 0);
+    CHECK(!slot.must_be_changed && slot.can_edit);
+    {
+        size_t record_size = 0, required = 12345;
+        const uint8_t *record = invitation_record(
+            with_second, second_size, &record_size);
+        uint8_t *tampered = (uint8_t *)malloc(second_size);
+        uint8_t *candidate = (uint8_t *)malloc(second_size + 1024);
+        CHECK(record != NULL && tampered != NULL && candidate != NULL);
+        memcpy(tampered, with_second, second_size);
+        tampered[(size_t)(record - with_second) + 44
+            + read_u32(record + 40) + 28] ^= 1;
+        memset(candidate, 0xa5, second_size + 1024);
+        const scpefe_invitation_create_v1 bad_add = {
+            sizeof(bad_add), tampered, second_size,
+            (const uint8_t *)owner, strlen(owner),
+            (const uint8_t *)extra, strlen(extra),
+            0, 0, 0, "Extra", 5
+        };
+        CHECK(scpefe_password_container_add_invitation(&bad_add,
+            candidate, second_size + 1024, &required)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(required == 12345 && candidate[0] == 0xa5
+            && candidate[second_size + 1023] == 0xa5);
+        const scpefe_invitation_claim_v1 bad_claim = {
+            sizeof(bad_claim), tampered, second_size,
+            (const uint8_t *)first, strlen(first),
+            (const uint8_t *)claimed_password, strlen(claimed_password),
+            "Grace", 5, "grace@example.test", strlen("grace@example.test")
+        };
+        CHECK(scpefe_password_container_claim_invitation(&bad_claim,
+            candidate, second_size + 1024, &required)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(required == 12345 && candidate[0] == 0xa5
+            && candidate[second_size + 1023] == 0xa5);
+        free(candidate); free(tampered);
+    }
+    free(claimed); free(with_second); free(with_first);
+    free(refreshed); free(saved); free(acquired); free(original);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    CHECK(rewritten_invitation_sequence() == 0);
     static const char owner[] = "owner passphrase with independent words";
     static const char recovery[] = "offline recovery passphrase is different";
     static const char temporary[] = "cobalt-lantern-river-planet-73";
