@@ -204,7 +204,30 @@ static int migration_round_trip(const char *root)
         sizeof(migration_head)) == 0);
     CHECK(view.content_size == strlen("saved after migration")
         && memcmp(view.content, "saved after migration", view.content_size) == 0);
+    size_t preserved_slots = 0;
+    CHECK(scpefe_unlocked_container_managed_slot_count(after, &preserved_slots)
+        == SCPEFE_STATUS_OK);
+    CHECK(preserved_slots == legacy_slot_count);
     scpefe_decoded_snapshot_revision_destroy(revision);
+    scpefe_unlocked_container_destroy(after);
+
+    /* The save must retain unknown-password invitation wrappers from v2. */
+    CHECK(scpefe_password_container_unlock(saved, saved_size,
+        (const uint8_t *)guest, sizeof(guest) - 1, &after) == SCPEFE_STATUS_OK);
+    after_view.struct_size = sizeof(after_view);
+    CHECK(scpefe_unlocked_container_view(after, &after_view) == SCPEFE_STATUS_OK);
+    CHECK(memcmp(after_view.document_id, document_id, sizeof(document_id)) == 0);
+    scpefe_unlocked_slot_access_v1 guest_access = {0};
+    guest_access.struct_size = sizeof(guest_access);
+    CHECK(scpefe_unlocked_container_slot_access(after, &guest_access)
+        == SCPEFE_STATUS_OK);
+    CHECK(guest_access.can_edit == 1 && guest_access.recovery_slot == 0);
+    scpefe_editing_lease_v1 saved_lease = {0};
+    saved_lease.struct_size = sizeof(saved_lease);
+    CHECK(scpefe_unlocked_container_editing_lease(after, &saved_lease)
+        == SCPEFE_STATUS_OK);
+    CHECK(saved_lease.active == 1 && saved_lease.heartbeat_counter == 1);
+    CHECK(memcmp(saved_lease.session_id, session, sizeof(session)) == 0);
     scpefe_unlocked_container_destroy(after);
 
     request.password = (const uint8_t *)guest;
