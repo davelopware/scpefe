@@ -29,9 +29,37 @@ void PasswordSlotLifecycle::validate_add_request(const std::uint8_t *password,
     const std::string &temporary_label)
 {
     require_strong_password(password, password_size);
+    validate_managed_permissions(permissions);
+    if (temporary_label.empty() || temporary_label.size() > max_holder_field_size)
+        throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::validate_managed_permissions(std::uint8_t permissions)
+{
     if ((permissions & ~permission_mask) != 0
-        || ((permissions & 6u) != 0 && (permissions & 1u) == 0)
-        || temporary_label.empty() || temporary_label.size() > max_holder_field_size)
+        || ((permissions & 6u) != 0 && (permissions & 1u) == 0))
+        throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::authorize_permissions_update(
+    const UnlockedContainerData &access)
+{
+    if (access.must_be_changed || (access.permissions & 6u) != 6u)
+        throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::update_managed_permissions(
+    ManagedSlotData &metadata, std::uint8_t permissions)
+{
+    validate_managed_permissions(permissions);
+    metadata.permissions = permissions;
+    metadata.permissions_known = true;
+}
+
+void PasswordSlotLifecycle::authorize_removal(
+    const UnlockedContainerData &access)
+{
+    if (access.must_be_changed || (access.permissions & 4u) == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
 }
 

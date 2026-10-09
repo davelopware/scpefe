@@ -10,7 +10,7 @@
 
 namespace scpefe::container {
 
-/* Applies invitation policy and authenticated slot-state transitions. */
+/* Applies invitation, identity, and managed-slot administration policy. */
 class PasswordSlotLifecycle {
 public:
     /* Validates a proposed invitation password, permissions, and temporary label. */
@@ -61,6 +61,19 @@ public:
     static void reconcile_managed_identity(ManagedSlotData &metadata,
         const UnlockedContainerData &access,
         const std::string &profile_name, const std::string &profile_email);
+
+    /* Validates a managed ordinary slot's proposed cooperative permissions. */
+    static void validate_managed_permissions(std::uint8_t permissions);
+
+    /* Requires both administrative permissions and rejects unclaimed invitations. */
+    static void authorize_permissions_update(const UnlockedContainerData &access);
+
+    /* Changes only the authenticated permissions of a managed ordinary slot. */
+    static void update_managed_permissions(ManagedSlotData &metadata,
+        std::uint8_t permissions);
+
+    /* Requires remove-password permission and rejects unclaimed invitations. */
+    static void authorize_removal(const UnlockedContainerData &access);
 
     /* Marks values hidden inside a legacy password wrapper as unknown. */
     static ManagedSlotData legacy_invitation(

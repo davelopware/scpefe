@@ -1838,14 +1838,10 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::update_slot_permissions(
     std::size_t administrator_password_size,
     const std::array<std::uint8_t, 16> &slot_id, std::uint8_t permissions)
 {
-    if ((permissions & ~permission_mask) != 0
-        || ((permissions & 6u) != 0 && (permissions & 1u) == 0))
-        throw ContainerFailure{ContainerError::invalid_argument};
+    PasswordSlotLifecycle::validate_managed_permissions(permissions);
     auto administrator = unlock(container, container_size, administrator_password,
         administrator_password_size, format::RevisionLimits::defaults());
-    if (administrator.must_be_changed
-        || (administrator.permissions & 6u) != 6u)
-        throw ContainerFailure{ContainerError::invalid_argument};
+    PasswordSlotLifecycle::authorize_permissions_update(administrator);
     const auto layout = read_layout(container, container_size);
     auto document_key = authenticated_document_key(container, container_size,
         administrator_password, administrator_password_size, layout);
@@ -1854,8 +1850,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::update_slot_permissions(
         container, container_size, layout, document_key.data());
     const auto index = find_managed_record(all_metadata, slot_id);
     auto &metadata = all_metadata[index];
-    metadata.permissions = permissions;
-    metadata.permissions_known = true;
+    PasswordSlotLifecycle::update_managed_permissions(metadata, permissions);
     auto identity_upgrade = owner_identity_upgrade(administrator);
     const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
     return rebuild_managed_records(container, container_size, layout,
@@ -1872,9 +1867,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::remove_slot(
 {
     auto administrator = unlock(container, container_size, administrator_password,
         administrator_password_size, format::RevisionLimits::defaults());
-    if (administrator.must_be_changed
-        || (administrator.permissions & 4u) == 0)
-        throw ContainerFailure{ContainerError::invalid_argument};
+    PasswordSlotLifecycle::authorize_removal(administrator);
     const auto layout = read_layout(container, container_size);
     auto document_key = authenticated_document_key(container, container_size,
         administrator_password, administrator_password_size, layout);
