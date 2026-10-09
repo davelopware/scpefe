@@ -160,6 +160,7 @@ static int same_document(const uint8_t *before, size_t before_size,
 {
     scpefe_unlocked_container *old = NULL, *current = NULL;
     scpefe_unlocked_container_v1 old_view = {0}, current_view = {0};
+    scpefe_editing_lease_v1 old_lease = {0}, current_lease = {0};
     CHECK(scpefe_password_container_unlock(before, before_size,
         (const uint8_t *)owner, strlen(owner), &old) == SCPEFE_STATUS_OK);
     CHECK(scpefe_password_container_unlock(after, after_size,
@@ -175,8 +176,93 @@ static int same_document(const uint8_t *before, size_t before_size,
         && memcmp(old_view.encoded_snapshot_revision,
             current_view.encoded_snapshot_revision,
             old_view.encoded_snapshot_revision_size) == 0);
+    old_lease.struct_size = current_lease.struct_size = sizeof(old_lease);
+    CHECK(scpefe_unlocked_container_editing_lease(old, &old_lease)
+        == SCPEFE_STATUS_OK);
+    CHECK(scpefe_unlocked_container_editing_lease(current, &current_lease)
+        == SCPEFE_STATUS_OK);
+    CHECK(old_lease.active == current_lease.active
+        && old_lease.heartbeat_counter == current_lease.heartbeat_counter
+        && old_lease.holder_utc_ms == current_lease.holder_utc_ms
+        && old_lease.duration_ms == current_lease.duration_ms);
+    CHECK(old_lease.session_id_size == current_lease.session_id_size);
+    if (old_lease.session_id_size != 0)
+        CHECK(memcmp(old_lease.session_id, current_lease.session_id,
+            old_lease.session_id_size) == 0);
+    CHECK(old_lease.holder_name_size == current_lease.holder_name_size
+        && old_lease.holder_email_size == current_lease.holder_email_size
+        && old_lease.device_name_size == current_lease.device_name_size);
+    if (old_lease.holder_name_size != 0)
+        CHECK(memcmp(old_lease.holder_name, current_lease.holder_name,
+            old_lease.holder_name_size) == 0);
+    if (old_lease.holder_email_size != 0)
+        CHECK(memcmp(old_lease.holder_email, current_lease.holder_email,
+            old_lease.holder_email_size) == 0);
+    if (old_lease.device_name_size != 0)
+        CHECK(memcmp(old_lease.device_name, current_lease.device_name,
+            old_lease.device_name_size) == 0);
     scpefe_unlocked_container_destroy(old);
     scpefe_unlocked_container_destroy(current);
+    return 0;
+}
+
+/* Compares the selected slot's stable role across a password rotation. */
+static int same_role(const uint8_t *before, size_t before_size,
+    const char *old_password, const uint8_t *after, size_t after_size,
+    const char *new_password)
+{
+    scpefe_unlocked_container *old = NULL, *current = NULL;
+    scpefe_unlocked_slot_access_v1 old_slot = {0}, current_slot = {0};
+    CHECK(scpefe_password_container_unlock(before, before_size,
+        (const uint8_t *)old_password, strlen(old_password), &old)
+        == SCPEFE_STATUS_OK);
+    CHECK(scpefe_password_container_unlock(after, after_size,
+        (const uint8_t *)new_password, strlen(new_password), &current)
+        == SCPEFE_STATUS_OK);
+    old_slot.struct_size = current_slot.struct_size = sizeof(old_slot);
+    CHECK(scpefe_unlocked_container_slot_access(old, &old_slot)
+        == SCPEFE_STATUS_OK);
+    CHECK(scpefe_unlocked_container_slot_access(current, &current_slot)
+        == SCPEFE_STATUS_OK);
+    CHECK(old_slot.slot_id_size == SCPEFE_SLOT_ID_SIZE
+        && current_slot.slot_id_size == SCPEFE_SLOT_ID_SIZE
+        && memcmp(old_slot.slot_id, current_slot.slot_id,
+            SCPEFE_SLOT_ID_SIZE) == 0);
+    CHECK(old_slot.can_edit == current_slot.can_edit
+        && old_slot.can_add_passwords == current_slot.can_add_passwords
+        && old_slot.can_remove_passwords == current_slot.can_remove_passwords
+        && old_slot.recovery_slot == current_slot.recovery_slot
+        && old_slot.must_be_changed == current_slot.must_be_changed);
+    CHECK(old_slot.identity_name_size == current_slot.identity_name_size
+        && old_slot.identity_email_size == current_slot.identity_email_size);
+    if (old_slot.identity_name_size != 0)
+        CHECK(memcmp(old_slot.identity_name, current_slot.identity_name,
+            old_slot.identity_name_size) == 0);
+    if (old_slot.identity_email_size != 0)
+        CHECK(memcmp(old_slot.identity_email, current_slot.identity_email,
+            old_slot.identity_email_size) == 0);
+    scpefe_unlocked_container_destroy(old);
+    scpefe_unlocked_container_destroy(current);
+    return 0;
+}
+
+/* Checks the authenticated identity while its borrowed strings are alive. */
+static int identity_is(const uint8_t *container, size_t size,
+    const char *password, const char *name, const char *email)
+{
+    scpefe_unlocked_container *unlocked = NULL;
+    scpefe_unlocked_slot_access_v1 slot = {0};
+    CHECK(scpefe_password_container_unlock(container, size,
+        (const uint8_t *)password, strlen(password), &unlocked)
+        == SCPEFE_STATUS_OK);
+    slot.struct_size = sizeof(slot);
+    CHECK(scpefe_unlocked_container_slot_access(unlocked, &slot)
+        == SCPEFE_STATUS_OK);
+    CHECK(slot.identity_name_size == strlen(name)
+        && slot.identity_email_size == strlen(email));
+    CHECK(memcmp(slot.identity_name, name, strlen(name)) == 0
+        && memcmp(slot.identity_email, email, strlen(email)) == 0);
+    scpefe_unlocked_container_destroy(unlocked);
     return 0;
 }
 
@@ -329,6 +415,12 @@ int main(int argc, char **argv)
     CHECK(slot.can_edit == 1 && slot.can_add_passwords == 0
         && slot.must_be_changed == 1 && slot.recovery_slot == 0);
     CHECK(slot.identity_name_size == strlen("New colleague"));
+    CHECK(reconcile(invited, invited_size, temporary,
+        "Grace Hopper", "grace@example.test", &extra, &extra_size)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
+    CHECK(reconcile(invited, invited_size, recovery,
+        "Recovery Operator", "recovery@example.test", &extra, &extra_size)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
     {
         uint8_t *tampered = (uint8_t *)malloc(invited_size);
         CHECK(tampered != NULL);
@@ -468,10 +560,43 @@ int main(int argc, char **argv)
         &extra, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
     CHECK(change(claimed, claimed_size, replacement, rewrapped_password,
         &rewrapped, &rewrapped_size) == SCPEFE_STATUS_OK);
+    CHECK(same_document(claimed, claimed_size, rewrapped, rewrapped_size,
+        owner) == 0);
+    CHECK(same_role(claimed, claimed_size, replacement,
+        rewrapped, rewrapped_size, rewrapped_password) == 0);
+    CHECK(same_slot_id(claimed, claimed_size, rewrapped, rewrapped_size,
+        owner) == 0);
+    CHECK(same_slot_id(claimed, claimed_size, rewrapped, rewrapped_size,
+        recovery) == 0);
     CHECK(scpefe_password_container_unlock(rewrapped, rewrapped_size,
         (const uint8_t *)replacement, sizeof(replacement) - 1, &unlocked)
         == SCPEFE_STATUS_AUTHENTICATION_FAILED);
     CHECK(access(rewrapped, rewrapped_size, rewrapped_password, &slot) == 0);
+    {
+        const char *owner_new = "owner rotates after invitation was claimed";
+        uint8_t *owner_rotated = NULL;
+        size_t owner_rotated_size = 0;
+        CHECK(change(claimed, claimed_size, owner, owner_new,
+            &owner_rotated, &owner_rotated_size) == SCPEFE_STATUS_OK);
+        CHECK(same_document(claimed, claimed_size,
+            owner_rotated, owner_rotated_size, recovery) == 0);
+        CHECK(same_role(claimed, claimed_size, owner,
+            owner_rotated, owner_rotated_size, owner_new) == 0);
+        CHECK(same_slot_id(claimed, claimed_size,
+            owner_rotated, owner_rotated_size, replacement) == 0);
+        CHECK(same_slot_id(claimed, claimed_size,
+            owner_rotated, owner_rotated_size, recovery) == 0);
+        CHECK(scpefe_password_container_unlock(owner_rotated,
+            owner_rotated_size, (const uint8_t *)owner, strlen(owner), &unlocked)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        free(owner_rotated);
+    }
+    CHECK(change(claimed, claimed_size, replacement, owner,
+        &extra, &extra_size) == SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE);
+    CHECK(change(claimed, claimed_size, replacement, recovery,
+        &extra, &extra_size) == SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE);
+    CHECK(change(claimed, claimed_size, replacement, "short",
+        &extra, &extra_size) == SCPEFE_STATUS_WEAK_PASSWORD);
     CHECK(add(container, size, recovery,
         "recovery creates a constrained invitation", 0, 0,
         &extra, &extra_size) == SCPEFE_STATUS_OK);
@@ -503,7 +628,10 @@ int main(int argc, char **argv)
         uint8_t managed_id[SCPEFE_SLOT_ID_SIZE];
         uint8_t owner_id[SCPEFE_SLOT_ID_SIZE];
         uint8_t *administered = NULL, *reconciled = NULL, *removed = NULL;
+        uint8_t *view_rotated = NULL, *owner_reconciled = NULL;
         size_t administered_size = 0, reconciled_size = 0, removed_size = 0;
+        size_t view_rotated_size = 0, owner_reconciled_size = 0;
+        const char *view_password = "view-only holder rotates a private password";
         size_t managed_count = 0;
         scpefe_managed_slot_v1 managed = {0};
         CHECK(scpefe_password_container_unlock(claimed, claimed_size,
@@ -545,20 +673,65 @@ int main(int argc, char **argv)
         CHECK(access(administered, administered_size, replacement, &slot) == 0);
         CHECK(slot.can_edit == 0 && slot.can_add_passwords == 0
             && slot.can_remove_passwords == 0);
-        CHECK(reconcile(administered, administered_size, replacement,
+        CHECK(change(administered, administered_size, replacement,
+            view_password, &view_rotated, &view_rotated_size) == SCPEFE_STATUS_OK);
+        CHECK(same_document(administered, administered_size,
+            view_rotated, view_rotated_size, owner) == 0);
+        CHECK(same_role(administered, administered_size, replacement,
+            view_rotated, view_rotated_size, view_password) == 0);
+        CHECK(same_slot_id(administered, administered_size,
+            view_rotated, view_rotated_size, owner) == 0);
+        CHECK(same_slot_id(administered, administered_size,
+            view_rotated, view_rotated_size, recovery) == 0);
+        CHECK(scpefe_password_container_unlock(view_rotated, view_rotated_size,
+            (const uint8_t *)replacement, sizeof(replacement) - 1, &unlocked)
+            == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+        CHECK(reconcile(view_rotated, view_rotated_size, view_password,
             "Rear Admiral Grace Hopper", "hopper@example.test",
             &reconciled, &reconciled_size) == SCPEFE_STATUS_OK);
-        CHECK(access(reconciled, reconciled_size, replacement, &slot) == 0);
+        CHECK(same_document(view_rotated, view_rotated_size,
+            reconciled, reconciled_size, owner) == 0);
+        CHECK(same_slot_id(view_rotated, view_rotated_size,
+            reconciled, reconciled_size, view_password) == 0);
+        CHECK(access(reconciled, reconciled_size, view_password, &slot) == 0);
+        CHECK(slot.can_edit == 0 && slot.can_add_passwords == 0
+            && slot.can_remove_passwords == 0);
         CHECK(slot.identity_name_size == strlen("Rear Admiral Grace Hopper")
             && slot.identity_email_size == strlen("hopper@example.test"));
+        CHECK(identity_is(reconciled, reconciled_size, view_password,
+            "Rear Admiral Grace Hopper", "hopper@example.test") == 0);
+        CHECK(reconcile(reconciled, reconciled_size, owner,
+            "Augusta Ada King", "ada.king@example.test",
+            &owner_reconciled, &owner_reconciled_size) == SCPEFE_STATUS_OK);
+        CHECK(same_document(reconciled, reconciled_size,
+            owner_reconciled, owner_reconciled_size, owner) == 0);
+        CHECK(same_slot_id(reconciled, reconciled_size,
+            owner_reconciled, owner_reconciled_size, owner) == 0);
+        CHECK(same_slot_id(reconciled, reconciled_size,
+            owner_reconciled, owner_reconciled_size, view_password) == 0);
+        CHECK(same_slot_id(reconciled, reconciled_size,
+            owner_reconciled, owner_reconciled_size, recovery) == 0);
+        CHECK(access(owner_reconciled, owner_reconciled_size, owner, &slot) == 0);
+        CHECK(slot.identity_name_size == strlen("Augusta Ada King")
+            && slot.identity_email_size == strlen("ada.king@example.test"));
+        CHECK(slot.can_edit && slot.can_add_passwords
+            && slot.can_remove_passwords);
+        CHECK(identity_is(owner_reconciled, owner_reconciled_size, owner,
+            "Augusta Ada King", "ada.king@example.test") == 0);
+        CHECK(identity_is(owner_reconciled, owner_reconciled_size, view_password,
+            "Rear Admiral Grace Hopper", "hopper@example.test") == 0);
+        CHECK(reconcile(reconciled, reconciled_size, recovery,
+            "Recovery Operator", "recovery@example.test",
+            &extra, &extra_size) == SCPEFE_STATUS_INVALID_ARGUMENT);
         CHECK(remove_slot(reconciled, reconciled_size, owner, managed_id,
             &removed, &removed_size) == SCPEFE_STATUS_OK);
         CHECK(scpefe_password_container_unlock(removed, removed_size,
-            (const uint8_t *)replacement, sizeof(replacement) - 1, &unlocked)
+            (const uint8_t *)view_password, strlen(view_password), &unlocked)
             == SCPEFE_STATUS_AUTHENTICATION_FAILED);
         CHECK(access(removed, removed_size, owner, &slot) == 0);
         CHECK(slot.can_edit == 1 && slot.can_add_passwords == 1
             && slot.can_remove_passwords == 1);
+        free(owner_reconciled); free(view_rotated);
         free(removed); free(reconciled); free(administered);
     }
     free(extra); free(rewrapped); free(delegated_invitation);

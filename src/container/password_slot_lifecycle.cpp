@@ -5,6 +5,7 @@
 
 extern "C" {
 void randombytes_buf(void *buffer, std::size_t size);
+void sodium_memzero(void *buffer, std::size_t size);
 }
 
 namespace scpefe::container {
@@ -76,6 +77,54 @@ void PasswordSlotLifecycle::validate_claim_request(const std::uint8_t *password,
         || profile_name.size() > max_holder_field_size
         || profile_email.size() > max_holder_field_size)
         throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::validate_rotation_password(
+    const std::uint8_t *password, std::size_t password_size)
+{
+    require_strong_password(password, password_size);
+}
+
+void PasswordSlotLifecycle::authorize_rotation(const UnlockedContainerData &access)
+{
+    if (access.must_be_changed)
+        throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::validate_reconciliation_identity(
+    const std::string &profile_name, const std::string &profile_email)
+{
+    if (profile_name.empty() || profile_email.empty()
+        || profile_name.size() > max_holder_field_size
+        || profile_email.size() > max_holder_field_size)
+        throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::authorize_reconciliation(
+    const UnlockedContainerData &access)
+{
+    if (access.recovery_slot || access.must_be_changed)
+        throw ContainerFailure{ContainerError::invalid_argument};
+}
+
+void PasswordSlotLifecycle::reconcile_managed_identity(
+    ManagedSlotData &metadata, const UnlockedContainerData &access,
+    const std::string &profile_name, const std::string &profile_email)
+{
+    authorize_reconciliation(access);
+    if (access.owner_slot || metadata.must_be_changed)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (metadata.slot_id_known && metadata.actual_slot_id != access.slot_id)
+        throw ContainerFailure{ContainerError::malformed_container};
+    metadata.actual_slot_id = access.slot_id;
+    metadata.slot_id_known = true;
+    if (!metadata.identity_name.empty())
+        sodium_memzero(metadata.identity_name.data(), metadata.identity_name.size());
+    if (!metadata.identity_email.empty())
+        sodium_memzero(metadata.identity_email.data(), metadata.identity_email.size());
+    metadata.identity_name = profile_name;
+    metadata.identity_email = profile_email;
+    metadata.identity_known = true;
 }
 
 ManagedSlotData PasswordSlotLifecycle::claim_invitation(
