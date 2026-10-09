@@ -32,7 +32,7 @@ struct WipeWatch {
     bool wiped{};
 };
 
-static std::array<WipeWatch, 4> wipe_watches;
+static std::array<WipeWatch, 5> wipe_watches;
 
 extern "C" void sodium_memzero(void *buffer, std::size_t size)
 {
@@ -139,6 +139,27 @@ int main()
     expect_cleared(short_replacement);
     expect_transferred(long_owner, short_text);
     CHECK(wipe_watches[2].wiped && wipe_watches[3].wiped);
+
+    auto long_assignment_destination = populated(std::string(256, 'D'));
+    auto long_assignment_source = populated(long_text);
+    const char *assigned_content = long_assignment_source.content.data();
+    const char *assigned_slot_identity =
+        long_assignment_source.slot_identity_name.data();
+    const char *assigned_profile_identity =
+        long_assignment_source.client_profile_name.data();
+    const char *assigned_device = long_assignment_source.device_name.data();
+    wipe_watches[4] = {long_assignment_destination.content.data(),
+        long_assignment_destination.content.size()};
+    long_assignment_destination = std::move(long_assignment_source);
+    expect_cleared(long_assignment_source);
+    expect_transferred(long_assignment_destination, long_text);
+    CHECK(long_assignment_destination.content.data() == assigned_content);
+    CHECK(long_assignment_destination.slot_identity_name.data()
+        == assigned_slot_identity);
+    CHECK(long_assignment_destination.client_profile_name.data()
+        == assigned_profile_identity);
+    CHECK(long_assignment_destination.device_name.data() == assigned_device);
+    CHECK(wipe_watches[4].wiped);
 
     auto long_replacement = populated(long_text);
     short_owner = std::move(long_replacement);

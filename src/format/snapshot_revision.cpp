@@ -33,7 +33,9 @@ void clear_bytes(std::vector<std::uint8_t> &value) noexcept
 
 void move_string_without_copy(std::string &destination, std::string &source) noexcept
 {
-    if (source.size() <= destination.capacity()) {
+    // Short strings can live inside the source object, so copy and wipe them.
+    // Larger strings keep their allocation, even when the destination has room.
+    if (source.size() <= std::string{}.capacity()) {
         destination.resize(source.size());
         if (!source.empty()) {
             std::memcpy(destination.data(), source.data(), source.size());
@@ -42,7 +44,7 @@ void move_string_without_copy(std::string &destination, std::string &source) noe
         source.clear();
         return;
     }
-    destination = std::move(source);
+    destination.swap(source);
     clear_identity_string(source);
 }
 
@@ -120,6 +122,7 @@ static_assert(!std::is_copy_assignable_v<SnapshotRevisionData>);
 static_assert(std::is_nothrow_move_constructible_v<SnapshotRevisionData>);
 static_assert(std::is_nothrow_move_assignable_v<SnapshotRevisionData>);
 static_assert(std::is_nothrow_move_assignable_v<std::string>);
+static_assert(std::is_nothrow_swappable_v<std::string>);
 static_assert(std::is_nothrow_move_assignable_v<std::vector<std::uint8_t>>);
 static_assert(std::is_nothrow_move_assignable_v<std::vector<RevisionGraphNodeData>>);
 
