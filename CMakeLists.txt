@@ -221,12 +221,14 @@ if(BUILD_TESTING)
         add_executable(scpefe_revision_ownership_test
             tests/revision_ownership_test.cpp
             ${SCPEFE_REVISION_OWNERSHIP_SOURCES})
+        target_compile_features(scpefe_revision_ownership_test PRIVATE cxx_std_20)
         target_include_directories(scpefe_revision_ownership_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
         add_executable(scpefe_managed_slot_ownership_test
             tests/managed_slot_ownership_test.cpp
             src/container/unlocked_container_data.cpp)
+        target_compile_features(scpefe_managed_slot_ownership_test PRIVATE cxx_std_20)
         target_include_directories(scpefe_managed_slot_ownership_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
