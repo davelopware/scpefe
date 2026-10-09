@@ -43,6 +43,25 @@ public:
         const ManagedSlotData *previous_metadata,
         const std::string &profile_name, const std::string &profile_email);
 
+    /* Validates a newly proposed password for any existing slot. */
+    static void validate_rotation_password(const std::uint8_t *password,
+        std::size_t password_size);
+
+    /* Allows a claimed ordinary slot or the recovery slot to rotate itself. */
+    static void authorize_rotation(const UnlockedContainerData &access);
+
+    /* Validates the profile to bind to a claimed ordinary slot. */
+    static void validate_reconciliation_identity(const std::string &profile_name,
+        const std::string &profile_email);
+
+    /* Refuses identity binding for unclaimed and recovery slots. */
+    static void authorize_reconciliation(const UnlockedContainerData &access);
+
+    /* Rebinds one managed slot without changing its ID, role, or claim state. */
+    static void reconcile_managed_identity(ManagedSlotData &metadata,
+        const UnlockedContainerData &access,
+        const std::string &profile_name, const std::string &profile_email);
+
     /* Marks values hidden inside a legacy password wrapper as unknown. */
     static ManagedSlotData legacy_invitation(
         const std::array<std::uint8_t, 16> &management_id,

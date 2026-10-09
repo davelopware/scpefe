@@ -4,7 +4,6 @@
 #include "container/password_slot_lifecycle.hpp"
 #include "format/revision_error.hpp"
 #include "format/snapshot_revision.hpp"
-#include "security/password_strength.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1347,9 +1346,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
     std::size_t new_password_size
 )
 {
-    if (security::assess_password_policy(new_password, new_password_size)
-        != security::PasswordPolicyAssessment::accepted)
-        throw ContainerFailure{ContainerError::weak_password};
+    PasswordSlotLifecycle::validate_rotation_password(
+        new_password, new_password_size);
     if (!recognizes(container, container_size) || container_size < header_size)
         throw ContainerFailure{ContainerError::malformed_container};
     const std::uint32_t version = read_u32(container + 8);
@@ -1376,13 +1374,19 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
     const std::uint64_t encrypted_size = read_u64(container + encrypted_snapshot_size_offset);
     const std::size_t snapshot_offset = layout.snapshot_offset;
 
-    try {
-        auto probe = unlock(container, container_size, new_password, new_password_size,
-            format::RevisionLimits::defaults());
-        throw ContainerFailure{ContainerError::password_already_in_use};
-    } catch (const ContainerFailure &failure) {
-        if (failure.error != ContainerError::authentication_failed) throw;
-    }
+    PasswordSlotLifecycle::require_available_password([&] {
+        try {
+            auto probe = unlock(container, container_size, new_password,
+                new_password_size, format::RevisionLimits::defaults());
+            return true;
+        } catch (const ContainerFailure &failure) {
+            if (failure.error != ContainerError::authentication_failed) throw;
+            return false;
+        }
+    });
+    auto rotating_slot = unlock(container, container_size, current_password,
+        current_password_size, format::RevisionLimits::defaults());
+    PasswordSlotLifecycle::authorize_rotation(rotating_slot);
 
     require_sodium();
     std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
@@ -1426,8 +1430,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
                     invited.data());
                 UnlockedContainerData access;
                 decode_invitation_plaintext(invited, access);
-                if (access.must_be_changed)
-                    throw ContainerFailure{ContainerError::invalid_argument};
+                PasswordSlotLifecycle::authorize_rotation(access);
                 derive_wrapping_key(wrapping_key, new_password, new_password_size,
                     record.salt);
                 std::vector<std::uint8_t> cipher(invited.size() + tag_size);
@@ -1891,14 +1894,11 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::reconcile_identity(
     const std::uint8_t *password, std::size_t password_size,
     const std::string &profile_name, const std::string &profile_email)
 {
-    if (profile_name.empty() || profile_email.empty()
-        || profile_name.size() > max_holder_field_size
-        || profile_email.size() > max_holder_field_size)
-        throw ContainerFailure{ContainerError::invalid_argument};
+    PasswordSlotLifecycle::validate_reconciliation_identity(
+        profile_name, profile_email);
     auto access = unlock(container, container_size, password, password_size,
         format::RevisionLimits::defaults());
-    if (access.recovery_slot || access.must_be_changed)
-        throw ContainerFailure{ContainerError::invalid_argument};
+    PasswordSlotLifecycle::authorize_reconciliation(access);
     const auto layout = read_layout(container, container_size);
     auto document_key = authenticated_document_key(
         container, container_size, password, password_size, layout);
@@ -1933,15 +1933,8 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::reconcile_identity(
     if (matched >= all_metadata.size())
         throw ContainerFailure{ContainerError::authentication_failed};
     auto &metadata = all_metadata[matched];
-    metadata.actual_slot_id = access.slot_id;
-    metadata.slot_id_known = true;
-    if (!metadata.identity_name.empty())
-        sodium_memzero(metadata.identity_name.data(), metadata.identity_name.size());
-    if (!metadata.identity_email.empty())
-        sodium_memzero(metadata.identity_email.data(), metadata.identity_email.size());
-    metadata.identity_name = profile_name;
-    metadata.identity_email = profile_email;
-    metadata.identity_known = true;
+    PasswordSlotLifecycle::reconcile_managed_identity(
+        metadata, access, profile_name, profile_email);
     return rebuild_managed_records(container, container_size, layout,
         document_key.data(), all_metadata);
 }
