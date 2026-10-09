@@ -261,6 +261,63 @@ std::vector<std::uint8_t> RevisionTransition::merge(
         format::RevisionLimits::defaults()).encode();
 }
 
+std::vector<std::uint8_t> RevisionTransition::migration(
+    const container::UnlockedContainerData &unlocked,
+    std::string_view profile_name,
+    std::string_view profile_email,
+    std::string_view device_name,
+    std::uint64_t timestamp_ms)
+{
+    if (sodium_init() < 0)
+        throw container::ContainerFailure{container::ContainerError::crypto_error};
+    const auto current = decode(unlocked.encoded_snapshot_revision);
+    format::SnapshotRevisionData data;
+    append_parent(data, current.data(), unlocked.encoded_snapshot_revision);
+    data.manually_sealed = true;
+    data.timestamp_ms = timestamp_ms;
+    data.slot_id.assign(unlocked.slot_id.begin(), unlocked.slot_id.end());
+    if (!unlocked.recovery_slot) {
+        data.slot_identity_name = unlocked.slot_identity_name;
+        data.slot_identity_email = unlocked.slot_identity_email;
+    }
+    data.client_profile_name.assign(profile_name);
+    data.client_profile_email.assign(profile_email);
+    data.device_name.assign(device_name);
+    data.content_hash = current.data().content_hash;
+    data.content = current.data().content;
+    data.event_type = "format-migration";
+    data.event_detail = "container-version-2-to-3";
+    return format::SnapshotRevision::create(std::move(data),
+        format::RevisionLimits::defaults()).encode();
+}
+
+std::vector<std::uint8_t> RevisionTransition::compact(
+    const container::UnlockedContainerData &unlocked)
+{
+    if (sodium_init() < 0)
+        throw container::ContainerFailure{container::ContainerError::crypto_error};
+    const auto current = decode(unlocked.encoded_snapshot_revision);
+    if (!current.data().manually_sealed)
+        throw container::ContainerFailure{container::ContainerError::invalid_argument};
+
+    const auto previous_head = hash_bytes(unlocked.encoded_snapshot_revision.data(),
+        unlocked.encoded_snapshot_revision.size());
+    format::SnapshotRevisionData baseline;
+    baseline.parent_revision_ids.assign(previous_head.begin(), previous_head.end());
+    baseline.timestamp_ms = current.data().timestamp_ms;
+    baseline.slot_id = current.data().slot_id;
+    baseline.slot_identity_name = current.data().slot_identity_name;
+    baseline.slot_identity_email = current.data().slot_identity_email;
+    baseline.client_profile_name = current.data().client_profile_name;
+    baseline.client_profile_email = current.data().client_profile_email;
+    baseline.device_name = current.data().device_name;
+    baseline.content_hash = current.data().content_hash;
+    baseline.content = current.data().content;
+    baseline.manually_sealed = true;
+    return format::SnapshotRevision::create(std::move(baseline),
+        format::RevisionLimits::defaults()).encode();
+}
+
 std::vector<std::uint8_t> RevisionTransition::discard(
     const container::UnlockedContainerData &unlocked)
 {

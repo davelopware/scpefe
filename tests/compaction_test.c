@@ -129,10 +129,102 @@ int main(void)
     scpefe_decoded_snapshot_revision_destroy(revision);
     scpefe_unlocked_container_destroy(after);
 
+    scpefe_unlocked_container *baseline = NULL;
+    scpefe_unlocked_container_v1 baseline_view = {0};
+    CHECK(scpefe_password_container_unlock(compacted, compacted_size,
+        (const uint8_t *)owner, sizeof(owner) - 1, &baseline) == SCPEFE_STATUS_OK);
+    baseline_view.struct_size = sizeof(baseline_view);
+    CHECK(scpefe_unlocked_container_view(baseline, &baseline_view)
+        == SCPEFE_STATUS_OK);
+    uint8_t baseline_head[SCPEFE_REVISION_ID_SIZE];
+    CHECK(crypto_generichash(baseline_head, sizeof(baseline_head),
+        baseline_view.encoded_snapshot_revision,
+        baseline_view.encoded_snapshot_revision_size, NULL, 0) == 0);
+    scpefe_unlocked_container_destroy(baseline);
+
+    const scpefe_manual_save_v1 after_compaction = {
+        sizeof(after_compaction), compacted, compacted_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        "Ada", 3, "ada@example.test", 16, "Desk", 4,
+        "saved after compaction", 22, 5000,
+    };
+    size_t next_size = 0;
+    CHECK(scpefe_manual_save(&after_compaction, NULL, 0, &next_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *next = (uint8_t *)malloc(next_size);
+    CHECK(next != NULL);
+    CHECK(scpefe_manual_save(&after_compaction, next, next_size,
+        &next_size) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_password_container_unlock(next, next_size,
+        (const uint8_t *)owner, sizeof(owner) - 1, &after) == SCPEFE_STATUS_OK);
+    after_view.struct_size = sizeof(after_view);
+    CHECK(scpefe_unlocked_container_view(after, &after_view) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_snapshot_revision_decode(after_view.encoded_snapshot_revision,
+        after_view.encoded_snapshot_revision_size, &limits, &revision)
+        == SCPEFE_STATUS_OK);
+    view.struct_size = sizeof(view);
+    CHECK(scpefe_decoded_snapshot_revision_view(revision, &view) == SCPEFE_STATUS_OK);
+    CHECK(view.manually_sealed == 1 && view.parent_count == 1
+        && view.ancestor_count == 1);
+    CHECK(memcmp(view.parent_revision_ids, baseline_head,
+        sizeof(baseline_head)) == 0);
+    CHECK(memcmp(view.ancestor_graph[0].revision_id, baseline_head,
+        sizeof(baseline_head)) == 0);
+    CHECK(view.ancestor_graph[0].parent_count == 1
+        && memcmp(view.ancestor_graph[0].parent_revision_ids, previous_head,
+            sizeof(previous_head)) == 0);
+    CHECK(view.content_size == strlen("saved after compaction")
+        && memcmp(view.content, "saved after compaction", view.content_size) == 0);
+    scpefe_decoded_snapshot_revision_destroy(revision);
+    scpefe_unlocked_container_destroy(after);
+
     request.password = (const uint8_t *)recovery;
     request.password_size = sizeof(recovery) - 1;
     CHECK(scpefe_compact_document(&request, NULL, 0, &compacted_size)
         == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    request.password = (const uint8_t *)"wrong password";
+    request.password_size = strlen("wrong password");
+    CHECK(scpefe_compact_document(&request, NULL, 0, &compacted_size)
+        == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+    request.password = (const uint8_t *)owner;
+    request.password_size = sizeof(owner) - 1;
+
+    static const char temporary[] = "temporary editor credential maple mountain";
+    static const char editor[] = "claimed editor credential cedar meadow";
+    const scpefe_invitation_create_v1 invitation = {
+        sizeof(invitation), leased, leased_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        (const uint8_t *)temporary, sizeof(temporary) - 1,
+        1, 0, 0, "Editor", 6,
+    };
+    size_t invited_size = 0;
+    CHECK(scpefe_password_container_add_invitation(&invitation, NULL, 0,
+        &invited_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *invited = (uint8_t *)malloc(invited_size);
+    CHECK(invited != NULL);
+    CHECK(scpefe_password_container_add_invitation(&invitation, invited,
+        invited_size, &invited_size) == SCPEFE_STATUS_OK);
+    const scpefe_invitation_claim_v1 claim = {
+        sizeof(claim), invited, invited_size,
+        (const uint8_t *)temporary, sizeof(temporary) - 1,
+        (const uint8_t *)editor, sizeof(editor) - 1,
+        "Grace", 5, "grace@example.test", 18,
+    };
+    size_t claimed_size = 0;
+    CHECK(scpefe_password_container_claim_invitation(&claim, NULL, 0,
+        &claimed_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *claimed = (uint8_t *)malloc(claimed_size);
+    CHECK(claimed != NULL);
+    CHECK(scpefe_password_container_claim_invitation(&claim, claimed,
+        claimed_size, &claimed_size) == SCPEFE_STATUS_OK);
+    request.container = claimed;
+    request.container_size = claimed_size;
+    request.password = (const uint8_t *)editor;
+    request.password_size = sizeof(editor) - 1;
+    CHECK(scpefe_compact_document(&request, NULL, 0, &compacted_size)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
+    request.container = leased;
+    request.container_size = leased_size;
     request.password = (const uint8_t *)owner;
     request.password_size = sizeof(owner) - 1;
     request.lease_heartbeat_counter = 8;
@@ -158,6 +250,9 @@ int main(void)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
 
     free(provisional);
+    free(claimed);
+    free(invited);
+    free(next);
     free(compacted);
     free(leased);
     free(saved);
