@@ -65,14 +65,14 @@ public:
     /* Validates a managed ordinary slot's proposed cooperative permissions. */
     static void validate_managed_permissions(std::uint8_t permissions);
 
-    /* Requires a claimed full administrator to change managed permissions. */
+    /* Requires both administrative permissions and rejects unclaimed invitations. */
     static void authorize_permissions_update(const UnlockedContainerData &access);
 
     /* Changes only the authenticated permissions of a managed ordinary slot. */
     static void update_managed_permissions(ManagedSlotData &metadata,
         std::uint8_t permissions);
 
-    /* Requires a claimed administrator with removal permission. */
+    /* Requires remove-password permission and rejects unclaimed invitations. */
     static void authorize_removal(const UnlockedContainerData &access);
 
     /* Marks values hidden inside a legacy password wrapper as unknown. */
