@@ -10,7 +10,7 @@ namespace scpefe::document {
 /* Creates, amends, and discards the single provisional revision in a container. */
 class ProvisionalSave {
 public:
-    /* Creates or amends a provisional revision from the latest working copy. */
+    /* Publishes a provisional revision built by the shared transition. */
     static std::vector<std::uint8_t> create(
         const std::uint8_t *container,
         std::size_t container_size,
@@ -23,7 +23,7 @@ public:
         std::uint64_t timestamp_ms
     );
 
-    /* Replaces a provisional head with its authenticated sealed base revision. */
+    /* Publishes the validated sealed base of a provisional head. */
     static std::vector<std::uint8_t> discard(
         const std::uint8_t *container,
         std::size_t container_size,
