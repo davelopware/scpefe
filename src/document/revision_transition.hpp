@@ -17,13 +17,24 @@ struct SaveTransitionResult {
     bool identity_only{};
 };
 
-/* Owns the lineage rules for sealed and provisional revision transitions. */
+/* Owns the lineage rules for sealed, provisional, and merged revisions. */
 class RevisionTransition {
 public:
     /* Builds an attributed saved revision from the authenticated current head. */
     static SaveTransitionResult save(
         const container::UnlockedContainerData &unlocked,
         SaveKind kind,
+        std::string_view profile_name,
+        std::string_view profile_email,
+        std::string_view device_name,
+        std::string_view content,
+        std::uint64_t timestamp_ms
+    );
+
+    /* Joins related divergent authenticated heads in one attributed sealed revision. */
+    static std::vector<std::uint8_t> merge(
+        const container::UnlockedContainerData &current,
+        const container::UnlockedContainerData &local,
         std::string_view profile_name,
         std::string_view profile_email,
         std::string_view device_name,

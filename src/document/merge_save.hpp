@@ -7,10 +7,10 @@
 
 namespace scpefe::document {
 
-/* Creates a user-resolved revision joining two authenticated branch heads. */
+/* Authenticates merge inputs and replaces the current container with a resolved head. */
 class MergeSave {
 public:
-    /* Creates a replacement current container with both branch heads as parents. */
+    /* Authorizes the merge, delegates its lineage, and returns a replacement container. */
     static std::vector<std::uint8_t> create(
         const std::uint8_t *current_container,
         std::size_t current_container_size,

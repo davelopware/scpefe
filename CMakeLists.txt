@@ -238,7 +238,7 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_provisional_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
 
         add_executable(scpefe_merge_save_test tests/merge_save_test.c)
-        target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe)
+        target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
 
         add_executable(scpefe_compaction_test tests/compaction_test.c)
         target_link_libraries(scpefe_compaction_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
