@@ -55,8 +55,40 @@ static_assert(std::is_nothrow_move_assignable_v<std::string>);
 static_assert(std::is_nothrow_move_assignable_v<EditingLeaseData>);
 static_assert(std::is_nothrow_move_assignable_v<std::vector<ManagedSlotData>>);
 static_assert(std::is_nothrow_move_assignable_v<std::vector<std::uint8_t>>);
+static_assert(!std::is_copy_constructible_v<ManagedSlotData>);
+static_assert(!std::is_copy_assignable_v<ManagedSlotData>);
+static_assert(std::is_nothrow_move_constructible_v<ManagedSlotData>);
+static_assert(std::is_nothrow_move_assignable_v<ManagedSlotData>);
+
+ManagedSlotData::ManagedSlotData(ManagedSlotData &&other) noexcept
+{
+    *this = std::move(other);
+}
+
+ManagedSlotData &ManagedSlotData::operator=(ManagedSlotData &&other) noexcept
+{
+    if (this == &other) return *this;
+    clear();
+    slot_id = other.slot_id;
+    actual_slot_id = other.actual_slot_id;
+    permissions = other.permissions;
+    must_be_changed = other.must_be_changed;
+    slot_id_known = other.slot_id_known;
+    permissions_known = other.permissions_known;
+    must_be_changed_known = other.must_be_changed_known;
+    identity_known = other.identity_known;
+    move_string_without_allocation(identity_name, other.identity_name);
+    move_string_without_allocation(identity_email, other.identity_email);
+    other.clear();
+    return *this;
+}
 
 ManagedSlotData::~ManagedSlotData()
+{
+    clear();
+}
+
+void ManagedSlotData::clear() noexcept
 {
     sodium_memzero(slot_id.data(), slot_id.size());
     sodium_memzero(actual_slot_id.data(), actual_slot_id.size());
@@ -120,18 +152,6 @@ void UnlockedContainerData::clear() noexcept
     clear_string(editing_lease.holder_email);
     clear_string(editing_lease.device_name);
     editing_lease.active = false;
-    for (auto &slot : managed_slots) {
-        sodium_memzero(slot.slot_id.data(), slot.slot_id.size());
-        sodium_memzero(slot.actual_slot_id.data(), slot.actual_slot_id.size());
-        slot.permissions = 0;
-        slot.must_be_changed = false;
-        slot.slot_id_known = false;
-        slot.permissions_known = false;
-        slot.must_be_changed_known = false;
-        slot.identity_known = false;
-        clear_string(slot.identity_name);
-        clear_string(slot.identity_email);
-    }
     managed_slots.clear();
     if (!encoded_snapshot_revision.empty()) {
         sodium_memzero(encoded_snapshot_revision.data(),

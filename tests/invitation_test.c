@@ -302,6 +302,21 @@ int main(void)
         managed.struct_size = sizeof(managed);
         CHECK(scpefe_unlocked_container_managed_slot(unlocked, 0, &managed)
             == SCPEFE_STATUS_OK);
+        CHECK(managed.slot_id_size == SCPEFE_SLOT_ID_SIZE);
+        CHECK(managed.identity_name_size == strlen("Grace Hopper")
+            && memcmp(managed.identity_name, "Grace Hopper",
+                managed.identity_name_size) == 0);
+        CHECK(managed.identity_email_size == strlen("grace@example.test")
+            && memcmp(managed.identity_email, "grace@example.test",
+                managed.identity_email_size) == 0);
+        CHECK(managed.slot_id_known && managed.permissions_known
+            && managed.identity_known && managed.must_be_changed_known);
+        const char *borrowed_name = managed.identity_name;
+        scpefe_managed_slot_v1 repeated = {0};
+        repeated.struct_size = sizeof(repeated);
+        CHECK(scpefe_unlocked_container_managed_slot(unlocked, 0, &repeated)
+            == SCPEFE_STATUS_OK);
+        CHECK(repeated.identity_name == borrowed_name);
         memcpy(managed_id, managed.slot_id, sizeof(managed_id));
         slot.struct_size = sizeof(slot);
         CHECK(scpefe_unlocked_container_slot_access(unlocked, &slot)
