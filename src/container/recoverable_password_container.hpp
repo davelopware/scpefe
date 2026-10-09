@@ -102,7 +102,7 @@ public:
         const std::string &profile_name, const std::string &profile_email
     );
 
-    /* Re-encrypts only shared lease metadata while preserving revision ciphertext semantics. */
+    /* Rewrites the lease while preserving document ID and encoded head revision. */
     static std::vector<std::uint8_t> replace_editing_lease(
         const std::uint8_t *container,
         std::size_t container_size,
