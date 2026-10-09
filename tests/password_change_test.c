@@ -140,7 +140,7 @@ int main(void)
         container_size, &changed_size) == SCPEFE_STATUS_OK);
     CHECK(changed_size == container_size);
     CHECK(memcmp(container + snapshot_offset, owner_changed + snapshot_offset,
-        container_size - snapshot_offset) == 0);
+        container_size - snapshot_offset) != 0);
     CHECK(memcmp(container + 160 + 65, owner_changed + 160 + 65, 65) == 0);
     CHECK(memcmp(container + 160, owner_changed + 160, 65) != 0);
     CHECK(!contains_bytes(owner_changed, changed_size, owner));
@@ -228,7 +228,7 @@ int main(void)
     CHECK(changed_size == container_size);
     CHECK(memcmp(owner_changed + snapshot_offset,
         recovery_changed + snapshot_offset,
-        container_size - snapshot_offset) == 0);
+        container_size - snapshot_offset) != 0);
     CHECK(memcmp(owner_changed + 160, recovery_changed + 160, 65) == 0);
     CHECK(memcmp(owner_changed + 160 + 65,
         recovery_changed + 160 + 65, 65) != 0);
