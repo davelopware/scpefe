@@ -214,6 +214,14 @@ if(BUILD_TESTING)
         add_executable(scpefe_revision_test tests/revision_test.c)
         target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
 
+        set(SCPEFE_REVISION_OWNERSHIP_SOURCES ${SCPEFE_PORTABLE_FORMAT_SOURCES})
+        list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/revision_abi.cpp)
+        add_executable(scpefe_revision_ownership_test
+            tests/revision_ownership_test.cpp
+            ${SCPEFE_REVISION_OWNERSHIP_SOURCES})
+        target_include_directories(scpefe_revision_ownership_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
         add_executable(scpefe_container_test tests/container_test.c)
         target_link_libraries(scpefe_container_test PRIVATE SCPEFE::scpefe)
 
@@ -277,6 +285,8 @@ if(BUILD_TESTING)
             COMMAND scpefe_revision_test
                 "${CMAKE_CURRENT_BINARY_DIR}/snapshot-revision-v1.cbor"
         )
+        add_test(NAME scpefe.revision-ownership
+            COMMAND scpefe_revision_ownership_test)
         add_test(
             NAME scpefe.diagnostic-revision
             COMMAND scpefe_diagnostic revision

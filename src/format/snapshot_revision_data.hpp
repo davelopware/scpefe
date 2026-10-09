@@ -25,7 +25,17 @@ struct RevisionGraphNodeData {
 
 /* Semantic values owned by a SnapshotRevision. */
 struct SnapshotRevisionData {
-    /* Wipes decoded identity strings and slot identifiers on destruction. */
+    /* Creates empty revision values. */
+    SnapshotRevisionData() = default;
+    /* Transfers owned values and clears the source, including short strings. */
+    SnapshotRevisionData(SnapshotRevisionData &&other) noexcept;
+    /* Wipes current values, then transfers and clears the source. */
+    SnapshotRevisionData &operator=(SnapshotRevisionData &&other) noexcept;
+    /* Prevents an implicit copy of decrypted revision values. */
+    SnapshotRevisionData(const SnapshotRevisionData &) = delete;
+    /* Prevents an implicit copy of decrypted revision values. */
+    SnapshotRevisionData &operator=(const SnapshotRevisionData &) = delete;
+    /* Wipes owned revision values before releasing storage. */
     ~SnapshotRevisionData();
 
     std::vector<std::uint8_t> parent_revision_ids;
@@ -43,6 +53,10 @@ struct SnapshotRevisionData {
     std::vector<std::uint8_t> provisional_base_revision;
     std::string event_type;
     std::string event_detail;
+
+private:
+    /* Wipes every currently owned value and resets scalar fields. */
+    void clear() noexcept;
 };
 
 } // namespace scpefe::format
