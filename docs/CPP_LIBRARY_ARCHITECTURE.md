@@ -69,15 +69,15 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 
 ### Document operations (`src/document/`)
 
-These classes are stateless operation entry points. They build or transform a revision and ask `RecoverablePasswordContainer` to return a complete candidate container. They do not keep a working copy or publish the bytes to a target. `RevisionTransition` owns the parent and ancestor links shared by manual and regular saves, validates a provisional head against its embedded sealed base, and returns that base for discard.
+These classes are stateless operation entry points. They build or transform a revision and ask `RecoverablePasswordContainer` to return a complete candidate container. They do not keep a working copy or publish the bytes to a target. `RevisionTransition` owns the parent and ancestor links for manual, regular, and merge saves, validates a provisional head against its embedded sealed base, and returns that base for discard.
 
 | Class | Responsibility |
 | --- | --- |
 | [`NewDocument`](../src/document/new_document.hpp) | Builds the initial attributed snapshot revision and creates a version-3 container with an owner slot and optional recovery/master slot. |
 | [`ManualSave`](../src/document/manual_save.hpp) | Authenticates the current container, delegates sealed revision construction to `RevisionTransition`, and replaces the encrypted snapshot. |
 | [`ProvisionalSave`](../src/document/provisional_save.hpp) | Delegates creation, amendment, and discard of the one provisional revision to `RevisionTransition`, then replaces the encrypted snapshot. |
-| [`RevisionTransition`](../src/document/revision_transition.hpp) | Builds attributed sealed or provisional revisions from authenticated heads, checks provisional lineage against its sealed base, and returns that base on discard. |
-| [`MergeSave`](../src/document/merge_save.hpp) | Authenticates current and local containers for the same document, checks that their heads are related and divergent, then records caller-supplied resolved text in a two-parent sealed revision. |
+| [`RevisionTransition`](../src/document/revision_transition.hpp) | Builds attributed sealed, provisional, or merged revisions from authenticated heads; checks merge ancestry and provisional lineage; and returns a sealed base on discard. |
+| [`MergeSave`](../src/document/merge_save.hpp) | Authenticates and authorizes current and local containers for the same document, delegates related divergent lineage and caller-supplied resolved text to `RevisionTransition`, then replaces the current container. |
 | [`Compaction`](../src/document/compaction.hpp) | Requires full administrator permissions, a matching active lease, and a sealed head; creates a fresh baseline with the previous head ID as a shallow parent. |
 | [`Migration`](../src/document/migration.hpp) | Builds a content-preserving migration revision and asks the container layer to convert a supported version-2 envelope to version 3 while retaining unknown password wrappers. |
 
