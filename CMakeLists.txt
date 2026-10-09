@@ -40,6 +40,7 @@ else()
         src/document/compaction.cpp
         src/document/manual_save.cpp
         src/document/provisional_save.cpp
+        src/document/revision_transition.cpp
         src/document/merge_save.cpp
         src/document/migration.cpp
         src/security/password_strength.cpp
@@ -234,7 +235,7 @@ if(BUILD_TESTING)
         add_executable(scpefe_manual_save_test tests/manual_save_test.c)
         target_link_libraries(scpefe_manual_save_test PRIVATE SCPEFE::scpefe)
         add_executable(scpefe_provisional_save_test tests/provisional_save_test.c)
-        target_link_libraries(scpefe_provisional_save_test PRIVATE SCPEFE::scpefe)
+        target_link_libraries(scpefe_provisional_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
 
         add_executable(scpefe_merge_save_test tests/merge_save_test.c)
         target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe)

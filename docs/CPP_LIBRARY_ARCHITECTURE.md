@@ -17,7 +17,9 @@ flowchart LR
     ABI --> Revision["SnapshotRevision"]
     ABI --> Policy["Password policy"]
     Operations --> Recoverable
+    Operations --> Transition["RevisionTransition<br/>sealed/provisional lineage"]
     Operations --> Revision
+    Transition --> Revision
     PasswordContainer --> Recoverable
     PasswordContainer --> Revision
     Recoverable --> Revision
@@ -67,13 +69,14 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 
 ### Document operations (`src/document/`)
 
-These classes are stateless operation entry points. They build or transform a revision and ask `RecoverablePasswordContainer` to return a complete candidate container. They do not keep a working copy or publish the bytes to a target.
+These classes are stateless operation entry points. They build or transform a revision and ask `RecoverablePasswordContainer` to return a complete candidate container. They do not keep a working copy or publish the bytes to a target. `RevisionTransition` owns the parent and ancestor links shared by manual and regular saves, validates a provisional head against its embedded sealed base, and returns that base for discard.
 
 | Class | Responsibility |
 | --- | --- |
 | [`NewDocument`](../src/document/new_document.hpp) | Builds the initial attributed snapshot revision and creates a version-3 container with an owner slot and optional recovery/master slot. |
-| [`ManualSave`](../src/document/manual_save.hpp) | Authenticates the current container, creates a sealed child revision from supplied text and attribution, and replaces the encrypted snapshot. When the current head is provisional, it seals against that revision's sealed base. |
-| [`ProvisionalSave`](../src/document/provisional_save.hpp) | Creates or amends the one provisional revision used by a regular save. `discard` restores its embedded sealed base revision. |
+| [`ManualSave`](../src/document/manual_save.hpp) | Authenticates the current container, delegates sealed revision construction to `RevisionTransition`, and replaces the encrypted snapshot. |
+| [`ProvisionalSave`](../src/document/provisional_save.hpp) | Delegates creation, amendment, and discard of the one provisional revision to `RevisionTransition`, then replaces the encrypted snapshot. |
+| [`RevisionTransition`](../src/document/revision_transition.hpp) | Builds attributed sealed or provisional revisions from authenticated heads, checks provisional lineage against its sealed base, and returns that base on discard. |
 | [`MergeSave`](../src/document/merge_save.hpp) | Authenticates current and local containers for the same document, checks that their heads are related and divergent, then records caller-supplied resolved text in a two-parent sealed revision. |
 | [`Compaction`](../src/document/compaction.hpp) | Requires full administrator permissions, a matching active lease, and a sealed head; creates a fresh baseline with the previous head ID as a shallow parent. |
 | [`Migration`](../src/document/migration.hpp) | Builds a content-preserving migration revision and asks the container layer to convert a supported version-2 envelope to version 3 while retaining unknown password wrappers. |
