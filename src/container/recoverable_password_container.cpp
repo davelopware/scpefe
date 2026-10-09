@@ -1831,14 +1831,10 @@ std::vector<std::uint8_t> rebuild_managed_records(
 }
 
 std::size_t find_managed_record(const std::vector<ManagedSlotData> &metadata,
-    const std::array<std::uint8_t, 16> &slot_id,
-    ManagedSlotData &result)
+    const std::array<std::uint8_t, 16> &slot_id)
 {
     for (std::size_t index = 0; index < metadata.size(); ++index) {
-        if (metadata[index].slot_id == slot_id) {
-            result = metadata[index];
-            return index;
-        }
+        if (metadata[index].slot_id == slot_id) return index;
     }
     throw ContainerFailure{ContainerError::invalid_argument};
 }
@@ -1863,13 +1859,12 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::update_slot_permissions(
     auto document_key = authenticated_document_key(container, container_size,
         administrator_password, administrator_password_size, layout);
     const auto key_clear = clear_on_scope_exit(document_key);
-    ManagedSlotData metadata;
     auto all_metadata = read_managed_metadata(
         container, container_size, layout, document_key.data());
-    const auto index = find_managed_record(all_metadata, slot_id, metadata);
+    const auto index = find_managed_record(all_metadata, slot_id);
+    auto &metadata = all_metadata[index];
     metadata.permissions = permissions;
     metadata.permissions_known = true;
-    all_metadata[index] = metadata;
     auto identity_upgrade = owner_identity_upgrade(administrator);
     const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
     return rebuild_managed_records(container, container_size, layout,
@@ -1895,8 +1890,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::remove_slot(
     const auto key_clear = clear_on_scope_exit(document_key);
     auto all_metadata = read_managed_metadata(
         container, container_size, layout, document_key.data());
-    ManagedSlotData ignored;
-    const auto matched = find_managed_record(all_metadata, slot_id, ignored);
+    const auto matched = find_managed_record(all_metadata, slot_id);
     auto identity_upgrade = owner_identity_upgrade(administrator);
     const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
     return rebuild_managed_records(container, container_size, layout,
@@ -1950,13 +1944,16 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::reconcile_identity(
     }
     if (matched >= all_metadata.size())
         throw ContainerFailure{ContainerError::authentication_failed};
-    auto metadata = all_metadata[matched];
+    auto &metadata = all_metadata[matched];
     metadata.actual_slot_id = access.slot_id;
     metadata.slot_id_known = true;
+    if (!metadata.identity_name.empty())
+        sodium_memzero(metadata.identity_name.data(), metadata.identity_name.size());
+    if (!metadata.identity_email.empty())
+        sodium_memzero(metadata.identity_email.data(), metadata.identity_email.size());
     metadata.identity_name = profile_name;
     metadata.identity_email = profile_email;
     metadata.identity_known = true;
-    all_metadata[matched] = metadata;
     return rebuild_managed_records(container, container_size, layout,
         document_key.data(), all_metadata);
 }

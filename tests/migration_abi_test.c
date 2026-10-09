@@ -15,13 +15,14 @@ int crypto_generichash(unsigned char *, size_t, const unsigned char *,
     } \
 } while (0)
 
-/* Loads the existing version-2 history fixture as container bytes. */
-static uint8_t *read_legacy_fixture(const char *root, size_t *size)
+/* Loads a checked-in version-2 container fixture as bytes. */
+static uint8_t *read_legacy_fixture(const char *root, const char *name,
+    size_t *size)
 {
     char path[1024];
     if (snprintf(path, sizeof(path),
-        "%s/apps/windows/test/fixtures/password-container-v2-history-invitations.hex",
-        root) >= (int)sizeof(path)) return NULL;
+        "%s/apps/windows/test/fixtures/%s", root, name)
+        >= (int)sizeof(path)) return NULL;
     FILE *input = fopen(path, "rb");
     if (input == NULL) return NULL;
     if (fseek(input, 0, SEEK_END) != 0) { fclose(input); return NULL; }
@@ -41,6 +42,36 @@ static uint8_t *read_legacy_fixture(const char *root, size_t *size)
     return bytes;
 }
 
+/* Checks the legacy invitation record's intentionally unknown metadata fields. */
+static int legacy_invitation_metadata(const char *root)
+{
+    static const char owner[] = "owner passphrase with independent words";
+    size_t size = 0;
+    uint8_t *container = read_legacy_fixture(root,
+        "legacy-invitation-v2.hex", &size);
+    CHECK(container != NULL && size != 0);
+    scpefe_unlocked_container *unlocked = NULL;
+    CHECK(scpefe_password_container_unlock(container, size,
+        (const uint8_t *)owner, sizeof(owner) - 1, &unlocked)
+        == SCPEFE_STATUS_OK);
+    size_t count = 0;
+    CHECK(scpefe_unlocked_container_managed_slot_count(unlocked, &count)
+        == SCPEFE_STATUS_OK && count == 1);
+    scpefe_managed_slot_v1 slot = {0};
+    slot.struct_size = sizeof(slot);
+    CHECK(scpefe_unlocked_container_managed_slot(unlocked, 0, &slot)
+        == SCPEFE_STATUS_OK);
+    CHECK(slot.slot_id_size == SCPEFE_SLOT_ID_SIZE);
+    CHECK(slot.identity_name_size == strlen("Legacy invitation 1")
+        && memcmp(slot.identity_name, "Legacy invitation 1",
+            slot.identity_name_size) == 0);
+    CHECK(!slot.slot_id_known && !slot.permissions_known
+        && !slot.identity_known && !slot.must_be_changed_known);
+    scpefe_unlocked_container_destroy(unlocked);
+    free(container);
+    return 0;
+}
+
 /* Verifies migration lineage, retained text, and a subsequent C ABI save. */
 static int migration_round_trip(const char *root)
 {
@@ -48,7 +79,8 @@ static int migration_round_trip(const char *root)
     static const char guest[] = "violet zeppelin compass orchid museum glacier";
     const uint8_t session[SCPEFE_LEASE_SESSION_ID_SIZE] = {0x7a};
     size_t legacy_size = 0;
-    uint8_t *legacy = read_legacy_fixture(root, &legacy_size);
+    uint8_t *legacy = read_legacy_fixture(root,
+        "password-container-v2-history-invitations.hex", &legacy_size);
     CHECK(legacy != NULL && legacy_size != 0);
 
     scpefe_unlocked_container *before = NULL;
@@ -58,6 +90,20 @@ static int migration_round_trip(const char *root)
     CHECK(scpefe_revision_limits_default(&limits) == SCPEFE_STATUS_OK);
     CHECK(scpefe_password_container_unlock(legacy, legacy_size,
         (const uint8_t *)owner, sizeof(owner) - 1, &before) == SCPEFE_STATUS_OK);
+    size_t legacy_slot_count = 0;
+    CHECK(scpefe_unlocked_container_managed_slot_count(before,
+        &legacy_slot_count) == SCPEFE_STATUS_OK);
+    CHECK(legacy_slot_count > 0);
+    scpefe_managed_slot_v1 legacy_slot = {0};
+    legacy_slot.struct_size = sizeof(legacy_slot);
+    CHECK(scpefe_unlocked_container_managed_slot(before, 0,
+        &legacy_slot) == SCPEFE_STATUS_OK);
+    CHECK(legacy_slot.slot_id_size == SCPEFE_SLOT_ID_SIZE);
+    CHECK(legacy_slot.identity_name_size == strlen("Guest One")
+        && memcmp(legacy_slot.identity_name, "Guest One",
+            legacy_slot.identity_name_size) == 0);
+    CHECK(legacy_slot.slot_id_known && legacy_slot.permissions_known
+        && legacy_slot.identity_known && legacy_slot.must_be_changed_known);
     before_view.struct_size = sizeof(before_view);
     CHECK(scpefe_unlocked_container_view(before, &before_view) == SCPEFE_STATUS_OK);
     uint8_t previous_head[SCPEFE_REVISION_ID_SIZE];
@@ -182,7 +228,7 @@ static int migration_round_trip(const char *root)
     return 0;
 }
 
-/* Verifies malformed migration arguments and the full migration path. */
+/* Verifies malformed arguments, legacy metadata, and the migration path. */
 int main(int argc, char **argv)
 {
     const uint8_t container[] = {0};
@@ -214,6 +260,7 @@ int main(int argc, char **argv)
     CHECK(scpefe_migrate_document(&migration, NULL, 0, &output_size)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
     CHECK(argc == 2);
+    CHECK(legacy_invitation_metadata(argv[1]) == 0);
     CHECK(migration_round_trip(argv[1]) == 0);
     return 0;
 }

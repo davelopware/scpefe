@@ -223,6 +223,12 @@ if(BUILD_TESTING)
         target_include_directories(scpefe_revision_ownership_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+        add_executable(scpefe_managed_slot_ownership_test
+            tests/managed_slot_ownership_test.cpp
+            src/container/unlocked_container_data.cpp)
+        target_include_directories(scpefe_managed_slot_ownership_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
         add_executable(scpefe_container_test tests/container_test.c)
         target_link_libraries(scpefe_container_test PRIVATE SCPEFE::scpefe)
 
@@ -289,6 +295,8 @@ if(BUILD_TESTING)
         )
         add_test(NAME scpefe.revision-ownership
             COMMAND scpefe_revision_ownership_test)
+        add_test(NAME scpefe.managed-slot-ownership
+            COMMAND scpefe_managed_slot_ownership_test)
         add_test(
             NAME scpefe.diagnostic-revision
             COMMAND scpefe_diagnostic revision
