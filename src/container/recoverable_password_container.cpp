@@ -1,6 +1,7 @@
 #include "container/recoverable_password_container.hpp"
 
 #include "container/container_error.hpp"
+#include "container/password_slot_lifecycle.hpp"
 #include "format/revision_error.hpp"
 #include "format/snapshot_revision.hpp"
 #include "security/password_strength.hpp"
@@ -559,14 +560,8 @@ std::array<std::uint8_t, 16> legacy_management_id(
 ManagedSlotData legacy_managed_metadata(const InvitationRecord &record,
     const std::uint8_t *document_key, std::size_t index)
 {
-    ManagedSlotData result;
-    result.slot_id = legacy_management_id(record, document_key);
-    result.slot_id_known = false;
-    result.permissions_known = false;
-    result.must_be_changed_known = false;
-    result.identity_known = false;
-    result.identity_name = "Legacy invitation " + std::to_string(index + 1);
-    return result;
+    return PasswordSlotLifecycle::legacy_invitation(
+        legacy_management_id(record, document_key), index);
 }
 
 std::size_t invitation_record_end(const InvitationRecord &record)
@@ -1559,28 +1554,23 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     const std::uint8_t *temporary_password, std::size_t temporary_password_size,
     std::uint8_t permissions, const std::string &temporary_label)
 {
-    if (security::assess_password_policy(temporary_password, temporary_password_size)
-        != security::PasswordPolicyAssessment::accepted)
-        throw ContainerFailure{ContainerError::weak_password};
-    if ((permissions & ~permission_mask) != 0
-        || ((permissions & 6u) != 0 && (permissions & 1u) == 0)
-        || temporary_label.empty() || temporary_label.size() > max_holder_field_size)
-        throw ContainerFailure{ContainerError::invalid_argument};
+    PasswordSlotLifecycle::validate_add_request(temporary_password,
+        temporary_password_size, permissions, temporary_label);
     auto creator = unlock(container, container_size, creator_password,
         creator_password_size, format::RevisionLimits::defaults());
-    if (creator.must_be_changed || (creator.permissions & 2u) == 0
-        || (permissions & ~creator.permissions) != 0)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    try {
-        auto probe = unlock(container, container_size, temporary_password,
-            temporary_password_size, format::RevisionLimits::defaults());
-        throw ContainerFailure{ContainerError::password_already_in_use};
-    } catch (const ContainerFailure &failure) {
-        if (failure.error != ContainerError::authentication_failed) throw;
-    }
+    PasswordSlotLifecycle::authorize_add(creator, permissions);
+    PasswordSlotLifecycle::require_available_password([&] {
+        try {
+            auto probe = unlock(container, container_size, temporary_password,
+                temporary_password_size, format::RevisionLimits::defaults());
+            return true;
+        } catch (const ContainerFailure &failure) {
+            if (failure.error != ContainerError::authentication_failed) throw;
+            return false;
+        }
+    });
     const auto layout = read_layout(container, container_size);
-    if (layout.invitations.size() >= max_ordinary_slots - 1)
-        throw ContainerFailure{ContainerError::limit_exceeded};
+    PasswordSlotLifecycle::require_invitation_room(layout.invitations.size());
 
     require_sodium();
     std::array<std::uint8_t, key_size> wrapping_key{};
@@ -1611,10 +1601,10 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     if (!found) throw ContainerFailure{ContainerError::authentication_failed};
     const std::uint8_t *document_key = creator_plain.empty()
         ? base_slot.data() : creator_plain.data();
-    std::array<std::uint8_t, 16> slot_id{};
-    randombytes_buf(slot_id.data(), slot_id.size());
-    auto plain = invitation_plaintext(document_key, slot_id, permissions,
-        must_change_flag, temporary_label, {});
+    auto new_slot = PasswordSlotLifecycle::new_invitation(
+        permissions, temporary_label);
+    auto plain = invitation_plaintext(document_key, new_slot.actual_slot_id,
+        new_slot.permissions, must_change_flag, new_slot.identity_name, {});
     const auto plain_clear = clear_on_scope_exit(plain);
     std::array<std::uint8_t, salt_size> salt{};
     std::array<std::uint8_t, nonce_size> nonce{};
@@ -1663,8 +1653,9 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     output.insert(output.end(), nonce.begin(), nonce.end());
     append_u32(output, static_cast<std::uint32_t>(cipher.size()));
     output.insert(output.end(), cipher.begin(), cipher.end());
-    auto metadata_plain = managed_metadata_plaintext(slot_id, slot_id, permissions,
-        must_change_flag, 15u, temporary_label, {});
+    auto metadata_plain = managed_metadata_plaintext(new_slot.slot_id,
+        new_slot.actual_slot_id, new_slot.permissions, must_change_flag,
+        15u, new_slot.identity_name, new_slot.identity_email);
     const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
     std::array<std::uint8_t, nonce_size> metadata_nonce{};
     auto metadata_cipher = encrypt_managed_metadata(
@@ -1690,20 +1681,18 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     const std::uint8_t *new_password, std::size_t new_password_size,
     const std::string &profile_name, const std::string &profile_email)
 {
-    if (security::assess_password_policy(new_password, new_password_size)
-        != security::PasswordPolicyAssessment::accepted)
-        throw ContainerFailure{ContainerError::weak_password};
-    if (profile_name.empty() || profile_email.empty()
-        || profile_name.size() > max_holder_field_size
-        || profile_email.size() > max_holder_field_size)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    try {
-        auto probe = unlock(container, container_size, new_password, new_password_size,
-            format::RevisionLimits::defaults());
-        throw ContainerFailure{ContainerError::password_already_in_use};
-    } catch (const ContainerFailure &failure) {
-        if (failure.error != ContainerError::authentication_failed) throw;
-    }
+    PasswordSlotLifecycle::validate_claim_request(new_password,
+        new_password_size, profile_name, profile_email);
+    PasswordSlotLifecycle::require_available_password([&] {
+        try {
+            auto probe = unlock(container, container_size, new_password,
+                new_password_size, format::RevisionLimits::defaults());
+            return true;
+        } catch (const ContainerFailure &failure) {
+            if (failure.error != ContainerError::authentication_failed) throw;
+            return false;
+        }
+    });
     const auto layout = read_layout(container, container_size);
     require_sodium();
     std::array<std::uint8_t, key_size> wrapping_key{};
@@ -1720,15 +1709,14 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     require_valid_slot_state(container, container_size, layout, plain.data());
     UnlockedContainerData access;
     decode_invitation_plaintext(plain, access);
-    if (!access.must_be_changed)
-        throw ContainerFailure{ContainerError::invalid_argument};
     auto previous_metadata = layout.managed_invitations
         ? decrypt_managed_metadata(*matched, plain.data()) : ManagedSlotData{};
-    const auto effective_permissions = layout.managed_invitations
-        && previous_metadata.permissions_known
-        ? previous_metadata.permissions : access.permissions;
-    auto replacement_plain = invitation_plaintext(plain.data(), access.slot_id,
-        effective_permissions, 0, profile_name, profile_email);
+    auto claimed_slot = PasswordSlotLifecycle::claim_invitation(access,
+        layout.managed_invitations ? &previous_metadata : nullptr,
+        profile_name, profile_email);
+    auto replacement_plain = invitation_plaintext(plain.data(),
+        claimed_slot.actual_slot_id, claimed_slot.permissions, 0,
+        claimed_slot.identity_name, claimed_slot.identity_email);
     const auto replacement_plain_clear = clear_on_scope_exit(replacement_plain);
     derive_wrapping_key(wrapping_key, new_password, new_password_size, matched->salt);
     std::vector<std::uint8_t> cipher(replacement_plain.size() + tag_size);
@@ -1742,9 +1730,9 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
     append_u32(output, static_cast<std::uint32_t>(cipher.size()));
     output.insert(output.end(), cipher.begin(), cipher.end());
     if (layout.managed_invitations) {
-        auto metadata_plain = managed_metadata_plaintext(previous_metadata.slot_id,
-            access.slot_id, effective_permissions, 0, 15u,
-            profile_name, profile_email);
+        auto metadata_plain = managed_metadata_plaintext(claimed_slot.slot_id,
+            claimed_slot.actual_slot_id, claimed_slot.permissions, 0, 15u,
+            claimed_slot.identity_name, claimed_slot.identity_email);
         const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
         std::array<std::uint8_t, nonce_size> metadata_nonce{};
         auto metadata_cipher = encrypt_managed_metadata(

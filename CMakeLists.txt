@@ -32,6 +32,7 @@ else()
         src/abi/container_abi.cpp
         src/abi/context_abi.cpp
         src/container/password_container.cpp
+        src/container/password_slot_lifecycle.cpp
         src/container/recoverable_password_container.cpp
         src/container/unlocked_container_data.cpp
         src/core/context.cpp
@@ -279,7 +280,8 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.editing-lease-round-trip COMMAND scpefe_editing_lease_test)
         add_test(NAME scpefe.migration-abi-validation
             COMMAND scpefe_migration_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
-        add_test(NAME scpefe.invitation-claim COMMAND scpefe_invitation_test)
+        add_test(NAME scpefe.invitation-claim
+            COMMAND scpefe_invitation_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"

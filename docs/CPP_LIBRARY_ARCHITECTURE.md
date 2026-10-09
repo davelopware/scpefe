@@ -24,6 +24,8 @@ flowchart LR
     PasswordContainer --> Revision
     Recoverable --> Revision
     Recoverable --> Policy
+    Recoverable --> SlotLifecycle["PasswordSlotLifecycle<br/>invitation policy and state"]
+    SlotLifecycle --> Policy
     Revision --> CBOR["CborReader and CborWriter"]
     Revision --> JSON["DiagnosticJsonWriter"]
     Revision --> Limits["RevisionLimits and text validation"]
@@ -64,6 +66,7 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 | --- | --- |
 | [`PasswordContainer`](../src/container/password_container.hpp) | Creates the draft version-1, single-owner envelope. On unlock it recognizes and delegates version-2/3 containers to `RecoverablePasswordContainer`, otherwise authenticates a version-1 container. |
 | [`RecoverablePasswordContainer`](../src/container/recoverable_password_container.hpp) | Creates current version-3 containers, unlocks version-2/3 envelopes, and produces replacement bytes for snapshot, lease, password-slot, identity, and migration changes. It implements the envelope parsing, key derivation, authenticated encryption, and password-slot checks. |
+| [`PasswordSlotLifecycle`](../src/container/password_slot_lifecycle.hpp) | Applies invitation creation and claiming policy, constructs known or legacy-unknown managed-slot state, and preserves immutable slot IDs and identity binding while the container class performs authenticated rewrites. |
 
 [`UnlockedContainerData`](../src/container/unlocked_container_data.hpp) is the move-only authenticated result of unlocking. It contains the document ID, selected slot and permissions, derived work-journal key, lease and managed-slot metadata, and the encoded snapshot revision. Its destructor clears owned sensitive values. The same header defines `EditingLeaseData` and `ManagedSlotData`; [`ContainerFailure`](../src/container/container_error.hpp) carries container errors to the ABI. The larger version-3 implementation also uses private layout and invitation-record structs to parse its envelope. The C bridge is [`container_abi.cpp`](../src/abi/container_abi.cpp).
 
