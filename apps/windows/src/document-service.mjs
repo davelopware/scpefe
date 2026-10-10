@@ -1210,6 +1210,7 @@ export class DocumentService {
     } finally {
       if (active.leaseSessionId) {
         this.suspendedLeases.set(active.documentId, {
+          target: active.target,
           sessionId: Buffer.from(active.leaseSessionId),
           counter: active.leaseCounter,
         });
@@ -1253,6 +1254,19 @@ export class DocumentService {
     active.leaseSessionId = null;
     this.suspendedLeases.delete(active.documentId);
     return { released: true };
+  }
+
+  // Carries a locked session's lease evidence into an authenticated replacement session.
+  transferSuspendedLeaseTo(next, target) {
+    const opened = next?.active;
+    if (this.active || !opened || opened.target !== target) return false;
+    const suspended = this.suspendedLeases.get(opened.documentId);
+    if (!suspended || suspended.target !== target) return false;
+    next.suspendedLeases.set(opened.documentId, {
+      target, sessionId: Buffer.from(suspended.sessionId), counter: suspended.counter,
+    });
+    this.suspendedLeases.delete(opened.documentId);
+    return true;
   }
 
   async regularSaveDocument() {
@@ -1901,7 +1915,7 @@ export class DocumentService {
       confirmedTakeover = true;
     }
     const suspended = this.suspendedLeases.get(active.documentId);
-    const sessionMatches = lease.active && suspended
+    const sessionMatches = lease.active && suspended?.target === active.target
       && Buffer.from(lease.sessionId, "hex").equals(suspended.sessionId);
     const age = this.utcNow() - lease.holderUtcMs;
     if (sessionMatches && lease.heartbeatCounter !== suspended.counter) {

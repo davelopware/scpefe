@@ -229,6 +229,9 @@ export class DocumentLifecycleHost {
   #adopt(staged, target) {
     this.#clearInactiveTimer();
     this.leaseTakeovers.clear(); const previous = this.service;
+    if (target === this.lockedTarget) {
+      previous.transferSuspendedLeaseTo?.(staged.candidate, target);
+    }
     this.service = staged.candidate; staged.candidate.acceptCreatedDocument?.();
     this.currentTarget = target; this.lockedTarget = target;
     if (previous !== this.service && previous.active) {
