@@ -535,15 +535,17 @@ export function validateLeaseDecisionResult(value) {
       || value.decisionRequired !== "lease-takeover"
       || !["edit", "recovery", "divergence", "migration"].includes(value.operation)
       || typeof value.holderName !== "string" || !value.holderName
+      || (value.reason !== undefined && value.reason !== "master")
       || typeof value.authorization !== "string"
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
         .test(value.authorization)
-      || Object.keys(value).length !== 4) {
+      || Object.keys(value).length !== (value.reason === undefined ? 4 : 5)) {
     throw new TypeError("host returned an invalid lease decision");
   }
   return Object.freeze({ decisionRequired: "lease-takeover",
     operation: value.operation, holderName: value.holderName,
-    authorization: value.authorization });
+    authorization: value.authorization,
+    ...(value.reason === "master" ? { reason: "master" } : {}) });
 }
 
 export function validateTakeoverRequest(value = {}) {

@@ -101,8 +101,55 @@ int main(void)
     memcpy(slot_id, slot_access.slot_id, sizeof(slot_id));
     scpefe_unlocked_container_destroy(unlocked);
 
+    static const char temporary[] = "temporary invite passphrase with words";
+    static const char invited[] = "claimed invite passphrase with words";
+    const scpefe_invitation_create_v1 invitation = {
+        sizeof(invitation), container, container_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        (const uint8_t *)temporary, sizeof(temporary) - 1,
+        1, 0, 0, "Colleague", strlen("Colleague"),
+    };
+    size_t invited_size = 0;
+    CHECK(scpefe_password_container_add_invitation(&invitation, NULL, 0,
+        &invited_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *with_invitation = (uint8_t *)malloc(invited_size);
+    CHECK(with_invitation != NULL);
+    CHECK(scpefe_password_container_add_invitation(&invitation,
+        with_invitation, invited_size, &invited_size) == SCPEFE_STATUS_OK);
+    const scpefe_invitation_claim_v1 claim = {
+        sizeof(claim), with_invitation, invited_size,
+        (const uint8_t *)temporary, sizeof(temporary) - 1,
+        (const uint8_t *)invited, sizeof(invited) - 1,
+        "Colleague", strlen("Colleague"),
+        "colleague@example.test", strlen("colleague@example.test"),
+    };
+    size_t claimed_size = 0;
+    CHECK(scpefe_password_container_claim_invitation(&claim, NULL, 0,
+        &claimed_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *claimed = (uint8_t *)malloc(claimed_size);
+    CHECK(claimed != NULL);
+    CHECK(scpefe_password_container_claim_invitation(&claim,
+        claimed, claimed_size, &claimed_size) == SCPEFE_STATUS_OK);
+    uint8_t session[SCPEFE_LEASE_SESSION_ID_SIZE];
+    memset(session, 0x5a, sizeof(session));
+    const scpefe_editing_lease_update_v1 lease_update = {
+        sizeof(lease_update), claimed, claimed_size,
+        (const uint8_t *)owner, sizeof(owner) - 1,
+        {sizeof(scpefe_editing_lease_v1), 1, session, sizeof(session),
+            7, 1726747250000u, 600000,
+            "Ada", 3, "ada@example.test", strlen("ada@example.test"),
+            "Ada's PC", strlen("Ada's PC")},
+    };
+    size_t source_size = 0;
+    CHECK(scpefe_editing_lease_update(&lease_update, NULL, 0, &source_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    uint8_t *source = (uint8_t *)malloc(source_size);
+    CHECK(source != NULL);
+    CHECK(scpefe_editing_lease_update(&lease_update, source, source_size,
+        &source_size) == SCPEFE_STATUS_OK);
+
     const scpefe_manual_save_v1 save = {
-        sizeof(scpefe_manual_save_v1), container, container_size,
+        sizeof(scpefe_manual_save_v1), source, source_size,
         (const uint8_t *)owner, sizeof(owner) - 1,
         "Grace Hopper", strlen("Grace Hopper"),
         "grace@example.test", strlen("grace@example.test"),
@@ -114,11 +161,78 @@ int main(void)
         == SCPEFE_STATUS_BUFFER_TOO_SMALL);
     uint8_t *saved = (uint8_t *)malloc(saved_size);
     CHECK(saved != NULL);
+    memset(saved, 0x5a, saved_size);
+    size_t required_size = 0;
+    CHECK(scpefe_manual_save(&save, saved, saved_size - 1, &required_size)
+        == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+    CHECK(required_size == saved_size);
+    for (size_t index = 0; index < saved_size; ++index)
+        CHECK(saved[index] == 0x5a);
     CHECK(scpefe_manual_save(&save, saved, saved_size, &saved_size)
         == SCPEFE_STATUS_OK);
     CHECK(inspect_saved(saved, saved_size, owner, document_id, slot_id, 1) == 0);
     CHECK(inspect_saved(saved, saved_size, recovery, document_id, slot_id, 0) == 0);
+    CHECK(inspect_saved(saved, saved_size, invited, document_id, slot_id, 0) == 0);
 
+    CHECK(scpefe_password_container_unlock(saved, saved_size,
+        (const uint8_t *)owner, sizeof(owner) - 1, &unlocked)
+        == SCPEFE_STATUS_OK);
+    scpefe_editing_lease_v1 lease_view = {0};
+    lease_view.struct_size = sizeof(lease_view);
+    CHECK(scpefe_unlocked_container_editing_lease(unlocked, &lease_view)
+        == SCPEFE_STATUS_OK);
+    CHECK(lease_view.active == 1 && lease_view.heartbeat_counter == 7);
+    CHECK(lease_view.holder_utc_ms == 1726747250000u);
+    CHECK(memcmp(lease_view.session_id, session, sizeof(session)) == 0);
+    CHECK(lease_view.holder_name_size == 3
+        && memcmp(lease_view.holder_name, "Ada", 3) == 0);
+    CHECK(lease_view.holder_email_size == strlen("ada@example.test")
+        && memcmp(lease_view.holder_email, "ada@example.test",
+            lease_view.holder_email_size) == 0);
+    CHECK(lease_view.device_name_size == strlen("Ada's PC")
+        && memcmp(lease_view.device_name, "Ada's PC",
+            lease_view.device_name_size) == 0);
+    size_t managed_count = 0;
+    CHECK(scpefe_unlocked_container_managed_slot_count(unlocked, &managed_count)
+        == SCPEFE_STATUS_OK);
+    CHECK(managed_count == 1);
+    scpefe_managed_slot_v1 managed = {0};
+    managed.struct_size = sizeof(managed);
+    CHECK(scpefe_unlocked_container_managed_slot(unlocked, 0, &managed)
+        == SCPEFE_STATUS_OK);
+    CHECK(managed.permissions_known == 1 && managed.can_edit == 1);
+    CHECK(managed.identity_known == 1 && managed.must_be_changed == 0);
+    CHECK(managed.identity_name_size == strlen("Colleague"));
+    CHECK(memcmp(managed.identity_name, "Colleague",
+        managed.identity_name_size) == 0);
+    scpefe_unlocked_container_destroy(unlocked);
+
+    scpefe_manual_save_v1 invalid_save = save;
+    static const char wrong[] = "wrong passphrase with independent words";
+    memset(saved, 0x3c, saved_size);
+    invalid_save.password = (const uint8_t *)wrong;
+    invalid_save.password_size = sizeof(wrong) - 1;
+    CHECK(scpefe_manual_save(&invalid_save, saved, saved_size, &required_size)
+        == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+    uint8_t *corrupt = (uint8_t *)malloc(source_size);
+    CHECK(corrupt != NULL);
+    memcpy(corrupt, source, source_size);
+    corrupt[source_size - 1] ^= 1;
+    invalid_save = save;
+    invalid_save.container = corrupt;
+    CHECK(scpefe_manual_save(&invalid_save, saved, saved_size, &required_size)
+        == SCPEFE_STATUS_AUTHENTICATION_FAILED);
+    invalid_save = save;
+    invalid_save.container_size = source_size - 1;
+    CHECK(scpefe_manual_save(&invalid_save, saved, saved_size, &required_size)
+        == SCPEFE_STATUS_MALFORMED_CONTAINER);
+    for (size_t index = 0; index < saved_size; ++index)
+        CHECK(saved[index] == 0x3c);
+
+    free(corrupt);
+    free(source);
+    free(claimed);
+    free(with_invitation);
     free(saved);
     free(container);
     return 0;

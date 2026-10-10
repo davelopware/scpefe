@@ -32,6 +32,7 @@ else()
         src/abi/container_abi.cpp
         src/abi/context_abi.cpp
         src/container/password_container.cpp
+        src/container/password_slot_lifecycle.cpp
         src/container/recoverable_password_container.cpp
         src/container/unlocked_container_data.cpp
         src/core/context.cpp
@@ -40,6 +41,7 @@ else()
         src/document/compaction.cpp
         src/document/manual_save.cpp
         src/document/provisional_save.cpp
+        src/document/revision_transition.cpp
         src/document/merge_save.cpp
         src/document/migration.cpp
         src/security/password_strength.cpp
@@ -214,6 +216,22 @@ if(BUILD_TESTING)
         add_executable(scpefe_revision_test tests/revision_test.c)
         target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
 
+        set(SCPEFE_REVISION_OWNERSHIP_SOURCES ${SCPEFE_PORTABLE_FORMAT_SOURCES})
+        list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/revision_abi.cpp)
+        add_executable(scpefe_revision_ownership_test
+            tests/revision_ownership_test.cpp
+            ${SCPEFE_REVISION_OWNERSHIP_SOURCES})
+        target_compile_features(scpefe_revision_ownership_test PRIVATE cxx_std_20)
+        target_include_directories(scpefe_revision_ownership_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+        add_executable(scpefe_managed_slot_ownership_test
+            tests/managed_slot_ownership_test.cpp
+            src/container/unlocked_container_data.cpp)
+        target_compile_features(scpefe_managed_slot_ownership_test PRIVATE cxx_std_20)
+        target_include_directories(scpefe_managed_slot_ownership_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
         add_executable(scpefe_container_test tests/container_test.c)
         target_link_libraries(scpefe_container_test PRIVATE SCPEFE::scpefe)
 
@@ -226,10 +244,10 @@ if(BUILD_TESTING)
         add_executable(scpefe_manual_save_test tests/manual_save_test.c)
         target_link_libraries(scpefe_manual_save_test PRIVATE SCPEFE::scpefe)
         add_executable(scpefe_provisional_save_test tests/provisional_save_test.c)
-        target_link_libraries(scpefe_provisional_save_test PRIVATE SCPEFE::scpefe)
+        target_link_libraries(scpefe_provisional_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
 
         add_executable(scpefe_merge_save_test tests/merge_save_test.c)
-        target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe)
+        target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
 
         add_executable(scpefe_compaction_test tests/compaction_test.c)
         target_link_libraries(scpefe_compaction_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
@@ -244,7 +262,7 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_editing_lease_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_migration_abi_test tests/migration_abi_test.c)
-        target_link_libraries(scpefe_migration_abi_test PRIVATE SCPEFE::scpefe)
+        target_link_libraries(scpefe_migration_abi_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
 
         add_executable(scpefe_invitation_test tests/invitation_test.c)
         target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
@@ -262,8 +280,10 @@ if(BUILD_TESTING)
             COMMAND scpefe_export_surface_test $<TARGET_FILE:scpefe>
         )
         add_test(NAME scpefe.editing-lease-round-trip COMMAND scpefe_editing_lease_test)
-        add_test(NAME scpefe.migration-abi-validation COMMAND scpefe_migration_abi_test)
-        add_test(NAME scpefe.invitation-claim COMMAND scpefe_invitation_test)
+        add_test(NAME scpefe.migration-abi-validation
+            COMMAND scpefe_migration_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.invitation-claim
+            COMMAND scpefe_invitation_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -277,6 +297,10 @@ if(BUILD_TESTING)
             COMMAND scpefe_revision_test
                 "${CMAKE_CURRENT_BINARY_DIR}/snapshot-revision-v1.cbor"
         )
+        add_test(NAME scpefe.revision-ownership
+            COMMAND scpefe_revision_ownership_test)
+        add_test(NAME scpefe.managed-slot-ownership
+            COMMAND scpefe_managed_slot_ownership_test)
         add_test(
             NAME scpefe.diagnostic-revision
             COMMAND scpefe_diagnostic revision

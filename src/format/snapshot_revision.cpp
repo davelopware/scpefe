@@ -7,8 +7,10 @@
 #include "format/text_validation.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -23,14 +25,37 @@ void clear_identity_string(std::string &value) noexcept
     value.clear();
 }
 
-void read_identity_text(CborReader &reader, std::string &output)
+void clear_bytes(std::vector<std::uint8_t> &value) noexcept
+{
+    if (!value.empty()) sodium_memzero(value.data(), value.size());
+    value.clear();
+}
+
+void move_string_without_copy(std::string &destination, std::string &source) noexcept
+{
+    // Short strings can live inside the source object, so copy and wipe them.
+    // Larger strings keep their allocation, even when the destination has room.
+    if (source.size() <= std::string{}.capacity()) {
+        destination.resize(source.size());
+        if (!source.empty()) {
+            std::memcpy(destination.data(), source.data(), source.size());
+            sodium_memzero(source.data(), source.size());
+        }
+        source.clear();
+        return;
+    }
+    destination.swap(source);
+    clear_identity_string(source);
+}
+
+void read_owned_text(CborReader &reader, std::string &output)
 {
     std::string temporary = reader.text();
     struct Guard {
         std::string &value;
         ~Guard() { clear_identity_string(value); }
     } guard{temporary};
-    output = temporary;
+    move_string_without_copy(output, temporary);
 }
 
 void read_slot_identifier(CborReader &reader, std::vector<std::uint8_t> &output)
@@ -40,11 +65,10 @@ void read_slot_identifier(CborReader &reader, std::vector<std::uint8_t> &output)
         std::vector<std::uint8_t> &value;
         ~Guard()
         {
-            if (!value.empty()) sodium_memzero(value.data(), value.size());
-            value.clear();
+            clear_bytes(value);
         }
     } guard{temporary};
-    output = temporary;
+    output = std::move(temporary);
 }
 
 std::string revision_key(const std::uint8_t *value)
@@ -93,14 +117,68 @@ void validate_ancestor_graph(
 
 } // namespace
 
+static_assert(!std::is_copy_constructible_v<SnapshotRevisionData>);
+static_assert(!std::is_copy_assignable_v<SnapshotRevisionData>);
+static_assert(std::is_nothrow_move_constructible_v<SnapshotRevisionData>);
+static_assert(std::is_nothrow_move_assignable_v<SnapshotRevisionData>);
+static_assert(std::is_nothrow_move_assignable_v<std::string>);
+static_assert(std::is_nothrow_swappable_v<std::string>);
+static_assert(std::is_nothrow_move_assignable_v<std::vector<std::uint8_t>>);
+static_assert(std::is_nothrow_move_assignable_v<std::vector<RevisionGraphNodeData>>);
+
+SnapshotRevisionData::SnapshotRevisionData(SnapshotRevisionData &&other) noexcept
+{
+    *this = std::move(other);
+}
+
+SnapshotRevisionData &SnapshotRevisionData::operator=(
+    SnapshotRevisionData &&other) noexcept
+{
+    if (this == &other) return *this;
+    clear();
+    parent_revision_ids = std::move(other.parent_revision_ids);
+    timestamp_ms = other.timestamp_ms;
+    slot_id = std::move(other.slot_id);
+    move_string_without_copy(slot_identity_name, other.slot_identity_name);
+    move_string_without_copy(slot_identity_email, other.slot_identity_email);
+    move_string_without_copy(client_profile_name, other.client_profile_name);
+    move_string_without_copy(client_profile_email, other.client_profile_email);
+    move_string_without_copy(device_name, other.device_name);
+    content_hash = std::move(other.content_hash);
+    move_string_without_copy(content, other.content);
+    ancestor_graph = std::move(other.ancestor_graph);
+    manually_sealed = other.manually_sealed;
+    provisional_base_revision = std::move(other.provisional_base_revision);
+    move_string_without_copy(event_type, other.event_type);
+    move_string_without_copy(event_detail, other.event_detail);
+    other.clear();
+    return *this;
+}
+
 SnapshotRevisionData::~SnapshotRevisionData()
 {
-    if (!slot_id.empty()) sodium_memzero(slot_id.data(), slot_id.size());
-    slot_id.clear();
+    clear();
+}
+
+void SnapshotRevisionData::clear() noexcept
+{
+    clear_bytes(parent_revision_ids);
+    timestamp_ms = 0;
+    clear_bytes(slot_id);
     clear_identity_string(slot_identity_name);
     clear_identity_string(slot_identity_email);
     clear_identity_string(client_profile_name);
     clear_identity_string(client_profile_email);
+    clear_identity_string(device_name);
+    clear_bytes(content_hash);
+    clear_identity_string(content);
+    for (auto &node : ancestor_graph) {
+        sodium_memzero(node.revision_id.data(), node.revision_id.size());
+        clear_bytes(node.parent_revision_ids);
+    }
+    ancestor_graph.clear();
+    manually_sealed = true;
+    clear_bytes(provisional_base_revision);
     clear_identity_string(event_type);
     clear_identity_string(event_detail);
 }
@@ -259,11 +337,11 @@ SnapshotRevision SnapshotRevision::decode(
     }
     reader.expect_unsigned(3); revision.data_.timestamp_ms = reader.unsigned_integer();
     reader.expect_unsigned(4); read_slot_identifier(reader, revision.data_.slot_id);
-    reader.expect_unsigned(5); read_identity_text(reader, revision.data_.slot_identity_name);
-    reader.expect_unsigned(6); read_identity_text(reader, revision.data_.slot_identity_email);
-    reader.expect_unsigned(7); read_identity_text(reader, revision.data_.client_profile_name);
-    reader.expect_unsigned(8); read_identity_text(reader, revision.data_.client_profile_email);
-    reader.expect_unsigned(9); revision.data_.device_name = reader.text();
+    reader.expect_unsigned(5); read_owned_text(reader, revision.data_.slot_identity_name);
+    reader.expect_unsigned(6); read_owned_text(reader, revision.data_.slot_identity_email);
+    reader.expect_unsigned(7); read_owned_text(reader, revision.data_.client_profile_name);
+    reader.expect_unsigned(8); read_owned_text(reader, revision.data_.client_profile_email);
+    reader.expect_unsigned(9); read_owned_text(reader, revision.data_.device_name);
     reader.expect_unsigned(10); revision.data_.content_hash = reader.bytes(content_hash_size);
     reader.expect_unsigned(11);
     if (reader.map(2) != 3) throw RevisionFailure{RevisionError::malformed_cbor};
@@ -271,7 +349,7 @@ SnapshotRevision SnapshotRevision::decode(
     if (reader.unsigned_integer() != 0) throw RevisionFailure{RevisionError::unsupported_format};
     reader.expect_unsigned(2);
     const std::uint64_t uncompressed_size = reader.unsigned_integer();
-    reader.expect_unsigned(3); revision.data_.content = reader.text();
+    reader.expect_unsigned(3); read_owned_text(reader, revision.data_.content);
     if (uncompressed_size != revision.data_.content.size()
         || !valid_canonical_document_text(
             revision.data_.content.data(), revision.data_.content.size()
@@ -330,12 +408,12 @@ SnapshotRevision SnapshotRevision::decode(
     }
     if (remaining_fields != 0 && reader.peek_unsigned() == 15) {
         reader.expect_unsigned(15);
-        read_identity_text(reader, revision.data_.event_type);
+        read_owned_text(reader, revision.data_.event_type);
         --remaining_fields;
     }
     if (remaining_fields != 0 && reader.peek_unsigned() == 16) {
         reader.expect_unsigned(16);
-        read_identity_text(reader, revision.data_.event_detail);
+        read_owned_text(reader, revision.data_.event_detail);
         --remaining_fields;
     }
     if (remaining_fields != 0 || !reader.finished())

@@ -10,7 +10,7 @@ namespace scpefe::document {
 /* Seals an edited child or a content-preserving identity reconciliation. */
 class ManualSave {
 public:
-    /* Creates a replacement container containing the attributed child revision. */
+    /* Publishes an attributed child built by the shared revision transition. */
     static std::vector<std::uint8_t> create(
         const std::uint8_t *container,
         std::size_t container_size,

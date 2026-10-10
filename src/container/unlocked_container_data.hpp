@@ -21,8 +21,18 @@ struct EditingLeaseData {
 
 /* Authenticated administrative metadata for one ordinary invitation slot. */
 struct ManagedSlotData {
+    /* Creates empty managed-slot metadata. */
+    ManagedSlotData() = default;
+    /* Transfers owned slot identifiers and identity values. */
+    ManagedSlotData(ManagedSlotData &&other) noexcept;
+    /* Replaces owned metadata and clears the previous values. */
+    ManagedSlotData &operator=(ManagedSlotData &&other) noexcept;
     /* Wipes decrypted administrative identity values before releasing storage. */
     ~ManagedSlotData();
+    /* Prevents duplicating owned slot identity through construction. */
+    ManagedSlotData(const ManagedSlotData &) = delete;
+    /* Prevents duplicating owned slot identity through assignment. */
+    ManagedSlotData &operator=(const ManagedSlotData &) = delete;
 
     std::array<std::uint8_t, 16> slot_id{};
     std::array<std::uint8_t, 16> actual_slot_id{};
@@ -34,6 +44,10 @@ struct ManagedSlotData {
     bool identity_known{true};
     std::string identity_name;
     std::string identity_email;
+
+private:
+    /* Wipes all currently owned slot metadata in place. */
+    void clear() noexcept;
 };
 
 /* Authenticated semantic values recovered from one encrypted container. */

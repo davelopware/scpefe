@@ -1,9 +1,9 @@
 #include "container/recoverable_password_container.hpp"
 
 #include "container/container_error.hpp"
+#include "container/password_slot_lifecycle.hpp"
 #include "format/revision_error.hpp"
 #include "format/snapshot_revision.hpp"
-#include "security/password_strength.hpp"
 
 #include <algorithm>
 #include <array>
@@ -559,14 +559,8 @@ std::array<std::uint8_t, 16> legacy_management_id(
 ManagedSlotData legacy_managed_metadata(const InvitationRecord &record,
     const std::uint8_t *document_key, std::size_t index)
 {
-    ManagedSlotData result;
-    result.slot_id = legacy_management_id(record, document_key);
-    result.slot_id_known = false;
-    result.permissions_known = false;
-    result.must_be_changed_known = false;
-    result.identity_known = false;
-    result.identity_name = "Legacy invitation " + std::to_string(index + 1);
-    return result;
+    return PasswordSlotLifecycle::legacy_invitation(
+        legacy_management_id(record, document_key), index);
 }
 
 std::size_t invitation_record_end(const InvitationRecord &record)
@@ -736,66 +730,6 @@ void require_valid_slot_state(const std::uint8_t *container,
     }
 }
 
-void rerandomize_snapshot(const std::uint8_t *container,
-    std::size_t container_size, const ContainerLayout &layout,
-    const std::uint8_t *document_key, std::vector<std::uint8_t> &output,
-    std::size_t output_snapshot_offset,
-    const std::vector<std::uint8_t> *identity_upgrade = nullptr,
-    bool replace_identity = false)
-{
-    const auto encrypted_size = read_u64(container + encrypted_snapshot_size_offset);
-    if (encrypted_size < tag_size || encrypted_size > container_size
-        || layout.snapshot_offset + encrypted_size != container_size)
-        throw ContainerFailure{ContainerError::malformed_container};
-    std::array<std::uint8_t, key_size> snapshot_key{};
-    std::vector<std::uint8_t> plaintext(encrypted_size - tag_size);
-    const auto snapshot_key_clear = clear_on_scope_exit(snapshot_key);
-    const auto plaintext_clear = clear_on_scope_exit(plaintext);
-    derive_snapshot_key(snapshot_key, document_key);
-    unsigned long long written = 0;
-    if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-        plaintext.data(), &written, nullptr,
-        container + layout.snapshot_offset, encrypted_size,
-        container, header_size, container + snapshot_nonce_offset,
-        snapshot_key.data()) != 0 || written != plaintext.size()) {
-        throw ContainerFailure{ContainerError::authentication_failed};
-    }
-    if (identity_upgrade != nullptr && !identity_upgrade->empty()) {
-        EditingLeaseData lease;
-        const auto lease_size = decode_lease(plaintext.data() + document_id_size,
-            plaintext.size() - document_id_size, lease);
-        std::array<std::uint8_t, 16> existing_slot{};
-        std::string existing_name, existing_email;
-        const auto existing_name_clear = clear_on_scope_exit(existing_name);
-        const auto existing_email_clear = clear_on_scope_exit(existing_email);
-        const auto existing_size = decode_owner_identity(
-            plaintext.data() + document_id_size + lease_size,
-            plaintext.size() - document_id_size - lease_size,
-            existing_slot, existing_name, existing_email);
-        const auto identity_offset = document_id_size + lease_size;
-        if (existing_size == 0 || replace_identity) {
-            if (existing_size != 0) {
-                plaintext.erase(plaintext.begin() + identity_offset,
-                    plaintext.begin() + identity_offset + existing_size);
-            }
-            plaintext.insert(plaintext.begin() + identity_offset,
-                identity_upgrade->begin(), identity_upgrade->end());
-        }
-    }
-    const auto replacement_encrypted_size = plaintext.size() + tag_size;
-    output.resize(output_snapshot_offset + replacement_encrypted_size);
-    randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
-    write_u64(output.data() + encrypted_snapshot_size_offset,
-        replacement_encrypted_size);
-    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
-        output.data() + output_snapshot_offset, &written,
-        plaintext.data(), plaintext.size(), output.data(), header_size, nullptr,
-        output.data() + snapshot_nonce_offset, snapshot_key.data()) != 0
-        || written != replacement_encrypted_size) {
-        throw ContainerFailure{ContainerError::crypto_error};
-    }
-}
-
 void authenticate_slot_state(std::vector<std::uint8_t> &container,
     const std::uint8_t *document_key)
 {
@@ -805,6 +739,136 @@ void authenticate_slot_state(std::vector<std::uint8_t> &container,
     const auto authentication_clear = clear_on_scope_exit(authentication);
     std::copy(authentication.begin(), authentication.end(),
         container.begin() + layout.slot_state_auth_offset);
+}
+
+enum class RewriteVerification {
+    preserve_access,
+    preserve_access_and_head,
+    claimed_access_and_head,
+    updated_access_and_head,
+    removed_access_and_head
+};
+
+// Owns the authenticated source, sensitive rewrite material, and complete candidate.
+// The mutation sees plaintext only after the entire source has been validated.
+template<typename Mutate>
+std::vector<std::uint8_t> rewrite_authenticated_container_with_records(
+    const std::uint8_t *container, std::size_t container_size,
+    const std::uint8_t *password, std::size_t password_size,
+    const std::uint8_t *verification_password,
+    std::size_t verification_password_size, RewriteVerification verification,
+    Mutate &&mutate)
+{
+    if (!RecoverablePasswordContainer::recognizes(container, container_size)
+        || container_size < header_size
+        || !std::equal(magic.begin(), magic.end(), container)
+        || read_u32(container + 8) != format_version)
+        throw ContainerFailure{ContainerError::unsupported_format};
+
+    // unlock validates every authenticated component, including managed slot
+    // metadata and the embedded revision, before any candidate is assembled.
+    const auto current = RecoverablePasswordContainer::unlock(container,
+        container_size, password, password_size, format::RevisionLimits::defaults());
+    const auto layout = read_layout(container, container_size);
+    require_sodium();
+    auto document_key = authenticated_document_key(container, container_size,
+        password, password_size, layout);
+    const auto document_key_clear = clear_on_scope_exit(document_key);
+    std::array<std::uint8_t, key_size> snapshot_key{};
+    const auto snapshot_key_clear = clear_on_scope_exit(snapshot_key);
+    derive_snapshot_key(snapshot_key, document_key.data());
+
+    const auto old_encrypted_size = read_u64(
+        container + encrypted_snapshot_size_offset);
+    std::vector<std::uint8_t> plaintext(old_encrypted_size - tag_size);
+    const auto plaintext_clear = clear_on_scope_exit(plaintext);
+    unsigned long long written = 0;
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(plaintext.data(), &written,
+        nullptr, container + layout.snapshot_offset, old_encrypted_size,
+        container, header_size, container + snapshot_nonce_offset,
+        snapshot_key.data()) != 0 || written != plaintext.size())
+        throw ContainerFailure{ContainerError::authentication_failed};
+    if (plaintext.size() < document_id_size
+        || !std::equal(current.document_id.begin(), current.document_id.end(),
+            plaintext.begin()))
+        throw ContainerFailure{ContainerError::malformed_container};
+
+    std::vector<std::uint8_t> candidate(container,
+        container + layout.snapshot_offset);
+    mutate(current, plaintext, candidate, layout, document_key.data());
+    if (plaintext.size() < document_id_size
+        || !std::equal(current.document_id.begin(), current.document_id.end(),
+            plaintext.begin())
+        || plaintext.size() > std::numeric_limits<std::size_t>::max()
+            - candidate.size() - tag_size)
+        throw ContainerFailure{ContainerError::invalid_argument};
+
+    const auto output_snapshot_offset = candidate.size();
+    candidate.resize(output_snapshot_offset + plaintext.size() + tag_size);
+    randombytes_buf(candidate.data() + snapshot_nonce_offset, nonce_size);
+    write_u64(candidate.data() + encrypted_snapshot_size_offset,
+        plaintext.size() + tag_size);
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+        candidate.data() + output_snapshot_offset, &written,
+        plaintext.data(), plaintext.size(), candidate.data(), header_size,
+        nullptr, candidate.data() + snapshot_nonce_offset,
+        snapshot_key.data()) != 0 || written != plaintext.size() + tag_size)
+        throw ContainerFailure{ContainerError::crypto_error};
+    const auto candidate_layout = read_layout(candidate.data(), candidate.size());
+    if (!candidate_layout.invitations.empty())
+        authenticate_slot_state(candidate, document_key.data());
+
+    // Do not expose a candidate until the ordinary reader authenticates it.
+    if (verification == RewriteVerification::removed_access_and_head) {
+        std::vector<std::uint8_t> decrypted(plaintext.size());
+        const auto decrypted_clear = clear_on_scope_exit(decrypted);
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(decrypted.data(),
+                &written, nullptr,
+                candidate.data() + candidate_layout.snapshot_offset,
+                plaintext.size() + tag_size, candidate.data(), header_size,
+                candidate.data() + snapshot_nonce_offset,
+                snapshot_key.data()) != 0 || written != decrypted.size()
+            || decrypted != plaintext)
+            throw ContainerFailure{ContainerError::crypto_error};
+        try {
+            auto unexpected = RecoverablePasswordContainer::unlock(candidate.data(),
+                candidate.size(), verification_password,
+                verification_password_size, format::RevisionLimits::defaults());
+            throw ContainerFailure{ContainerError::crypto_error};
+        } catch (const ContainerFailure &failure) {
+            if (failure.error != ContainerError::authentication_failed) throw;
+        }
+    } else {
+        const auto verified = RecoverablePasswordContainer::unlock(candidate.data(),
+            candidate.size(), verification_password, verification_password_size,
+            format::RevisionLimits::defaults());
+        if (verified.document_id != current.document_id
+            || verified.slot_id != current.slot_id
+            || (verification != RewriteVerification::updated_access_and_head
+                && verified.permissions != current.permissions)
+            || verified.must_be_changed !=
+                (verification == RewriteVerification::claimed_access_and_head
+                    ? false : current.must_be_changed)
+            || (verification != RewriteVerification::preserve_access
+                && verified.encoded_snapshot_revision
+                != current.encoded_snapshot_revision))
+            throw ContainerFailure{ContainerError::crypto_error};
+    }
+    return candidate;
+}
+
+template<typename Mutate>
+std::vector<std::uint8_t> rewrite_authenticated_container(
+    const std::uint8_t *container, std::size_t container_size,
+    const std::uint8_t *password, std::size_t password_size, Mutate &&mutate)
+{
+    return rewrite_authenticated_container_with_records(container, container_size,
+        password, password_size, password, password_size,
+        RewriteVerification::preserve_access,
+        [&](const UnlockedContainerData &current,
+            std::vector<std::uint8_t> &plaintext,
+            std::vector<std::uint8_t> &, const ContainerLayout &,
+            const std::uint8_t *) { mutate(current, plaintext); });
 }
 
 } // namespace
@@ -1118,138 +1182,71 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_snapshot(
 {
     validate_snapshot(encoded_snapshot_revision, encoded_snapshot_revision_size,
         format::RevisionLimits::defaults(), ContainerError::invalid_argument);
-    if (!recognizes(container, container_size) || container_size < header_size) {
-        throw ContainerFailure{ContainerError::unsupported_format};
-    }
-    if (!std::equal(magic.begin(), magic.end(), container)
-        || read_u32(container + 8) != format_version) {
-        throw ContainerFailure{ContainerError::unsupported_format};
-    }
-    const auto layout = read_layout(container, container_size);
-    const std::uint32_t slot_count = layout.base_slot_count;
-    auto current = unlock(container, container_size, password, password_size,
-        format::RevisionLimits::defaults());
-    if (current.must_be_changed
-        || ((current.permissions & 1u) == 0 && !allow_identity_only))
-        throw ContainerFailure{ContainerError::invalid_argument};
+    return rewrite_authenticated_container(container, container_size,
+        password, password_size,
+        [&](const UnlockedContainerData &current,
+            std::vector<std::uint8_t> &plaintext) {
+            if (current.must_be_changed
+                || ((current.permissions & 1u) == 0 && !allow_identity_only))
+                throw ContainerFailure{ContainerError::invalid_argument};
 
-    require_sodium();
-    std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
-    std::array<std::uint8_t, slot_plaintext_size> slot{};
-    std::vector<std::uint8_t> plaintext;
-    try {
-        const auto old_aad = slot_additional_data(container);
-        bool authenticated = false;
-        unsigned long long written = 0;
-        for (std::uint32_t index = 0; index < slot_count; ++index) {
-            const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
-            const std::size_t nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
-            derive_wrapping_key(wrapping_key, password, password_size, container + salt);
-            const auto *wrapper_aad = layout.base_wrapper_versions[index]
-                    == legacy_format_version
-                ? layout.legacy_header : old_aad.data();
-            if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-                slot.data(), &written, nullptr,
-                container + header_size + index * wrapped_slot_size,
-                wrapped_slot_size, wrapper_aad, header_size,
-                container + nonce, wrapping_key.data()) == 0) {
-                authenticated = true;
-                break;
-            }
-        }
-        std::vector<std::uint8_t> invited;
-        const auto invited_clear = clear_on_scope_exit(invited);
-        if (!authenticated) {
-            for (const auto &record : layout.invitations) {
-                if (decrypt_invitation(record, password, password_size,
-                    wrapping_key, invited)) {
-                    std::copy_n(invited.data(), key_size, slot.begin());
-                    authenticated = true;
-                    break;
+            EditingLeaseData old_lease;
+            const auto old_holder_name_clear =
+                clear_on_scope_exit(old_lease.holder_name);
+            const auto old_holder_email_clear =
+                clear_on_scope_exit(old_lease.holder_email);
+            const auto old_device_name_clear =
+                clear_on_scope_exit(old_lease.device_name);
+            const auto lease_size = decode_lease(
+                plaintext.data() + document_id_size,
+                plaintext.size() - document_id_size, old_lease);
+            std::array<std::uint8_t, 16> owner_identity_slot{};
+            std::string owner_identity_name, owner_identity_email;
+            const auto owner_identity_name_clear =
+                clear_on_scope_exit(owner_identity_name);
+            const auto owner_identity_email_clear =
+                clear_on_scope_exit(owner_identity_email);
+            const auto identity_size = decode_owner_identity(
+                plaintext.data() + document_id_size + lease_size,
+                plaintext.size() - document_id_size - lease_size,
+                owner_identity_slot, owner_identity_name, owner_identity_email);
+            auto encoded_lease = encode_lease(current.editing_lease);
+            std::vector<std::uint8_t> identity;
+            const auto identity_clear = clear_on_scope_exit(identity);
+            if (identity_size != 0) {
+                identity.assign(plaintext.begin() + document_id_size + lease_size,
+                    plaintext.begin() + document_id_size + lease_size + identity_size);
+            } else if (current.owner_slot) {
+                const auto replacement_revision = format::SnapshotRevision::decode(
+                    encoded_snapshot_revision, encoded_snapshot_revision_size,
+                    format::RevisionLimits::defaults());
+                const auto &replacement_data = replacement_revision.data();
+                if (replacement_data.slot_id.size() == current.slot_id.size()
+                    && std::equal(replacement_data.slot_id.begin(),
+                        replacement_data.slot_id.end(), current.slot_id.begin())) {
+                    identity = encode_owner_identity(current.slot_id,
+                        replacement_data.slot_identity_name,
+                        replacement_data.slot_identity_email);
                 }
             }
-        }
-        if (!authenticated) throw ContainerFailure{ContainerError::authentication_failed};
-        auto encoded_lease = encode_lease(current.editing_lease);
-        const auto encoded_lease_clear = clear_on_scope_exit(encoded_lease);
-        const std::uint64_t old_encrypted_size = read_u64(
-            container + encrypted_snapshot_size_offset);
-        const std::size_t old_snapshot_offset = layout.snapshot_offset;
-        if (old_encrypted_size < document_id_size + tag_size
-            || old_snapshot_offset + old_encrypted_size != container_size) {
-            throw ContainerFailure{ContainerError::malformed_container};
-        }
-        derive_snapshot_key(snapshot_key, slot.data());
-        plaintext.resize(old_encrypted_size - tag_size);
-        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-            plaintext.data(), &written, nullptr, container + old_snapshot_offset,
-            old_encrypted_size, container, header_size,
-            container + snapshot_nonce_offset, snapshot_key.data()) != 0
-            || written != plaintext.size()) {
-            throw ContainerFailure{ContainerError::authentication_failed};
-        }
-        EditingLeaseData old_lease;
-        const auto old_lease_size = decode_lease(plaintext.data() + document_id_size,
-            plaintext.size() - document_id_size, old_lease);
-        std::array<std::uint8_t, 16> owner_identity_slot{};
-        std::string owner_identity_name, owner_identity_email;
-        const auto owner_identity_name_clear = clear_on_scope_exit(owner_identity_name);
-        const auto owner_identity_email_clear = clear_on_scope_exit(owner_identity_email);
-        const auto identity_size = decode_owner_identity(
-            plaintext.data() + document_id_size + old_lease_size,
-            plaintext.size() - document_id_size - old_lease_size,
-            owner_identity_slot, owner_identity_name, owner_identity_email);
-        std::vector<std::uint8_t> identity;
-        const auto identity_clear = clear_on_scope_exit(identity);
-        if (identity_size != 0) {
-            identity.assign(plaintext.begin() + document_id_size + old_lease_size,
-                plaintext.begin() + document_id_size + old_lease_size + identity_size);
-        } else if (current.owner_slot) {
-            const auto replacement_revision = format::SnapshotRevision::decode(
-                encoded_snapshot_revision, encoded_snapshot_revision_size,
-                format::RevisionLimits::defaults());
-            const auto &replacement_data = replacement_revision.data();
-            if (replacement_data.slot_id.size() == current.slot_id.size()
-                && std::equal(replacement_data.slot_id.begin(),
-                    replacement_data.slot_id.end(), current.slot_id.begin())) {
-                identity = encode_owner_identity(current.slot_id,
-                    replacement_data.slot_identity_name,
-                    replacement_data.slot_identity_email);
-            }
-        }
-        const std::size_t new_size = layout.snapshot_offset + document_id_size
-            + encoded_lease.size() + identity.size()
-            + encoded_snapshot_revision_size + tag_size;
-        std::vector<std::uint8_t> output(new_size);
-        std::copy_n(container, layout.snapshot_offset, output.begin());
-        randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
-        write_u64(output.data() + encrypted_snapshot_size_offset,
-            document_id_size + encoded_lease.size() + identity.size()
-                + encoded_snapshot_revision_size + tag_size);
-        plaintext.resize(document_id_size + encoded_lease.size() + identity.size()
-            + encoded_snapshot_revision_size);
-        std::copy(encoded_lease.begin(), encoded_lease.end(),
-            plaintext.begin() + document_id_size);
-        std::copy(identity.begin(), identity.end(),
-            plaintext.begin() + document_id_size + encoded_lease.size());
-        std::copy(encoded_snapshot_revision,
-            encoded_snapshot_revision + encoded_snapshot_revision_size,
-            plaintext.begin() + document_id_size + encoded_lease.size() + identity.size());
-        const std::size_t new_snapshot_offset = layout.snapshot_offset;
-        if (crypto_aead_xchacha20poly1305_ietf_encrypt(
-            output.data() + new_snapshot_offset, &written,
-            plaintext.data(), plaintext.size(), output.data(), header_size, nullptr,
-            output.data() + snapshot_nonce_offset, snapshot_key.data()) != 0
-            || written != plaintext.size() + tag_size) {
-            throw ContainerFailure{ContainerError::crypto_error};
-        }
-        if (!layout.invitations.empty()) authenticate_slot_state(output, slot.data());
-        clear(wrapping_key, snapshot_key, slot, plaintext);
-        return output;
-    } catch (...) {
-        clear(wrapping_key, snapshot_key, slot, plaintext);
-        throw;
-    }
+            const auto encoded_lease_clear = clear_on_scope_exit(encoded_lease);
+            const auto preserved_size = document_id_size + encoded_lease.size()
+                + identity.size();
+            if (encoded_snapshot_revision_size
+                > std::numeric_limits<std::size_t>::max() - preserved_size)
+                throw ContainerFailure{ContainerError::invalid_argument};
+            auto replacement = build_sensitive_plaintext([&](auto &out) {
+                out.reserve(preserved_size + encoded_snapshot_revision_size);
+                out.insert(out.end(), plaintext.begin(),
+                    plaintext.begin() + document_id_size);
+                out.insert(out.end(), encoded_lease.begin(), encoded_lease.end());
+                out.insert(out.end(), identity.begin(), identity.end());
+                out.insert(out.end(), encoded_snapshot_revision,
+                    encoded_snapshot_revision + encoded_snapshot_revision_size);
+            });
+            const auto replacement_clear = clear_on_scope_exit(replacement);
+            plaintext.swap(replacement);
+        });
 }
 
 std::vector<std::uint8_t> RecoverablePasswordContainer::migrate(
@@ -1352,205 +1349,89 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::change_password(
     std::size_t new_password_size
 )
 {
-    if (security::assess_password_policy(new_password, new_password_size)
-        != security::PasswordPolicyAssessment::accepted)
-        throw ContainerFailure{ContainerError::weak_password};
-    if (!recognizes(container, container_size) || container_size < header_size)
-        throw ContainerFailure{ContainerError::malformed_container};
-    const std::uint32_t version = read_u32(container + 8);
-    const bool current = std::equal(magic.begin(), magic.end(), container);
-    if (!current || version != format_version)
-        throw ContainerFailure{ContainerError::unsupported_format};
-    if (read_u32(container + 12) != argon2id13_algorithm
-        || read_u64(container + 16) != operations_limit
-        || read_u64(container + 24) != memory_limit
-        || read_u32(container + 36) != aead_algorithm) {
-        throw ContainerFailure{ContainerError::unsupported_format};
-    }
-    const std::uint32_t slot_count = read_u32(container + slot_count_offset);
-    if ((slot_count != 1 && slot_count != 2)
-        || read_u32(container + 112) != wrapped_slot_size
-        || (slot_count == 2 && read_u32(container + 156) != wrapped_slot_size)
-        || (slot_count == 1
-            && !std::all_of(container + recovery_salt_offset,
-                container + header_size,
-                [](std::uint8_t value) { return value == 0; }))) {
-        throw ContainerFailure{ContainerError::malformed_container};
-    }
-    const auto layout = read_layout(container, container_size);
-    const std::uint64_t encrypted_size = read_u64(container + encrypted_snapshot_size_offset);
-    const std::size_t snapshot_offset = layout.snapshot_offset;
-
-    try {
-        auto probe = unlock(container, container_size, new_password, new_password_size,
-            format::RevisionLimits::defaults());
-        throw ContainerFailure{ContainerError::password_already_in_use};
-    } catch (const ContainerFailure &failure) {
-        if (failure.error != ContainerError::authentication_failed) throw;
-    }
-
-    require_sodium();
-    std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
-    std::array<std::uint8_t, slot_plaintext_size> slot{}, candidate_slot{};
-    std::vector<std::uint8_t> snapshot;
-    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
-    const auto snapshot_key_clear = clear_on_scope_exit(snapshot_key);
-    const auto slot_clear = clear_on_scope_exit(slot);
-    const auto candidate_slot_clear = clear_on_scope_exit(candidate_slot);
-    const auto snapshot_clear = clear_on_scope_exit(snapshot);
-    try {
-        const auto normalized_aad = slot_additional_data(container);
-        bool authenticated = false;
-        std::uint32_t authenticated_index = 0;
-        unsigned long long plain_size = 0;
-        for (std::uint32_t index = 0; index < slot_count; ++index) {
+    PasswordSlotLifecycle::validate_rotation_password(
+        new_password, new_password_size);
+    return rewrite_authenticated_container_with_records(container, container_size,
+        current_password, current_password_size, new_password, new_password_size,
+        RewriteVerification::preserve_access_and_head,
+        [&](const UnlockedContainerData &access, std::vector<std::uint8_t> &,
+            std::vector<std::uint8_t> &prefix, const ContainerLayout &layout,
+            const std::uint8_t *document_key) {
+        PasswordSlotLifecycle::authorize_rotation(access);
+        PasswordSlotLifecycle::require_available_password([&] {
+            try {
+                auto probe = unlock(container, container_size, new_password,
+                    new_password_size, format::RevisionLimits::defaults());
+                return true;
+            } catch (const ContainerFailure &failure) {
+                if (failure.error != ContainerError::authentication_failed) throw;
+                return false;
+            }
+        });
+        std::array<std::uint8_t, key_size> wrapping_key{};
+        const auto wrapping_clear = clear_on_scope_exit(wrapping_key);
+        unsigned long long written = 0;
+        if (access.owner_slot || access.recovery_slot) {
+            const std::size_t index = access.owner_slot ? 0 : 1;
             const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
             const std::size_t nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
+            std::array<std::uint8_t, slot_plaintext_size> slot{};
+            const auto slot_clear = clear_on_scope_exit(slot);
             derive_wrapping_key(wrapping_key, current_password,
                 current_password_size, container + salt);
-            const auto *slot_aad = layout.base_wrapper_versions[index]
+            const auto aad = slot_additional_data(container);
+            const auto *old_aad = layout.base_wrapper_versions[index]
                     == legacy_format_version
-                ? layout.legacy_header : normalized_aad.data();
-            if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-                slot.data(), &plain_size, nullptr,
-                container + header_size + index * wrapped_slot_size,
-                wrapped_slot_size, slot_aad, header_size,
-                container + nonce, wrapping_key.data()) == 0) {
-                authenticated = true;
-                authenticated_index = index;
-                break;
-            }
-        }
-        if (!authenticated) {
-            std::vector<std::uint8_t> invited;
-            const auto invited_clear = clear_on_scope_exit(invited);
-            for (const auto &record : layout.invitations) {
-                if (!decrypt_invitation(record, current_password, current_password_size,
-                    wrapping_key, invited)) continue;
-                require_valid_slot_state(container, container_size, layout,
-                    invited.data());
-                UnlockedContainerData access;
-                decode_invitation_plaintext(invited, access);
-                if (access.must_be_changed)
-                    throw ContainerFailure{ContainerError::invalid_argument};
-                derive_wrapping_key(wrapping_key, new_password, new_password_size,
-                    record.salt);
-                std::vector<std::uint8_t> cipher(invited.size() + tag_size);
-                unsigned long long invited_written = 0;
-                if (crypto_aead_xchacha20poly1305_ietf_encrypt(cipher.data(),
-                    &invited_written, invited.data(), invited.size(), nullptr, 0,
-                    nullptr, record.nonce, wrapping_key.data()) != 0
-                    || invited_written != cipher.size())
-                    throw ContainerFailure{ContainerError::crypto_error};
-                std::vector<std::uint8_t> output;
-                output.insert(output.end(), container, container + record.offset + 40);
-                append_u32(output, static_cast<std::uint32_t>(cipher.size()));
-                output.insert(output.end(), cipher.begin(), cipher.end());
-                const auto password_cipher_end = record.offset
-                    + invitation_prefix_size + record.ciphertext_size;
-                const auto old_end = invitation_record_end(record);
-                output.insert(output.end(), container + password_cipher_end,
-                    container + old_end);
-                output.insert(output.end(), container + old_end,
-                    container + layout.slot_state_auth_offset);
-                output.resize(output.size() + slot_state_auth_size);
-                const auto output_snapshot_offset = output.size();
-                rerandomize_snapshot(container, container_size, layout,
-                    invited.data(), output, output_snapshot_offset);
-                authenticate_slot_state(output, invited.data());
-                return output;
-            }
-        }
-        if (authenticated) {
-            if (plain_size != slot.size() || slot.back() != full_permissions)
-                throw ContainerFailure{ContainerError::malformed_container};
-            require_valid_slot_state(container, container_size, layout, slot.data());
-        }
-        for (const auto &record : layout.invitations) {
-            std::vector<std::uint8_t> invited;
-            const auto invited_clear = clear_on_scope_exit(invited);
-            if (decrypt_invitation(record, new_password, new_password_size,
-                wrapping_key, invited)) {
-                require_valid_slot_state(container, container_size, layout,
-                    invited.data());
-                throw ContainerFailure{ContainerError::password_already_in_use};
-            }
-        }
-        if (!authenticated)
-            throw ContainerFailure{ContainerError::authentication_failed};
-
-        derive_snapshot_key(snapshot_key, slot.data());
-        snapshot.resize(static_cast<std::size_t>(encrypted_size) - tag_size);
-        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-            snapshot.data(), &plain_size, nullptr, container + snapshot_offset,
-            encrypted_size, container, header_size,
-            container + snapshot_nonce_offset, snapshot_key.data()) != 0) {
-            throw ContainerFailure{ContainerError::authentication_failed};
-        }
-        if (plain_size != snapshot.size() || plain_size < document_id_size)
-            throw ContainerFailure{ContainerError::malformed_container};
-        EditingLeaseData lease;
-        const auto lease_size = decode_lease(snapshot.data() + document_id_size,
-            snapshot.size() - document_id_size, lease);
-        std::array<std::uint8_t, 16> owner_identity_slot{};
-        std::string owner_identity_name, owner_identity_email;
-        const auto owner_identity_name_clear = clear_on_scope_exit(owner_identity_name);
-        const auto owner_identity_email_clear = clear_on_scope_exit(owner_identity_email);
-        const auto identity_size = decode_owner_identity(
-            snapshot.data() + document_id_size + lease_size,
-            snapshot.size() - document_id_size - lease_size,
-            owner_identity_slot, owner_identity_name, owner_identity_email);
-        validate_snapshot(snapshot.data() + document_id_size + lease_size + identity_size,
-            snapshot.size() - document_id_size - lease_size - identity_size,
-            format::RevisionLimits::defaults(),
-            ContainerError::malformed_container);
-
-        for (std::uint32_t index = 0; index < slot_count; ++index) {
-            if (index == authenticated_index) continue;
-            const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
-            const std::size_t nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
+                ? layout.legacy_header : aad.data();
+            if (crypto_aead_xchacha20poly1305_ietf_decrypt(slot.data(),
+                    &written, nullptr,
+                    container + header_size + index * wrapped_slot_size,
+                    wrapped_slot_size, old_aad, header_size,
+                    container + nonce, wrapping_key.data()) != 0
+                || written != slot.size()
+                || !std::equal(slot.begin(), slot.begin() + key_size, document_key))
+                throw ContainerFailure{ContainerError::authentication_failed};
+            if (layout.migration_offset != 0)
+                write_u32(prefix.data() + layout.migration_offset + 12
+                    + index * 4, format_version);
             derive_wrapping_key(wrapping_key, new_password, new_password_size,
                 container + salt);
-            const auto *candidate_aad = layout.base_wrapper_versions[index]
-                    == legacy_format_version
-                ? layout.legacy_header : normalized_aad.data();
-            if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-                candidate_slot.data(), &plain_size, nullptr,
-                container + header_size + index * wrapped_slot_size,
-                wrapped_slot_size, candidate_aad, header_size,
-                container + nonce, wrapping_key.data()) == 0) {
-                throw ContainerFailure{ContainerError::password_already_in_use};
-            }
-            sodium_memzero(candidate_slot.data(), candidate_slot.size());
+            if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+                    prefix.data() + header_size + index * wrapped_slot_size,
+                    &written, slot.data(), slot.size(), aad.data(), header_size,
+                    nullptr, container + nonce, wrapping_key.data()) != 0
+                || written != wrapped_slot_size)
+                throw ContainerFailure{ContainerError::crypto_error};
+            return;
         }
-
-        std::vector<std::uint8_t> output(container, container + container_size);
-        if (layout.migration_offset != 0) {
-            write_u32(output.data() + layout.migration_offset + 12
-                + authenticated_index * 4, format_version);
+        for (const auto &record : layout.invitations) {
+            std::vector<std::uint8_t> plain;
+            const auto plain_clear = clear_on_scope_exit(plain);
+            if (!decrypt_invitation(record, current_password,
+                    current_password_size, wrapping_key, plain)) continue;
+            if (!std::equal(plain.begin(), plain.begin() + key_size, document_key))
+                throw ContainerFailure{ContainerError::malformed_container};
+            derive_wrapping_key(wrapping_key, new_password, new_password_size,
+                record.salt);
+            std::vector<std::uint8_t> cipher(plain.size() + tag_size);
+            if (crypto_aead_xchacha20poly1305_ietf_encrypt(cipher.data(),
+                    &written, plain.data(), plain.size(), nullptr, 0, nullptr,
+                    record.nonce, wrapping_key.data()) != 0
+                || written != cipher.size())
+                throw ContainerFailure{ContainerError::crypto_error};
+            std::vector<std::uint8_t> output(container,
+                container + record.offset + 40);
+            append_u32(output, static_cast<std::uint32_t>(cipher.size()));
+            output.insert(output.end(), cipher.begin(), cipher.end());
+            const auto password_end = record.offset + invitation_prefix_size
+                + record.ciphertext_size;
+            output.insert(output.end(), container + password_end,
+                container + layout.snapshot_offset);
+            prefix.swap(output);
+            return;
         }
-        const std::size_t salt = authenticated_index == 0
-            ? owner_salt_offset : recovery_salt_offset;
-        const std::size_t nonce = authenticated_index == 0
-            ? owner_nonce_offset : recovery_nonce_offset;
-        derive_wrapping_key(wrapping_key, new_password, new_password_size,
-            container + salt);
-        unsigned long long written = 0;
-        if (crypto_aead_xchacha20poly1305_ietf_encrypt(
-            output.data() + header_size + authenticated_index * wrapped_slot_size,
-            &written, slot.data(), slot.size(), normalized_aad.data(), header_size, nullptr,
-            container + nonce, wrapping_key.data()) != 0
-            || written != wrapped_slot_size) {
-            throw ContainerFailure{ContainerError::crypto_error};
-        }
-        clear(wrapping_key, snapshot_key, slot, snapshot);
-        sodium_memzero(candidate_slot.data(), candidate_slot.size());
-        return output;
-    } catch (...) {
-        clear(wrapping_key, snapshot_key, slot, snapshot);
-        sodium_memzero(candidate_slot.data(), candidate_slot.size());
-        throw;
-    }
+        throw ContainerFailure{ContainerError::authentication_failed};
+        });
 }
 
 std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
@@ -1559,96 +1440,184 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
     const std::uint8_t *temporary_password, std::size_t temporary_password_size,
     std::uint8_t permissions, const std::string &temporary_label)
 {
-    if (security::assess_password_policy(temporary_password, temporary_password_size)
-        != security::PasswordPolicyAssessment::accepted)
-        throw ContainerFailure{ContainerError::weak_password};
-    if ((permissions & ~permission_mask) != 0
-        || ((permissions & 6u) != 0 && (permissions & 1u) == 0)
-        || temporary_label.empty() || temporary_label.size() > max_holder_field_size)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    auto creator = unlock(container, container_size, creator_password,
-        creator_password_size, format::RevisionLimits::defaults());
-    if (creator.must_be_changed || (creator.permissions & 2u) == 0
-        || (permissions & ~creator.permissions) != 0)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    try {
-        auto probe = unlock(container, container_size, temporary_password,
-            temporary_password_size, format::RevisionLimits::defaults());
-        throw ContainerFailure{ContainerError::password_already_in_use};
-    } catch (const ContainerFailure &failure) {
-        if (failure.error != ContainerError::authentication_failed) throw;
-    }
-    const auto layout = read_layout(container, container_size);
-    if (layout.invitations.size() >= max_ordinary_slots - 1)
-        throw ContainerFailure{ContainerError::limit_exceeded};
+    PasswordSlotLifecycle::validate_add_request(temporary_password,
+        temporary_password_size, permissions, temporary_label);
+    return rewrite_authenticated_container_with_records(container, container_size,
+        creator_password, creator_password_size,
+        creator_password, creator_password_size,
+        RewriteVerification::preserve_access_and_head,
+        [&](const UnlockedContainerData &creator,
+            std::vector<std::uint8_t> &plaintext,
+            std::vector<std::uint8_t> &prefix, const ContainerLayout &layout,
+            const std::uint8_t *document_key) {
+        PasswordSlotLifecycle::authorize_add(creator, permissions);
+        PasswordSlotLifecycle::require_available_password([&] {
+            try {
+                auto probe = unlock(container, container_size, temporary_password,
+                    temporary_password_size, format::RevisionLimits::defaults());
+                return true;
+            } catch (const ContainerFailure &failure) {
+                if (failure.error != ContainerError::authentication_failed) throw;
+                return false;
+            }
+        });
+        PasswordSlotLifecycle::require_invitation_room(layout.invitations.size());
+        std::array<std::uint8_t, key_size> wrapping_key{};
+        const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
+        unsigned long long written = 0;
+        auto new_slot = PasswordSlotLifecycle::new_invitation(
+            permissions, temporary_label);
+        auto plain = invitation_plaintext(document_key, new_slot.actual_slot_id,
+            new_slot.permissions, must_change_flag, new_slot.identity_name, {});
+        const auto plain_clear = clear_on_scope_exit(plain);
+        std::array<std::uint8_t, salt_size> salt{};
+        std::array<std::uint8_t, nonce_size> nonce{};
+        randombytes_buf(salt.data(), salt.size());
+        randombytes_buf(nonce.data(), nonce.size());
+        derive_wrapping_key(wrapping_key, temporary_password, temporary_password_size,
+            salt.data());
+        std::vector<std::uint8_t> cipher(plain.size() + tag_size);
+        if (crypto_aead_xchacha20poly1305_ietf_encrypt(cipher.data(), &written,
+            plain.data(), plain.size(), nullptr, 0, nullptr, nonce.data(),
+            wrapping_key.data()) != 0 || written != cipher.size())
+            throw ContainerFailure{ContainerError::crypto_error};
 
-    require_sodium();
-    std::array<std::uint8_t, key_size> wrapping_key{};
-    std::array<std::uint8_t, slot_plaintext_size> base_slot{};
-    std::vector<std::uint8_t> creator_plain;
-    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
-    const auto base_slot_clear = clear_on_scope_exit(base_slot);
-    const auto creator_plain_clear = clear_on_scope_exit(creator_plain);
-    const auto aad = slot_additional_data(container);
-    bool found = false;
-    unsigned long long written = 0;
-    for (std::uint32_t index = 0; index < layout.base_slot_count && !found; ++index) {
-        const auto salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
-        const auto nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
-        derive_wrapping_key(wrapping_key, creator_password, creator_password_size,
-            container + salt);
-        found = crypto_aead_xchacha20poly1305_ietf_decrypt(base_slot.data(), &written,
-            nullptr, container + header_size + index * wrapped_slot_size,
-            wrapped_slot_size, aad.data(), aad.size(), container + nonce,
-            wrapping_key.data()) == 0;
-    }
-    if (!found) {
-        for (const auto &record : layout.invitations) {
-            if (decrypt_invitation(record, creator_password, creator_password_size,
-                wrapping_key, creator_plain)) { found = true; break; }
+        const std::size_t base_end = layout.invitations.empty()
+            ? layout.snapshot_offset : layout.invitation_offset;
+        std::vector<std::uint8_t> output;
+        output.insert(output.end(), container, container + base_end);
+        output.insert(output.end(), managed_invitation_magic.begin(),
+            managed_invitation_magic.end());
+        append_u32(output, static_cast<std::uint32_t>(layout.invitations.size() + 1));
+        if (layout.managed_invitations) {
+            output.insert(output.end(), container + base_end + 12,
+                container + layout.slot_state_auth_offset);
+        } else {
+            for (std::size_t index = 0; index < layout.invitations.size(); ++index) {
+                const auto &record = layout.invitations[index];
+                output.insert(output.end(), container + record.offset,
+                    container + record.offset + invitation_prefix_size
+                        + record.ciphertext_size);
+                const auto metadata = legacy_managed_metadata(
+                    record, document_key, index);
+                auto metadata_plain = managed_metadata_plaintext(metadata.slot_id,
+                    metadata.actual_slot_id, metadata.permissions, 0, 0,
+                    metadata.identity_name, metadata.identity_email);
+                const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
+                std::array<std::uint8_t, nonce_size> metadata_nonce{};
+                auto metadata_cipher = encrypt_managed_metadata(
+                    document_key, metadata_plain, metadata_nonce);
+                const auto metadata_cipher_clear = clear_on_scope_exit(metadata_cipher);
+                output.insert(output.end(), metadata_nonce.begin(), metadata_nonce.end());
+                append_u32(output, static_cast<std::uint32_t>(metadata_cipher.size()));
+                output.insert(output.end(), metadata_cipher.begin(), metadata_cipher.end());
+            }
         }
-    }
-    if (!found) throw ContainerFailure{ContainerError::authentication_failed};
-    const std::uint8_t *document_key = creator_plain.empty()
-        ? base_slot.data() : creator_plain.data();
-    std::array<std::uint8_t, 16> slot_id{};
-    randombytes_buf(slot_id.data(), slot_id.size());
-    auto plain = invitation_plaintext(document_key, slot_id, permissions,
-        must_change_flag, temporary_label, {});
-    const auto plain_clear = clear_on_scope_exit(plain);
-    std::array<std::uint8_t, salt_size> salt{};
-    std::array<std::uint8_t, nonce_size> nonce{};
-    randombytes_buf(salt.data(), salt.size());
-    randombytes_buf(nonce.data(), nonce.size());
-    derive_wrapping_key(wrapping_key, temporary_password, temporary_password_size,
-        salt.data());
-    std::vector<std::uint8_t> cipher(plain.size() + tag_size);
-    if (crypto_aead_xchacha20poly1305_ietf_encrypt(cipher.data(), &written,
-        plain.data(), plain.size(), nullptr, 0, nullptr, nonce.data(),
-        wrapping_key.data()) != 0 || written != cipher.size())
-        throw ContainerFailure{ContainerError::crypto_error};
+        output.insert(output.end(), salt.begin(), salt.end());
+        output.insert(output.end(), nonce.begin(), nonce.end());
+        append_u32(output, static_cast<std::uint32_t>(cipher.size()));
+        output.insert(output.end(), cipher.begin(), cipher.end());
+        auto metadata_plain = managed_metadata_plaintext(new_slot.slot_id,
+            new_slot.actual_slot_id, new_slot.permissions, must_change_flag,
+            15u, new_slot.identity_name, new_slot.identity_email);
+        const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
+        std::array<std::uint8_t, nonce_size> metadata_nonce{};
+        auto metadata_cipher = encrypt_managed_metadata(
+            document_key, metadata_plain, metadata_nonce);
+        const auto metadata_cipher_clear = clear_on_scope_exit(metadata_cipher);
+        output.insert(output.end(), metadata_nonce.begin(), metadata_nonce.end());
+        append_u32(output, static_cast<std::uint32_t>(metadata_cipher.size()));
+        output.insert(output.end(), metadata_cipher.begin(), metadata_cipher.end());
+        output.resize(output.size() + slot_state_auth_size);
+        auto identity_upgrade = owner_identity_upgrade(creator);
+        const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
+        if (!identity_upgrade.empty()) {
+            EditingLeaseData lease;
+            const auto holder_name_clear = clear_on_scope_exit(lease.holder_name);
+            const auto holder_email_clear = clear_on_scope_exit(lease.holder_email);
+            const auto device_name_clear = clear_on_scope_exit(lease.device_name);
+            const auto lease_size = decode_lease(plaintext.data() + document_id_size,
+                plaintext.size() - document_id_size, lease);
+            std::array<std::uint8_t, 16> owner_slot{};
+            std::string name, email;
+            const auto name_clear = clear_on_scope_exit(name);
+            const auto email_clear = clear_on_scope_exit(email);
+            if (decode_owner_identity(plaintext.data() + document_id_size + lease_size,
+                    plaintext.size() - document_id_size - lease_size,
+                    owner_slot, name, email) == 0) {
+                plaintext.insert(plaintext.begin() + document_id_size + lease_size,
+                    identity_upgrade.begin(), identity_upgrade.end());
+            }
+        }
+        prefix.swap(output);
+        });
+}
 
-    const std::size_t base_end = header_size
-        + layout.base_slot_count * wrapped_slot_size;
-    std::vector<std::uint8_t> output;
-    output.insert(output.end(), container, container + base_end);
-    output.insert(output.end(), managed_invitation_magic.begin(),
-        managed_invitation_magic.end());
-    append_u32(output, static_cast<std::uint32_t>(layout.invitations.size() + 1));
-    if (layout.managed_invitations) {
-        output.insert(output.end(), container + base_end + 12,
-            container + layout.slot_state_auth_offset);
-    } else {
-        for (std::size_t index = 0; index < layout.invitations.size(); ++index) {
-            const auto &record = layout.invitations[index];
-            output.insert(output.end(), container + record.offset,
-                container + record.offset + invitation_prefix_size
-                    + record.ciphertext_size);
-            const auto metadata = legacy_managed_metadata(
-                record, document_key, index);
-            auto metadata_plain = managed_metadata_plaintext(metadata.slot_id,
-                metadata.actual_slot_id, metadata.permissions, 0, 0,
-                metadata.identity_name, metadata.identity_email);
+std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
+    const std::uint8_t *container, std::size_t container_size,
+    const std::uint8_t *temporary_password, std::size_t temporary_password_size,
+    const std::uint8_t *new_password, std::size_t new_password_size,
+    const std::string &profile_name, const std::string &profile_email)
+{
+    PasswordSlotLifecycle::validate_claim_request(new_password,
+        new_password_size, profile_name, profile_email);
+    return rewrite_authenticated_container_with_records(container, container_size,
+        temporary_password, temporary_password_size,
+        new_password, new_password_size,
+        RewriteVerification::claimed_access_and_head,
+        [&](const UnlockedContainerData &access,
+            std::vector<std::uint8_t> &,
+            std::vector<std::uint8_t> &prefix, const ContainerLayout &layout,
+            const std::uint8_t *document_key) {
+        PasswordSlotLifecycle::require_available_password([&] {
+            try {
+                auto probe = unlock(container, container_size, new_password,
+                    new_password_size, format::RevisionLimits::defaults());
+                return true;
+            } catch (const ContainerFailure &failure) {
+                if (failure.error != ContainerError::authentication_failed) throw;
+                return false;
+            }
+        });
+        std::array<std::uint8_t, key_size> wrapping_key{};
+        std::vector<std::uint8_t> plain;
+        const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
+        const auto plain_clear = clear_on_scope_exit(plain);
+        const InvitationRecord *matched = nullptr;
+        for (const auto &record : layout.invitations) {
+            if (decrypt_invitation(record, temporary_password, temporary_password_size,
+                wrapping_key, plain)) { matched = &record; break; }
+        }
+        if (matched == nullptr)
+            throw ContainerFailure{ContainerError::authentication_failed};
+        if (!std::equal(plain.begin(), plain.begin() + key_size, document_key))
+            throw ContainerFailure{ContainerError::malformed_container};
+        const auto matched_index = static_cast<std::size_t>(
+            matched - layout.invitations.data());
+        const ManagedSlotData *previous_metadata = layout.managed_invitations
+            ? &access.managed_slots[matched_index] : nullptr;
+        auto claimed_slot = PasswordSlotLifecycle::claim_invitation(access,
+            previous_metadata,
+            profile_name, profile_email);
+        auto replacement_plain = invitation_plaintext(document_key,
+            claimed_slot.actual_slot_id, claimed_slot.permissions, 0,
+            claimed_slot.identity_name, claimed_slot.identity_email);
+        const auto replacement_plain_clear = clear_on_scope_exit(replacement_plain);
+        derive_wrapping_key(wrapping_key, new_password, new_password_size, matched->salt);
+        std::vector<std::uint8_t> cipher(replacement_plain.size() + tag_size);
+        unsigned long long written = 0;
+        if (crypto_aead_xchacha20poly1305_ietf_encrypt(cipher.data(), &written,
+            replacement_plain.data(), replacement_plain.size(), nullptr, 0, nullptr,
+            matched->nonce, wrapping_key.data()) != 0 || written != cipher.size())
+            throw ContainerFailure{ContainerError::crypto_error};
+        std::vector<std::uint8_t> output;
+        output.insert(output.end(), container, container + matched->offset + 40);
+        append_u32(output, static_cast<std::uint32_t>(cipher.size()));
+        output.insert(output.end(), cipher.begin(), cipher.end());
+        if (layout.managed_invitations) {
+            auto metadata_plain = managed_metadata_plaintext(claimed_slot.slot_id,
+                claimed_slot.actual_slot_id, claimed_slot.permissions, 0, 15u,
+                claimed_slot.identity_name, claimed_slot.identity_email);
             const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
             std::array<std::uint8_t, nonce_size> metadata_nonce{};
             auto metadata_cipher = encrypt_managed_metadata(
@@ -1658,111 +1627,12 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::add_invitation(
             append_u32(output, static_cast<std::uint32_t>(metadata_cipher.size()));
             output.insert(output.end(), metadata_cipher.begin(), metadata_cipher.end());
         }
-    }
-    output.insert(output.end(), salt.begin(), salt.end());
-    output.insert(output.end(), nonce.begin(), nonce.end());
-    append_u32(output, static_cast<std::uint32_t>(cipher.size()));
-    output.insert(output.end(), cipher.begin(), cipher.end());
-    auto metadata_plain = managed_metadata_plaintext(slot_id, slot_id, permissions,
-        must_change_flag, 15u, temporary_label, {});
-    const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
-    std::array<std::uint8_t, nonce_size> metadata_nonce{};
-    auto metadata_cipher = encrypt_managed_metadata(
-        document_key, metadata_plain, metadata_nonce);
-    const auto metadata_cipher_clear = clear_on_scope_exit(metadata_cipher);
-    output.insert(output.end(), metadata_nonce.begin(), metadata_nonce.end());
-    append_u32(output, static_cast<std::uint32_t>(metadata_cipher.size()));
-    output.insert(output.end(), metadata_cipher.begin(), metadata_cipher.end());
-    output.resize(output.size() + slot_state_auth_size);
-    const auto output_snapshot_offset = output.size();
-    auto identity_upgrade = owner_identity_upgrade(creator);
-    const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
-    rerandomize_snapshot(container, container_size, layout,
-        document_key, output, output_snapshot_offset,
-        identity_upgrade.empty() ? nullptr : &identity_upgrade);
-    authenticate_slot_state(output, document_key);
-    return output;
-}
-
-std::vector<std::uint8_t> RecoverablePasswordContainer::claim_invitation(
-    const std::uint8_t *container, std::size_t container_size,
-    const std::uint8_t *temporary_password, std::size_t temporary_password_size,
-    const std::uint8_t *new_password, std::size_t new_password_size,
-    const std::string &profile_name, const std::string &profile_email)
-{
-    if (security::assess_password_policy(new_password, new_password_size)
-        != security::PasswordPolicyAssessment::accepted)
-        throw ContainerFailure{ContainerError::weak_password};
-    if (profile_name.empty() || profile_email.empty()
-        || profile_name.size() > max_holder_field_size
-        || profile_email.size() > max_holder_field_size)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    try {
-        auto probe = unlock(container, container_size, new_password, new_password_size,
-            format::RevisionLimits::defaults());
-        throw ContainerFailure{ContainerError::password_already_in_use};
-    } catch (const ContainerFailure &failure) {
-        if (failure.error != ContainerError::authentication_failed) throw;
-    }
-    const auto layout = read_layout(container, container_size);
-    require_sodium();
-    std::array<std::uint8_t, key_size> wrapping_key{};
-    std::vector<std::uint8_t> plain;
-    const auto wrapping_key_clear = clear_on_scope_exit(wrapping_key);
-    const auto plain_clear = clear_on_scope_exit(plain);
-    const InvitationRecord *matched = nullptr;
-    for (const auto &record : layout.invitations) {
-        if (decrypt_invitation(record, temporary_password, temporary_password_size,
-            wrapping_key, plain)) { matched = &record; break; }
-    }
-    if (matched == nullptr)
-        throw ContainerFailure{ContainerError::authentication_failed};
-    require_valid_slot_state(container, container_size, layout, plain.data());
-    UnlockedContainerData access;
-    decode_invitation_plaintext(plain, access);
-    if (!access.must_be_changed)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    auto previous_metadata = layout.managed_invitations
-        ? decrypt_managed_metadata(*matched, plain.data()) : ManagedSlotData{};
-    const auto effective_permissions = layout.managed_invitations
-        && previous_metadata.permissions_known
-        ? previous_metadata.permissions : access.permissions;
-    auto replacement_plain = invitation_plaintext(plain.data(), access.slot_id,
-        effective_permissions, 0, profile_name, profile_email);
-    const auto replacement_plain_clear = clear_on_scope_exit(replacement_plain);
-    derive_wrapping_key(wrapping_key, new_password, new_password_size, matched->salt);
-    std::vector<std::uint8_t> cipher(replacement_plain.size() + tag_size);
-    unsigned long long written = 0;
-    if (crypto_aead_xchacha20poly1305_ietf_encrypt(cipher.data(), &written,
-        replacement_plain.data(), replacement_plain.size(), nullptr, 0, nullptr,
-        matched->nonce, wrapping_key.data()) != 0 || written != cipher.size())
-        throw ContainerFailure{ContainerError::crypto_error};
-    std::vector<std::uint8_t> output;
-    output.insert(output.end(), container, container + matched->offset + 40);
-    append_u32(output, static_cast<std::uint32_t>(cipher.size()));
-    output.insert(output.end(), cipher.begin(), cipher.end());
-    if (layout.managed_invitations) {
-        auto metadata_plain = managed_metadata_plaintext(previous_metadata.slot_id,
-            access.slot_id, effective_permissions, 0, 15u,
-            profile_name, profile_email);
-        const auto metadata_plain_clear = clear_on_scope_exit(metadata_plain);
-        std::array<std::uint8_t, nonce_size> metadata_nonce{};
-        auto metadata_cipher = encrypt_managed_metadata(
-            plain.data(), metadata_plain, metadata_nonce);
-        const auto metadata_cipher_clear = clear_on_scope_exit(metadata_cipher);
-        output.insert(output.end(), metadata_nonce.begin(), metadata_nonce.end());
-        append_u32(output, static_cast<std::uint32_t>(metadata_cipher.size()));
-        output.insert(output.end(), metadata_cipher.begin(), metadata_cipher.end());
-    }
-    const auto old_end = invitation_record_end(*matched);
-    output.insert(output.end(), container + old_end,
-        container + layout.slot_state_auth_offset);
-    output.resize(output.size() + slot_state_auth_size);
-    const auto output_snapshot_offset = output.size();
-    rerandomize_snapshot(container, container_size, layout,
-        plain.data(), output, output_snapshot_offset);
-    authenticate_slot_state(output, plain.data());
-    return output;
+        const auto old_end = invitation_record_end(*matched);
+        output.insert(output.end(), container + old_end,
+            container + layout.slot_state_auth_offset);
+        output.resize(output.size() + slot_state_auth_size);
+        prefix.swap(output);
+        });
 }
 
 namespace {
@@ -1782,12 +1652,11 @@ std::vector<ManagedSlotData> read_managed_metadata(
     return result;
 }
 
-std::vector<std::uint8_t> rebuild_managed_records(
-    const std::uint8_t *container, std::size_t container_size,
+void rebuild_managed_records(
+    std::vector<std::uint8_t> &prefix, const std::uint8_t *container,
     const ContainerLayout &layout, const std::uint8_t *document_key,
     const std::vector<ManagedSlotData> &metadata,
-    std::size_t removed_index = std::numeric_limits<std::size_t>::max(),
-    const std::vector<std::uint8_t> *identity_upgrade = nullptr)
+    std::size_t removed_index = std::numeric_limits<std::size_t>::max())
 {
     const std::size_t remaining = metadata.size()
         - (removed_index < metadata.size() ? 1u : 0u);
@@ -1823,22 +1692,37 @@ std::vector<std::uint8_t> rebuild_managed_records(
         }
         output.resize(output.size() + slot_state_auth_size);
     }
-    const auto output_snapshot_offset = output.size();
-    rerandomize_snapshot(container, container_size, layout,
-        document_key, output, output_snapshot_offset, identity_upgrade);
-    if (remaining != 0) authenticate_slot_state(output, document_key);
-    return output;
+    prefix.swap(output);
+}
+
+void upgrade_owner_identity(const UnlockedContainerData &access,
+    std::vector<std::uint8_t> &plaintext)
+{
+    auto identity = owner_identity_upgrade(access);
+    const auto identity_clear = clear_on_scope_exit(identity);
+    if (identity.empty()) return;
+    EditingLeaseData lease;
+    const auto name_clear = clear_on_scope_exit(lease.holder_name);
+    const auto email_clear = clear_on_scope_exit(lease.holder_email);
+    const auto device_clear = clear_on_scope_exit(lease.device_name);
+    const auto lease_size = decode_lease(plaintext.data() + document_id_size,
+        plaintext.size() - document_id_size, lease);
+    std::array<std::uint8_t, 16> owner_slot{};
+    std::string name, email;
+    const auto owner_name_clear = clear_on_scope_exit(name);
+    const auto owner_email_clear = clear_on_scope_exit(email);
+    if (decode_owner_identity(plaintext.data() + document_id_size + lease_size,
+            plaintext.size() - document_id_size - lease_size,
+            owner_slot, name, email) == 0)
+        plaintext.insert(plaintext.begin() + document_id_size + lease_size,
+            identity.begin(), identity.end());
 }
 
 std::size_t find_managed_record(const std::vector<ManagedSlotData> &metadata,
-    const std::array<std::uint8_t, 16> &slot_id,
-    ManagedSlotData &result)
+    const std::array<std::uint8_t, 16> &slot_id)
 {
     for (std::size_t index = 0; index < metadata.size(); ++index) {
-        if (metadata[index].slot_id == slot_id) {
-            result = metadata[index];
-            return index;
-        }
+        if (metadata[index].slot_id == slot_id) return index;
     }
     throw ContainerFailure{ContainerError::invalid_argument};
 }
@@ -1851,31 +1735,33 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::update_slot_permissions(
     std::size_t administrator_password_size,
     const std::array<std::uint8_t, 16> &slot_id, std::uint8_t permissions)
 {
-    if ((permissions & ~permission_mask) != 0
-        || ((permissions & 6u) != 0 && (permissions & 1u) == 0))
-        throw ContainerFailure{ContainerError::invalid_argument};
-    auto administrator = unlock(container, container_size, administrator_password,
-        administrator_password_size, format::RevisionLimits::defaults());
-    if (administrator.must_be_changed
-        || (administrator.permissions & 6u) != 6u)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    const auto layout = read_layout(container, container_size);
-    auto document_key = authenticated_document_key(container, container_size,
-        administrator_password, administrator_password_size, layout);
-    const auto key_clear = clear_on_scope_exit(document_key);
-    ManagedSlotData metadata;
-    auto all_metadata = read_managed_metadata(
-        container, container_size, layout, document_key.data());
-    const auto index = find_managed_record(all_metadata, slot_id, metadata);
-    metadata.permissions = permissions;
-    metadata.permissions_known = true;
-    all_metadata[index] = metadata;
-    auto identity_upgrade = owner_identity_upgrade(administrator);
-    const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
-    return rebuild_managed_records(container, container_size, layout,
-        document_key.data(), all_metadata,
-        std::numeric_limits<std::size_t>::max(),
-        identity_upgrade.empty() ? nullptr : &identity_upgrade);
+    PasswordSlotLifecycle::validate_managed_permissions(permissions);
+    std::uint8_t expected_access_permissions = 0;
+    auto candidate = rewrite_authenticated_container_with_records(container,
+        container_size,
+        administrator_password, administrator_password_size,
+        administrator_password, administrator_password_size,
+        RewriteVerification::updated_access_and_head,
+        [&](const UnlockedContainerData &administrator,
+            std::vector<std::uint8_t> &plaintext,
+            std::vector<std::uint8_t> &prefix, const ContainerLayout &layout,
+            const std::uint8_t *document_key) {
+        PasswordSlotLifecycle::authorize_permissions_update(administrator);
+        auto metadata = read_managed_metadata(
+            container, container_size, layout, document_key);
+        const auto index = find_managed_record(metadata, slot_id);
+        PasswordSlotLifecycle::update_managed_permissions(metadata[index], permissions);
+        expected_access_permissions = administrator.slot_id == slot_id
+            ? permissions : administrator.permissions;
+        upgrade_owner_identity(administrator, plaintext);
+        rebuild_managed_records(prefix, container, layout, document_key, metadata);
+        });
+    const auto verified = unlock(candidate.data(), candidate.size(),
+        administrator_password, administrator_password_size,
+        format::RevisionLimits::defaults());
+    if (verified.permissions != expected_access_permissions)
+        throw ContainerFailure{ContainerError::crypto_error};
+    return candidate;
 }
 
 std::vector<std::uint8_t> RecoverablePasswordContainer::remove_slot(
@@ -1884,24 +1770,30 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::remove_slot(
     std::size_t administrator_password_size,
     const std::array<std::uint8_t, 16> &slot_id)
 {
-    auto administrator = unlock(container, container_size, administrator_password,
-        administrator_password_size, format::RevisionLimits::defaults());
-    if (administrator.must_be_changed
-        || (administrator.permissions & 4u) == 0)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    const auto layout = read_layout(container, container_size);
-    auto document_key = authenticated_document_key(container, container_size,
-        administrator_password, administrator_password_size, layout);
-    const auto key_clear = clear_on_scope_exit(document_key);
-    auto all_metadata = read_managed_metadata(
-        container, container_size, layout, document_key.data());
-    ManagedSlotData ignored;
-    const auto matched = find_managed_record(all_metadata, slot_id, ignored);
-    auto identity_upgrade = owner_identity_upgrade(administrator);
-    const auto identity_upgrade_clear = clear_on_scope_exit(identity_upgrade);
-    return rebuild_managed_records(container, container_size, layout,
-        document_key.data(), all_metadata, matched,
-        identity_upgrade.empty() ? nullptr : &identity_upgrade);
+    // A managed administrator may remove its own slot. In that case there is
+    // no selected password left to use for the final ordinary-reader check.
+    const auto administrator = unlock(container, container_size,
+        administrator_password, administrator_password_size,
+        format::RevisionLimits::defaults());
+    const auto verification = administrator.slot_id == slot_id
+        ? RewriteVerification::removed_access_and_head
+        : RewriteVerification::preserve_access_and_head;
+    return rewrite_authenticated_container_with_records(container, container_size,
+        administrator_password, administrator_password_size,
+        administrator_password, administrator_password_size,
+        verification,
+        [&](const UnlockedContainerData &current,
+            std::vector<std::uint8_t> &plaintext,
+            std::vector<std::uint8_t> &prefix, const ContainerLayout &layout,
+            const std::uint8_t *document_key) {
+        PasswordSlotLifecycle::authorize_removal(current);
+        auto metadata = read_managed_metadata(
+            container, container_size, layout, document_key);
+        const auto matched = find_managed_record(metadata, slot_id);
+        upgrade_owner_identity(current, plaintext);
+        rebuild_managed_records(prefix, container, layout, document_key,
+            metadata, matched);
+        });
 }
 
 std::vector<std::uint8_t> RecoverablePasswordContainer::reconcile_identity(
@@ -1909,56 +1801,63 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::reconcile_identity(
     const std::uint8_t *password, std::size_t password_size,
     const std::string &profile_name, const std::string &profile_email)
 {
-    if (profile_name.empty() || profile_email.empty()
-        || profile_name.size() > max_holder_field_size
-        || profile_email.size() > max_holder_field_size)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    auto access = unlock(container, container_size, password, password_size,
-        format::RevisionLimits::defaults());
-    if (access.recovery_slot || access.must_be_changed)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    const auto layout = read_layout(container, container_size);
-    auto document_key = authenticated_document_key(
-        container, container_size, password, password_size, layout);
-    const auto key_clear = clear_on_scope_exit(document_key);
-    if (access.owner_slot) {
-        auto identity = encode_owner_identity(
-            access.slot_id, profile_name, profile_email);
-        const auto identity_clear = clear_on_scope_exit(identity);
-        std::vector<std::uint8_t> output(
-            container, container + layout.snapshot_offset);
-        rerandomize_snapshot(container, container_size, layout,
-            document_key.data(), output, layout.snapshot_offset,
-            &identity, true);
-        if (!layout.invitations.empty()) {
-            authenticate_slot_state(output, document_key.data());
+    PasswordSlotLifecycle::validate_reconciliation_identity(
+        profile_name, profile_email);
+    return rewrite_authenticated_container_with_records(container, container_size,
+        password, password_size, password, password_size,
+        RewriteVerification::preserve_access_and_head,
+        [&](const UnlockedContainerData &access,
+            std::vector<std::uint8_t> &plaintext,
+            std::vector<std::uint8_t> &prefix, const ContainerLayout &layout,
+            const std::uint8_t *document_key) {
+        PasswordSlotLifecycle::authorize_reconciliation(access);
+        if (access.owner_slot) {
+            auto identity = encode_owner_identity(
+                access.slot_id, profile_name, profile_email);
+            const auto identity_clear = clear_on_scope_exit(identity);
+            EditingLeaseData lease;
+            const auto name_clear = clear_on_scope_exit(lease.holder_name);
+            const auto email_clear = clear_on_scope_exit(lease.holder_email);
+            const auto device_clear = clear_on_scope_exit(lease.device_name);
+            const auto lease_size = decode_lease(plaintext.data() + document_id_size,
+                plaintext.size() - document_id_size, lease);
+            std::array<std::uint8_t, 16> owner_slot{};
+            std::string name, email;
+            const auto owner_name_clear = clear_on_scope_exit(name);
+            const auto owner_email_clear = clear_on_scope_exit(email);
+            const auto old_size = decode_owner_identity(
+                plaintext.data() + document_id_size + lease_size,
+                plaintext.size() - document_id_size - lease_size,
+                owner_slot, name, email);
+            const auto offset = document_id_size + lease_size;
+            plaintext.erase(plaintext.begin() + offset,
+                plaintext.begin() + offset + old_size);
+            plaintext.insert(plaintext.begin() + offset,
+                identity.begin(), identity.end());
+            return;
         }
-        return output;
-    }
-    if (access.managed_slots.empty())
-        throw ContainerFailure{ContainerError::invalid_argument};
-    auto all_metadata = read_managed_metadata(
-        container, container_size, layout, document_key.data());
-    std::size_t matched = all_metadata.size();
-    for (std::size_t index = 0; index < layout.invitations.size(); ++index) {
-        std::array<std::uint8_t, key_size> wrapping_key{};
-        std::vector<std::uint8_t> plain;
-        const auto wrapping_clear = clear_on_scope_exit(wrapping_key);
-        const auto plain_clear = clear_on_scope_exit(plain);
-        if (decrypt_invitation(layout.invitations[index], password, password_size,
-            wrapping_key, plain)) { matched = index; break; }
-    }
-    if (matched >= all_metadata.size())
-        throw ContainerFailure{ContainerError::authentication_failed};
-    auto metadata = all_metadata[matched];
-    metadata.actual_slot_id = access.slot_id;
-    metadata.slot_id_known = true;
-    metadata.identity_name = profile_name;
-    metadata.identity_email = profile_email;
-    metadata.identity_known = true;
-    all_metadata[matched] = metadata;
-    return rebuild_managed_records(container, container_size, layout,
-        document_key.data(), all_metadata);
+        if (access.managed_slots.empty())
+            throw ContainerFailure{ContainerError::invalid_argument};
+        auto metadata = read_managed_metadata(
+            container, container_size, layout, document_key);
+        std::size_t matched = metadata.size();
+        for (std::size_t index = 0; index < layout.invitations.size(); ++index) {
+            std::array<std::uint8_t, key_size> wrapping_key{};
+            std::vector<std::uint8_t> plain;
+            const auto wrapping_clear = clear_on_scope_exit(wrapping_key);
+            const auto plain_clear = clear_on_scope_exit(plain);
+            if (decrypt_invitation(layout.invitations[index], password,
+                    password_size, wrapping_key, plain)) {
+                matched = index;
+                break;
+            }
+        }
+        if (matched >= metadata.size())
+            throw ContainerFailure{ContainerError::authentication_failed};
+        PasswordSlotLifecycle::reconcile_managed_identity(
+            metadata[matched], access, profile_name, profile_email);
+        rebuild_managed_records(prefix, container, layout, document_key, metadata);
+        });
 }
 
 std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
@@ -1966,105 +1865,39 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::replace_editing_lease(
     const std::uint8_t *password, std::size_t password_size,
     const EditingLeaseData &lease)
 {
-    auto encoded_lease = encode_lease(lease);
-    const auto encoded_lease_clear = clear_on_scope_exit(encoded_lease);
-    auto current = unlock(container, container_size, password, password_size,
-        format::RevisionLimits::defaults());
-    if (current.must_be_changed)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    const std::uint32_t slot_count = read_u32(container + slot_count_offset);
-    const auto layout = read_layout(container, container_size);
-    if (!std::equal(magic.begin(), magic.end(), container)
-        || read_u32(container + 8) != format_version
-        || (slot_count != 1 && slot_count != 2)) {
-        throw ContainerFailure{ContainerError::unsupported_format};
-    }
-
-    require_sodium();
-    std::array<std::uint8_t, key_size> wrapping_key{}, snapshot_key{};
-    std::array<std::uint8_t, slot_plaintext_size> slot{};
-    std::vector<std::uint8_t> plaintext, replacement;
-    const auto plaintext_clear = clear_on_scope_exit(plaintext);
-    const auto replacement_clear = clear_on_scope_exit(replacement);
-    try {
-        const auto old_aad = slot_additional_data(container);
-        bool authenticated = false;
-        unsigned long long written = 0;
-        for (std::uint32_t index = 0; index < slot_count; ++index) {
-            const std::size_t salt = index == 0 ? owner_salt_offset : recovery_salt_offset;
-            const std::size_t nonce = index == 0 ? owner_nonce_offset : recovery_nonce_offset;
-            derive_wrapping_key(wrapping_key, password, password_size, container + salt);
-            const auto *wrapper_aad = layout.base_wrapper_versions[index]
-                    == legacy_format_version
-                ? layout.legacy_header : old_aad.data();
-            if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-                slot.data(), &written, nullptr,
-                container + header_size + index * wrapped_slot_size,
-                wrapped_slot_size, wrapper_aad, header_size,
-                container + nonce, wrapping_key.data()) == 0) {
-                authenticated = true;
-                break;
-            }
-        }
-        std::vector<std::uint8_t> invited;
-        const auto invited_clear = clear_on_scope_exit(invited);
-        if (!authenticated) {
-            for (const auto &record : layout.invitations) {
-                if (decrypt_invitation(record, password, password_size,
-                    wrapping_key, invited)) {
-                    std::copy_n(invited.data(), key_size, slot.begin());
-                    authenticated = true;
-                    break;
-                }
-            }
-        }
-        if (!authenticated) throw ContainerFailure{ContainerError::authentication_failed};
-
-        const std::uint64_t old_encrypted_size = read_u64(
-            container + encrypted_snapshot_size_offset);
-        const std::size_t snapshot_offset = layout.snapshot_offset;
-        if (old_encrypted_size < document_id_size + tag_size
-            || snapshot_offset + old_encrypted_size != container_size)
-            throw ContainerFailure{ContainerError::malformed_container};
-        derive_snapshot_key(snapshot_key, slot.data());
-        plaintext.resize(old_encrypted_size - tag_size);
-        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
-            plaintext.data(), &written, nullptr, container + snapshot_offset,
-            old_encrypted_size, container, header_size,
-            container + snapshot_nonce_offset, snapshot_key.data()) != 0
-            || written != plaintext.size()) {
-            throw ContainerFailure{ContainerError::authentication_failed};
-        }
-        EditingLeaseData old_lease;
-        const auto old_lease_size = decode_lease(plaintext.data() + document_id_size,
-            plaintext.size() - document_id_size, old_lease);
-        const auto revision_begin = plaintext.begin() + document_id_size + old_lease_size;
-        replacement.insert(replacement.end(), plaintext.begin(),
-            plaintext.begin() + document_id_size);
-        replacement.insert(replacement.end(), encoded_lease.begin(), encoded_lease.end());
-        replacement.insert(replacement.end(), revision_begin, plaintext.end());
-
-        std::vector<std::uint8_t> output(snapshot_offset + replacement.size() + tag_size);
-        std::copy_n(container, snapshot_offset, output.begin());
-        randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
-        write_u64(output.data() + encrypted_snapshot_size_offset,
-            replacement.size() + tag_size);
-        if (crypto_aead_xchacha20poly1305_ietf_encrypt(
-            output.data() + snapshot_offset, &written,
-            replacement.data(), replacement.size(), output.data(), header_size,
-            nullptr, output.data() + snapshot_nonce_offset, snapshot_key.data()) != 0
-            || written != replacement.size() + tag_size) {
-            throw ContainerFailure{ContainerError::crypto_error};
-        }
-        if (!layout.invitations.empty()) authenticate_slot_state(output, slot.data());
-        if (!replacement.empty()) sodium_memzero(replacement.data(), replacement.size());
-        clear(wrapping_key, snapshot_key, slot, plaintext);
-        return output;
-    } catch (...) {
-        if (!replacement.empty()) sodium_memzero(replacement.data(), replacement.size());
-        clear(wrapping_key, snapshot_key, slot, plaintext);
-        throw;
-    }
+    return rewrite_authenticated_container(container, container_size,
+        password, password_size,
+        [&](const UnlockedContainerData &current,
+            std::vector<std::uint8_t> &plaintext) {
+            if (current.must_be_changed)
+                throw ContainerFailure{ContainerError::invalid_argument};
+            EditingLeaseData old_lease;
+            const auto old_holder_name_clear =
+                clear_on_scope_exit(old_lease.holder_name);
+            const auto old_holder_email_clear =
+                clear_on_scope_exit(old_lease.holder_email);
+            const auto old_device_name_clear =
+                clear_on_scope_exit(old_lease.device_name);
+            const auto old_lease_size = decode_lease(
+                plaintext.data() + document_id_size,
+                plaintext.size() - document_id_size, old_lease);
+            auto encoded_lease = encode_lease(lease);
+            const auto encoded_lease_clear = clear_on_scope_exit(encoded_lease);
+            if (encoded_lease.size() > std::numeric_limits<std::size_t>::max()
+                    - (plaintext.size() - old_lease_size))
+                throw ContainerFailure{ContainerError::invalid_argument};
+            auto replacement = build_sensitive_plaintext([&](auto &out) {
+                out.reserve(plaintext.size() - old_lease_size + encoded_lease.size());
+                out.insert(out.end(), plaintext.begin(),
+                    plaintext.begin() + document_id_size);
+                out.insert(out.end(), encoded_lease.begin(), encoded_lease.end());
+                out.insert(out.end(),
+                    plaintext.begin() + document_id_size + old_lease_size,
+                    plaintext.end());
+            });
+            const auto replacement_clear = clear_on_scope_exit(replacement);
+            plaintext.swap(replacement);
+        });
 }
 
 } // namespace scpefe::container

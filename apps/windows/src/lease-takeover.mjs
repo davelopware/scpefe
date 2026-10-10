@@ -10,14 +10,16 @@ export class LeaseTakeoverAuthorizations {
   }
 
   stage(operation, service, error) {
-    if (!OPERATIONS.has(operation) || !service || error?.code !== "LEASE_CLOCK_UNCERTAIN"
+    if (!OPERATIONS.has(operation) || !service
+        || !["LEASE_CLOCK_UNCERTAIN", "LEASE_ACTIVE"].includes(error?.code)
         || !error.takeoverToken) {
       throw new TypeError("lease takeover evidence is invalid");
     }
     const authorization = this.createId();
     this.pending.set(authorization, { operation, service, token: error.takeoverToken });
     return Object.freeze({ decisionRequired: "lease-takeover", operation,
-      holderName: String(error.lease?.holderName || "another editor"), authorization });
+      holderName: String(error.lease?.holderName || "another editor"), authorization,
+      ...(error.code === "LEASE_ACTIVE" ? { reason: "master" } : {}) });
   }
 
   consume(operation, authorization, service) {
@@ -49,7 +51,7 @@ export class LeaseTakeoverAuthorizations {
   }
 }
 
-/* Runs a lease-requiring operation and stages only clock-uncertain takeovers. */
+/* Runs a lease-requiring operation and stages authorized one-shot takeovers. */
 export async function runLeaseOperation({ authorizations, operation, service,
   authorization, perform }) {
   const takeoverToken = authorization === undefined ? undefined
@@ -61,11 +63,13 @@ export async function runLeaseOperation({ authorizations, operation, service,
       try {
         return await perform(undefined);
       } catch (refreshed) {
-        if (refreshed?.code !== "LEASE_CLOCK_UNCERTAIN") throw refreshed;
+        if (!["LEASE_CLOCK_UNCERTAIN", "LEASE_ACTIVE"].includes(refreshed?.code)
+            || !refreshed.takeoverToken) throw refreshed;
         return authorizations.stage(operation, service, refreshed);
       }
     }
-    if (error?.code !== "LEASE_CLOCK_UNCERTAIN") throw error;
+    if (!["LEASE_CLOCK_UNCERTAIN", "LEASE_ACTIVE"].includes(error?.code)
+        || !error.takeoverToken) throw error;
     return authorizations.stage(operation, service, error);
   }
 }

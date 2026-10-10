@@ -100,8 +100,11 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
     {leaseDecision && <FocusedDialog returnFocus={returnFocus}
       title="Confirm editing-lease takeover" close={leaseBusy ? undefined
         : () => void onAction("cancel-lease")}>
-      <div className="warning" role="alert"><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
-        <p>Force takeover only after confirming that no other client is editing this document.</p></div>
+      <div className="warning" role="alert">{leaseDecision.reason === "master"
+        ? <><p>This document is locked for editing by {leaseDecision.holderName}.</p>
+          <p>The recovery/master password can unlock it now. Taking over will end their editing lease and may interrupt their work.</p></>
+        : <><p>The lease held by {leaseDecision.holderName} cannot be proved expired because the clocks disagree.</p>
+          <p>Force takeover only after confirming that no other client is editing this document.</p></>}</div>
       {leaseDecision.errorMessage && <p className="dialog-error" role="alert">
         {leaseDecision.errorMessage}</p>}
       <div className="dialog-actions"><button autoFocus disabled={leaseBusy}

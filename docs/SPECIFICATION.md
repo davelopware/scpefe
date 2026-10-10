@@ -231,10 +231,13 @@ The normal workflow edits an internal working copy. The shared `.scpefe` file is
 Concurrent editing is not a primary supported workflow. SCPEFE uses a provider-neutral advisory lease stored inside the encrypted file. It must not depend on provider-specific locking or revision facilities and must not create an adjacent lock file.
 
 An actively leased file can still be opened read-only after password entry, showing the decrypted lease-holder details. Entering edit mode warns the second editor rather than silently permitting concurrent editing.
+The recovery/master password may take over an active editing lease after a warning naming the current holder and explicit confirmation. The client rechecks the lease immediately before takeover and requires a fresh confirmation if it changed. Ordinary passwords cannot force takeover of a valid lease merely because the profile identity matches its holder.
 
 ### 8.2 Lease lifecycle and heartbeat
 
 The encrypted per-file lease duration defaults to ten minutes so every client applies the same takeover rule. While unlocked in edit mode the holder refreshes the lease every two minutes. Refresh stops completely while the application is locked. Lease expiry makes takeover permissible; it does not itself discard the editing session. On unlock, a still-valid lease resumes directly. An expired but unchanged and unclaimed lease is transparently reacquired. If another client acquired or changed the file, recovery/conflict handling applies.
+
+Closing or exiting a locked document releases its retained editing lease when the container is unchanged. A client must not replace a changed container merely to clear the old lease. A second local session with the same profile identity is still a different editing session and cannot take over a valid lease silently.
 
 Each refresh contains a random lease-session identifier, monotonically increasing heartbeat counter, holder UTC time, and lease duration. A reader uses advancing heartbeats as proof of activity. If clocks appear inconsistent, it can observe an unchanged session/counter for one full lease duration using its own monotonic clock before treating the lease as stale. Carefully confirmed forced takeover remains available so a bad clock cannot lock a file indefinitely.
 
@@ -324,6 +327,8 @@ Immediately before an automatic lock, SCPEFE force-flushes the unified encrypted
 ### 11.2 Effect on editing leases
 
 Automatic UI lock does not immediately surrender an editing lease. Heartbeat refresh stops, so the lease naturally becomes eligible for takeover after its file-defined duration. Returning before expiry resumes seamlessly after password entry; returning later transparently reacquires an unchanged, unclaimed file.
+
+Close and application exit end that retention. They release a lease held by the locked session when the target is unchanged, even though the password and document key have already been cleared from the locked session.
 
 ## 12. Editor features
 

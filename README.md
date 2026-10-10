@@ -2,7 +2,7 @@
 
 SCPEFE is a storage-neutral, cross-platform application for editing small encrypted text files. A document may live on a local disk, a network share or NAS, or cloud-backed storage; cloud-hosted files are a required capability, not a required location.
 
-The developing requirements and design decisions are recorded in [docs/SPECIFICATION.md](docs/SPECIFICATION.md). Canonical project terminology is defined in [docs/DOMAIN_MODEL.md](docs/DOMAIN_MODEL.md).
+The developing requirements and design decisions are recorded in [docs/SPECIFICATION.md](docs/SPECIFICATION.md). Canonical project terminology is defined in [docs/DOMAIN_MODEL.md](docs/DOMAIN_MODEL.md). The [C++ library architecture guide](docs/CPP_LIBRARY_ARCHITECTURE.md) maps the implemented classes and their call flow.
 
 ## Initial project scope
 
