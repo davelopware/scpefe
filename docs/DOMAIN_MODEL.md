@@ -116,7 +116,7 @@ Password-slot permissions are cooperative policy for conforming clients. They ar
 | Heartbeat | A lease refresh containing the session ID, increasing counter, holder time, and lease duration. |
 | Lease duration | The file-level interval after which an unrefreshed lease becomes eligible for takeover; ten minutes by default. |
 | Stale lease | A lease whose heartbeat has not advanced for the applicable duration according to the available evidence. |
-| Takeover | Acquisition of an expired/unclaimed lease by another session. |
+| Takeover | Acquisition of an expired/unclaimed lease, or an explicitly confirmed recovery/master acquisition of an active lease, by another session. |
 | Forced takeover | An explicitly confirmed takeover used when clock or storage evidence cannot establish expiry reliably. |
 | Clock-offset cache | Optional client-local estimates learned from observed heartbeats and used only as supporting lease evidence. |
 
@@ -129,6 +129,9 @@ closed → locked → unlocked/read-only → edit mode
 After an eligible editor slot opens or unlocks the document, the session attempts the read-only to edit-mode transition automatically. The same lease rules and explicit takeover decisions apply as when the user chooses **Edit Contents**.
 
 Re-locking stops heartbeat refresh but does not immediately erase the lease from the container. A returning session resumes a valid lease or transparently reacquires an unchanged, unclaimed expired lease.
+
+Closing or exiting a locked document ends its retained editing lease when the container is unchanged. A matching name, email, or device does not make another instance the same lease session.
+The recovery/master slot can take over an active lease after a holder warning and confirmation. The observed lease must still match when the takeover is published.
 
 ## 7. Working-state and save terms
 

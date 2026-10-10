@@ -136,6 +136,7 @@ export interface SessionLeaseDecision {
   readonly operation: "edit" | "recovery" | "divergence" | "migration";
   readonly holderName: string;
   readonly authorization: string;
+  readonly reason?: "master";
 }
 
 /** Safe identity context a presentation adapter may show to its user. */
@@ -143,6 +144,7 @@ export interface SessionLeaseAttention {
   readonly kind: "lease-takeover";
   readonly operation: SessionLeaseDecision["operation"];
   readonly holderName: string;
+  readonly reason?: "master";
 }
 
 /** A failed edit transition that can be retried without retaining host error text. */
@@ -2114,7 +2116,8 @@ export class DocumentSession<Doc extends SessionDocument,
       ? this.protectionAttention()
       : this.leaseDecision
       ? Object.freeze({ kind: "lease-takeover", operation: this.leaseDecision.operation,
-        holderName: this.leaseDecision.holderName })
+        holderName: this.leaseDecision.holderName,
+        ...(this.leaseDecision.reason ? { reason: this.leaseDecision.reason } : {}) })
       : this.editFailureCode ? Object.freeze({ kind: "edit-unavailable",
         code: this.editFailureCode })
       : this.saveFailureCode ? Object.freeze({ kind: "save-failed",

@@ -1209,10 +1209,14 @@ export class DocumentService {
       warningCode = "LOCK_CHECKPOINT_FAILED";
     } finally {
       if (active.leaseSessionId) {
+        let release = null;
+        try { release = this.#prepareSuspendedLeaseRelease(active); }
+        catch { /* Lock must clear secrets even if release preparation fails. */ }
         this.suspendedLeases.set(active.documentId, {
           target: active.target,
           sessionId: Buffer.from(active.leaseSessionId),
           counter: active.leaseCounter,
+          release,
         });
       }
       active.journalKey.fill(0);
@@ -1264,9 +1268,65 @@ export class DocumentService {
     if (!suspended || suspended.target !== target) return false;
     next.suspendedLeases.set(opened.documentId, {
       target, sessionId: Buffer.from(suspended.sessionId), counter: suspended.counter,
+      release: suspended.release ? {
+        base: Buffer.from(suspended.release.base),
+        candidate: Buffer.from(suspended.release.candidate) } : null,
     });
     this.suspendedLeases.delete(opened.documentId);
     return true;
+  }
+
+  #prepareSuspendedLeaseRelease(active) {
+    const base = Buffer.from(active.baseContainer);
+    const opened = this.#validateNativeOpened(
+      this.native.openDocument(base, active.password));
+    try {
+      if (opened.documentId !== active.documentId || !opened.lease.active
+          || opened.lease.sessionId !== active.leaseSessionId.toString("hex")
+          || opened.lease.heartbeatCounter !== active.leaseCounter) return null;
+      const candidate = this.native.updateLease(base, active.password,
+        { ...opened.lease, active: false });
+      if (Buffer.from(candidate).equals(base)) {
+        // A no-op bridge cannot supply bytes for a later safe release.
+        this.native.updateLease(base, active.password, opened.lease);
+        return null;
+      }
+      return { base, candidate: Buffer.from(candidate) };
+    } finally {
+      opened.journalKey.fill(0);
+    }
+  }
+
+  hasSuspendedLease() { return this.suspendedLeases.size > 0; }
+
+  async releaseSuspendedLease(target) {
+    const entry = [...this.suspendedLeases].find(([, value]) => value.target === target);
+    if (!entry) return { released: false };
+    const [documentId, suspended] = entry;
+    if (!suspended.release) {
+      this.suspendedLeases.delete(documentId);
+      return { released: false };
+    }
+    try {
+      await this.#queuePublication(async () => {
+        await this.#atomicWrite(target, suspended.release.candidate, true,
+          () => this.suspendedLeases.get(documentId) === suspended,
+          suspended.release.base);
+      });
+    } catch (error) {
+      if (error?.code !== "TARGET_CHANGED") throw error;
+      this.suspendedLeases.delete(documentId);
+      return { released: false, changed: true };
+    }
+    this.suspendedLeases.delete(documentId);
+    return { released: true };
+  }
+
+  async releaseSuspendedLeases() {
+    for (const target of new Set(
+      [...this.suspendedLeases.values()].map((value) => value.target))) {
+      await this.releaseSuspendedLease(target);
+    }
   }
 
   async regularSaveDocument() {
@@ -1865,10 +1925,11 @@ export class DocumentService {
         deviceName: profile.deviceName,
       };
       const candidate = this.native.updateLease(bytes, active.password, nextLease);
-      await this.#atomicWrite(active.target, candidate, true);
+      await this.#atomicWrite(active.target, candidate, true, () => true, bytes);
       active.baseContainer = Buffer.from(candidate);
       active.leaseSessionId = Buffer.from(acquisition.sessionId);
       active.leaseCounter = nextLease.heartbeatCounter;
+      this.suspendedLeases.delete(active.documentId);
     });
     this.leaseGeneration += 1;
     this.#scheduleHeartbeat(this.leaseGeneration);
@@ -1935,7 +1996,8 @@ export class DocumentService {
         const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
         error.code = age < 0 ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
         error.lease = lease;
-        if (error.code === "LEASE_CLOCK_UNCERTAIN" && issueTakeoverToken) {
+        if (issueTakeoverToken && (error.code === "LEASE_CLOCK_UNCERTAIN"
+            || (error.code === "LEASE_ACTIVE" && active.opened.recoverySlot))) {
           error.takeoverToken = this.#issueLeaseTakeoverToken(
             active, lease, observedDocumentId);
         }

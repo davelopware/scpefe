@@ -52,6 +52,7 @@ export interface NewerEditsDecision {
 export type DocumentAttentionDecision =
   | { readonly kind: "lease-takeover"; readonly holderName: string;
     readonly operation: "edit" | "recovery" | "divergence" | "migration";
+    readonly reason?: "master";
     readonly errorMessage: string | null }
   | { readonly kind: "migration-decision"; readonly canMigrate: boolean;
     readonly canceled: boolean; readonly failureMessage: string | null }
@@ -86,7 +87,8 @@ export class SessionPresentation {
   private focusIntent: SessionPresentationView["focusIntent"] = null;
   private leaseError: string | null = null;
   private leaseInFlight: { holderName: string;
-    operation: "edit" | "recovery" | "divergence" | "migration" } | null = null;
+    operation: "edit" | "recovery" | "divergence" | "migration";
+    reason?: "master" } | null = null;
   private compactionInFlight = false;
   private confirmDivergenceDiscard = false;
   private adoption: number | null = null;
@@ -202,7 +204,9 @@ export class SessionPresentation {
         ? { kind: "lease-takeover" as const, ...this.leaseInFlight, errorMessage: null }
       : attention?.kind === "lease-takeover"
         ? { kind: "lease-takeover" as const, holderName: attention.holderName,
-          operation: attention.operation, errorMessage: this.leaseError }
+          operation: attention.operation,
+          ...(attention.reason ? { reason: attention.reason } : {}),
+          errorMessage: this.leaseError }
       : (snapshot.kind === "read-only" || snapshot.kind === "edit")
         && snapshot.document.profileMismatch
         && (!attention || attention.kind === "migration-decision")
@@ -425,6 +429,7 @@ export class SessionPresentation {
       if ((action === "confirm-lease" || action === "cancel-lease")
         && attention.kind === "lease-takeover") this.leaseInFlight = {
           holderName: attention.holderName, operation: attention.operation,
+          ...(attention.reason ? { reason: attention.reason } : {}),
         };
       if (action === "compact") this.compactionInFlight = true;
       const outcome = await (action === "confirm-lease" ? this.session.confirmLeaseTakeover()

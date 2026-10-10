@@ -24,7 +24,7 @@ export type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
 export type LeaseOperation = "edit" | "recovery" | "divergence" | "migration";
 export type LeaseDecision = { decisionRequired: "lease-takeover"; operation: LeaseOperation;
-  holderName: string; authorization: string };
+  holderName: string; authorization: string; reason?: "master" };
 export type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   targetName?: string;

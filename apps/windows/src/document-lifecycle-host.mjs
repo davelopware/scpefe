@@ -63,7 +63,8 @@ export class DocumentLifecycleHost {
     this.replacements = new ReplacementCoordinator({ makeCandidate: () => this.#makeService(),
       authorizeCurrent: (operation, commit, validateCandidate) =>
         this.protections.authorize(operation, commit, validateCandidate),
-      adopt: (staged, target) => this.#adopt(staged, target), generation: this.generation });
+      adopt: (staged, target, assertCurrent) =>
+        this.#adopt(staged, target, assertCurrent), generation: this.generation });
     this.secureLocks = new SecureLockCoordinator({ getService: () => this.service,
       replacements: this.replacements, creationFlow: this.creation,
       clearOpenTarget: () => { this.selectedOpenTarget = null; },
@@ -162,6 +163,9 @@ export class DocumentLifecycleHost {
         if (!result.journalSaved) throw new Error(result.warningCode
           ?? "The document could not be checkpointed before closing");
       }
+      if (this.lockedTarget) {
+        await this.service.releaseSuspendedLease?.(this.lockedTarget);
+      }
       this.currentTarget = null; this.lockedTarget = null; this.selectedOpenTarget = null;
     });
     if (closed) {
@@ -226,9 +230,17 @@ export class DocumentLifecycleHost {
     return true;
   }
 
-  #adopt(staged, target) {
+  async #adopt(staged, target, assertCurrent = () => {}) {
     this.#clearInactiveTimer();
     this.leaseTakeovers.clear(); const previous = this.service;
+    const priorLockedTarget = this.lockedTarget;
+    if (target !== this.lockedTarget) {
+      await previous.releaseSuspendedLeases?.();
+    }
+    assertCurrent();
+    if (this.service !== previous || this.lockedTarget !== priorLockedTarget) {
+      throw new Error("The document changed before replacement could be adopted");
+    }
     if (target === this.lockedTarget) {
       previous.transferSuspendedLeaseTo?.(staged.candidate, target);
     }

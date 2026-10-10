@@ -1016,7 +1016,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (["new", "open", "external"].includes(entry)) {
       await driveSuccessfulReplacement(entry); return;
     }
-    await driveDirect(entry, "Locked"); return;
+    await driveDirect(entry, "Locked", entry === "window"); return;
   }
   await user.clear(editor);
   await user.type(editor, "mounted secret plaintext");

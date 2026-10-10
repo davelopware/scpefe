@@ -201,7 +201,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   const authorization = "123e4567-e89b-42d3-a456-426614174000";
   editResult = { decisionRequired: "lease-takeover", operation: "edit",
-    holderName: "Remote editor", authorization };
+    holderName: "Remote editor", authorization, reason: "master" };
   assert.deepEqual(JSON.parse(JSON.stringify(await exposed.enterEditMode())), editResult);
   await assert.rejects(exposed.enterEditMode({ authorization, extra: true }),
     /lease takeover request is invalid/);
