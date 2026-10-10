@@ -85,7 +85,7 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         calls.push(["edit", Boolean(authorization)]); editAttempts += 1;
         if (!authorization && editAttempts <= 2) {
           return { decisionRequired: "lease-takeover", operation: "edit",
-            holderName: "Remote editor",
+            holderName: "Remote editor", reason: "master",
             authorization: "123e4567-e89b-42d3-a456-426614174000" };
         }
         if (authorization && editAttempts === 3) {
@@ -359,6 +359,8 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
       { name: "Confirm editing-lease takeover" });
     assert.equal(editor.value, "");
     assert.match(ui.getByRole(dialog, "alert").textContent, /Remote editor/);
+    assert.match(ui.getByRole(dialog, "alert").textContent,
+      /recovery\/master password can unlock it now/i);
     await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
     assert.equal(status("Document state"), "Read-only");
     await command("Edit", "Edit Contents");

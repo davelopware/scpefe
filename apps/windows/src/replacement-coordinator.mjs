@@ -23,7 +23,7 @@ export class ReplacementCoordinator {
         this.#assertCurrent(generation);
         await staged.candidate.revalidateTargetForReplacement();
         this.#assertCurrent(generation);
-        this.adopt(staged, target);
+        await this.adopt(staged, target, () => this.#assertCurrent(generation));
         this.#assertCurrent(generation);
         this.candidates.delete(staged.candidate);
       }, () => staged.candidate.revalidateTargetForReplacement());
@@ -59,7 +59,7 @@ export class ReplacementCoordinator {
       const authorized = await this.authorizeCurrent(operation, async () => {
         await staged.candidate.revalidateTargetForReplacement();
         this.#assertCurrent(generation);
-        this.adopt(staged, target);
+        await this.adopt(staged, target, () => this.#assertCurrent(generation));
         this.#assertCurrent(generation);
         this.candidates.delete(staged.candidate);
       }, () => staged.candidate.revalidateTargetForReplacement());
@@ -85,7 +85,7 @@ export class ReplacementCoordinator {
         this.#assertCurrent(generation);
         await staged.candidate.revalidateTargetForReplacement();
         this.#assertCurrent(generation);
-        this.adopt(staged, staged.target);
+        await this.adopt(staged, staged.target, () => this.#assertCurrent(generation));
         this.#assertCurrent(generation);
         this.candidates.delete(staged.candidate);
       });

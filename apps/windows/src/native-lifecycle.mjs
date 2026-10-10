@@ -25,8 +25,9 @@ export class NativeLifecycleCoordinator {
     const active = service.active;
     const needsProtection = needsCloseDecision(active)
       || service.hasActivePublication?.() === true;
+    const needsLeaseRelease = service.hasSuspendedLease?.() === true;
     if ((!active || (!active.editMode && !needsProtection))
-        && !this.hasExternalRequests()) return Promise.resolve(true);
+        && !this.hasExternalRequests() && !needsLeaseRelease) return Promise.resolve(true);
     event.preventDefault();
     return this.#authorizeExit(service).catch((error) => {
       this.report(`Could not finish exit: ${error.message}`);
@@ -49,6 +50,7 @@ export class NativeLifecycleCoordinator {
       try { await service.exitEditMode(); }
       catch { await this.lockActive("app-exit"); }
     }
+    await service.releaseSuspendedLeases?.();
     this.releasing = true;
     this.closeWindow();
   }

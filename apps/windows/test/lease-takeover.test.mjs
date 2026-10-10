@@ -14,6 +14,26 @@ function uncertain(token) {
   return error;
 }
 
+test("active lease takeover requires a native master capability and warns about its holder", async () => {
+  const token = Object.freeze({});
+  const service = { cancelLeaseTakeover() { return true; } };
+  const authorizations = new LeaseTakeoverAuthorizations({ createId: () => ids[0] });
+  const active = new Error("active lease");
+  active.code = "LEASE_ACTIVE";
+  active.lease = { holderName: "Remote editor" };
+  await assert.rejects(runLeaseOperation({ authorizations, operation: "edit", service,
+    perform: async () => { throw active; } }), (error) => error === active);
+  active.takeoverToken = token;
+  const decision = await runLeaseOperation({ authorizations, operation: "edit", service,
+    perform: async () => { throw active; } });
+  assert.deepEqual(decision, { decisionRequired: "lease-takeover", operation: "edit",
+    holderName: "Remote editor", authorization: ids[0], reason: "master" });
+  assert.deepEqual(await runLeaseOperation({ authorizations, operation: "edit", service,
+    authorization: decision.authorization,
+    perform: async (candidate) => { assert.equal(candidate, token);
+      return { readOnly: false }; } }), { readOnly: false });
+});
+
 test("opaque authorizations bind operation and service and are one-shot", async () => {
   const canceled = [];
   const service = { cancelLeaseTakeover(token) { canceled.push(token); return true; } };

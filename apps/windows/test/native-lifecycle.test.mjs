@@ -72,6 +72,20 @@ test("clean read-only native close requires no interception", async () => {
   assert.deepEqual(value.calls, []);
 });
 
+test("native close releases a lease retained by a locked document", async () => {
+  const calls = [];
+  const service = { active: null, hasSuspendedLease: () => true,
+    async releaseSuspendedLeases() { calls.push("release"); } };
+  const lifecycle = new NativeLifecycleCoordinator({ getService: () => service,
+    protections: { async authorize(_operation, commit) {
+      calls.push("protect"); await commit(); return true;
+    } }, lockActive: async () => {}, closeWindow: () => calls.push("close"),
+    report: () => {} });
+  const event = { preventDefault() { calls.push("prevent"); } };
+  assert.equal(await lifecycle.handleClose(event), true);
+  assert.deepEqual(calls, ["prevent", "protect", "release", "close"]);
+});
+
 for (const active of [null, { editMode: false, dirty: false, manuallySealed: true }]) {
   test(`active external request intercepts ${active ? "clean read-only" : "no-document"} native close`,
     async () => {
