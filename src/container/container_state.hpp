@@ -66,7 +66,7 @@ struct ContainerState {
 
 /* Opens a validated envelope without exposing clear content. */
 struct Open {};
-/* Authenticates a slot and supplies its effective permissions. */
+/* Carries slot facts verified by Container before its state changes. */
 struct Unlock {
     SlotId slot_id;
     Permissions permissions;
@@ -81,7 +81,7 @@ struct Close {};
 struct AcquireEdit { Lease lease; };
 /* Returns the document session to read-only mode. */
 struct ReleaseEdit {};
-/* Applies authenticated target permissions before adopting target bytes. */
+/* Carries active-slot rights derived from an authenticated target. */
 struct ApplyTargetPermissions { Permissions permissions; bool wrapper_changed; };
 /* Requires a user decision before the next publication. */
 struct RaiseAttention { Attention reason; };
@@ -89,7 +89,7 @@ struct RaiseAttention { Attention reason; };
 struct ClearAttention {};
 /* Starts exactly one candidate publication with a fresh operation ID. */
 struct BeginPublication { std::uint64_t operation_id; PublicationKind kind; };
-/* Acknowledges the result of the matching in-flight publication. */
+/* Carries a host-verified result for the matching publication. */
 struct AcknowledgePublication { std::uint64_t operation_id; PublicationOutcome outcome; };
 /* Reports completion of a backup or export following its published attempt. */
 struct CompleteHostAction { std::uint64_t operation_id; bool succeeded; };
@@ -121,7 +121,7 @@ struct TransitionResult {
 /* Identifies a rejected or stale transition without altering installed state. */
 enum class StateError { invalid_transition, stale_operation };
 
-/* Computes legal state transitions and their required host effects. */
+/* Computes transitions from supplied facts without authenticating those facts. */
 class ContainerStateManagerService {
 public:
     /* Allows a context to own a concrete manager or a deterministic fake. */

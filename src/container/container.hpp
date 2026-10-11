@@ -30,13 +30,13 @@ public:
         const std::uint8_t *recovery_password, std::size_t recovery_password_size) const;
     /* Validates and stores a transitional 160-byte-header envelope without a password. */
     void open_legacy_document(const std::uint8_t *bytes, std::size_t size);
-    /* Authenticates the open document and installs its effective permissions. */
+    /* Verifies the current envelope password before restoring clear access. */
     const UnlockedContainerData &unlock_legacy_document(
         const std::uint8_t *password, std::size_t password_size);
-    /* Reauthenticates a changed target wrapper while retaining local committed bytes. */
-    const UnlockedContainerData &unlock_target_legacy_document(
-        const std::uint8_t *target_bytes, std::size_t target_size,
-        const std::uint8_t *password, std::size_t password_size);
+    /* Verifies one same-document target, pins its bytes, and applies active-slot rights. */
+    TransitionResult apply_target_legacy_document(const std::uint8_t *target_bytes,
+        std::size_t target_size, const std::uint8_t *password,
+        std::size_t password_size);
     /* Prepares a compaction candidate from the current committed envelope. */
     std::vector<std::uint8_t> compact_legacy_document(
         const std::uint8_t *password, std::size_t password_size,
@@ -46,9 +46,9 @@ public:
     const ContainerState &state() const { return state_; }
     /* Reports whether this session may expose currently available clear data. */
     bool can_read_clear() const;
-    /* Computes, installs, and announces a valid state transition. */
+    /* Installs Lock, Close, ReleaseEdit, or RaiseAttention only. */
     TransitionResult transition(const StateTransition &attempt);
-    /* Attempts a transition while retaining state on a rejected request. */
+    /* Tries a safe public transition while retaining state on rejection. */
     bool try_transition(const StateTransition &attempt);
     /* Subscribes an observer for the lifetime of this container or until removal. */
     void subscribe(ContainerStateObserver &observer);
@@ -56,6 +56,8 @@ public:
     void unsubscribe(ContainerStateObserver &observer);
 
 private:
+    /* Installs a transition after its caller has verified any required facts. */
+    TransitionResult install_transition(const StateTransition &attempt);
     const ContainerStateManagerService &state_manager_;
     const core::PasswordService &password_;
     const core::EncryptionService &encryption_;

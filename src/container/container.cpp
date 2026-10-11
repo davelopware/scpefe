@@ -54,8 +54,13 @@ void Container::open_legacy_document(const std::uint8_t *bytes, std::size_t size
     if (state_.access != Access::closed) throw StateError::invalid_transition;
     persistence_.validate_legacy_envelope(bytes, size);
     std::vector<std::uint8_t> incoming(bytes, bytes + size);
-    transition(Open{});
-    committed_bytes_ = std::move(incoming);
+    committed_bytes_.swap(incoming);
+    try {
+        install_transition(Open{});
+    } catch (...) {
+        committed_bytes_.swap(incoming);
+        throw;
+    }
 }
 
 const UnlockedContainerData &Container::unlock_legacy_document(
@@ -87,7 +92,7 @@ const UnlockedContainerData &Container::unlock_legacy_document(
     const bool retain_local_data = authenticating_target && unlocked_.has_value();
     if (!retain_local_data) unlocked_.emplace(std::move(decoded));
     try {
-        transition(request);
+        install_transition(request);
     } catch (...) {
         if (!retain_local_data) unlocked_.reset();
         throw;
@@ -96,20 +101,44 @@ const UnlockedContainerData &Container::unlock_legacy_document(
     return *unlocked_;
 }
 
-const UnlockedContainerData &Container::unlock_target_legacy_document(
+TransitionResult Container::apply_target_legacy_document(
     const std::uint8_t *target_bytes, std::size_t target_size,
     const std::uint8_t *password, std::size_t password_size)
 {
-    if (state_.access != Access::open || state_.screen != Screen::locked
-        || state_.attention != Attention::reauthenticate || !state_.target_access
-        || !state_.target_access->wrapper_changed || !document_id_
-        || !target_bytes_.empty()) throw StateError::invalid_transition;
+    if (state_.access != Access::open || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle || !state_.active_slot
+        || !document_id_ || committed_bytes_.empty() || state_.target_access
+        || !target_bytes_.empty())
+        throw StateError::invalid_transition;
+    if (password == nullptr || password_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
     persistence_.validate_legacy_envelope(target_bytes, target_size);
-    target_bytes_.assign(target_bytes, target_bytes + target_size);
+    auto decoded = persistence_.unlock_legacy_envelope(target_bytes, target_size,
+        password, password_size, format::RevisionLimits::defaults());
+    if (decoded.document_id != *document_id_)
+        throw ContainerFailure{ContainerError::malformed_container};
+    const bool active_slot_matched = decoded.slot_id == *state_.active_slot;
+    bool wrapper_changed = !active_slot_matched;
+    if (active_slot_matched) {
+        try {
+            const auto current = persistence_.unlock_legacy_envelope(committed_bytes_.data(),
+                committed_bytes_.size(), password, password_size,
+                format::RevisionLimits::defaults());
+            wrapper_changed = current.slot_id != decoded.slot_id;
+        } catch (const ContainerFailure &failure) {
+            if (failure.error != ContainerError::authentication_failed) throw;
+            wrapper_changed = true;
+        }
+    }
+    const Permissions rights{active_slot_matched && (decoded.permissions & 1u) != 0,
+        active_slot_matched && (decoded.permissions & 2u) != 0,
+        active_slot_matched && (decoded.permissions & 4u) != 0};
+    std::vector<std::uint8_t> incoming(target_bytes, target_bytes + target_size);
+    target_bytes_.swap(incoming);
     try {
-        return unlock_legacy_document(password, password_size);
+        return install_transition(ApplyTargetPermissions{rights, wrapper_changed});
     } catch (...) {
-        target_bytes_.clear();
+        target_bytes_.swap(incoming);
         throw;
     }
 }
@@ -140,6 +169,16 @@ bool Container::can_read_clear() const
 
 TransitionResult Container::transition(const StateTransition &attempt)
 {
+    if (!std::holds_alternative<Lock>(attempt)
+        && !std::holds_alternative<Close>(attempt)
+        && !std::holds_alternative<ReleaseEdit>(attempt)
+        && !std::holds_alternative<RaiseAttention>(attempt))
+        throw StateError::invalid_transition;
+    return install_transition(attempt);
+}
+
+TransitionResult Container::install_transition(const StateTransition &attempt)
+{
     if (transitioning_) throw StateError::invalid_transition;
     auto result = state_manager_.apply(state_, attempt);
     if (result.state == state_) return result;
@@ -149,8 +188,6 @@ TransitionResult Container::transition(const StateTransition &attempt)
     if (unlocked_ && (std::holds_alternative<Unlock>(attempt)
         || std::holds_alternative<ApplyTargetPermissions>(attempt)))
         unlocked_->permissions = permission_bits(state_.permissions);
-    if (const auto *target = std::get_if<ApplyTargetPermissions>(&attempt);
-        target && target->wrapper_changed) target_bytes_.clear();
     if (std::holds_alternative<Close>(attempt)) {
         unlocked_.reset();
         committed_bytes_.clear();
