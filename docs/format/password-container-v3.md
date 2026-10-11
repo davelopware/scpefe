@@ -5,6 +5,13 @@
 Status: implementation milestone format; independent cryptographic and format
 review remains required before production release.
 
+This describes the currently implemented, unreleased version-3 grammar. The
+[proposed library architecture](../RefactorLibraryToCleanerClasses.md) and
+[product specification](../SPECIFICATION.md) require a revised version-3
+baseline/delta/event grammar before the first release; its exact field layout
+and conformance vectors are still to be specified. The version number stays
+3 during this unreleased revision.
+
 Version 3 has the same fields, offsets, lengths, KDF, and encryption algorithms
 as the [version-2 envelope](password-container-v2.md). Readers distinguish it by
 the magic `53 43 50 45 46 45 00 03` and the envelope version integer `3`.

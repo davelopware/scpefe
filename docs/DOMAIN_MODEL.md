@@ -14,6 +14,7 @@ Status: working terminology, started 19 September 2026. This document defines th
 - Use **recovery/master slot** only for the optional emergency administrative password slot.
 - Use **manual save**, **regular save**, **recovery checkpoint**, and **publication** only with the meanings below; do not use autosave as an umbrella term.
 - Use **client** for one installed SCPEFE environment with app-private state, **instance** for one running process, and **session** for one opened document within that instance.
+- Use **lock** only for the screen-privacy state. Use **editing lease** for the advisory shared-file mechanism; never call that mechanism a lock.
 
 ## 2. Core domain relationships
 
@@ -51,7 +52,7 @@ Important boundaries:
 | Container | One self-contained physical `.scpefe` representation of a document. |
 | Target | The path, URI, or opaque host handle from which the active container was opened and to which it is published. |
 | Replica | A container with the same document ID. Replicas may be byte-identical, stale, or divergent. |
-| Backup replica | A verified byte-for-byte replica created by Backup or automatically before migration/compaction. |
+| Backup replica | A verified byte-for-byte replica of the source container as copied after a backup-attempt revision. A later outcome revision can make it an older replica. |
 | Active document | The single document currently open in the application instance. |
 | Plaintext export | An intentionally unencrypted copy of only the current resolved text. |
 | Publication | The process that makes a candidate container the current value at a target, or creates a new backup target without replacing an existing replica. |
@@ -63,21 +64,24 @@ Important boundaries:
 
 | Term | Canonical meaning |
 |---|---|
-| Revision | A history node with parent revision IDs, author/device metadata, timestamp, and either a snapshot or delta. |
+| Revision | An immutable history node with an ID, links, actor slot ID/name/email, client/device attribution, timestamp, and a snapshot, delta, or event-only body; its content body may later be pruned while metadata remains. |
+| Baseline revision | The first revision of a saved container, or the content revision at an anchored compaction checkpoint. It provides a full reconstruction base without requiring a later delta. |
 | Sealed revision | An immutable revision produced by a manual save. |
 | Provisional revision | The single amendable revision updated by optional regular saves since the last manual save. It remains logically unsaved. |
 | Revision ID | The cryptographic identity/hash of a revision. |
-| Revision graph | The hash-linked directed graph of revisions, including branches created by divergence. |
-| Head | The revision representing the container's current resolved document state. |
+| Revision graph | The hash-linked history with one canonical reconstructable content line and one resolved head; resolved foreign branches may remain as metadata-only records. |
+| Head | The latest revision in a container, including an event-only revision that leaves content unchanged. |
 | Snapshot | A full encrypted representation of document text at a point in history. |
-| Delta | An encrypted representation of changes relative to another revision. |
+| Delta | An encrypted reconstruction record for text changes relative to the canonical content parent. |
 | Checkpoint | A full snapshot placed within history to bound delta replay. Do not confuse it with a recovery checkpoint. |
-| Branch | A line of revisions that diverged from a shared ancestor. |
+| Branch | A line of revisions that diverged from a shared ancestor. A foreign branch is temporary during resolution and becomes metadata-only history when merged. |
 | Divergence | The condition in which observed heads are not descendants of one another. |
 | Conflict | A divergence requiring user-directed resolution before publication. |
-| Merge | A new revision with multiple parents that records the user's resolution of divergent branches. |
-| Compaction | An administrative rewrite that creates a fresh baseline, retains a shallow reference to the previous head, and removes older embedded revision bodies after backup. |
-| Shallow parent | A retained parent revision ID whose full revision body has been removed by compaction. |
+| Merge | A new delta revision from the local content head to the user's resolution, linked to the foreign head and its metadata-only history. |
+| Metadata-only revision | A revision whose ID, links, actor, time, and event details remain but whose content body is unavailable after merge or compaction. |
+| Compaction | An administrative rewrite that anchors a new reconstruction base at a retained revision ID, keeps the last N content deltas, and removes older content bodies after backup while retaining their metadata. |
+| Shallow parent | A retained revision link whose full content body has been removed. |
+| Activity event | A revision recording a conforming client's backup or plaintext-export attempt and later observed outcome; it is a cooperative log, not a complete audit trail. |
 
 ## 5. Password and identity terms
 
@@ -107,11 +111,11 @@ Password-slot permissions are cooperative policy for conforming clients. They ar
 
 | Term | Canonical meaning |
 |---|---|
-| Locked | No document password/key or plaintext editing state is available to the UI. |
+| Locked | Screen-privacy state in which the UI hides document content and requires a valid password before showing it again. The library may retain clear content and keys in memory until Close. |
 | Unlocked | A password slot has opened the document. An eligible editor slot attempts edit mode as part of opening or unlocking. |
 | Read-only mode | Unlocked viewing without an editing lease. View-only and editing-blocked sessions remain here; an editor slot also remains here if lease acquisition needs a decision or fails. |
 | Edit mode | The document session owns or has reacquired the advisory editing lease and permits changes allowed by the slot policy. |
-| Editing lease | Encrypted advisory shared state identifying the edit session permitted to publish changes. It is not a guaranteed distributed lock. |
+| Editing lease | Encrypted advisory shared state identifying the edit session permitted to publish changes. It does not guarantee mutual exclusion. |
 | Lease session ID | A random identifier for one acquisition of an editing lease. |
 | Heartbeat | A lease refresh containing the session ID, increasing counter, holder time, and lease duration. |
 | Lease duration | The file-level interval after which an unrefreshed lease becomes eligible for takeover; ten minutes by default. |
@@ -145,7 +149,7 @@ The recovery/master slot can take over an active lease after a holder warning an
 | Regular save | An optional timed save that updates the single provisional revision in the target. It does not seal the user's changes. |
 | Pending publication | A user-saved journal state that cannot yet be published to the target. |
 | Recovered unsaved work | Journal content restored after re-lock or unexpected exit; it remains logically unsaved. |
-| Candidate container | The exact serialized/encrypted byte stream prepared for publication. |
+| Candidate container | The exact serialized/encrypted byte stream prepared for publication; it is not committed until target publication is verified. |
 | Clean | No unsaved, provisional, pending-publication, or unresolved-conflict state exists. |
 
 ```text
@@ -179,6 +183,7 @@ working copy ──recovery checkpoint──> local work journal
 - Every legitimate replica of a document carries that same document ID.
 - A document has one owner slot, zero or one recovery/master slot, and no more than eight ordinary slots total.
 - Every password slot wraps the same document key.
+- Every saved container has a baseline revision; it may have zero content deltas after that base.
 - At most one provisional revision exists after the last sealed revision.
 - A conforming application permits editing only after lease acquisition. An eligible editor slot attempts that acquisition once on open or unlock; blocked and view-only sessions remain read-only.
 - A client stores at most one local work journal per document.
@@ -186,4 +191,6 @@ working copy ──recovery checkpoint──> local work journal
 - Persistent adjacent files are not required. Explicit backup replicas and short-lived transaction files are the documented exceptions.
 - Backup publication is create-only: it uses a UTC standard name plus a numeric collision suffix and never replaces an existing target.
 - Manual save seals history; regular save does not.
+- Backup and plaintext export require a published attempt revision before the external action; the source records a later observed outcome.
+- Compaction retains all revision metadata and defaults to ten reconstructable content deltas after its new base; older content bodies may be unavailable.
 - A new client without a head witness cannot prove that an otherwise valid container is the newest replica.

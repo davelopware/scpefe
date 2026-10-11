@@ -44,13 +44,15 @@ The native build is the production path. A WebAssembly build of the platform-neu
 
 ### 2.3 Library and host adapters
 
-The common C++ implementation is delivered as one `libscpefe` library. Internally it preserves logical separation between pure format/cryptographic code and application orchestration, but exposes both low-level diagnostic/format APIs and high-level session/configuration APIs through one stable, versioned C ABI.
+The common C++ implementation is delivered as one `libscpefe` library. Internally it preserves logical separation between pure format/cryptographic code and application orchestration, but exposes both low-level diagnostic/format APIs and high-level session/configuration APIs through one versioned C ABI. The proposed object model and replacement handle-based ABI are specified in [RefactorLibraryToCleanerClasses](RefactorLibraryToCleanerClasses.md).
 
 The C ABI is an adapter seam, not the internal programming model. Core state and domain behavior are implemented in idiomatic, object-oriented C++20 classes and value types with encapsulation, RAII ownership, and standard-library types. C entry points remain thin: they validate and marshal C-compatible arguments, delegate to C++ objects, translate results/errors, and must not accumulate the primary implementation logic. C structs, opaque handles, callbacks, and function tables are used only where data crosses the external ABI or a host-adapter seam. Pure stateless algorithms may remain free functions where that is clearer, but domain state must not be represented internally as an anemic C-style struct manipulated primarily by free procedures.
 
 Internal code is organized for discoverability and reuse: each class has a clearly named private `.hpp`/`.cpp` pair, and even small reusable helpers live in their own named files rather than being hidden inside an unrelated implementation file. Files implementing the external C seam use the `_abi.cpp` suffix and contain adapter logic only. Public C headers use `.h`; private C++ interfaces use `.hpp` and are never installed as part of the C ABI. Because this convention creates more files, adding another cohesive, purpose-named folder level is explicitly encouraged when it keeps directory contents navigable.
 
 The public `libscpefe` headers define a versioned host-services interface. Official Windows, POSIX/Linux, and Android adapter libraries implement it; an embedding application may provide its own implementation. The frontend creates an adapter instance and passes its function table and instance data to an explicit SCPEFE context. Registration is per-context rather than process-global, allowing multiple isolated contexts and deterministic test adapters.
+
+The C++ composition factory uses a per-context dependency registry to inject only the services each internal class needs. One active `Container` handle belongs to a context; temporary comparison containers may be used during merge and replacement checks. The active handle persists through screen Lock/Unlock and successful publications until Close. State-changing operations are serialized, and confirmed publication updates the same in-memory container instance.
 
 Host services use opaque document handles rather than assuming filesystem paths and cover document reads/safe replacement, app-private blob/journal storage, typed-settings persistence, clocks, lifecycle input, and declared storage capabilities. `libscpefe` owns schemas, defaults, and validation for meaningful SCPEFE settings; purely frontend preferences such as window geometry and theme remain in the frontend.
 
@@ -67,13 +69,13 @@ SCPEFE is intended to protect document content from:
 - The cloud-storage provider.
 - An attacker who obtains access to the storage account or copies encrypted files.
 - Competent attackers and automated or LLM-assisted offline password guessing.
-- Someone who obtains a device while SCPEFE is locked.
+- Someone who finds an unattended device while SCPEFE's screen is locked and cannot view the hidden document through the application without its password.
 
 It is not intended to resist a nation-state adversary or protect plaintext that is already visible in a currently unlocked editor. It also cannot prevent compromise by malware, keyloggers, screen capture, or a fully compromised operating system.
 
 ### 3.2 Visible and encrypted metadata
 
-The storage layer may see the meaningful external filename, file size, and filesystem timestamps. Semantic metadata—including lock state, internal document metadata, author identity, device identity, revision history, and document content—must be encrypted. Only non-semantic data strictly required to recognize and decrypt the container, such as format and cryptographic envelope parameters, may be exposed.
+The storage layer may see the meaningful external filename, file size, and filesystem timestamps. Semantic metadata—including editing-lease state, internal document metadata, author identity, device identity, revision history, and document content—must be encrypted. Screen Lock is local session state and is not stored in the shared container. Only non-semantic data strictly required to recognize and decrypt the container, such as format and cryptographic envelope parameters, may be exposed.
 
 ### 3.3 Cryptographic baseline and release gates
 
@@ -155,9 +157,7 @@ Weak passwords must be rejected. Strength is assessed locally using resistance-t
 
 The UI explains why a proposed password is rejected without logging, retaining, or transmitting it.
 
-Passwords and decrypted file keys are not persistently stored in operating-system credential storage in the initial releases. They remain only for the active unlocked session and are cleared on re-lock or exit as far as the platform permits.
-
-Libsodium guarded or locked memory and explicit zeroing are used as defense in depth where supported. These mechanisms are not presented as absolute protection against a compromised operating system.
+Passwords and decrypted file keys are not persistently stored in operating-system credential storage in the initial releases. Password input is transient; the library may retain decrypted keys and content in memory until the document is closed. Screen Lock hides content through the UI and requires a valid password before showing it again; it does not claim to clear process memory or protect against memory inspection. A small secret-owning type best-effort clears passwords and keys when destroyed or replaced. Guarded memory and per-field plaintext/metadata wiping are not requirements.
 
 ## 6. Self-contained file format
 
@@ -165,7 +165,7 @@ Libsodium guarded or locked memory and explicit zeroing are used as defense in d
 
 Encrypted documents use a dedicated `.scpefe` extension. A meaningful filename may be retained, for example `notes.md.scpefe`.
 
-Everything durable that defines the shared document belongs in the single `.scpefe` file. This includes content, semantic metadata, lock/lease state, revision history, and merge ancestry. The format must not require adjacent key, lock, index, history, or metadata files.
+Everything durable that defines the shared document belongs in the single `.scpefe` file. This includes content, semantic metadata, editing-lease state, revision history, and merge ancestry. The format must not require adjacent key, index, history, or metadata files for its own operation.
 
 Encrypted work journals in application-private local storage are an accepted exception. They are local recovery or pending-synchronization state, not companion files in the shared storage location.
 
@@ -184,41 +184,42 @@ The file uses two layers:
 
 The SCPEFE CBOR profile uses definite lengths, integer field identifiers, no floating-point values, strict UTF-8 validation, rejection of duplicate keys, and explicit limits on nesting, counts, and sizes. Unknown optional fields are preserved or ignored as specified; unknown mandatory features are rejected. A public CDDL schema plus valid and invalid conformance vectors define the profile. Diagnostic tooling maps numeric fields to readable JSON names.
 
-Version 1 stores snapshots and delta segments uncompressed. Records nevertheless contain versioned codec framing, initially `none`, and validated uncompressed lengths so a later speed-oriented compression enhancement does not require changing record semantics. Unsupported codecs are rejected cleanly.
+The initial released record codec stores snapshots and delta segments uncompressed. Records nevertheless contain versioned codec framing, initially `none`, and validated uncompressed lengths so a later speed-oriented compression enhancement does not require changing record semantics. Unsupported codecs are rejected cleanly.
 
 ### 6.3 Proposed history representation
 
-The agreed direction is a hybrid representation:
+The unreleased version-3 grammar is to be revised before release:
 
-- An encrypted full snapshot supports fast normal opening.
-- Encrypted revision records contain parent revision identifiers, content hashes, timestamps, author/device information, and text deltas.
-- Revision ancestry forms a graph rather than only a linear list, permitting divergent offline edits to share a merge base.
-- Occasional encrypted checkpoints prevent recovery from depending on an indefinitely long delta chain.
-- Checkpoint frequency and similar tuning are implementation details.
+- Every saved container has a baseline snapshot revision, followed by zero or more encrypted content-delta and event-only revisions. A checkpoint is a full snapshot anchored to an existing revision ID; opening reconstructs current text from the nearest checkpoint and bounded later deltas.
+- Each revision has an immutable ID, links, content hash or body digest, time, actor slot ID, actor name and email at the time, client profile/device, kind, and body-availability status. Event-only revisions leave text unchanged. All semantic metadata remains encrypted.
+- The saved graph has one canonical reconstructable content lineage and one resolved head. During a merge, both versions are available in memory. The published merge revision stores a delta from the local content head to resolved text and links to the foreign head. Foreign revisions are then retained as metadata-only records marked as resolved by that merge; their deltas are not retained in the new container.
+- Compaction may remove older content bodies while preserving their IDs, links, attribution, and times. Revision identity must remain stable when a body is pruned or a checkpoint is materialized. The format must authenticate retained metadata and detect corruption or unsupported features.
 
-This structure must be designed for crash detection and authenticated integrity. The precise binary layout is not yet specified.
+The logical behavior is specified in [RefactorLibraryToCleanerClasses](RefactorLibraryToCleanerClasses.md). Exact version-3 field numbers, binary layout, CDDL, and conformance vectors must be defined before the revised writer is implemented. Older unreleased container versions 1 and 2 need not remain readable. Once a format is released, later releases must retain read support for it.
 
 ## 7. History and compaction
 
 ### 7.1 Revision lifecycle
 
-Each explicit document save creates a revision. History is retained indefinitely by default.
+Each explicit document save creates a revision. Shared credential/permission changes, compaction, and conforming-client backup/export attempts and outcomes also create event-only revisions. Editing-lease heartbeats and screen Lock/Unlock do not. Revision metadata is retained indefinitely; content bodies remain until optional compaction. The log is a cooperative record of observed actions, not a complete audit trail.
 
 Optional regular saves are a configurable per-client application preference, disabled by default with a two-minute default interval when enabled. They commit to the actual `.scpefe` file but update one provisional autosave revision whose cumulative delta is based on the last user-asserted save; timer events do not fill history with individual revisions. A manual save seals the consolidated revision.
 
 On clean exit with a provisional autosave, the user is still warned about unsaved changes. Choosing save seals the consolidated update. Choosing discard restores the last manually saved content and removes the provisional autosave, subject to the normal divergence check. After a crash or stale lease, the next editor is offered an explicit choice to recover or discard the provisional changes, with author/device details shown after decryption.
 
+Before publishing an event-only revision, the single provisional revision must be manually sealed or explicitly discarded. A combined seal-and-event workflow may avoid a separate user command.
+
 ### 7.2 Compaction prompting and policy
 
 When the file's estimated size exceeds a configurable multiple of its estimated compacted size, the application regularly suggests compaction. The default threshold is 10×. The user may permanently dismiss this notification for an individual file.
 
-Compaction creates a fresh baseline from the latest resolved content and, after explicit confirmation, discards earlier embedded history. The UI must warn that compaction cannot erase copies retained by storage providers, sync tools, caches, or backups.
+Compaction defaults to keeping `N=10` reconstructable content deltas after a new base. `N=0` makes the latest content revision the base; `N=1` makes the preceding content revision the base and retains one delta. The implementation materializes a full checkpoint at the cutoff revision's existing ID, removes earlier content bodies, retains all older revision metadata, and appends a compaction event. The UI must explain that older text becomes unavailable and that compaction cannot erase copies retained by storage providers, sync tools, caches, or backups.
 
-Compaction is allowed only from a clean, manually sealed, conflict-free document while holding the lease, and only for a slot possessing both add-password and remove-password permissions. Before compaction, SCPEFE creates and verifies an exact backup using the standard timestamped naming convention. The fresh baseline retains the previous head hash as a shallow “history truncated here” parent reference so clients that witnessed that head can recognize continuity.
+Compaction is allowed only from a clean, manually sealed, conflict-free document while holding the lease, and only for a slot possessing both add-password and remove-password permissions. Before compaction, SCPEFE creates and verifies an exact backup using the standard timestamped naming convention. Retained IDs and links preserve continuity for clients that witnessed earlier heads. Compaction bounds content-history size but does not bound attribution-metadata growth.
 
 ### 7.3 Deferred history interface
 
-Browsing, comparing, and restoring historical revisions is a future feature and is not required for the initial release. The history is nevertheless recorded from the first format version so later implementations can use it.
+The initial UI shows a newest-first list of every revision kind with actor name/email and time; foreign metadata-only records may be visually distinguished. The C ABI exposes full revision metadata, available deltas, reconstruction, and comparison so merge and later history tools can use them. The UI for browsing, comparing, and restoring old text may be deferred. Pruned or foreign metadata-only bodies report explicit unavailability.
 
 ## 8. Editing and locking
 
@@ -235,25 +236,27 @@ The recovery/master password may take over an active editing lease after a warni
 
 ### 8.2 Lease lifecycle and heartbeat
 
-The encrypted per-file lease duration defaults to ten minutes so every client applies the same takeover rule. While unlocked in edit mode the holder refreshes the lease every two minutes. Refresh stops completely while the application is locked. Lease expiry makes takeover permissible; it does not itself discard the editing session. On unlock, a still-valid lease resumes directly. An expired but unchanged and unclaimed lease is transparently reacquired. If another client acquired or changed the file, recovery/conflict handling applies.
+The encrypted per-file lease duration defaults to ten minutes so every client applies the same takeover rule. While unlocked in edit mode the holder refreshes the lease every two minutes. Refresh stops completely while the screen is locked. Lease expiry makes takeover permissible; it does not itself discard the editing session. On unlock, a still-valid lease resumes directly. An expired but unchanged and unclaimed lease is transparently reacquired. If another client acquired or changed the file, recovery/conflict handling applies.
 
-Closing or exiting a locked document releases its retained editing lease when the container is unchanged. A client must not replace a changed container merely to clear the old lease. A second local session with the same profile identity is still a different editing session and cannot take over a valid lease silently.
+Closing or exiting a screen-locked document releases its retained editing lease when the container is unchanged. A client must not replace a changed container merely to clear the old lease. A second local session with the same profile identity is still a different editing session and cannot take over a valid lease silently.
 
-Each refresh contains a random lease-session identifier, monotonically increasing heartbeat counter, holder UTC time, and lease duration. A reader uses advancing heartbeats as proof of activity. If clocks appear inconsistent, it can observe an unchanged session/counter for one full lease duration using its own monotonic clock before treating the lease as stale. Carefully confirmed forced takeover remains available so a bad clock cannot lock a file indefinitely.
+Each refresh contains a random lease-session identifier, monotonically increasing heartbeat counter, holder UTC time, and lease duration. A reader uses advancing heartbeats as proof of activity. If clocks appear inconsistent, it can observe an unchanged session/counter for one full lease duration using its own monotonic clock before treating the lease as stale. Carefully confirmed forced takeover remains available so a bad clock cannot deny access to a file indefinitely.
 
-Lease-only refreshes change the storage-level modification time but never create document-history revisions. Version 1 safely rewrites the small container while reusing unchanged ciphertext rather than adding a specialized in-place double-buffered header writer; this may be optimized later only if measurement shows problematic synchronization traffic.
+Lease-only refreshes change the storage-level modification time but never create document-history revisions. The initial writer safely rewrites the small container while reusing unchanged ciphertext rather than adding a specialized in-place double-buffered header writer; this may be optimized later only if measurement shows problematic synchronization traffic.
 
 ### 8.3 Clock sanity checks
 
 A client may locally learn approximate clock offsets from observed heartbeats as an additional sanity check. This app-private cache is keyed by document/device, records uncertainty and observation times, is never authoritative, and is invalidated after clock jumps, contradictory evidence, or prolonged gaps. Offset learning is disable-able per client; disabling it deletes the client's cache. Read-only observation never writes clock estimates into the shared document.
 
-### 8.4 Lock limitations and conflicts
+### 8.4 Lease limitations and conflicts
 
-Because generic filesystems, cloud-sync clients, and NAS implementations do not provide uniform atomic compare-and-swap behavior, this lock cannot guarantee exclusion. Two editors can read the same unlocked version before either write becomes visible. SCPEFE must describe the lock as advisory rather than claiming distributed locking guarantees.
+Because generic filesystems, cloud-sync clients, and NAS implementations do not provide uniform atomic compare-and-swap behavior, the editing lease cannot guarantee exclusion. Two editors can read the same version before either write becomes visible. SCPEFE must describe the lease as advisory rather than claiming guaranteed mutual exclusion.
 
 An editor that detects a changed base does not automatically choose a winner or silently merge. It presents a manual three-way merge using the common ancestor, local version, and current observed version. Initial conflict handling creates a working draft using the Git-style marker sequence `<<<<<<< local`, `=======`, and `>>>>>>> current` around the two alternatives.
 
-Final save is blocked until all conflict markers are resolved. Both branches remain represented in history. SCPEFE can only detect or merge versions it can observe; it cannot recover a version already discarded by the underlying storage system.
+Final save is blocked until all conflict markers are resolved. The resolved result continues the local content lineage; foreign revisions remain as metadata-only records linked to the merge, without retaining their content deltas in the published container. If the common ancestor's text was pruned, SCPEFE uses a verified backup or local journal when available; otherwise it offers a manual two-version comparison and does not claim a three-way merge. SCPEFE can only detect or merge versions it can observe; it cannot recover a version already discarded by the underlying storage system.
+
+An authenticated observed target's current password-slot and lease state governs publication. Once its document identity and lineage pass validation, its permissions limit local commands immediately through an effective-access overlay. A removed or demoted local slot cannot publish a merge using old privileges; unsaved work remains in the encrypted local journal. A changed wrapper for the same slot requires reauthentication with the target's current password. Conflicting local credential changes remain in history, but target credential state prevails and a reconciliation event records that choice. A rolled-back or unrelated target is not silently treated as authoritative.
 
 ## 9. Offline work and local journal
 
@@ -303,13 +306,13 @@ An authenticated mismatch may be inspected read-only, but editing and saving rem
 
 ### 10.1 Backup
 
-Backup creates a verified byte-for-byte replica of a clean, manually sealed `.scpefe` container. It uses crash-safe publication at the selected destination and does not decrypt, re-encrypt, change the document ID, or switch the active document away from its original path. View-only slots may create backups. If unsaved or provisional changes exist, the user must save or discard them before Backup.
+Backup requires a clean, manually sealed source. It first publishes a backup-attempt revision in the source; if that publication fails, copying does not start. It then creates a verified byte-for-byte replica of the source as it exists after the attempt event, using crash-safe publication at the selected destination. It does not decrypt or re-encrypt the copied bytes, change the document ID, or switch the active document away from its original path. It finally publishes a success or failure outcome revision in the source. On success, that later event makes the backup an older valid replica. If the outcome cannot be published, the app-private journal retains the pending record and the UI reports that state. View-only slots have narrow authority to append activity revisions for Backup. If unsaved or provisional changes exist, the user must save or discard them before Backup.
 
 Backup names use the default form `name.backup-YYYYMMDDTHHMMSSZ.scpefe`, with a UTC filesystem-safe timestamp and numeric collision suffix where required. Existing backups are never overwritten.
 
 ### 10.2 Format migration
 
-Every application release reads supported older stable formats but writes only the latest format. Opening an older format offers migration; declining still permits read-only access, while the next save necessarily migrates. Migration preserves the document identity, content, history, and password slots and records a migration event without claiming a text change. Slot wrappers remain individually versioned because passwords for other slots may be unavailable during migration.
+Before the first release, container version 3 is the sole required reader/writer and its grammar may be revised without advancing its version number. Versions 1 and 2 are unreleased development formats and need not remain readable. After release, every application release reads supported older stable formats but writes only the latest format. Opening an older released format offers migration; declining still permits read-only access, while the next save necessarily migrates. Migration preserves the document identity, content, history, and password slots and records a migration event without claiming a text change. Slot wrappers remain individually versioned because passwords for other slots may be unavailable during migration.
 
 Before rewriting an older document, SCPEFE automatically creates and verifies an exact pre-migration backup using the standard backup naming convention. Migration never silently proceeds if backup creation fails; the user may select another destination. The UI warns that older SCPEFE versions may not open the migrated document.
 
@@ -328,7 +331,7 @@ Immediately before an automatic lock, SCPEFE force-flushes the unified encrypted
 
 Automatic UI lock does not immediately surrender an editing lease. Heartbeat refresh stops, so the lease naturally becomes eligible for takeover after its file-defined duration. Returning before expiry resumes seamlessly after password entry; returning later transparently reacquires an unchanged, unclaimed file.
 
-Close and application exit end that retention. They release a lease held by the locked session when the target is unchanged, even though the password and document key have already been cleared from the locked session.
+Close and application exit end that retention. They release a lease held by the screen-locked session when the target is unchanged. Decrypted keys may have remained in library memory during screen Lock and are released on Close.
 
 ## 12. Editor features
 
@@ -347,9 +350,11 @@ Canonical internal document text is valid UTF-8 without a BOM and uses `LF` line
 
 Plaintext export must prominently warn that the exported copy is not password protected and may persist in backups or storage history.
 
+Before exporting, the source must publish an export-attempt revision. If that cannot be published, export does not start. After the host action, the source records an observed success or failure revision; an unavailable outcome publication remains pending in the app-private journal. These are cooperative activity records, not a guarantee that all plaintext copies are known to the app.
+
 There is no explicit plaintext-import workflow initially; users create a new encrypted document and paste text into it. Export never includes history, identity, lease, or other metadata.
 
-View-only slots may use plaintext export and encrypted Backup because they already possess the plaintext; they cannot enter edit mode, create revisions, compact history, or administer credentials except for changing their own password/identity as explicitly allowed.
+View-only slots may use plaintext export and encrypted Backup because they already possess the plaintext. They may append only the required activity and own-credential/identity revisions; they cannot enter content edit mode, create content revisions, compact history, or administer other credentials.
 
 ### 12.3 Single-document application workflow
 
@@ -379,8 +384,8 @@ Core diagnostic capabilities should include:
 
 - Validate the container and authenticated revision graph.
 - Report format versions and cryptographic parameters.
-- Dump structured metadata, snapshots, deltas, and lock state as JSON after successful authentication.
-- Support golden-file, corruption, migration, merge, and round-trip tests.
+- Dump structured metadata, snapshots, deltas, and lease state as JSON after successful authentication.
+- Support golden-file, corruption, future stable-format migration, merge, and round-trip tests.
 
 The diagnostic dump must never emit passwords or raw encryption keys. It must acquire passwords through a secure interactive prompt or standard input, never a command-line argument. Decrypted document text is excluded by default and requires an explicit `--include-content` option.
 
@@ -402,12 +407,15 @@ There is no account recovery service, master developer key, escrow key, or backd
 
 ## 15. Known limitations
 
-- No provider-neutral format can guarantee a distributed lock or atomic compare-and-swap on every filesystem and sync service.
+- No provider-neutral format can guarantee mutual exclusion or atomic compare-and-swap on every filesystem and sync service.
 - Connectivity detection cannot guarantee that a cloud-backed filesystem view is current.
 - Conflict recovery requires access to both divergent versions; SCPEFE cannot reconstruct a version discarded by another system.
+- If compaction removed a common ancestor's text, the current container alone cannot perform a true three-way merge at that ancestor.
 - Compaction cannot delete historical copies outside the current file.
 - Self-asserted author details are useful attribution, not a cryptographically verified identity or tamper-proof audit trail against someone who legitimately knows a file password.
+- Backup/export events are a cooperative record of actions observed by conforming clients, not proof that every copy or export was recorded.
 - A password cannot protect plaintext already displayed in an unlocked session or a device whose operating system is compromised.
+- Screen Lock hides content and requires reauthentication to display it again; it does not claim to remove plaintext or keys from process memory.
 - Password-slot permissions cannot stop a deliberately modified client used by someone who already has a valid password.
 - Local head witnessing cannot establish freshness on a new client that has never observed the document.
 
@@ -424,7 +432,7 @@ The following details have not yet been decided:
 - Exact password-strength threshold and accessibility/usability testing of its feedback.
 - Local work-journal storage quotas, cleanup, and detailed behavior under low-storage conditions.
 - Password-slot management UX, key-rotation UX, and handling of first-use invitation races.
-- Remaining history-compaction details, including treatment of branches and minimum-size handling for very small documents.
+- Minimum-size handling for compaction of very small documents and any tuning beyond the default ten retained content deltas.
 - Profile input validation and detailed presentation of self-asserted authorship.
 - Whether and when Markdown preview and WYSIWYG editing enter the release roadmap.
 - Contribution and governance model, including a future royalty-free patent commitment for format contributions.
