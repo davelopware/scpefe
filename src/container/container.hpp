@@ -28,6 +28,8 @@ public:
         std::string_view content, std::uint64_t timestamp_ms,
         const std::uint8_t *owner_password, std::size_t owner_password_size,
         const std::uint8_t *recovery_password, std::size_t recovery_password_size) const;
+    /* Opens only the current version-3 envelope for a stateful handle. */
+    void open_document(const std::uint8_t *bytes, std::size_t size);
     /* Validates and stores a transitional 160-byte-header envelope without a password. */
     void open_legacy_document(const std::uint8_t *bytes, std::size_t size);
     /* Verifies the current envelope password before restoring clear access. */
@@ -46,6 +48,10 @@ public:
     const ContainerState &state() const { return state_; }
     /* Reports whether this session may expose currently available clear data. */
     bool can_read_clear() const;
+    /* Borrows authenticated values only while clear reads are permitted. */
+    const UnlockedContainerData *read_unlocked() const;
+    /* Borrows the encrypted committed image for an immediate caller copy. */
+    const std::vector<std::uint8_t> &committed_bytes() const { return committed_bytes_; }
     /* Installs Lock, Close, ReleaseEdit, or RaiseAttention only. */
     TransitionResult transition(const StateTransition &attempt);
     /* Tries a safe public transition while retaining state on rejection. */

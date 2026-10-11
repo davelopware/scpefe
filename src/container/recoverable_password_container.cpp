@@ -883,14 +883,21 @@ bool RecoverablePasswordContainer::recognizes(
             || std::equal(legacy_magic.begin(), legacy_magic.end(), container));
 }
 
-void RecoverablePasswordContainer::validate_structure(
-    const std::uint8_t *container, std::size_t container_size)
+std::size_t RecoverablePasswordContainer::max_container_bytes()
 {
     // The encrypted revision is bounded to 32 MiB; allow room for slot and
     // metadata framing without admitting an unbounded copy at Open.
     constexpr std::size_t envelope_allowance = 1024u * 1024u;
-    if (container_size > format::RevisionLimits::defaults().max_input_bytes()
-        + envelope_allowance)
+    const auto revision_limit = format::RevisionLimits::defaults().max_input_bytes();
+    if (revision_limit > std::numeric_limits<std::size_t>::max() - envelope_allowance)
+        return std::numeric_limits<std::size_t>::max();
+    return revision_limit + envelope_allowance;
+}
+
+void RecoverablePasswordContainer::validate_structure(
+    const std::uint8_t *container, std::size_t container_size)
+{
+    if (container_size > max_container_bytes())
         throw ContainerFailure{ContainerError::limit_exceeded};
     if (!recognizes(container, container_size) || container_size < header_size)
         throw ContainerFailure{ContainerError::malformed_container};

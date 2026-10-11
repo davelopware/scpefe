@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define SCPEFE_ABI_VERSION 1u
+#define SCPEFE_ABI_VERSION 2u
 
 /* Stable result codes returned by the versioned C ABI. */
 typedef enum scpefe_status {
@@ -34,7 +34,9 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_AUTHENTICATION_FAILED = 10,
     SCPEFE_STATUS_CRYPTO_ERROR = 11,
     SCPEFE_STATUS_WEAK_PASSWORD = 12,
-    SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE = 13
+    SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE = 13,
+    SCPEFE_STATUS_INVALID_STATE = 14,
+    SCPEFE_STATUS_LOCKED = 15
 } scpefe_status;
 
 /* Stable reasons returned when assessing a newly proposed password. */
@@ -84,6 +86,10 @@ typedef struct scpefe_health_info_v1 {
 
 /* Opaque handle for one isolated common-core context. */
 typedef struct scpefe_context scpefe_context;
+/* Context-owned active container token, valid until its context is destroyed. */
+typedef struct scpefe_container scpefe_container;
+/* Independent copy of authenticated values, valid across Lock and Close. */
+typedef struct scpefe_owned_snapshot scpefe_owned_snapshot;
 /* Opaque owner of one decoded snapshot revision. */
 typedef struct scpefe_decoded_snapshot_revision scpefe_decoded_snapshot_revision;
 /* Opaque owner of one authenticated, unlocked container. */
@@ -317,6 +323,52 @@ typedef struct scpefe_new_document_v1 {
     size_t recovery_password_size;
 } scpefe_new_document_v1;
 
+/* Versioned request to create an active container from a new document. */
+typedef struct scpefe_container_create_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    scpefe_new_document_v1 document;
+} scpefe_container_create_v1;
+
+/* Versioned request to open validated encrypted bytes in locked state. */
+typedef struct scpefe_container_open_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *bytes;
+    size_t bytes_size;
+} scpefe_container_open_v1;
+
+/* Versioned transient password input for authentication or reauthentication. */
+typedef struct scpefe_password_input_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *bytes;
+    size_t bytes_size;
+} scpefe_password_input_v1;
+
+/* Copied access and permission state of one active container. */
+typedef struct scpefe_container_status_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    int is_locked;
+    int can_edit;
+    int can_add_passwords;
+    int can_remove_passwords;
+    int must_change_password;
+} scpefe_container_status_v1;
+
+/* View of a separately owned authenticated snapshot; no secret keys appear. */
+typedef struct scpefe_owned_snapshot_view_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t document_id[SCPEFE_DOCUMENT_ID_SIZE];
+    uint8_t slot_id[SCPEFE_SLOT_ID_SIZE];
+    const uint8_t *encoded_revision;
+    size_t encoded_revision_size;
+    const char *content;
+    size_t content_size;
+} scpefe_owned_snapshot_view_v1;
+
 /* All byte counts are limits applied before allocating or copying data. */
 typedef struct scpefe_revision_limits_v1 {
     uint32_t struct_size;
@@ -392,6 +444,37 @@ SCPEFE_API scpefe_status scpefe_context_health(
     scpefe_context *context,
     scpefe_health_info_v1 *health_info
 );
+
+/* Creates the sole active context-owned container and returns it unlocked. */
+SCPEFE_API scpefe_status scpefe_container_create(
+    scpefe_context *context, const scpefe_container_create_v1 *request,
+    scpefe_container **container);
+/* Opens the sole active container in screen-locked state. */
+SCPEFE_API scpefe_status scpefe_container_open(
+    scpefe_context *context, const scpefe_container_open_v1 *request,
+    scpefe_container **container);
+/* Authenticates a password before restoring clear access. */
+SCPEFE_API scpefe_status scpefe_container_unlock(
+    scpefe_container *container, const scpefe_password_input_v1 *password);
+/* Hides future clear reads while retaining the same container handle. */
+SCPEFE_API scpefe_status scpefe_container_lock(scpefe_container *container);
+/* Closes and invalidates the handle; another container may then be opened. */
+SCPEFE_API scpefe_status scpefe_container_close(scpefe_container *container);
+/* Copies current lock and authenticated permission state. */
+SCPEFE_API scpefe_status scpefe_container_status(
+    const scpefe_container *container, scpefe_container_status_v1 *status);
+/* Copies authenticated content into an owner independent of future state. */
+SCPEFE_API scpefe_status scpefe_container_read(
+    const scpefe_container *container, scpefe_owned_snapshot **snapshot);
+/* Borrows immutable spans from the owned snapshot until its destruction. */
+SCPEFE_API scpefe_status scpefe_owned_snapshot_view(
+    const scpefe_owned_snapshot *snapshot, scpefe_owned_snapshot_view_v1 *view);
+/* Releases one independently owned snapshot. */
+SCPEFE_API void scpefe_owned_snapshot_destroy(scpefe_owned_snapshot *snapshot);
+/* Copies the current encrypted image into caller storage. */
+SCPEFE_API scpefe_status scpefe_container_copy_bytes(
+    const scpefe_container *container, uint8_t *output,
+    size_t output_capacity, size_t *output_size);
 
 /* Populates caller storage with the default revision allocation limits. */
 SCPEFE_API scpefe_status scpefe_revision_limits_default(

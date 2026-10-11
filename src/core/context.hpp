@@ -22,6 +22,8 @@ public:
     ServiceRegistry &services() { return services_; }
     /* Returns this context's single active container, creating it on first use. */
     container::Container &make_container();
+    /* Releases the closed container before a later active lifecycle begins. */
+    void release_container() noexcept;
 
 private:
     HostServices host_services_;

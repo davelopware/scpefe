@@ -49,6 +49,15 @@ std::vector<std::uint8_t> Container::create_document(std::string_view profile_na
         recovery_password, recovery_password_size, &encryption_);
 }
 
+void Container::open_document(const std::uint8_t *bytes, std::size_t size)
+{
+    constexpr std::uint8_t obsolete_v2_magic[8]{'S', 'C', 'P', 'E', 'F', 'E', 0, 2};
+    if (bytes && size >= sizeof(obsolete_v2_magic)
+        && std::memcmp(bytes, obsolete_v2_magic, sizeof(obsolete_v2_magic)) == 0)
+        throw ContainerFailure{ContainerError::unsupported_format};
+    open_legacy_document(bytes, size);
+}
+
 void Container::open_legacy_document(const std::uint8_t *bytes, std::size_t size)
 {
     if (state_.access != Access::closed) throw StateError::invalid_transition;
@@ -165,6 +174,11 @@ std::vector<std::uint8_t> Container::compact_legacy_document(
 bool Container::can_read_clear() const
 {
     return state_.access == Access::open && state_.screen == Screen::unlocked;
+}
+
+const UnlockedContainerData *Container::read_unlocked() const
+{
+    return can_read_clear() && unlocked_ ? &*unlocked_ : nullptr;
 }
 
 TransitionResult Container::transition(const StateTransition &attempt)

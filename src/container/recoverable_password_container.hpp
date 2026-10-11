@@ -22,6 +22,9 @@ public:
     /* Reports whether the bytes carry a supported recoverable-container magic. */
     static bool recognizes(const std::uint8_t *container, std::size_t size);
 
+    /* Returns the maximum bounded revision plus envelope framing size. */
+    static std::size_t max_container_bytes();
+
     /* Validates bounded envelope structure without authenticating encrypted fields. */
     static void validate_structure(const std::uint8_t *container, std::size_t size);
 

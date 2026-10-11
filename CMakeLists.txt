@@ -221,6 +221,12 @@ if(BUILD_TESTING)
         add_executable(scpefe_context_test tests/context_test.c)
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_lifecycle_abi_test tests/lifecycle_abi_test.c)
+        target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
+
+        add_executable(scpefe_lifecycle_open_limit_test tests/lifecycle_open_limit_test.c)
+        target_link_libraries(scpefe_lifecycle_open_limit_test PRIVATE SCPEFE::scpefe)
+
         add_executable(scpefe_container_state_test
             tests/container_state_test.cpp
             src/container/container.cpp
@@ -309,6 +315,8 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
 
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
+        add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
+        add_test(NAME scpefe.lifecycle-open-limit COMMAND scpefe_lifecycle_open_limit_test)
         add_test(NAME scpefe.container-state COMMAND scpefe_container_state_test
             "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
@@ -358,7 +366,7 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.diagnostic-health COMMAND scpefe_diagnostic health)
         set_tests_properties(scpefe.diagnostic-health PROPERTIES
             PASS_REGULAR_EXPRESSION
-                "\"status\":\"ok\".*\"abi_version\":1.*\"host_monotonic_time_ms\":424242"
+                "\"status\":\"ok\".*\"abi_version\":2.*\"host_monotonic_time_ms\":424242"
         )
         set_tests_properties(scpefe.diagnostic-revision PROPERTIES
             DEPENDS scpefe.revision-round-trip

@@ -33,4 +33,9 @@ container::Container &Context::make_container()
     return *container_;
 }
 
+void Context::release_container() noexcept
+{
+    container_.reset();
+}
+
 } // namespace scpefe::core
