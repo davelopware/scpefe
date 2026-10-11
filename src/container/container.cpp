@@ -9,6 +9,16 @@
 #include <utility>
 
 namespace scpefe::container {
+namespace {
+
+std::uint8_t permission_bits(const Permissions &permissions)
+{
+    return static_cast<std::uint8_t>((permissions.can_edit ? 1u : 0u)
+        | (permissions.can_add_passwords ? 2u : 0u)
+        | (permissions.can_remove_passwords ? 4u : 0u));
+}
+
+} // namespace
 
 Container::Container(const ContainerStateManagerService &state_manager,
     const core::PasswordService &password, const core::EncryptionService &encryption,
@@ -42,8 +52,7 @@ std::vector<std::uint8_t> Container::create_document(std::string_view profile_na
 void Container::open_legacy_document(const std::uint8_t *bytes, std::size_t size)
 {
     if (state_.access != Access::closed) throw StateError::invalid_transition;
-    if (!persistence_.recognizes_legacy_envelope(bytes, size))
-        throw ContainerFailure{ContainerError::malformed_container};
+    persistence_.validate_legacy_envelope(bytes, size);
     std::vector<std::uint8_t> incoming(bytes, bytes + size);
     transition(Open{});
     committed_bytes_ = std::move(incoming);
@@ -54,22 +63,55 @@ const UnlockedContainerData &Container::unlock_legacy_document(
 {
     if (state_.access != Access::open || state_.screen != Screen::locked
         || committed_bytes_.empty()) throw StateError::invalid_transition;
+    if (state_.attention == Attention::reauthenticate && target_bytes_.empty())
+        throw StateError::invalid_transition;
     if (password == nullptr || password_size == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
-    auto decoded = persistence_.unlock_legacy_envelope(committed_bytes_.data(),
-        committed_bytes_.size(), password, password_size,
+    const bool authenticating_target = !target_bytes_.empty();
+    const auto &source = authenticating_target ? target_bytes_ : committed_bytes_;
+    auto decoded = persistence_.unlock_legacy_envelope(source.data(),
+        source.size(), password, password_size,
         format::RevisionLimits::defaults());
+    if (document_id_ && decoded.document_id != *document_id_)
+        throw ContainerFailure{ContainerError::malformed_container};
+    if (authenticating_target && state_.target_access
+        && (decoded.slot_id != state_.target_access->slot_id
+            || decoded.permissions != permission_bits(state_.target_access->permissions)))
+        throw ContainerFailure{ContainerError::malformed_container};
     const Permissions rights{(decoded.permissions & 1u) != 0,
         (decoded.permissions & 2u) != 0, (decoded.permissions & 4u) != 0};
-    const Unlock request{decoded.slot_id, rights, !decoded.must_be_changed};
-    unlocked_.emplace(std::move(decoded));
+    const Unlock request{decoded.slot_id, rights, !decoded.must_be_changed,
+        authenticating_target};
+    // Target authentication changes effective access, not the local committed
+    // document or its retained clear projection.
+    const bool retain_local_data = authenticating_target && unlocked_.has_value();
+    if (!retain_local_data) unlocked_.emplace(std::move(decoded));
     try {
         transition(request);
     } catch (...) {
-        unlocked_.reset();
+        if (!retain_local_data) unlocked_.reset();
         throw;
     }
+    document_id_ = unlocked_->document_id;
     return *unlocked_;
+}
+
+const UnlockedContainerData &Container::unlock_target_legacy_document(
+    const std::uint8_t *target_bytes, std::size_t target_size,
+    const std::uint8_t *password, std::size_t password_size)
+{
+    if (state_.access != Access::open || state_.screen != Screen::locked
+        || state_.attention != Attention::reauthenticate || !state_.target_access
+        || !state_.target_access->wrapper_changed || !document_id_
+        || !target_bytes_.empty()) throw StateError::invalid_transition;
+    persistence_.validate_legacy_envelope(target_bytes, target_size);
+    target_bytes_.assign(target_bytes, target_bytes + target_size);
+    try {
+        return unlock_legacy_document(password, password_size);
+    } catch (...) {
+        target_bytes_.clear();
+        throw;
+    }
 }
 
 std::vector<std::uint8_t> Container::compact_legacy_document(
@@ -104,9 +146,16 @@ TransitionResult Container::transition(const StateTransition &attempt)
     const auto before = state_;
     transitioning_ = true;
     state_ = result.state;
+    if (unlocked_ && (std::holds_alternative<Unlock>(attempt)
+        || std::holds_alternative<ApplyTargetPermissions>(attempt)))
+        unlocked_->permissions = permission_bits(state_.permissions);
+    if (const auto *target = std::get_if<ApplyTargetPermissions>(&attempt);
+        target && target->wrapper_changed) target_bytes_.clear();
     if (std::holds_alternative<Close>(attempt)) {
         unlocked_.reset();
         committed_bytes_.clear();
+        target_bytes_.clear();
+        document_id_.reset();
     }
     const auto operation_id = state_.operation_id.value_or(before.operation_id.value_or(0));
     for (auto *observer : observers_)

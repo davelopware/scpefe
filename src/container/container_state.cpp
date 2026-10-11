@@ -50,12 +50,17 @@ TransitionResult ContainerStateManagerService::apply(
             && current.publication == PublicationPhase::idle);
         require(!unlock->permissions.can_add_passwords || unlock->permissions.can_edit);
         require(!unlock->permissions.can_remove_passwords || unlock->permissions.can_edit);
+        if (current.target_access)
+            require((!current.target_access->wrapper_changed
+                    || unlock->authenticated_target_wrapper)
+                && current.target_access->slot_id == unlock->slot_id);
         next.screen = Screen::unlocked;
         next.active_slot = unlock->slot_id;
-        next.permissions = unlock->permissions;
+        next.permissions = current.target_access
+            ? current.target_access->permissions : unlock->permissions;
         if (current.attention == Attention::reauthenticate)
             next.attention = Attention::none;
-        if (unlock->may_attempt_edit && unlock->permissions.can_edit)
+        if (unlock->may_attempt_edit && next.permissions.can_edit)
             result.effects.push_back({EffectKind::attempt_edit_lease});
     } else if (std::holds_alternative<Lock>(attempt)) {
         require(current.access == Access::open && current.screen == Screen::unlocked
@@ -103,6 +108,9 @@ TransitionResult ContainerStateManagerService::apply(
             && current.publication == PublicationPhase::idle);
         require(!target->permissions.can_add_passwords || target->permissions.can_edit);
         require(!target->permissions.can_remove_passwords || target->permissions.can_edit);
+        require(current.active_slot.has_value());
+        next.target_access = TargetAccess{*current.active_slot,
+            target->permissions, target->wrapper_changed};
         next.permissions = target->wrapper_changed ? Permissions{} : target->permissions;
         if (target->wrapper_changed) {
             next.attention = Attention::reauthenticate;

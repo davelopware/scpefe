@@ -39,6 +39,7 @@ namespace {
 
 constexpr std::array<std::uint8_t, 8> legacy_magic{'S','C','P','E','F','E',0,2};
 constexpr std::array<std::uint8_t, 8> magic{'S','C','P','E','F','E',0,3};
+// Transitional prerefactor v3 header; the revised v3 contract has a 72-byte header.
 constexpr std::size_t header_size = 160;
 constexpr std::size_t document_id_size = 16;
 constexpr std::size_t key_size = 32;
@@ -882,6 +883,39 @@ bool RecoverablePasswordContainer::recognizes(
             || std::equal(legacy_magic.begin(), legacy_magic.end(), container));
 }
 
+void RecoverablePasswordContainer::validate_structure(
+    const std::uint8_t *container, std::size_t container_size)
+{
+    // The encrypted revision is bounded to 32 MiB; allow room for slot and
+    // metadata framing without admitting an unbounded copy at Open.
+    constexpr std::size_t envelope_allowance = 1024u * 1024u;
+    if (container_size > format::RevisionLimits::defaults().max_input_bytes()
+        + envelope_allowance)
+        throw ContainerFailure{ContainerError::limit_exceeded};
+    if (!recognizes(container, container_size) || container_size < header_size)
+        throw ContainerFailure{ContainerError::malformed_container};
+    const auto version = read_u32(container + 8);
+    const bool legacy = std::equal(legacy_magic.begin(), legacy_magic.end(), container);
+    if ((legacy && version != legacy_format_version)
+        || (!legacy && version != format_version))
+        throw ContainerFailure{ContainerError::malformed_container};
+    if (read_u32(container + 12) != argon2id13_algorithm
+        || read_u64(container + 16) != operations_limit
+        || read_u64(container + 24) != memory_limit
+        || read_u32(container + 36) != aead_algorithm)
+        throw ContainerFailure{ContainerError::unsupported_format};
+    const auto slot_count = read_u32(container + slot_count_offset);
+    if ((slot_count != 1 && slot_count != 2)
+        || read_u32(container + 112) != wrapped_slot_size
+        || (slot_count == 2 && read_u32(container + 156) != wrapped_slot_size))
+        throw ContainerFailure{ContainerError::malformed_container};
+    if (slot_count == 1
+        && !std::all_of(container + recovery_salt_offset,
+            container + header_size, [](std::uint8_t value) { return value == 0; }))
+        throw ContainerFailure{ContainerError::malformed_container};
+    read_layout(container, container_size);
+}
+
 std::size_t RecoverablePasswordContainer::encoded_size(
     std::size_t snapshot_size, bool has_recovery,
     std::size_t owner_name_size, std::size_t owner_email_size)
@@ -1018,32 +1052,8 @@ UnlockedContainerData RecoverablePasswordContainer::unlock(
     const std::uint8_t *password, std::size_t password_size,
     const format::RevisionLimits &limits)
 {
-    if (!recognizes(container, container_size) || container_size < header_size)
-        throw ContainerFailure{ContainerError::malformed_container};
-    const std::uint32_t version = read_u32(container + 8);
-    const bool has_legacy_magic = std::equal(
-        legacy_magic.begin(), legacy_magic.end(), container);
-    const bool has_current_magic = std::equal(
-        magic.begin(), magic.end(), container);
-    if ((has_legacy_magic && version != legacy_format_version)
-        || (has_current_magic && version != format_version)) {
-        throw ContainerFailure{ContainerError::malformed_container};
-    }
-    if ((version != legacy_format_version && version != format_version)
-        || read_u32(container + 12) != argon2id13_algorithm
-        || read_u64(container + 16) != operations_limit
-        || read_u64(container + 24) != memory_limit
-        || read_u32(container + 36) != aead_algorithm)
-        throw ContainerFailure{ContainerError::unsupported_format};
+    validate_structure(container, container_size);
     const std::uint32_t slot_count = read_u32(container + slot_count_offset);
-    if ((slot_count != 1 && slot_count != 2)
-        || read_u32(container + 112) != wrapped_slot_size
-        || (slot_count == 2 && read_u32(container + 156) != wrapped_slot_size))
-        throw ContainerFailure{ContainerError::malformed_container};
-    if (slot_count == 1
-        && !std::all_of(container + recovery_salt_offset,
-            container + header_size, [](std::uint8_t value) { return value == 0; }))
-        throw ContainerFailure{ContainerError::malformed_container};
     const auto layout = read_layout(container, container_size);
     const std::uint64_t encrypted_size = read_u64(container + encrypted_snapshot_size_offset);
     const std::size_t snapshot_offset = layout.snapshot_offset;

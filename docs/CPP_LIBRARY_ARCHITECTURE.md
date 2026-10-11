@@ -72,6 +72,13 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 
 [`UnlockedContainerData`](../src/container/unlocked_container_data.hpp) is the move-only authenticated result of unlocking. It contains the document ID, selected slot and permissions, derived work-journal key, lease and managed-slot metadata, and the encoded snapshot revision. Its destructor clears owned sensitive values. The same header defines `EditingLeaseData` and `ManagedSlotData`; [`ContainerFailure`](../src/container/container_error.hpp) carries container errors to the ABI. The larger version-3 implementation also uses private layout and invitation-record structs to parse its envelope. The C bridge is [`container_abi.cpp`](../src/abi/container_abi.cpp).
 
+The existing byte ABI's recoverable v3 envelope has a transitional 160-byte
+header. The revised pre-release v3 contract in
+[`password-container-v3.md`](format/password-container-v3.md) has a 72-byte
+header; `PersistenceService::has_valid_v3_framing` screens that revised framing.
+The stateful `Container::open_legacy_document` currently validates and retains
+the transitional envelope.
+
 ### Document operations (`src/document/`)
 
 These classes are stateless operation entry points. They build or transform a revision and ask `RecoverablePasswordContainer` to return a complete candidate container. They do not keep a working copy or publish the bytes to a target. `RevisionTransition` owns the parent and ancestor links for manual, regular, and merge saves, migration, and compaction; validates a provisional head against its embedded sealed base; and returns that base for discard.

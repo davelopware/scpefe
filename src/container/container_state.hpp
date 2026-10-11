@@ -37,12 +37,22 @@ struct Permissions {
 /* Identifies one immutable password slot in the authenticated document. */
 using SlotId = std::array<std::uint8_t, 16>;
 
+/* Retains authenticated target access until the target image is adopted or closed. */
+struct TargetAccess {
+    SlotId slot_id;
+    Permissions permissions;
+    bool wrapper_changed{};
+    /* Compares the authenticated target overlay. */
+    bool operator==(const TargetAccess &) const = default;
+};
+
 /* Captures one immutable access, lease, attention, and publication snapshot. */
 struct ContainerState {
     Access access{Access::closed};
     Screen screen{Screen::locked};
     std::optional<SlotId> active_slot;
     Permissions permissions{};
+    std::optional<TargetAccess> target_access;
     EditMode edit{EditMode::read_only};
     Lease lease{Lease::none};
     Attention attention{Attention::none};
@@ -57,7 +67,12 @@ struct ContainerState {
 /* Opens a validated envelope without exposing clear content. */
 struct Open {};
 /* Authenticates a slot and supplies its effective permissions. */
-struct Unlock { SlotId slot_id; Permissions permissions; bool may_attempt_edit; };
+struct Unlock {
+    SlotId slot_id;
+    Permissions permissions;
+    bool may_attempt_edit;
+    bool authenticated_target_wrapper{};
+};
 /* Hides clear content and stops this session's lease heartbeat. */
 struct Lock {};
 /* Releases the open container and any retained lease. */

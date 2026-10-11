@@ -38,10 +38,10 @@ bool PersistenceService::has_valid_v3_framing(
     return true;
 }
 
-bool PersistenceService::recognizes_legacy_envelope(
+void PersistenceService::validate_legacy_envelope(
     const std::uint8_t *bytes, std::size_t size) const
 {
-    return container::RecoverablePasswordContainer::recognizes(bytes, size);
+    container::RecoverablePasswordContainer::validate_structure(bytes, size);
 }
 
 container::UnlockedContainerData PersistenceService::unlock_legacy_envelope(

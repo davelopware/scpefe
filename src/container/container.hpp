@@ -28,10 +28,14 @@ public:
         std::string_view content, std::uint64_t timestamp_ms,
         const std::uint8_t *owner_password, std::size_t owner_password_size,
         const std::uint8_t *recovery_password, std::size_t recovery_password_size) const;
-    /* Stores a recognized prerefactor envelope after the host has read its bytes. */
+    /* Validates and stores a transitional 160-byte-header envelope without a password. */
     void open_legacy_document(const std::uint8_t *bytes, std::size_t size);
     /* Authenticates the open document and installs its effective permissions. */
     const UnlockedContainerData &unlock_legacy_document(
+        const std::uint8_t *password, std::size_t password_size);
+    /* Reauthenticates a changed target wrapper while retaining local committed bytes. */
+    const UnlockedContainerData &unlock_target_legacy_document(
+        const std::uint8_t *target_bytes, std::size_t target_size,
         const std::uint8_t *password, std::size_t password_size);
     /* Prepares a compaction candidate from the current committed envelope. */
     std::vector<std::uint8_t> compact_legacy_document(
@@ -58,6 +62,8 @@ private:
     const core::PersistenceService &persistence_;
     const core::HistoryService &history_;
     std::vector<std::uint8_t> committed_bytes_;
+    std::vector<std::uint8_t> target_bytes_;
+    std::optional<std::array<std::uint8_t, 16>> document_id_;
     std::optional<UnlockedContainerData> unlocked_;
     ContainerState state_{};
     std::vector<ContainerStateObserver *> observers_;

@@ -1,6 +1,8 @@
 #include "core/context.hpp"
 #include "core/service_registry.hpp"
 #include "container/container.hpp"
+#include "container/container_error.hpp"
+#include "container/recoverable_password_container.hpp"
 #include "scpefe/scpefe.h"
 #include "format/snapshot_revision.hpp"
 
@@ -40,8 +42,8 @@ class FakePersistence final : public core::PersistenceService {
 public:
     bool has_valid_v3_framing(const std::uint8_t *, std::size_t, std::size_t) const override
     { return true; }
-    bool recognizes_legacy_envelope(const std::uint8_t *, std::size_t) const override
-    { ++open_calls; return true; }
+    void validate_legacy_envelope(const std::uint8_t *, std::size_t) const override
+    { ++open_calls; }
     container::UnlockedContainerData unlock_legacy_envelope(
         const std::uint8_t *, std::size_t, const std::uint8_t *, std::size_t,
         const format::RevisionLimits &) const override
@@ -192,8 +194,8 @@ int main(int argc, char **argv)
     assert(!active.can_read_clear());
     assert(active.state().attention == Attention::reauthenticate);
     assert(!active.try_transition(ClearAttention{}));
-    active.transition(Unlock{SlotId{7}, Permissions{}, false});
-    assert(active.state().attention == Attention::none);
+    assert(!active.try_transition(Unlock{SlotId{7}, Permissions{true, true, true}, true}));
+    assert(active.state().attention == Attention::reauthenticate);
     active.transition(Close{});
     assert(!active.can_read_clear());
     active.transition(Open{});
@@ -268,6 +270,40 @@ int main(int argc, char **argv)
     const auto *password_bytes = reinterpret_cast<const std::uint8_t *>(strong_password.data());
     auto real_candidate = production_container.create_document("Ada", "ada@example.org",
         "test", "first line", 123, password_bytes, strong_password.size(), nullptr, 0);
+    auto bad_structure = real_candidate;
+    bad_structure[32] = 3; // Unsupported base-slot count in the transitional header.
+    try {
+        production_container.open_legacy_document(bad_structure.data(), bad_structure.size());
+        assert(false);
+    } catch (const ContainerFailure &failure) {
+        assert(failure.error == ContainerError::malformed_container);
+    }
+    assert(production_container.state().access == Access::closed);
+    try {
+        production_container.open_legacy_document(real_candidate.data(), 8);
+        assert(false);
+    } catch (const ContainerFailure &failure) {
+        assert(failure.error == ContainerError::malformed_container);
+    }
+    assert(production_container.state().access == Access::closed);
+    bad_structure = real_candidate;
+    bad_structure[64] = 0; // The encrypted payload length must match the envelope.
+    try {
+        production_container.open_legacy_document(bad_structure.data(), bad_structure.size());
+        assert(false);
+    } catch (const ContainerFailure &failure) {
+        assert(failure.error == ContainerError::malformed_container);
+    }
+    assert(production_container.state().access == Access::closed);
+    bad_structure = real_candidate;
+    bad_structure[36] = 2; // Keep the unsupported-algorithm error distinct.
+    try {
+        production_container.open_legacy_document(bad_structure.data(), bad_structure.size());
+        assert(false);
+    } catch (const ContainerFailure &failure) {
+        assert(failure.error == ContainerError::unsupported_format);
+    }
+    assert(production_container.state().access == Access::closed);
     production_container.open_legacy_document(real_candidate.data(), real_candidate.size());
     const auto &real_unlocked = production_container.unlock_legacy_document(
         password_bytes, strong_password.size());
@@ -276,5 +312,52 @@ int main(int argc, char **argv)
         real_unlocked.encoded_snapshot_revision.size(), format::RevisionLimits::defaults());
     assert(revision.data().content == "first line");
     assert(production_container.can_read_clear());
+    production_container.transition(AcquireEdit{Lease::held});
+    production_container.transition(ApplyTargetPermissions{Permissions{}, false});
+    assert(real_unlocked.permissions == 0);
+    production_container.transition(Lock{});
+    const auto &demoted_access = production_container.unlock_legacy_document(
+        password_bytes, strong_password.size());
+    assert(demoted_access.permissions == 0);
+    assert(!production_container.state().permissions.can_edit);
+    assert(!production_container.try_transition(AcquireEdit{Lease::held}));
+    assert(!production_container.try_transition(BeginPublication{1, PublicationKind::save}));
+    const std::string replacement_password = "f5ee6791-97ad-44bc-8a72-b79b7b26316a";
+    const auto *replacement_bytes = reinterpret_cast<const std::uint8_t *>(
+        replacement_password.data());
+    auto changed_target = RecoverablePasswordContainer::change_password(
+        real_candidate.data(), real_candidate.size(), password_bytes,
+        strong_password.size(), replacement_bytes, replacement_password.size());
+    production_container.transition(ApplyTargetPermissions{
+        Permissions{true, true, true}, true});
+    try {
+        production_container.unlock_legacy_document(password_bytes, strong_password.size());
+        assert(false);
+    } catch (StateError error) {
+        assert(error == StateError::invalid_transition);
+    }
+    assert(production_container.state().screen == Screen::locked);
+    assert(production_container.state().attention == Attention::reauthenticate);
+    try {
+        production_container.unlock_target_legacy_document(changed_target.data(),
+            changed_target.size(), password_bytes, strong_password.size());
+        assert(false);
+    } catch (const ContainerFailure &failure) {
+        assert(failure.error == ContainerError::authentication_failed);
+    }
+    const auto &target_access = production_container.unlock_target_legacy_document(
+        changed_target.data(), changed_target.size(), replacement_bytes,
+        replacement_password.size());
+    assert(target_access.permissions == 7);
+    assert(production_container.state().attention == Attention::none);
+    production_container.transition(Lock{});
+    try {
+        production_container.unlock_legacy_document(password_bytes, strong_password.size());
+        assert(false);
+    } catch (const ContainerFailure &failure) {
+        assert(failure.error == ContainerError::authentication_failed);
+    }
+    assert(production_container.unlock_legacy_document(replacement_bytes,
+        replacement_password.size()).permissions == 7);
     production_container.transition(Close{});
 }

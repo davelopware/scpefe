@@ -5,7 +5,10 @@
 #include <string_view>
 #include <vector>
 
-namespace scpefe::core { class EncryptionService; }
+namespace scpefe::core {
+/* Supplies injectable random bytes for document creation. */
+class EncryptionService;
+}
 
 namespace scpefe::document {
 
