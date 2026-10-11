@@ -32,10 +32,18 @@ else()
         src/abi/container_abi.cpp
         src/abi/context_abi.cpp
         src/container/password_container.cpp
+        src/container/container.cpp
+        src/container/container_state.cpp
         src/container/password_slot_lifecycle.cpp
         src/container/recoverable_password_container.cpp
         src/container/unlocked_container_data.cpp
         src/core/context.cpp
+        src/core/service_registry.cpp
+        src/core/service_factory.cpp
+        src/core/password_service.cpp
+        src/core/encryption_service.cpp
+        src/core/persistence_service.cpp
+        src/core/history_service.cpp
         src/core/host_services.cpp
         src/document/new_document.cpp
         src/document/compaction.cpp
@@ -213,6 +221,39 @@ if(BUILD_TESTING)
         add_executable(scpefe_context_test tests/context_test.c)
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_container_state_test
+            tests/container_state_test.cpp
+            src/container/container.cpp
+            src/container/container_state.cpp
+            src/container/recoverable_password_container.cpp
+            src/container/password_slot_lifecycle.cpp
+            src/container/unlocked_container_data.cpp
+            src/core/context.cpp
+            src/core/host_services.cpp
+            src/core/service_registry.cpp
+            src/core/service_factory.cpp
+            src/core/password_service.cpp
+            src/core/encryption_service.cpp
+            src/core/persistence_service.cpp
+            src/core/history_service.cpp
+            src/document/new_document.cpp
+            src/document/compaction.cpp
+            src/document/revision_transition.cpp
+            src/format/cbor_reader.cpp
+            src/format/cbor_writer.cpp
+            src/format/diagnostic_json_writer.cpp
+            src/format/revision_limits.cpp
+            src/format/snapshot_revision.cpp
+            src/format/text_validation.cpp
+            src/security/password_strength.cpp
+            third_party/zxcvbn-c/zxcvbn.c)
+        target_compile_features(scpefe_container_state_test PRIVATE cxx_std_20)
+        target_include_directories(scpefe_container_state_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/zxcvbn-c)
+        target_link_libraries(scpefe_container_state_test PRIVATE ${SODIUM_LIBRARY})
+
         add_executable(scpefe_revision_test tests/revision_test.c)
         target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
 
@@ -268,6 +309,8 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
 
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
+        add_test(NAME scpefe.container-state COMMAND scpefe_container_state_test
+            "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
         add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
         add_test(NAME scpefe.manual-save-round-trip COMMAND scpefe_manual_save_test)

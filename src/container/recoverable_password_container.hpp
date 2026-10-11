@@ -9,13 +9,21 @@
 #include <string>
 #include <vector>
 
+namespace scpefe::core {
+/* Supplies injectable random bytes for container creation. */
+class EncryptionService;
+}
+
 namespace scpefe::container {
 
-/* Reads recoverable v2/v3 containers and creates mutable version-3 containers. */
+/* Reads transitional 160-byte-header v2/v3 containers and creates v3 candidates. */
 class RecoverablePasswordContainer {
 public:
     /* Reports whether the bytes carry a supported recoverable-container magic. */
     static bool recognizes(const std::uint8_t *container, std::size_t size);
+
+    /* Validates bounded envelope structure without authenticating encrypted fields. */
+    static void validate_structure(const std::uint8_t *container, std::size_t size);
 
     /* Returns the version-3 encoded size for a snapshot and selected slot count. */
     static std::size_t encoded_size(std::size_t snapshot_size, bool has_recovery,
@@ -29,7 +37,8 @@ public:
         std::size_t recovery_password_size,
         const std::array<std::uint8_t, 16> &owner_slot_id,
         const std::uint8_t *encoded_snapshot_revision,
-        std::size_t encoded_snapshot_revision_size
+        std::size_t encoded_snapshot_revision_size,
+        const core::EncryptionService *encryption = nullptr
     );
 
     /* Authenticates either slot in a matched v2/v3 envelope and returns its snapshot. */

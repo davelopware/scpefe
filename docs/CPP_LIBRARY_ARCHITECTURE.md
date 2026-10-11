@@ -2,7 +2,7 @@
 
 This guide describes the **implemented** C++ common library, `libscpefe`. It is a code map, not a replacement for the [specification](SPECIFICATION.md) or the [domain glossary](DOMAIN_MODEL.md). The proposed replacement architecture is specified separately in [RefactorLibraryToCleanerClasses](RefactorLibraryToCleanerClasses.md). The public entry point is the versioned C ABI in [`include/scpefe/scpefe.h`](../include/scpefe/scpefe.h); the C++ classes under `src/` are internal implementation details.
 
-The library accepts byte spans and structured inputs, validates and encodes snapshot revisions, encrypts or unlocks self-contained containers, and returns replacement container bytes for document operations. The caller owns the target, app-private state, publication, and user interaction. In particular, the currently registered host-services table supplies a monotonic-clock callback to `Context`; the document functions do not use that context to read or write a target.
+The library accepts byte spans and structured inputs, validates and encodes snapshot revisions, encrypts or unlocks self-contained containers, and returns replacement container bytes for document operations. The caller owns the target, app-private state, publication, and user interaction. The registered host-services table supplies a monotonic-clock callback to `Context`. The context owns one injectable service registry and its active internal `Container`. That container can prepare a new document, recognize and unlock the current byte ABI envelope, and prepare a compaction candidate through those services. The existing document C ABI still uses byte-oriented operations until the handle ABI is implemented.
 
 ## How the pieces fit
 
@@ -35,7 +35,7 @@ flowchart LR
     Policy --> Zxcvbn["zxcvbn-c"]
 ```
 
-Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with already-decrypted revision data; the container classes provide the password and encryption boundary. `Context` currently serves the health API and is separate from the byte-oriented document operations.
+Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with already-decrypted revision data; the container classes provide the password and encryption boundary. The current document C ABI still enters the prerefactor static operations; the internal context-owned container is the injectable seam for the new handle ABI.
 
 ## Classes by responsibility
 
@@ -43,8 +43,10 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 
 | Class | Responsibility |
 | --- | --- |
-| [`Context`](../src/core/context.hpp) | Owns one `HostServices` adapter and serves the context health operation. It is not currently an open document session. |
+| [`Context`](../src/core/context.hpp) | Owns one `HostServices` adapter, one independently constructed service registry, and at most one active internal container. The container is destroyed before its injected services. The public context ABI currently serves health only. |
 | [`HostServices`](../src/core/host_services.hpp) | Wraps the host-provided instance pointer and monotonic-clock callback, returning failure if the callback fails. |
+| [`ServiceFactory`](../src/core/service_factory.hpp) and [`ServiceRegistry`](../src/core/service_registry.hpp) | Compose and own per-context password, encryption, persistence, history, and state-manager services; tests can inject deterministic replacements. |
+| [`Container`](../src/container/container.hpp) and [`ContainerState`](../src/container/container_state.hpp) | Install typed access, permission, edit, attention, and publication transitions; return required host effects and notify observers only after installation. Internal document entry points use injected password policy and encryption for creation, persistence for prerefactor envelope recognition and authentication, and history for prerefactor compaction. The new lifecycle ABI is still pending. |
 
 [`HealthInfo`](../src/core/health_info.hpp) is the internal result value converted into the C health structure. The matching C ABI code is [`context_abi.cpp`](../src/abi/context_abi.cpp).
 
@@ -69,6 +71,13 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 | [`PasswordSlotLifecycle`](../src/container/password_slot_lifecycle.hpp) | Applies invitation, claiming, identity, permission-update, and removal policy; constructs known or legacy-unknown managed-slot state; and preserves immutable slot IDs and identity binding while the container class performs authenticated rewrites. |
 
 [`UnlockedContainerData`](../src/container/unlocked_container_data.hpp) is the move-only authenticated result of unlocking. It contains the document ID, selected slot and permissions, derived work-journal key, lease and managed-slot metadata, and the encoded snapshot revision. Its destructor clears owned sensitive values. The same header defines `EditingLeaseData` and `ManagedSlotData`; [`ContainerFailure`](../src/container/container_error.hpp) carries container errors to the ABI. The larger version-3 implementation also uses private layout and invitation-record structs to parse its envelope. The C bridge is [`container_abi.cpp`](../src/abi/container_abi.cpp).
+
+The existing byte ABI's recoverable v3 envelope has a transitional 160-byte
+header. The revised pre-release v3 contract in
+[`password-container-v3.md`](format/password-container-v3.md) has a 72-byte
+header; `PersistenceService::has_valid_v3_framing` screens that revised framing.
+The stateful `Container::open_legacy_document` currently validates and retains
+the transitional envelope.
 
 ### Document operations (`src/document/`)
 

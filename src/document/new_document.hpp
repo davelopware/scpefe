@@ -5,6 +5,11 @@
 #include <string_view>
 #include <vector>
 
+namespace scpefe::core {
+/* Supplies injectable random bytes for document creation. */
+class EncryptionService;
+}
+
 namespace scpefe::document {
 
 /* Builds a validated initial revision and its self-contained encrypted container. */
@@ -30,7 +35,8 @@ public:
         const std::uint8_t *owner_password,
         std::size_t owner_password_size,
         const std::uint8_t *recovery_password,
-        std::size_t recovery_password_size
+        std::size_t recovery_password_size,
+        const core::EncryptionService *encryption = nullptr
     );
 };
 
