@@ -4,6 +4,7 @@
 #include "container/password_slot_lifecycle.hpp"
 #include "format/revision_error.hpp"
 #include "format/snapshot_revision.hpp"
+#include "core/encryption_service.hpp"
 
 #include <algorithm>
 #include <array>
@@ -910,8 +911,13 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
     const std::uint8_t *recovery_password, std::size_t recovery_password_size,
     const std::array<std::uint8_t, 16> &owner_slot_id,
     const std::uint8_t *encoded_snapshot_revision,
-    std::size_t encoded_snapshot_revision_size)
+    std::size_t encoded_snapshot_revision_size,
+    const core::EncryptionService *encryption)
 {
+    const auto random = [encryption](std::uint8_t *out, std::size_t size) {
+        if (encryption) encryption->random_bytes(out, size);
+        else randombytes_buf(out, size);
+    };
     const bool has_recovery = recovery_password != nullptr;
     validate_snapshot(encoded_snapshot_revision, encoded_snapshot_revision_size,
         format::RevisionLimits::defaults(), ContainerError::invalid_argument);
@@ -939,22 +945,22 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
         write_u64(output.data() + 24, memory_limit);
         write_u32(output.data() + slot_count_offset, slot_count);
         write_u32(output.data() + 36, aead_algorithm);
-        randombytes_buf(output.data() + snapshot_nonce_offset, nonce_size);
+        random(output.data() + snapshot_nonce_offset, nonce_size);
         auto lease = encode_lease(EditingLeaseData{});
         const auto lease_clear = clear_on_scope_exit(lease);
         write_u64(output.data() + encrypted_snapshot_size_offset,
             document_id_size + lease.size() + owner_identity.size()
                 + encoded_snapshot_revision_size + tag_size);
-        randombytes_buf(output.data() + owner_salt_offset, salt_size);
-        randombytes_buf(output.data() + owner_nonce_offset, nonce_size);
+        random(output.data() + owner_salt_offset, salt_size);
+        random(output.data() + owner_nonce_offset, nonce_size);
         write_u32(output.data() + 112, wrapped_slot_size);
         if (has_recovery) {
-            randombytes_buf(output.data() + recovery_salt_offset, salt_size);
-            randombytes_buf(output.data() + recovery_nonce_offset, nonce_size);
+            random(output.data() + recovery_salt_offset, salt_size);
+            random(output.data() + recovery_nonce_offset, nonce_size);
             write_u32(output.data() + 156, wrapped_slot_size);
         }
 
-        randombytes_buf(document_key.data(), document_key.size());
+        random(document_key.data(), document_key.size());
         std::copy(document_key.begin(), document_key.end(), slot.begin());
         std::copy(owner_slot_id.begin(), owner_slot_id.end(), slot.begin() + key_size);
         slot.back() = full_permissions;
@@ -970,7 +976,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
             throw ContainerFailure{ContainerError::crypto_error};
         }
         if (has_recovery) {
-            randombytes_buf(slot.data() + key_size, slot_id_size);
+            random(slot.data() + key_size, slot_id_size);
             derive_wrapping_key(working_key, recovery_password, recovery_password_size,
                 output.data() + recovery_salt_offset);
             if (crypto_aead_xchacha20poly1305_ietf_encrypt(
@@ -983,7 +989,7 @@ std::vector<std::uint8_t> RecoverablePasswordContainer::create(
         }
         snapshot.resize(document_id_size + lease.size() + owner_identity.size()
             + encoded_snapshot_revision_size);
-        randombytes_buf(snapshot.data(), document_id_size);
+        random(snapshot.data(), document_id_size);
         std::copy(lease.begin(), lease.end(), snapshot.begin() + document_id_size);
         std::copy(owner_identity.begin(), owner_identity.end(),
             snapshot.begin() + document_id_size + lease.size());

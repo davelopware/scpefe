@@ -5,6 +5,7 @@
 #include "format/revision_limits.hpp"
 #include "format/snapshot_revision.hpp"
 #include "format/snapshot_revision_data.hpp"
+#include "core/encryption_service.hpp"
 
 #include <array>
 
@@ -83,19 +84,23 @@ std::vector<std::uint8_t> NewDocument::create(
     const std::uint8_t *owner_password,
     std::size_t owner_password_size,
     const std::uint8_t *recovery_password,
-    std::size_t recovery_password_size
+    std::size_t recovery_password_size,
+    const core::EncryptionService *encryption
 )
 {
     require_sodium();
     std::array<std::uint8_t, format::slot_id_size> owner_slot_id{};
     std::array<std::uint8_t, format::content_hash_size> content_hash{};
-    randombytes_buf(owner_slot_id.data(), owner_slot_id.size());
-    if (crypto_generichash(
-        content_hash.data(), content_hash.size(),
-        reinterpret_cast<const unsigned char *>(content.data()), content.size(),
-        nullptr, 0
-    ) != 0) {
-        throw container::ContainerFailure{container::ContainerError::crypto_error};
+    if (encryption) {
+        encryption->random_bytes(owner_slot_id.data(), owner_slot_id.size());
+        content_hash = encryption->hash_content(
+            reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
+    } else {
+        randombytes_buf(owner_slot_id.data(), owner_slot_id.size());
+        if (crypto_generichash(content_hash.data(), content_hash.size(),
+            reinterpret_cast<const unsigned char *>(content.data()), content.size(),
+            nullptr, 0) != 0)
+            throw container::ContainerFailure{container::ContainerError::crypto_error};
     }
 
     const auto encoded = make_revision(profile_name, profile_email, device_name,
@@ -103,7 +108,7 @@ std::vector<std::uint8_t> NewDocument::create(
     return container::RecoverablePasswordContainer::create(
         owner_password, owner_password_size,
         recovery_password, recovery_password_size, owner_slot_id,
-        encoded.data(), encoded.size()
+        encoded.data(), encoded.size(), encryption
     );
 }
 

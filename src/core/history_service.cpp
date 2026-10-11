@@ -1,4 +1,5 @@
 #include "core/history_service.hpp"
+#include "document/compaction.hpp"
 
 namespace scpefe::core {
 
@@ -8,6 +9,16 @@ std::size_t HistoryService::compaction_cutoff(
     if (content_revision_count == 0 || retain_deltas >= content_revision_count - 1)
         return 0;
     return content_revision_count - retain_deltas - 1;
+}
+
+std::vector<std::uint8_t> HistoryService::compact_legacy_document(
+    const std::uint8_t *bytes, std::size_t size,
+    const std::uint8_t *password, std::size_t password_size,
+    const std::array<std::uint8_t, 16> &lease_session_id,
+    std::uint64_t heartbeat_counter) const
+{
+    return document::Compaction::create(bytes, size, password, password_size,
+        lease_session_id, heartbeat_counter);
 }
 
 } // namespace scpefe::core

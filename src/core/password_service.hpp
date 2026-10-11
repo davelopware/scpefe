@@ -9,7 +9,7 @@
 
 namespace scpefe::core {
 
-/* Provides password-policy decisions for one context's slot objects. */
+/* Provides password-policy decisions and salt creation within one context. */
 class PasswordService {
 public:
     /* Injects only the cryptographic randomness used for new slot salts. */

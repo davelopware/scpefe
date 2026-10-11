@@ -25,9 +25,12 @@ bool Context::read_health(HealthInfo &health_info) const
     return true;
 }
 
-std::unique_ptr<container::Container> Context::make_container() const
+container::Container &Context::make_container()
 {
-    return std::make_unique<container::Container>(services_.state_manager());
+    if (!container_) container_ = std::make_unique<container::Container>(
+        services_.state_manager(), services_.password(), services_.encryption(),
+        services_.persistence(), services_.history());
+    return *container_;
 }
 
 } // namespace scpefe::core

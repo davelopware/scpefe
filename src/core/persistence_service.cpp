@@ -1,6 +1,7 @@
 #include "core/persistence_service.hpp"
 
 #include <array>
+#include "container/recoverable_password_container.hpp"
 
 namespace scpefe::core {
 namespace {
@@ -35,6 +36,21 @@ bool PersistenceService::has_valid_v3_framing(
     for (std::size_t index = 0; index < slots; ++index)
         if (read_le(bytes + 72 + 110 * index + 40, 4) != 66) return false;
     return true;
+}
+
+bool PersistenceService::recognizes_legacy_envelope(
+    const std::uint8_t *bytes, std::size_t size) const
+{
+    return container::RecoverablePasswordContainer::recognizes(bytes, size);
+}
+
+container::UnlockedContainerData PersistenceService::unlock_legacy_envelope(
+    const std::uint8_t *bytes, std::size_t size,
+    const std::uint8_t *password, std::size_t password_size,
+    const format::RevisionLimits &limits) const
+{
+    return container::RecoverablePasswordContainer::unlock(
+        bytes, size, password, password_size, limits);
 }
 
 } // namespace scpefe::core

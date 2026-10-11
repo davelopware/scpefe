@@ -20,12 +20,13 @@ public:
     bool read_health(HealthInfo &health_info) const;
     /* Returns this context's independently owned service registry. */
     ServiceRegistry &services() { return services_; }
-    /* Constructs a stateful container with its narrow state dependency. */
-    std::unique_ptr<container::Container> make_container() const;
+    /* Returns this context's single active container, creating it on first use. */
+    container::Container &make_container();
 
 private:
     HostServices host_services_;
     ServiceRegistry services_;
+    std::unique_ptr<container::Container> container_;
 };
 
 } // namespace scpefe::core

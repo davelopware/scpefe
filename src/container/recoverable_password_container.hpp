@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+namespace scpefe::core { class EncryptionService; }
+
 namespace scpefe::container {
 
 /* Reads recoverable v2/v3 containers and creates mutable version-3 containers. */
@@ -29,7 +31,8 @@ public:
         std::size_t recovery_password_size,
         const std::array<std::uint8_t, 16> &owner_slot_id,
         const std::uint8_t *encoded_snapshot_revision,
-        std::size_t encoded_snapshot_revision_size
+        std::size_t encoded_snapshot_revision_size,
+        const core::EncryptionService *encryption = nullptr
     );
 
     /* Authenticates either slot in a matched v2/v3 envelope and returns its snapshot. */

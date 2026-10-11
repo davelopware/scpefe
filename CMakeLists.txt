@@ -225,6 +225,9 @@ if(BUILD_TESTING)
             tests/container_state_test.cpp
             src/container/container.cpp
             src/container/container_state.cpp
+            src/container/recoverable_password_container.cpp
+            src/container/password_slot_lifecycle.cpp
+            src/container/unlocked_container_data.cpp
             src/core/context.cpp
             src/core/host_services.cpp
             src/core/service_registry.cpp
@@ -233,6 +236,15 @@ if(BUILD_TESTING)
             src/core/encryption_service.cpp
             src/core/persistence_service.cpp
             src/core/history_service.cpp
+            src/document/new_document.cpp
+            src/document/compaction.cpp
+            src/document/revision_transition.cpp
+            src/format/cbor_reader.cpp
+            src/format/cbor_writer.cpp
+            src/format/diagnostic_json_writer.cpp
+            src/format/revision_limits.cpp
+            src/format/snapshot_revision.cpp
+            src/format/text_validation.cpp
             src/security/password_strength.cpp
             third_party/zxcvbn-c/zxcvbn.c)
         target_compile_features(scpefe_container_state_test PRIVATE cxx_std_20)
