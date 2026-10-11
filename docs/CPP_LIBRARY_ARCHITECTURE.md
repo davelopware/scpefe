@@ -2,7 +2,7 @@
 
 This guide describes the **implemented** C++ common library, `libscpefe`. It is a code map, not a replacement for the [specification](SPECIFICATION.md) or the [domain glossary](DOMAIN_MODEL.md). The proposed replacement architecture is specified separately in [RefactorLibraryToCleanerClasses](RefactorLibraryToCleanerClasses.md). The public entry point is the versioned C ABI in [`include/scpefe/scpefe.h`](../include/scpefe/scpefe.h); the C++ classes under `src/` are internal implementation details.
 
-The library accepts byte spans and structured inputs, validates and encodes snapshot revisions, encrypts or unlocks self-contained containers, and returns replacement container bytes for document operations. The caller owns the target, app-private state, publication, and user interaction. In particular, the currently registered host-services table supplies a monotonic-clock callback to `Context`; the document functions do not use that context to read or write a target.
+The library accepts byte spans and structured inputs, validates and encodes snapshot revisions, encrypts or unlocks self-contained containers, and returns replacement container bytes for document operations. The caller owns the target, app-private state, publication, and user interaction. The registered host-services table supplies a monotonic-clock callback to `Context`. The context now owns an injectable service registry and can construct an internal stateful `Container`; the existing document C ABI still uses byte-oriented operations until the handle ABI is implemented.
 
 ## How the pieces fit
 
@@ -43,8 +43,10 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 
 | Class | Responsibility |
 | --- | --- |
-| [`Context`](../src/core/context.hpp) | Owns one `HostServices` adapter and serves the context health operation. It is not currently an open document session. |
+| [`Context`](../src/core/context.hpp) | Owns one `HostServices` adapter and one independently constructed service registry; serves health and constructs internal containers. It is not currently an open document session. |
 | [`HostServices`](../src/core/host_services.hpp) | Wraps the host-provided instance pointer and monotonic-clock callback, returning failure if the callback fails. |
+| [`ServiceFactory`](../src/core/service_factory.hpp) and [`ServiceRegistry`](../src/core/service_registry.hpp) | Compose and own per-context password, encryption, persistence, history, and state-manager services; tests can inject deterministic replacements. |
+| [`Container`](../src/container/container.hpp) and [`ContainerState`](../src/container/container_state.hpp) | Install typed access, permission, edit, attention, and publication transitions; return required host effects and notify observers only after installation. The new lifecycle ABI is still pending. |
 
 [`HealthInfo`](../src/core/health_info.hpp) is the internal result value converted into the C health structure. The matching C ABI code is [`context_abi.cpp`](../src/abi/context_abi.cpp).
 
