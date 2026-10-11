@@ -188,14 +188,14 @@ The initial released record codec stores snapshots and delta segments uncompress
 
 ### 6.3 Proposed history representation
 
-The unreleased version-3 grammar is to be revised before release:
+The unreleased version-3 grammar is defined by [the v3 format specification](format/password-container-v3.md) and [CDDL](format/password-container-v3.cddl):
 
 - Every saved container has a baseline snapshot revision, followed by zero or more encrypted content-delta and event-only revisions. A checkpoint is a full snapshot anchored to an existing revision ID; opening reconstructs current text from the nearest checkpoint and bounded later deltas.
 - Each revision has an immutable ID, links, content hash or body digest, time, actor slot ID, actor name and email at the time, client profile/device, kind, and body-availability status. Event-only revisions leave text unchanged. All semantic metadata remains encrypted.
 - The saved graph has one canonical reconstructable content lineage and one resolved head. During a merge, both versions are available in memory. The published merge revision stores a delta from the local content head to resolved text and links to the foreign head. Foreign revisions are then retained as metadata-only records marked as resolved by that merge; their deltas are not retained in the new container.
 - Compaction may remove older content bodies while preserving their IDs, links, attribution, and times. Revision identity must remain stable when a body is pruned or a checkpoint is materialized. The format must authenticate retained metadata and detect corruption or unsupported features.
 
-The logical behavior is specified in [RefactorLibraryToCleanerClasses](RefactorLibraryToCleanerClasses.md). Exact version-3 field numbers, binary layout, CDDL, and conformance vectors must be defined before the revised writer is implemented. Older unreleased container versions 1 and 2 need not remain readable. Once a format is released, later releases must retain read support for it.
+The logical behavior is specified in [RefactorLibraryToCleanerClasses](RefactorLibraryToCleanerClasses.md). The exact version-3 field numbers, binary layout, CDDL, and [conformance vectors](../tests/vectors/draft-v3/README.md) are defined for the revised writer. Older unreleased container versions 1 and 2 need not remain readable. Once a format is released, later releases must retain read support for it.
 
 ## 7. History and compaction
 
@@ -425,7 +425,7 @@ The following details have not yet been decided:
 
 - Packaging and distribution details for Electron, Capacitor, and native core binaries.
 - Final password-KDF parameters after required Android benchmarking.
-- Exact file grammar, CDDL schema, outer-envelope layout, checkpoint cadence, and migration rules.
+- Independent review and implementation of the defined v3 grammar; future stable-format migration rules and checkpoint cadence tuning.
 - Safe-write and replacement behavior across the supported filesystems.
 - Final lease write/renewal mechanics and crash behavior when auto-locking, suspending, or resuming.
 - Android file-provider workflow and how its availability/staleness is assessed without provider-specific revision APIs.

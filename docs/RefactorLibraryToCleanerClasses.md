@@ -149,9 +149,9 @@ Attribution is self-asserted, not a verified identity. Passwords, document
 keys, wrapping keys, and old/new password values are never history details.
 Event details may identify the affected slot and relevant permission or
 identity change. Revision IDs and parent/merge links must remain stable when
-bodies are pruned or moved to checkpoints. The v3 format specification must
-define canonical identity hashing and preserve enough authenticated metadata
-to verify retained links after pruning.
+bodies are pruned or moved to checkpoints. The [v3 format specification](format/password-container-v3.md) defines
+canonical identity hashing and retains authenticated metadata needed to verify
+links after pruning.
 
 The canonical content line is reconstructable from the nearest retained
 checkpoint and subsequent deltas. A stored delta is a reconstruction record;
