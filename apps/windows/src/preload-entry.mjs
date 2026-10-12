@@ -6,7 +6,6 @@ import { validateCreateFormRequest, validateCreationResult,
   validateEditMode, validateSaveResult, validateSaveSubmission,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
-  validateMigrationResult,
   validateLeaseDecisionResult, validateTakeoverRequest, validateDivergenceRequest,
   validateTakeoverCancellation,
   validateCompactionRequest,
@@ -133,12 +132,6 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:compact",
       validateCompactionRequest(request));
     return value === null ? null : validateCompactionResult(value);
-  },
-  migrateDocument: async (request = {}) => {
-    const value = await ipcRenderer.invoke("document:migrate",
-      validateTakeoverRequest(request));
-    return value === null ? null : value?.decisionRequired === "lease-takeover"
-      ? validateLeaseDecisionResult(value) : validateMigrationResult(value);
   },
   changePassword: async (request) => validateActiveDocument(
     await ipcRenderer.invoke("document:change-password",

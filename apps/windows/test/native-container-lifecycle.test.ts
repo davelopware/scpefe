@@ -22,7 +22,7 @@ interface ContainerContext {
 interface NativeAddon {
   createDocument(request: object): Buffer;
   createContainerContext(): ContainerContext;
-  openDocument(bytes: Buffer, password: string): { content: string };
+  inspectDocument(bytes: Buffer, password: string): { content: string };
 }
 
 const addonPath = process.env.SCPEFE_NATIVE_ADDON_PATH;
@@ -39,7 +39,7 @@ test("one context retains its handle through Lock and authenticated Unlock", {
   const bytes = context.create({ name: "Ada", email: "ada@example.test",
     deviceName: "Ada PC", content: "private words", ownerPassword: password,
     timestampMs: 1 });
-  assert.equal(native.openDocument(bytes, password).content, "private words");
+  assert.equal(native.inspectDocument(bytes, password).content, "private words");
   assert.equal(context.status().locked, false);
   assert.throws(() => context.open(bytes), /status 14/);
   const first = context.read();
@@ -78,7 +78,7 @@ test("exact native save candidates remain pending until verified or resolved", {
     deviceName: "Ada PC", content: "submitted", timestampMs: 2,
     operationId: 1 };
   const candidate = context.prepareSave("manual", password, input);
-  assert.equal(native.openDocument(candidate.bytes, password).content, "submitted");
+  assert.equal(native.inspectDocument(candidate.bytes, password).content, "submitted");
   assert.equal(context.read().content, "submitted");
   assert.notDeepEqual(context.bytes(), candidate.bytes);
   assert.throws(() => context.prepareSave("manual", password,

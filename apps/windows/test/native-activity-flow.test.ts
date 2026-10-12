@@ -14,7 +14,7 @@ interface NativeContext {
 }
 interface NativeAddon {
   createContainerContext(): NativeContext;
-  openDocument(bytes: Buffer, password: string): {
+  inspectDocument(bytes: Buffer, password: string): {
     content: string; baseRevision: string; historyEventType: string };
 }
 
@@ -57,9 +57,9 @@ test("backup includes the published attempt and leaves a later success outcome",
   const source = await fs.readFile(target);
   assert.notDeepEqual(copied, original);
   assert.notDeepEqual(source, copied);
-  assert.equal(native?.openDocument(copied, password).historyEventType,
+  assert.equal(native?.inspectDocument(copied, password).historyEventType,
     "backup-attempted");
-  assert.equal(native?.openDocument(source, password).historyEventType,
+  assert.equal(native?.inspectDocument(source, password).historyEventType,
     "backup-succeeded");
   assert.equal(service.active.opened.activityOutcomePending, undefined);
 });
@@ -116,7 +116,7 @@ test("failed backup action publishes a failure outcome without a replica", {
   const { directory, target, service } = await fixture(t, failingFs);
   destination = path.join(directory, "backup.scpefe");
   assert.deepEqual(await service.backupDocument(destination), { backedUp: false });
-  assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
     "backup-failed");
   await assert.rejects(fs.readFile(destination), (error: unknown) =>
     (error as NodeJS.ErrnoException).code === "ENOENT");
@@ -140,7 +140,7 @@ test("successful copy reports and recovers an unpublished activity outcome", {
   assert.deepEqual(await service.backupDocument(backup),
     { backedUp: true, outcomePending: true });
   assert.equal(service.active.opened.activityOutcomePending, true);
-  assert.equal(native?.openDocument(await fs.readFile(backup), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(backup), password).historyEventType,
     "backup-attempted");
   const journal = await service.journals.read(service.active.documentId,
     service.active.journalKey);
@@ -148,7 +148,7 @@ test("successful copy reports and recovers an unpublished activity outcome", {
   const restarted = new DocumentService({ ...options, fs });
   const reopened = await restarted.openDocument(source, password);
   assert.equal(reopened.activityOutcomePending, undefined);
-  assert.equal(native?.openDocument(await fs.readFile(source), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(source), password).historyEventType,
     "backup-succeeded");
   assert.equal(await restarted.journals.read(restarted.active.documentId,
     restarted.active.journalKey), null);
@@ -178,7 +178,7 @@ async function pendingDirtyExport(t: import("node:test").TestContext) {
     { content: draft, lineEndings: "lf" }),
   { exported: true, outcomePending: true });
   assert.equal(await fs.readFile(exported, "utf8"), draft);
-  assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
     "export-attempted");
   return { target, service, options, draft, working,
     documentId: service.active.documentId,
@@ -216,7 +216,7 @@ for (const checkpoint of ["lock", "timer"] as const) {
     const reopened = await restarted.openDocument(target, password);
     assert.equal(reopened.activityOutcomePending, undefined);
     assert.equal(reopened.recovery.content, draft);
-    assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+    assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
       "export-succeeded");
     const resolved = await restarted.journals.read(documentId, journalKey);
     assert.equal(resolved.activity, undefined);
@@ -242,7 +242,7 @@ test("restart clears a journal after the source already published its outcome", 
   const backup = path.join(directory, "backup.scpefe");
   assert.deepEqual(await service.backupDocument(backup),
     { backedUp: true, outcomePending: true });
-  assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
     "backup-succeeded");
   const restarted = new DocumentService({ ...options, fs });
   const opened = await restarted.openDocument(target, password);
@@ -260,14 +260,14 @@ test("plaintext export publishes its outcome and records a failed host action", 
     { content: "resolved text", lineEndings: "lf" });
   assert.deepEqual(result, { exported: true });
   assert.equal(await fs.readFile(exported, "utf8"), "resolved text");
-  assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
     "export-succeeded");
   assert.deepEqual(await service.exportPlaintext(target,
     { content: "must not overwrite", lineEndings: "lf" }),
   { exported: false });
-  assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
     "export-failed");
-  assert.equal(native?.openDocument(await fs.readFile(target), password).content,
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).content,
     "published words");
 });
 

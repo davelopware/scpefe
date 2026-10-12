@@ -6,6 +6,7 @@ import test from "node:test";
 import { DocumentService } from "../src/document-service.mjs";
 import { ReplacementCoordinator } from "../src/replacement-coordinator.mjs";
 import { SessionGeneration } from "../src/session-generation.mjs";
+import { statefulFake } from "./support/stateful-native-fake.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -24,7 +25,7 @@ async function realInvitationCandidate(t) {
   const oldHead = "42".repeat(32);
   const claimedHead = "43".repeat(32);
   const journalKey = Buffer.alloc(32, 7);
-  const native = {
+  const native = statefulFake({
     assessPasswordPolicy: () => "accepted",
     openDocument(bytes, password) {
       if (bytes.toString() === "invited" && password === temporary) {
@@ -51,7 +52,7 @@ async function realInvitationCandidate(t) {
       assert.equal(request.newPassword, replacement);
       return Buffer.from("claimed");
     },
-  };
+  });
   const candidate = new DocumentService({ native, fs, profilePath,
     publicationCapabilities, journalDirectory: path.join(directory, "journals"),
     witnessDirectory: path.join(directory, "witnesses") });

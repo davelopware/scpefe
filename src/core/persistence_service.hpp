@@ -9,9 +9,10 @@
 
 namespace scpefe::core {
 
+/* Supplies cryptographic operations for revised-v3 creation. */
 class EncryptionService;
 
-/* Screens revised-v3 framing and adapts the transitional 160-byte-header reader. */
+/* Screens and authenticates revised-v3 encrypted document envelopes. */
 class PersistenceService {
 public:
     /* Permits bounded parsing substitution in context tests. */
@@ -24,12 +25,6 @@ public:
         std::size_t owner_password_size, const std::uint8_t *recovery_password,
         std::size_t recovery_password_size,
         const EncryptionService &encryption) const;
-    /* Checks exact envelope framing under the caller's byte limit. */
-    virtual bool has_valid_v3_framing(const std::uint8_t *bytes,
-        std::size_t size, std::size_t max_bytes) const;
-    /* Recognizes the revised v3 layout before choosing an envelope reader. */
-    virtual bool recognizes_revised_envelope(const std::uint8_t *bytes,
-        std::size_t size) const;
     /* Validates revised v3 public framing before password derivation. */
     virtual void validate_revised_envelope(const std::uint8_t *bytes,
         std::size_t size) const;
@@ -43,14 +38,6 @@ public:
         const std::uint8_t *bytes, std::size_t size,
         const std::uint8_t *password, std::size_t password_size,
         const std::uint8_t *graph, std::size_t graph_size) const;
-    /* Validates the transitional byte ABI envelope before Open, without a password. */
-    virtual void validate_legacy_envelope(const std::uint8_t *bytes,
-        std::size_t size) const;
-    /* Authenticates the current byte ABI envelope and decodes its snapshot. */
-    virtual container::UnlockedContainerData unlock_legacy_envelope(
-        const std::uint8_t *bytes, std::size_t size,
-        const std::uint8_t *password, std::size_t password_size,
-        const format::RevisionLimits &limits) const;
 };
 
 } // namespace scpefe::core

@@ -4,7 +4,7 @@
 #include "core/host_services.hpp"
 #include "container/container_error.hpp"
 #include "container/container_state.hpp"
-#include "container/recoverable_password_container.hpp"
+#include "container/revised_v3_container.hpp"
 #include "format/revision_error.hpp"
 #include "format/revision_limits.hpp"
 #include "format/snapshot_revision.hpp"
@@ -293,7 +293,7 @@ scpefe_status scpefe_container_create(scpefe_context *context,
             document.recovery_password, document.recovery_password_size);
         container.open_document(bytes.data(), bytes.size());
         try {
-            container.unlock_legacy_document(document.owner_password, document.owner_password_size);
+            container.unlock_document(document.owner_password, document.owner_password_size);
         } catch (...) {
             container.transition(scpefe::container::Close{});
             context->implementation.release_container();
@@ -320,7 +320,7 @@ scpefe_status scpefe_container_open(scpefe_context *context,
     if (request->abi_version != SCPEFE_ABI_VERSION) return SCPEFE_STATUS_UNSUPPORTED_ABI;
     if (!request->bytes || request->bytes_size == 0) return SCPEFE_STATUS_INVALID_ARGUMENT;
     if (request->bytes_size
-        > scpefe::container::RecoverablePasswordContainer::max_container_bytes())
+        > scpefe::container::RevisedV3Container::max_container_bytes())
         return SCPEFE_STATUS_LIMIT_EXCEEDED;
     if (context->active) return SCPEFE_STATUS_INVALID_STATE;
     try {
@@ -348,7 +348,7 @@ scpefe_status scpefe_container_unlock(scpefe_container *handle,
     if (password->bytes_size > 4096) return SCPEFE_STATUS_LIMIT_EXCEEDED;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     try {
-        handle->owner->implementation.make_container().unlock_legacy_document(
+        handle->owner->implementation.make_container().unlock_document(
             password->bytes, password->bytes_size);
         return SCPEFE_STATUS_OK;
     } catch (const scpefe::container::ContainerFailure &failure) {
@@ -503,7 +503,7 @@ scpefe_status scpefe_container_apply_target(scpefe_container *handle,
         return SCPEFE_STATUS_UNSUPPORTED_ABI;
     if (target->password_size > 4096
         || target->bytes_size
-            > scpefe::container::RecoverablePasswordContainer::max_container_bytes())
+            > scpefe::container::RevisedV3Container::max_container_bytes())
         return SCPEFE_STATUS_LIMIT_EXCEEDED;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     try {
@@ -729,6 +729,150 @@ scpefe_status scpefe_container_prepare_save(scpefe_container *handle,
     }
 }
 
+scpefe_status scpefe_container_prepare_merge(scpefe_container *handle,
+    const scpefe_container_merge_v1 *merge, scpefe_candidate_info_v1 *info)
+{
+    using scpefe::format::span_is_valid;
+    using scpefe::format::valid_utf8;
+    if (!merge || !info || merge->struct_size < sizeof(*merge)
+        || info->struct_size < sizeof(*info)
+        || !span_is_valid(merge->local_container, merge->local_container_size)
+        || !merge->local_container_size
+        || !span_is_valid(merge->target_password, merge->target_password_size)
+        || !merge->target_password_size
+        || !span_is_valid(merge->local_password, merge->local_password_size)
+        || !merge->local_password_size
+        || !valid_utf8(merge->profile_name, merge->profile_name_size)
+        || !merge->profile_name_size
+        || !valid_utf8(merge->profile_email, merge->profile_email_size)
+        || !merge->profile_email_size
+        || !valid_utf8(merge->device_name, merge->device_name_size)
+        || !merge->device_name_size
+        || !scpefe::format::valid_canonical_document_text(
+            merge->content, merge->content_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (merge->abi_version != SCPEFE_ABI_VERSION
+        || info->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    const auto limits = scpefe::format::RevisionLimits::defaults();
+    if (merge->local_container_size
+            > scpefe::container::RevisedV3Container::max_container_bytes()
+        || merge->target_password_size > 4096 || merge->local_password_size > 4096
+        || merge->profile_name_size > limits.max_text_bytes()
+        || merge->profile_email_size > limits.max_text_bytes()
+        || merge->device_name_size > limits.max_text_bytes()
+        || merge->content_size > limits.max_text_bytes())
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        const auto result = handle->owner->implementation.make_container().prepare_merge(
+            merge->operation_id, merge->local_container,
+            merge->local_container_size, merge->target_password,
+            merge->target_password_size, merge->local_password,
+            merge->local_password_size,
+            {merge->profile_name, merge->profile_name_size},
+            {merge->profile_email, merge->profile_email_size},
+            {merge->device_name, merge->device_name_size},
+            {merge->content, merge->content_size}, merge->timestamp_ms);
+        const auto *candidate = handle->owner->implementation.make_container().candidate();
+        *info = {sizeof(*info), SCPEFE_ABI_VERSION, candidate->operation_id, {},
+            candidate->bytes.size(), effect_mask(result)};
+        std::memcpy(info->source_head, candidate->source_head.data(),
+            candidate->source_head.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::format::MergeFailure &failure) {
+        switch (failure.problem) {
+        case scpefe::format::MergeProblem::unrelated_target:
+            return SCPEFE_STATUS_UNRELATED_TARGET;
+        case scpefe::format::MergeProblem::rollback:
+            return SCPEFE_STATUS_TARGET_ROLLBACK;
+        case scpefe::format::MergeProblem::unavailable_base:
+            return SCPEFE_STATUS_MERGE_BASE_UNAVAILABLE;
+        case scpefe::format::MergeProblem::revoked_access:
+            return SCPEFE_STATUS_TARGET_ACCESS_REVOKED;
+        case scpefe::format::MergeProblem::permission_denied:
+            return SCPEFE_STATUS_TARGET_PERMISSION_DENIED;
+        }
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return map_error(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+    return SCPEFE_STATUS_INVALID_ARGUMENT;
+}
+
+scpefe_status scpefe_container_assess_merge(scpefe_container *handle,
+    const scpefe_container_merge_v1 *merge)
+{
+    using scpefe::format::span_is_valid;
+    using scpefe::format::valid_utf8;
+    if (!merge || merge->struct_size < sizeof(*merge)
+        || !span_is_valid(merge->local_container, merge->local_container_size)
+        || !merge->local_container_size
+        || !span_is_valid(merge->target_password, merge->target_password_size)
+        || !merge->target_password_size
+        || !span_is_valid(merge->local_password, merge->local_password_size)
+        || !merge->local_password_size
+        || !valid_utf8(merge->profile_name, merge->profile_name_size)
+        || !merge->profile_name_size
+        || !valid_utf8(merge->profile_email, merge->profile_email_size)
+        || !merge->profile_email_size
+        || !valid_utf8(merge->device_name, merge->device_name_size)
+        || !merge->device_name_size
+        || !scpefe::format::valid_canonical_document_text(
+            merge->content, merge->content_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (merge->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    const auto limits = scpefe::format::RevisionLimits::defaults();
+    if (merge->local_container_size
+            > scpefe::container::RevisedV3Container::max_container_bytes()
+        || merge->target_password_size > 4096 || merge->local_password_size > 4096
+        || merge->profile_name_size > limits.max_text_bytes()
+        || merge->profile_email_size > limits.max_text_bytes()
+        || merge->device_name_size > limits.max_text_bytes()
+        || merge->content_size > limits.max_text_bytes())
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        handle->owner->implementation.make_container().assess_merge(
+            merge->local_container, merge->local_container_size,
+            merge->target_password, merge->target_password_size,
+            merge->local_password, merge->local_password_size,
+            {merge->profile_name, merge->profile_name_size},
+            {merge->profile_email, merge->profile_email_size},
+            {merge->device_name, merge->device_name_size},
+            {merge->content, merge->content_size}, merge->timestamp_ms);
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::format::MergeFailure &failure) {
+        switch (failure.problem) {
+        case scpefe::format::MergeProblem::unrelated_target:
+            return SCPEFE_STATUS_UNRELATED_TARGET;
+        case scpefe::format::MergeProblem::rollback:
+            return SCPEFE_STATUS_TARGET_ROLLBACK;
+        case scpefe::format::MergeProblem::unavailable_base:
+            return SCPEFE_STATUS_MERGE_BASE_UNAVAILABLE;
+        case scpefe::format::MergeProblem::revoked_access:
+            return SCPEFE_STATUS_TARGET_ACCESS_REVOKED;
+        case scpefe::format::MergeProblem::permission_denied:
+            return SCPEFE_STATUS_TARGET_PERMISSION_DENIED;
+        }
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return map_error(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+    return SCPEFE_STATUS_INVALID_ARGUMENT;
+}
+
 scpefe_status scpefe_container_prepare_compaction(scpefe_container *handle,
     const scpefe_container_compaction_v1 *request,
     scpefe_candidate_info_v1 *info)
@@ -762,7 +906,7 @@ scpefe_status scpefe_container_prepare_compaction(scpefe_container *handle,
     const auto limits = scpefe::format::RevisionLimits::defaults();
     if (request->password_size > 4096
         || request->verified_backup_size
-            > scpefe::container::RecoverablePasswordContainer::max_container_bytes()
+            > scpefe::container::RevisedV3Container::max_container_bytes()
         || request->client_name_size > limits.max_text_bytes()
         || request->client_email_size > limits.max_text_bytes()
         || request->device_name_size > limits.max_text_bytes())
@@ -828,7 +972,7 @@ static scpefe_status prepare_activity(scpefe_container *handle,
     const auto limit = scpefe::format::RevisionLimits::defaults().max_text_bytes();
     if (request->password_size > 4096
         || request->observed_target_size
-            > scpefe::container::RecoverablePasswordContainer::max_container_bytes()
+            > scpefe::container::RevisedV3Container::max_container_bytes()
         || request->client_name_size > limit
         || request->client_email_size > limit
         || request->device_name_size > limit)
@@ -910,7 +1054,7 @@ scpefe_status scpefe_container_restore_activity_outcome(
     if (request->abi_version != SCPEFE_ABI_VERSION)
         return SCPEFE_STATUS_UNSUPPORTED_ABI;
     if (request->observed_target_size
-        > scpefe::container::RecoverablePasswordContainer::max_container_bytes())
+        > scpefe::container::RevisedV3Container::max_container_bytes())
         return SCPEFE_STATUS_LIMIT_EXCEEDED;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     try {

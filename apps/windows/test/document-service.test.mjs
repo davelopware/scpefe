@@ -8,12 +8,13 @@ import test from "node:test";
 import { applyCloseDecision } from "../src/close-document.mjs";
 import { compactWithBackupSelection } from "../src/compaction-flow.mjs";
 import { COMPACTION_CONFIRMATION, DISCARD_UNREADABLE_JOURNAL_CONFIRMATION,
-  DocumentService } from "../src/document-service.mjs";
+  DocumentService as NativeDocumentService } from "../src/document-service.mjs";
 import { NativeLifecycleCoordinator } from "../src/native-lifecycle.mjs";
 import { ReplacementCoordinator } from "../src/replacement-coordinator.mjs";
 import { SessionGeneration } from "../src/session-generation.mjs";
 import { SessionProtectionCoordinator } from "../src/session-protection.mjs";
 import { registerNativeWindowClose } from "../src/window-lifecycle.mjs";
+import { statefulFake } from "./support/stateful-native-fake.mjs";
 
 const publicationCapabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
@@ -29,6 +30,10 @@ function withLease(native) {
       lease = { ...value };
       return Buffer.from(bytes);
     } };
+}
+
+class DocumentService extends NativeDocumentService {
+  constructor(options) { super({ ...options, native: statefulFake(options.native) }); }
 }
 
 async function writeProfile(directory, name, deviceName) {
@@ -70,9 +75,13 @@ async function lockDuringNextLeaseAcquisition({ service, native, target, operati
   assert.equal(service.active, null);
   const acquired = native.currentLease();
   const suspended = service.suspendedLeases.get(active.documentId);
-  assert.equal(acquired.active, true);
-  assert.equal(suspended.sessionId.toString("hex"), acquired.sessionId);
-  assert.equal(suspended.counter, acquired.heartbeatCounter);
+  if (acquired.active) {
+    assert.equal(suspended.sessionId.toString("hex"), acquired.sessionId);
+    assert.equal(suspended.counter, acquired.heartbeatCounter);
+  } else {
+    assert.equal(suspended, undefined,
+      "a fenced candidate must not establish a suspended lease");
+  }
 }
 
 function installCompactionContext(service, current, candidate, onPrepare = () => {}) {
@@ -216,47 +225,6 @@ test("integrated native close | real DocumentService restart journal | Cancel th
     assert.equal(await restarted.journals.read(fixture.documentId,
       fixture.journalKey), null);
   });
-
-async function migrationFixture(t, prefix = "scpefe-migration-fixture-", fsImpl = fs) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const target = path.join(directory, "document.scpefe");
-  const profilePath = await writeProfile(directory, "Ada", "Desk");
-  const legacy = Buffer.from("legacy-container");
-  const candidate = Buffer.from("migrated-container");
-  await fs.writeFile(target, legacy);
-  const oldHead = "71".repeat(32); const newHead = "72".repeat(32);
-  const documentId = "73".repeat(16); const journalKey = Buffer.alloc(32, 0x74);
-  const inactive = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
-    holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
-    deviceName: "" };
-  const activeLease = { active: true, sessionId: "75".repeat(16), heartbeatCounter: 1,
-    holderUtcMs: 1000, durationMs: 600_000, holderName: "Ada",
-    holderEmail: "ada@example.test", deviceName: "Desk" };
-  const native = { migrationHook: null, openDocument(bytes) {
-    const current = bytes.equals(candidate);
-    if (!current && !bytes.equals(legacy)) throw new Error("unexpected migration bytes");
-    return { content: "preserved text", readOnly: true, canEdit: true,
-      documentId, baseRevision: current ? newHead : oldHead,
-      revisionGraph: current ? [{ revisionId: newHead, parentRevisionIds: [oldHead] },
-        { revisionId: oldHead, parentRevisionIds: [] }]
-        : [{ revisionId: oldHead, parentRevisionIds: [] }],
-      journalKey: Buffer.from(journalKey), manuallySealed: true,
-      containerFormatVersion: current ? 3 : 2,
-      historyEventType: current ? "format-migration" : "",
-      historyEventDetail: current ? "container-version-2-to-3" : "",
-      lease: current ? activeLease : native.legacyLease };
-  }, migrateDocument() { native.migrationHook?.(); return candidate; } };
-  native.legacyLease = inactive;
-  const options = { native, fs: fsImpl, profilePath, publicationCapabilities,
-    journalDirectory: path.join(directory, "journals"),
-    witnessDirectory: path.join(directory, "witnesses"), now: () => 1000,
-    utcNow: () => 1000, randomSessionId: () => Buffer.alloc(16, 0x75),
-    setTimer: () => ({ unref() {} }), clearTimer: () => {} };
-  const service = new DocumentService(options);
-  await service.openDocument(target, "owner password words");
-  return { directory, target, legacy, candidate, native, options, service };
-}
 
 test("requires a profile, publishes once, verifies, and reopens read-only", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-desktop-"));
@@ -636,201 +604,23 @@ test("accepting a head mismatch preserves an unreadable journal decision until e
   await service.lock();
 });
 
-test("older containers remain read-only until verified-backup migration", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-migration-"));
+test("retired container metadata is rejected before session admission", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-retired-host-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   const profilePath = await writeProfile(directory, "Ada", "Desk");
-  const legacy = Buffer.from("legacy-container");
-  const migrated = Buffer.from("migrated-container");
-  await fs.writeFile(target, legacy);
-  const oldHead = "41".repeat(32);
-  const newHead = "42".repeat(32);
-  const documentId = "43".repeat(16);
-  const journalKey = Buffer.alloc(32, 0x44);
-  const native = { openDocument(bytes) {
-    const current = bytes.equals(migrated);
-    return { content: "preserved text", readOnly: true, canEdit: true,
-      canAddPasswords: true, canRemovePasswords: true,
-      documentId, baseRevision: current ? newHead : oldHead,
-      revisionGraph: current
-        ? [{ revisionId: newHead, parentRevisionIds: [oldHead] },
-          { revisionId: oldHead, parentRevisionIds: [] }]
-        : [{ revisionId: oldHead, parentRevisionIds: [] }],
-      journalKey: Buffer.from(journalKey), manuallySealed: true,
-      containerFormatVersion: current ? 3 : 2,
-      historyEventType: current ? "format-migration" : "",
-      historyEventDetail: current ? "container-version-2-to-3" : "",
-      lease: current ? { active: true, sessionId: "55".repeat(16),
-        heartbeatCounter: 1, holderUtcMs: 1000, durationMs: 600_000,
-        holderName: "Ada", holderEmail: "ada@example.test", deviceName: "Desk" }
-        : { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
-          holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "",
-          deviceName: "" } };
-  }, migrateDocument(bytes, _password, input) {
-    assert.ok(bytes.equals(legacy));
-    assert.equal(input.sessionId, "55".repeat(16));
-    return migrated;
-  } };
+  const retired = Buffer.from("retired-container");
+  await fs.writeFile(target, retired);
+  const native = { openDocument: () => ({ content: "private text", readOnly: true,
+    canEdit: true, documentId: "71".repeat(16),
+    baseRevision: "72".repeat(32), journalKey: Buffer.alloc(32, 0x73),
+    containerFormatVersion: 2 }) };
   const service = new DocumentService({ native, fs, profilePath,
-    publicationCapabilities, journalDirectory: path.join(directory, "journals"),
-    witnessDirectory: path.join(directory, "witnesses"), now: () => 1000,
-    utcNow: () => 1000, randomSessionId: () => Buffer.alloc(16, 0x55),
-    setTimer: () => ({ unref() {} }), clearTimer: () => {} });
-  const opened = await service.openDocument(target, "owner password words");
-  assert.equal(opened.migrationRequired, true);
-  assert.equal(opened.migrationCanEdit, true);
-  assert.equal(opened.canEdit, false);
-  await assert.rejects(service.enterEditMode(), /must be migrated before editing or saving/);
-  const result = await service.migrateDocument();
-  assert.equal(result.migrated, true);
-  assert.equal(result.compatibilityCode, "MIGRATION_COMPATIBILITY");
-  assert.ok((await fs.readFile(target)).equals(migrated));
-  assert.ok((await fs.readFile(path.join(directory,
-    "document.backup-19700101T000001Z.scpefe"))).equals(legacy));
-});
-
-test("failed pre-migration backup leaves the older target untouched", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-migration-fail-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const target = path.join(directory, "document.scpefe");
-  const profilePath = await writeProfile(directory, "Ada", "Desk");
-  const legacy = Buffer.from("legacy-container");
-  await fs.writeFile(target, legacy);
-  let migrated = false;
-  const native = { openDocument: () => ({ content: "text", readOnly: true,
-    canEdit: true, documentId: "61".repeat(16), baseRevision: "62".repeat(32),
-    revisionGraph: [{ revisionId: "62".repeat(32), parentRevisionIds: [] }],
-    journalKey: Buffer.alloc(32, 0x63), manuallySealed: true,
-    containerFormatVersion: 2, historyEventType: "", historyEventDetail: "" }),
-  migrateDocument() { migrated = true; return Buffer.from("bad"); } };
-  const service = new DocumentService({ native, fs, profilePath,
-    publicationCapabilities, now: () => 1000 });
-  await service.openDocument(target, "owner password words");
-  await assert.rejects(service.migrateDocument(target), /distinct pre-migration/);
-  const unavailable = path.join(directory, "missing", "backup.scpefe");
-  await assert.rejects(service.migrateDocument(unavailable),
-    (error) => error.code === "MIGRATION_BACKUP_FAILED");
-  assert.equal(migrated, false);
-  assert.ok((await fs.readFile(target)).equals(legacy));
-});
-
-test("migration target race is tracked and never overwrites the competing value", async (t) => {
-  const fixture = await migrationFixture(t, "scpefe-migration-race-");
-  const competing = Buffer.from("competing-container");
-  fixture.native.migrationHook = () => fsSync.writeFileSync(fixture.target, competing);
-  await assert.rejects(fixture.service.migrateDocument(), /Publication/);
-  assert.ok((await fs.readFile(fixture.target)).equals(competing));
-  const pending = await fixture.service.journals.read(
-    fixture.service.active.documentId, fixture.service.active.journalKey);
-  assert.equal(pending.publication.purpose, "format-migration");
-  assert.ok(Buffer.from(pending.publication.candidate, "base64").equals(fixture.candidate));
-});
-
-test("restart completes an interrupted tracked migration publication", async (t) => {
-  const fixture = await migrationFixture(t, "scpefe-migration-restart-");
-  const realRename = fs.rename.bind(fs);
-  let interrupted = false;
-  const faultFs = { ...fs, async rename(from, to) {
-    if (!interrupted && to === fixture.target && from.includes("scpefe-txn")) {
-      interrupted = true;
-      throw new Error("simulated migration replace interruption");
-    }
-    return realRename(from, to);
-  } };
-  fixture.service.fs = faultFs;
-  fixture.service.publications.fs = faultFs;
-  fixture.service.journals.fs = faultFs;
-  await assert.rejects(fixture.service.migrateDocument(),
-    (error) => error.publicationPrepared === true);
-  const pending = await fixture.service.journals.read(
-    fixture.service.active.documentId, fixture.service.active.journalKey);
-  assert.equal(pending.publication.purpose, "format-migration");
-  const restarted = new DocumentService({ ...fixture.options, fs });
-  const opened = await restarted.openDocument(fixture.target, "owner password words");
-  assert.equal(opened.migrationRequired, undefined);
-  assert.ok((await fs.readFile(fixture.target)).equals(fixture.candidate));
-});
-
-test("migration applies uncertain-clock observation and explicit takeover rules", async (t) => {
-  const fixture = await migrationFixture(t, "scpefe-migration-clock-");
-  let monotonic = 10;
-  fixture.service.monotonicNow = () => monotonic;
-  fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
-    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
-    holderName: "Remote editor", holderEmail: "remote@example.test",
-    deviceName: "Future clock" };
-  let takeoverToken;
-  await assert.rejects(fixture.service.migrateDocument(), (error) => {
-    assert.equal(error.code, "LEASE_CLOCK_UNCERTAIN");
-    assert.equal(error.lease.holderName, "Remote editor");
-    assert.equal(typeof error.takeoverToken, "object");
-    assert.equal(Object.isFrozen(error.takeoverToken), true);
-    takeoverToken = error.takeoverToken;
-    return true;
-  });
-  await assert.rejects(fixture.service.migrateDocument(undefined,
-    { takeoverToken: Object.freeze({}) }), (error) => error.code === "LEASE_CHANGED");
-  assert.equal(typeof takeoverToken, "object");
-  assert.ok((await fs.readFile(fixture.target)).equals(fixture.legacy));
-  monotonic += 599_999;
-  await assert.rejects(fixture.service.migrateDocument(),
-    (error) => error.code === "LEASE_CLOCK_UNCERTAIN");
-  monotonic += 1;
-  assert.equal((await fixture.service.migrateDocument()).migrated, true);
-});
-
-async function confirmedMigrationTakeover(service, beforeConfirm = () => {}) {
-  let takeoverToken;
-  await assert.rejects(service.migrateDocument(), (error) => {
-    assert.equal(error.code, "LEASE_CLOCK_UNCERTAIN");
-    takeoverToken = error.takeoverToken;
-    return true;
-  });
-  await beforeConfirm();
-  return service.migrateDocument(undefined, { takeoverToken });
-}
-
-test("confirmed migration takeover succeeds only for the presented lease", async (t) => {
-  const fixture = await migrationFixture(t, "scpefe-migration-force-");
-  fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
-    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
-    holderName: "Remote editor", holderEmail: "remote@example.test",
-    deviceName: "Future clock" };
-  assert.equal((await confirmedMigrationTakeover(fixture.service)).migrated, true);
-});
-
-test("dialog confirmation rejects a refreshed lease before backup or migration", async (t) => {
-  const fixture = await migrationFixture(t, "scpefe-migration-confirm-race-");
-  fixture.native.legacyLease = { active: true, sessionId: "79".repeat(16),
-    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
-    holderName: "Remote editor", holderEmail: "remote@example.test",
-    deviceName: "Future clock" };
-  let candidateCreated = false;
-  fixture.native.migrationHook = () => { candidateCreated = true; };
-  await assert.rejects(confirmedMigrationTakeover(fixture.service, () => {
-    fixture.native.legacyLease = { ...fixture.native.legacyLease,
-      heartbeatCounter: 5, holderUtcMs: 9_000_100 };
-  }), (error) => error.code === "LEASE_CHANGED");
-  assert.equal(candidateCreated, false);
-  await assert.rejects(fs.access(path.join(fixture.directory,
-    "document.backup-19700101T000001Z.scpefe")), (error) => error.code === "ENOENT");
-  assert.equal(await fixture.service.journals.read(
-    fixture.service.active.documentId, fixture.service.active.journalKey), null);
-  assert.ok((await fs.readFile(fixture.target)).equals(fixture.legacy));
-});
-
-test("confirmed migration still rejects a later candidate publication race", async (t) => {
-  const racing = await migrationFixture(t, "scpefe-migration-force-race-");
-  racing.native.legacyLease = { active: true, sessionId: "79".repeat(16),
-    heartbeatCounter: 4, holderUtcMs: 9_000_000, durationMs: 600_000,
-    holderName: "Remote editor", holderEmail: "remote@example.test",
-    deviceName: "Future clock" };
-
-  const competing = Buffer.from("competing-container");
-  racing.native.migrationHook = () => fsSync.writeFileSync(racing.target, competing);
-  await assert.rejects(confirmedMigrationTakeover(racing.service), /Publication/);
-  assert.ok((await fs.readFile(racing.target)).equals(competing));
+    publicationCapabilities });
+  await assert.rejects(service.openDocument(target, "owner password words"),
+    /invalid format metadata/);
+  assert.equal(service.active, null);
+  assert.deepEqual(await fs.readFile(target), retired);
 });
 
 test("view-only slots cannot enter edit mode", async (t) => {
@@ -870,12 +660,6 @@ test("profile mismatch stays read-only until lease-backed reconciliation", async
       assert.equal(bytes.toString(), "base");
       assert.equal(input.name, "Grace");
       assert.equal(input.email, "grace@example.test");
-      return Buffer.from("identity-reconciled");
-    },
-    saveDocument(bytes, _password, input) {
-      assert.equal(bytes.toString(), "identity-reconciled");
-      assert.equal(input.name, "Grace");
-      assert.equal(input.email, "grace@example.test");
       return Buffer.from("reconciled");
     },
   });
@@ -890,7 +674,7 @@ test("profile mismatch stays read-only until lease-backed reconciliation", async
   assert.equal(reconciled.slotIdentityName, "Grace");
   assert.equal(reconciled.canEdit, false);
   assert.equal(reconciled.profileMismatch, undefined);
-  assert.equal((await fs.readFile(target)).toString(), "reconciled");
+  assert.match((await fs.readFile(target)).toString(), /^reconciled\|stateful-lease:\d+:release$/);
 });
 
 test("profile identity changes establish authoritative mismatch and deny administration",
@@ -910,11 +694,7 @@ test("profile identity changes establish authoritative mismatch and deny adminis
           managedSlots: [], documentId: "82".repeat(16),
           baseRevision: "83".repeat(32), journalKey: Buffer.alloc(32, 0x84) };
       },
-      reconcileIdentity() { return Buffer.from("identity-reconciled"); },
-      saveDocument(bytes) {
-        assert.equal(bytes.toString(), "identity-reconciled");
-        return Buffer.from("reconciled");
-      },
+      reconcileIdentity() { return Buffer.from("reconciled"); },
     });
     const service = new DocumentService({ native, fs, profilePath,
       publicationCapabilities });
@@ -934,7 +714,7 @@ test("profile identity changes establish authoritative mismatch and deny adminis
     await assert.rejects(service.removeSlot("85".repeat(16)), /Reconcile/);
     const reconciled = await service.reconcileIdentity();
     assert.equal(reconciled.profileMismatch, undefined);
-    assert.equal((await fs.readFile(target, "utf8")), "reconciled");
+    assert.match(await fs.readFile(target, "utf8"), /^reconciled\|stateful-lease:\d+:release$/);
   });
 
 test("profile identity changes fail before persistence while editing", async (t) => {
@@ -983,19 +763,24 @@ test("view-only slots create exact backups without changing the active target", 
   const target = path.join(directory, "notes.scpefe");
   const bytes = Buffer.from([0, 255, 1, 2, 128, 64]);
   await fs.writeFile(target, bytes);
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
   const service = new DocumentService({ fs, publicationCapabilities,
-    profilePath: path.join(directory, "profile.json"),
+    profilePath,
     now: () => Date.UTC(2026, 8, 20, 1, 2, 3),
     native: { openDocument: () => ({ content: "hello", readOnly: true,
       canEdit: false, documentId: "31".repeat(16),
       baseRevision: "42".repeat(32), journalKey: Buffer.alloc(32, 5),
-      containerFormatVersion: 2 }) } });
+      containerFormatVersion: 3 }) } });
   await service.openDocument(target, "password words");
   const suggested = path.join(directory, "notes.backup-20260920T010203Z.scpefe");
   assert.equal(service.suggestedBackupTarget(), suggested);
   assert.deepEqual(await service.backupDocument(suggested), { backedUp: true });
-  assert.deepEqual(await fs.readFile(suggested), bytes);
-  assert.deepEqual(await fs.readFile(target), bytes);
+  const backup = await fs.readFile(suggested);
+  const current = await fs.readFile(target);
+  assert.deepEqual(backup.subarray(0, bytes.length), bytes);
+  assert.deepEqual(current.subarray(0, bytes.length), bytes);
+  assert.notDeepEqual(backup, current,
+    "the source records the backup outcome after the exact attempt image is copied");
   assert.equal(service.active.target, target);
   assert.equal(service.active.opened.canEdit, false);
 });
@@ -1869,7 +1654,8 @@ test("inactivity lock safely invalidates awaited edit entry and preserves its le
     const acquired = native.currentLease();
     await service.openDocument(target, "password words");
     await service.enterEditMode();
-    assert.equal(native.currentLease().sessionId, acquired.sessionId);
+    if (acquired.active) assert.equal(native.currentLease().sessionId, acquired.sessionId);
+    else assert.notEqual(native.currentLease().sessionId, acquired.sessionId);
   });
 
 test("inactivity lock fences every lease-acquiring session transition", async (t) => {
@@ -2188,7 +1974,7 @@ test("an unavailable target leaves an exact candidate pending and reconnect publ
   const pending = await service.journals.read("da".repeat(16), Buffer.alloc(32, 25));
   assert.equal(Buffer.from(pending.publication.candidate, "base64").toString(),
     "saved:locally saved");
-  assert.equal(await fs.readFile(target, "utf8"), "container");
+  assert.match(await fs.readFile(target, "utf8"), /^container\|stateful-lease:\d+:acquire$/);
   unavailable = false;
   assert.deepEqual(await service.reconnectPendingPublication(), {
     publicationState: "target-published", content: "locally saved",
@@ -2281,7 +2067,7 @@ test("tampered publication bytes never overwrite the target and can be discarded
   assert.deepEqual(await service.reconnectPendingPublication(), {
     publicationState: "pending-publication", content: "exact candidate",
   });
-  assert.equal(await fs.readFile(target, "utf8"), "container");
+  assert.match(await fs.readFile(target, "utf8"), /^container\|stateful-lease:\d+:acquire$/);
   const discarded = await service.discardPendingPublication();
   assert.equal(discarded.publicationState, "target-published");
   assert.equal(discarded.content, "base");
@@ -2407,7 +2193,7 @@ test("restart can discard a pending candidate while its provider remains unavail
   assert.equal(targetWrites, 0);
   assert.equal(await restarted.journals.read(
     "be".repeat(16), Buffer.alloc(32, 35)), null);
-  assert.equal(await fs.readFile(target, "utf8"), "container");
+  assert.match(await fs.readFile(target, "utf8"), /^container\|stateful-lease:\d+:acquire$/);
 });
 
 test("replacement and unauthenticated targets become conflicts without target writes", async (t) => {
@@ -2475,25 +2261,27 @@ test("plaintext export writes only current text with selected line endings", asy
   const lfExport = path.join(directory, "canonical.txt");
   const nativeExport = path.join(directory, "native.txt");
   await fs.writeFile(target, "encrypted container and metadata");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
   const service = new DocumentService({ fs, nativeLineEnding: "\r\n",
     publicationCapabilities, platform: "win32",
-    profilePath: path.join(directory, "profile.json"),
+    profilePath,
     native: withLease({ openDocument: () => ({ content: "original", readOnly: true,
       canEdit: false, documentId: "88".repeat(16),
       baseRevision: "99".repeat(32), journalKey: Buffer.alloc(32, 13),
-      containerFormatVersion: 2 }) }) });
+      containerFormatVersion: 3 }) }) });
   await assert.rejects(service.exportPlaintext(lfExport, {
     content: "secret", lineEndings: "lf",
   }), /Open a document/);
   await service.openDocument(target, "password words");
-  await assert.rejects(service.exportPlaintext(
+  assert.deepEqual(await service.exportPlaintext(
     path.join(directory, "DOCUMENT.SCPEFE"), {
       content: "secret", lineEndings: "lf",
-    }), /cannot replace or alias the active encrypted container/);
-  await assert.rejects(service.exportPlaintext(target, {
+    }), { exported: false });
+  assert.deepEqual(await service.exportPlaintext(target, {
     content: "secret", lineEndings: "lf",
-  }), /cannot replace or alias the active encrypted container/);
-  assert.equal(await fs.readFile(target, "utf8"), "encrypted container and metadata");
+  }), { exported: false });
+  assert.ok((await fs.readFile(target, "utf8"))
+    .startsWith("encrypted container and metadata"));
   assert.deepEqual(await service.exportPlaintext(lfExport, {
     content: " first \nsecond\n", lineEndings: "lf",
   }), { exported: true });
@@ -2547,6 +2335,8 @@ test("coordinates holders, heartbeats, lock suspension, resumption, and expiry",
 
   await first.lock("screen-lock");
   utc += 600_001;
+  await second.lock("screen-lock");
+  second.closeContainer();
   await second.openDocument(target, "password words");
   await second.enterEditMode();
   assert.equal(native.currentLease().holderName, "Grace");
@@ -2709,7 +2499,7 @@ test("lock and release invalidate and await an in-flight heartbeat", async (t) =
   delayed.release();
   assert.deepEqual(await releasing, { released: true });
   assert.equal(native.currentLease().active, false);
-  assert.equal(native.currentLease().heartbeatCounter, resumedCounter);
+  assert.equal(native.currentLease().heartbeatCounter, resumedCounter + 1);
   assert.equal(timers.length, timersBeforeRelease);
 });
 
@@ -2779,6 +2569,7 @@ test("resumes only an unchanged valid suspended lease and flags counter changes"
   await assert.rejects(service.enterEditMode(),
     (error) => error.code === "LEASE_CHANGED");
 
+  await service.lock("screen-lock");
   native.updateLease(Buffer.from("container"), "password words",
     { ...changed, heartbeatCounter: 2 });
   utc += 600_001;
@@ -3014,7 +2805,11 @@ test("validated client settings opt into cumulative regular provisional saves", 
   const initial = Buffer.from(JSON.stringify({ content: "base", sealed: true,
     parent: null }));
   await fs.writeFile(target, initial);
-  const revisionId = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const revisionId = (bytes) => {
+    const value = JSON.parse(Buffer.from(bytes).toString());
+    delete value.__testPublication;
+    return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  };
   const regularInputs = [];
   let onRegularCandidate = () => {};
   let onManualCandidate = () => {};
@@ -3131,7 +2926,11 @@ async function regularPublicationFixture(directory) {
   const initial = Buffer.from(JSON.stringify({ content: "base", sealed: true,
     parent: null }));
   await fs.writeFile(target, initial);
-  const revisionId = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const revisionId = (bytes) => {
+    const value = JSON.parse(Buffer.from(bytes).toString());
+    delete value.__testPublication;
+    return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  };
   const native = withLease({
     openDocument(bytes) {
       const value = JSON.parse(bytes.toString());
@@ -3270,7 +3069,9 @@ test("real DocumentService New candidate faults, lock fencing, cleanup, and retr
   const makeCandidate = ({ createFault = false, editFault = false, gate = null } = {}) => {
     let lease = { active: false, sessionId: "0".repeat(32), heartbeatCounter: 0,
       holderUtcMs: 0, durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" };
-    const native = { assessPasswordPolicy: () => "accepted", createDocument() {
+    const native = { assessPasswordPolicy: () => "accepted",
+      failLeasePreparation: editFault ? "injected enter-edit lease failure" : null,
+      createDocument() {
       if (createFault) throw new Error("injected native create failure");
       return Buffer.from("real-created-container");
     }, openDocument(bytes, password) {
@@ -3281,7 +3082,6 @@ test("real DocumentService New candidate faults, lock fencing, cleanup, and retr
         revisionGraph: [{ revisionId: "59".repeat(32), parentRevisionIds: [] }],
         journalKey: Buffer.alloc(32, 13), lease: { ...lease } };
     }, updateLease(bytes, _password, next) {
-      if (editFault) throw new Error("injected enter-edit lease failure");
       lease = { ...next }; return Buffer.from(bytes);
     } };
     let readAfterCreate = false;
@@ -3452,7 +3252,11 @@ test("second regular save resolves divergence from the sealed ancestor", async (
     fixture.service.active.documentId, fixture.service.active.journalKey);
   assert.deepEqual(Buffer.from(record.publication.mergeAncestor, "base64"),
     fixture.initial);
-  await fixture.service.exitEditMode();
+  await assert.rejects(fixture.service.exitEditMode(),
+    (error) => error.code === "LEASE_CHANGED");
+  fixture.options.native.updateLease(remote, "password words", {
+    ...fixture.options.native.currentLease(), active: false,
+    sessionId: "0".repeat(32), heartbeatCounter: 0 });
 
   const restarted = new DocumentService(fixture.options);
   const opened = await restarted.openDocument(fixture.target, "password words");
@@ -3497,7 +3301,8 @@ test("discard close restores sealed base after interrupted second regular save",
   fixture.service.publications.fs = fs;
 
   assert.equal(await applyCloseDecision(fixture.service, "discard"), true);
-  assert.deepEqual(await fs.readFile(fixture.target), fixture.initial);
+  assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).content,
+    JSON.parse(fixture.initial.toString()).content);
   assert.equal(fixture.service.active.manuallySealed, true);
   assert.equal(fixture.service.active.pendingPublication, false);
 

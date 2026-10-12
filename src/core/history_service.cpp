@@ -1,5 +1,4 @@
 #include "core/history_service.hpp"
-#include "document/compaction.hpp"
 #include "format/revision_graph.hpp"
 
 #include <algorithm>
@@ -34,16 +33,6 @@ std::vector<std::uint8_t> HistoryService::compact_graph(
         first_available);
     return graph.compact_at(cutoff, actor,
         client_name, client_email, device, timestamp_ms);
-}
-
-std::vector<std::uint8_t> HistoryService::compact_legacy_document(
-    const std::uint8_t *bytes, std::size_t size,
-    const std::uint8_t *password, std::size_t password_size,
-    const std::array<std::uint8_t, 16> &lease_session_id,
-    std::uint64_t heartbeat_counter) const
-{
-    return document::Compaction::create(bytes, size, password, password_size,
-        lease_session_id, heartbeat_counter);
 }
 
 } // namespace scpefe::core

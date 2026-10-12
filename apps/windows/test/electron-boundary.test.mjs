@@ -54,7 +54,6 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   let divergenceResult = { content: "merge", hasConflicts: false,
     ancestorRevision: "11".repeat(32), localRevision: "22".repeat(32),
     currentRevision: "33".repeat(32) };
-  let migrationResult = null;
   let invitationResult = { created: true,
     temporaryPassword: "generated secret words", opened: editOpened };
   let rejectedChannel = null;
@@ -118,7 +117,6 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:restore-recovery") return recoveryResult;
         if (channel === "document:begin-divergence-resolution") return divergenceResult;
         if (channel === "document:cancel-lease-takeover") return true;
-        if (channel === "document:migrate") return migrationResult;
         if (channel === "document:remove-slot") {
           return { removed: true, warningCode: "SLOT_REMOVED", opened: editOpened };
         }
@@ -144,7 +142,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "openExternalDocument", "cancelExternalOpen",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
-    "discardPendingPublication", "backupDocument", "compactDocument", "migrateDocument",
+    "discardPendingPublication", "backupDocument", "compactDocument",
     "changePassword", "createInvitation", "copyInvitationPassphrase",
     "claimInvitation", "cancelInvitationClaim", "reconcileIdentity",
     "updateSlotPermissions", "removeSlot",
@@ -239,13 +237,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   });
   await assert.rejects(exposed.cancelLeaseTakeover("not-an-authorization"),
     /lease takeover request is invalid/);
-  migrationResult = { decisionRequired: "lease-takeover", operation: "migration",
-    holderName: "Future editor", authorization };
-  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.migrateDocument())),
-    migrationResult);
-  assert.deepEqual(JSON.parse(JSON.stringify(invocations.at(-1))), {
-    channel: "document:migrate", request: {},
-  });
+  assert.equal(Object.hasOwn(exposed, "migrateDocument"), false);
   await assert.rejects(exposed.createDocument({
     ownerPassword: "owner password words",
     ownerPasswordConfirmation: "owner password words",

@@ -136,21 +136,22 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     }
     return fs.unlink(file);
   } };
-  const openedContent = (bytes) => bytes.toString() === "other-container" ? "other plaintext"
-    : bytes.toString().startsWith("new:") ? bytes.toString().slice(4)
-    : /^(saved|provisional):/.test(bytes.toString())
-      ? bytes.toString().replace(/^[^:]+:/, "") : "original plaintext";
+  const baseImage = (bytes) => bytes.toString().split("|lease:", 1)[0];
+  const openedContent = (bytes) => baseImage(bytes) === "other-container" ? "other plaintext"
+    : baseImage(bytes).startsWith("new:") ? baseImage(bytes).slice(4)
+    : /^(saved|provisional):/.test(baseImage(bytes))
+      ? baseImage(bytes).replace(/^[^:]+:/, "") : "original plaintext";
   const fakeNative = { openDocument(bytes, password) {
     if (password === "wrong password") throw new Error("authentication failed");
-    const revision = createHash("sha256").update(bytes).digest("hex");
+    const revision = createHash("sha256").update(baseImage(bytes)).digest("hex");
     const initialRevision = createHash("sha256").update(Buffer.from("container")).digest("hex");
     const revisionGraph = revisionGraphs.get(revision)
-      ?? (bytes.toString().startsWith("saved:")
+      ?? (baseImage(bytes).startsWith("saved:")
         ? [{ revisionId: revision, parentRevisionIds: [initialRevision] },
           { revisionId: initialRevision, parentRevisionIds: [] }]
         : [{ revisionId: revision, parentRevisionIds: [] }]);
-    const invitation = origin === "ro-invitation" && bytes.toString() === "other-container";
-    const viewOnly = origin.startsWith("s1-") && bytes.toString() === "container";
+    const invitation = origin === "ro-invitation" && baseImage(bytes) === "other-container";
+    const viewOnly = origin.startsWith("s1-") && baseImage(bytes) === "container";
     return { content: invitation ? "" : openedContent(bytes), readOnly: true,
     canEdit: !invitation && !viewOnly,
     canAddPasswords: !invitation && !viewOnly,
@@ -159,17 +160,17 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       slotIdentityName: "Temporary colleague label",
       slotIdentityEmail: "invited@example.test", profileName: "Document author",
       profileEmail: "author@example.test", deviceName: "Author device" } : {}),
-    manuallySealed: !bytes.toString().startsWith("provisional:"),
-    documentId: bytes.toString().startsWith("other") ? "62".repeat(16)
-      : bytes.toString().startsWith("new:") ? "63".repeat(16) : "61".repeat(16),
+    manuallySealed: !baseImage(bytes).startsWith("provisional:"),
+    documentId: baseImage(bytes).startsWith("other") ? "62".repeat(16)
+      : baseImage(bytes).startsWith("new:") ? "63".repeat(16) : "61".repeat(16),
     baseRevision: revision,
     revisionGraph,
-    journalKey: Buffer.alloc(32, bytes.toString().startsWith("other") ? 0x64
-      : bytes.toString().startsWith("new:") ? 0x65 : 0x63),
-    lease: { ...(bytes.toString().startsWith("other") ? { active: false,
+    journalKey: Buffer.alloc(32, baseImage(bytes).startsWith("other") ? 0x64
+      : baseImage(bytes).startsWith("new:") ? 0x65 : 0x63),
+    lease: { ...(baseImage(bytes).startsWith("other") ? { active: false,
       sessionId: "0".repeat(32), heartbeatCounter: 0, holderUtcMs: 0,
       durationMs: 600_000, holderName: "", holderEmail: "", deviceName: "" }
-      : bytes.toString().startsWith("new:") ? newLease : lease) } };
+      : baseImage(bytes).startsWith("new:") ? newLease : lease) } };
   }, updateLease(bytes, _password, next) {
     if (createdCandidate && createdLeaseFault) throw new Error("injected created candidate lease failure");
     if (bytes.toString().startsWith("new:")) newLease = { ...next };
@@ -191,7 +192,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (saveFault) throw new Error("injected native save failure");
     const candidate = Buffer.from(`saved:${input.content}`);
     const revision = createHash("sha256").update(candidate).digest("hex");
-    const parent = createHash("sha256").update(_bytes).digest("hex");
+    const parent = createHash("sha256").update(baseImage(_bytes)).digest("hex");
     revisionGraphs.set(revision, [{ revisionId: revision, parentRevisionIds: [parent] },
       ...(revisionGraphs.get(parent) ?? [{ revisionId: parent, parentRevisionIds: [] }])]);
     return candidate;
@@ -201,8 +202,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     // Keep its original ancestry until a distinct resolution is published.
     if (candidate.equals(localBytes)) return candidate;
     const revision = createHash("sha256").update(candidate).digest("hex");
-    const current = createHash("sha256").update(currentBytes).digest("hex");
-    const local = createHash("sha256").update(localBytes).digest("hex");
+    const current = createHash("sha256").update(baseImage(currentBytes)).digest("hex");
+    const local = createHash("sha256").update(baseImage(localBytes)).digest("hex");
     const nodes = [...(revisionGraphs.get(current)
       ?? [{ revisionId: current, parentRevisionIds: [] }])];
     for (const node of revisionGraphs.get(local)
@@ -218,6 +219,98 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (provisionalDiscardFault) throw new Error("injected provisional discard failure");
     return Buffer.from("saved:original plaintext");
   } };
+  let leaseImageSequence = 0;
+  fakeNative.inspectDocument = (bytes, password) => fakeNative.openDocument(bytes, password);
+  fakeNative.createContainerContext = () => {
+    let committed = null;
+    let authenticated = null;
+    let locked = true;
+    let editing = false;
+    let pending = null;
+    const inspect = () => fakeNative.inspectDocument(committed, authenticated);
+    return {
+      create(input) { committed = fakeNative.createDocument(input);
+        authenticated = null; locked = true; editing = false;
+        return Buffer.from(committed); },
+      open(bytes) { committed = Buffer.from(bytes); authenticated = null;
+        locked = true; editing = false; pending = null; },
+      unlock(password) { fakeNative.inspectDocument(committed, password);
+        authenticated = password; locked = false; },
+      lock() { locked = true; editing = false; },
+      close() { committed = null; authenticated = null; locked = true;
+        editing = false; pending = null; },
+      status() { return { locked }; },
+      read() { if (locked) throw new Error("native status 15");
+        const opened = inspect(); return { documentId: opened.documentId,
+          slotId: opened.slotId, content: opened.content }; },
+      bytes() { return Buffer.from(committed); },
+      authenticatedLease() { return inspect().lease; },
+      leaseMode() { return { editing, leaseStatus: editing ? "held" : "none" }; },
+      leaseAdvice({ suspendedSessionId, suspendedCounter, nowUtcMs,
+        unchangedMonotonicMs = 0 } = {}) {
+        const current = inspect().lease;
+        if (!current.active) return "acquire";
+        if (current.sessionId === suspendedSessionId
+            && current.heartbeatCounter === suspendedCounter) return "resume";
+        if (nowUtcMs >= current.holderUtcMs + current.durationMs
+            || unchangedMonotonicMs >= current.durationMs) return "takeover";
+        return "confirm-takeover";
+      },
+      prepareLeaseChange(action, _password, input) {
+        if (createdCandidate && createdLeaseFault) {
+          throw new Error("injected created candidate lease failure");
+        }
+        const before = inspect().lease;
+        const next = action === "release"
+          ? { ...before, active: false, sessionId: "0".repeat(32),
+            heartbeatCounter: before.heartbeatCounter + 1 }
+          : { active: true, sessionId: input.sessionId,
+            heartbeatCounter: before.heartbeatCounter + 1,
+            holderUtcMs: input.nowUtcMs, durationMs: input.durationMs,
+            holderName: input.holderName, holderEmail: input.holderEmail,
+            deviceName: input.deviceName };
+        const bytes = Buffer.from(`${committed}|lease:${++leaseImageSequence}:${action}`);
+        pending = { bytes, operationId: input.operationId, lease: next };
+        return { bytes, operationId: input.operationId, effects: 7 };
+      },
+      confirmEditLease() { editing = true; },
+      prepareSave(kind, password, input) {
+        const bytes = kind === "discard"
+          ? fakeNative.discardProvisional(committed, password, input)
+          : kind === "regular"
+            ? fakeNative.regularSaveDocument(committed, password, input)
+            : fakeNative.saveDocument(committed, password, input);
+        pending = { bytes, operationId: input.operationId };
+        return { bytes, operationId: input.operationId, effects: 7 };
+      },
+      assessMerge(localBytes, targetPassword, localPassword, input) {
+        fakeNative.mergeDocument(committed, localBytes, targetPassword,
+          { ...input, localPassword });
+      },
+      prepareMerge(localBytes, targetPassword, localPassword, input) {
+        const bytes = fakeNative.mergeDocument(committed, localBytes,
+          targetPassword, { ...input, localPassword });
+        pending = { bytes, operationId: input.operationId };
+        return { bytes, operationId: input.operationId, effects: 7 };
+      },
+      finishSave(operationId, outcome) {
+        if (!pending || pending.operationId !== operationId) throw new Error("stale candidate");
+        if (outcome === "verified") {
+          committed = Buffer.from(pending.bytes);
+          if (pending.lease) {
+            if (baseImage(committed).startsWith("new:")) newLease = pending.lease;
+            else lease = pending.lease;
+            editing = pending.lease.active;
+          }
+        }
+        if (outcome !== "ambiguous") pending = null;
+        return outcome === "verified" ? 8 : 0;
+      },
+      resolveSave(operationId, published) {
+        return this.finishSave(operationId, published ? "verified" : "definite-failure");
+      },
+    };
+  };
   const native = nativeOverride ?? fakeNative;
   const serviceOptions = (callbacks = {}) => ({ native, fs: serviceFs, profilePath,
     publicationCapabilities: capabilities,
@@ -851,7 +944,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       const closeEvent = fakeWindow.close();
       if (closeEvent.prevented) await fakeWindow.lastClose;
       await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
-      assert.equal(await fs.readFile(target, "utf8"), "saved:merged authenticated branch");
+      assert.equal(baseImage(await fs.readFile(target)), "saved:merged authenticated branch");
       return;
     }
     if (origin.startsWith("rw-")) {
@@ -904,7 +997,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       }
       await closing;
       assert.equal(fakeWindow.closed, 1);
-      if (outcome !== "discard") assert.equal(await fs.readFile(target, "utf8"),
+      if (outcome !== "discard") assert.equal(baseImage(await fs.readFile(target)),
         "saved:restart recovered plaintext");
       return;
     }
@@ -1825,7 +1918,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       "native window Exit save retry");
     await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
     assert.equal(host.service.active.editMode, false);
-    assert.equal(await fs.readFile(target, "utf8"), "saved:mounted secret plaintext");
+    assert.equal(baseImage(await fs.readFile(target)), "saved:mounted secret plaintext");
     return;
   }
   let releaseJournal; let journalStarted;

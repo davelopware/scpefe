@@ -79,17 +79,6 @@ ContainerError graph_error(format::RevisionError error)
 
 } // namespace
 
-bool RevisedV3Container::recognizes(const std::uint8_t *bytes, std::size_t size)
-{
-    if (!bytes || size < header_size + record_size + 33
-        || !std::equal(magic.begin(), magic.end(), bytes)) return false;
-    const auto slots = read_le(bytes + 32, 4);
-    const auto payload = read_le(bytes + 64, 8);
-    if (slots < 1 || slots > 9) return false;
-    const auto offset = header_size + record_size * slots;
-    return size >= offset && payload == size - offset;
-}
-
 std::vector<std::uint8_t> RevisedV3Container::create(
     std::string_view profile_name, std::string_view profile_email,
     std::string_view device_name, std::string_view content,
@@ -194,7 +183,7 @@ void RevisedV3Container::validate_structure(const std::uint8_t *bytes, std::size
 {
     if (!bytes || size < header_size || !std::equal(magic.begin(), magic.end(), bytes))
         throw ContainerFailure{ContainerError::malformed_container};
-    if (size > 33u * 1024u * 1024u)
+    if (size > max_container_bytes())
         throw ContainerFailure{ContainerError::limit_exceeded};
     if (read_le(bytes + 8, 4) != 3 || read_le(bytes + 12, 4) != 2
         || read_le(bytes + 16, 8) != 2 || read_le(bytes + 24, 8) != 67108864

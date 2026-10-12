@@ -11,8 +11,6 @@ interface OpenedDocument {
   targetName: string;
   canEdit: boolean;
   activityOutcomePending?: true;
-  migrationRequired?: true;
-  migrationCanEdit?: boolean;
   provisional?: true;
   recovery?: { content: string; state: "unsaved"; updateTime: number;
     cursor: { start: number; end: number }; authorName?: string; deviceName?: string };
@@ -149,12 +147,6 @@ class Host implements DocumentSessionHost<OpenedDocument> {
       operation: "divergence"; holderName: string; authorization: string }> {
     return { content: "merge", hasConflicts: false, ancestorRevision: "a",
       localRevision: "l", currentRevision: "c" };
-  }
-  async migrateDocument(_request: { authorization?: string } = {}): Promise<{
-    opened: OpenedDocument; compatibilityCode: string } | {
-    decisionRequired: "lease-takeover"; operation: "migration";
-    holderName: string; authorization: string } | null> {
-    return { opened: opened(), compatibilityCode: "MIGRATED" };
   }
   async compactDocument(_request: { confirmed: true }): Promise<{
     opened: OpenedDocument; previousHead: string; head: string } | null> {
@@ -1249,7 +1241,6 @@ test("automatic lease entry respects slot and unresolved-attention gates", async
     { ...opened(), headMismatch: { kind: "rollback", title: "changed",
       explanation: "review", editingBlocked: true } },
     { ...opened(), unreadableJournal: true },
-    { ...opened(), migrationRequired: true, migrationCanEdit: true },
     { ...opened(), publicationState: "pending-publication" },
   ];
   for (const document of blocked) {
@@ -1682,65 +1673,6 @@ test("a late invitation publication neither reveals its passphrase nor updates a
   session.dispose();
 });
 
-test("migration uses canonical slot permission and adopts only the live verified result", async () => {
-  const host = new Host();
-  const session = new DocumentSession(host, new Journal());
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: false });
-  let state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("view expected");
-  assert.equal(state.commands.migrate, false);
-  assert.equal((await session.migrate()).status, "unavailable");
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: true });
-  state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("view expected");
-  assert.equal(state.commands.migrate, true);
-  assert.equal(state.attention?.kind, "migration-decision");
-  host.migrateDocument = async () => ({ opened: opened("migrated", false),
-    compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  const migration = await session.migrate();
-  assert.deepEqual(migration, { status: "migration",
-    compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  assert.equal("document" in migration, false);
-  assert.equal("content" in migration, false);
-  assert.equal(JSON.stringify(migration).includes("migrated"), false);
-  state = session.getSnapshot();
-  if (state.kind !== "edit") throw new Error("edit expected");
-  assert.equal(state.document.content, "migrated");
-  assert.equal(state.working.text, "migrated");
-  assert.equal(state.working.dirty, false);
-  assert.equal(state.commands.write, true);
-  session.dispose();
-});
-
-test("migration cancellation consumes takeover; late result after lock cannot adopt", async () => {
-  const host = new Host();
-  const session = new DocumentSession(host, new Journal());
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: true });
-  host.migrateDocument = async () => null;
-  assert.equal((await session.migrate()).status, "migration-canceled");
-  const canceled = session.getSnapshot();
-  if (canceled.kind !== "read-only") throw new Error("view expected");
-  assert.equal(canceled.attention?.kind, "migration-decision");
-  let finish!: (value: { opened: OpenedDocument; compatibilityCode: string }) => void;
-  let started!: () => void;
-  const active = new Promise<void>((resolve) => { started = resolve; });
-  host.migrateDocument = () => new Promise((resolve) => { finish = resolve; started(); });
-  const pending = session.migrate();
-  await active;
-  session.lockStarted();
-  session.adopt(opened("replacement"));
-  finish({ opened: opened("stale migration", false),
-    compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  assert.equal((await pending).status, "superseded");
-  const replaced = session.getSnapshot();
-  if (replaced.kind !== "read-only") throw new Error("replacement expected");
-  assert.equal(replaced.document.content, "replacement");
-  session.dispose();
-});
-
 test("compaction requires full administration, explicit confirmation, and a clean document", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
@@ -1774,33 +1706,6 @@ test("compaction requires full administration, explicit confirmation, and a clea
   assert.equal(state.working.dirty, false);
   assert.equal(state.commands.compact, true);
   assert.equal(state.attention?.kind, undefined);
-  session.dispose();
-});
-
-test("migration consumes takeover before a failed backup and requires fresh authorization", async () => {
-  const host = new Host();
-  const session = new DocumentSession(host, new Journal());
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: true });
-  const requests: string[] = [];
-  host.migrateDocument = async (request = {}) => {
-    requests.push(request.authorization ?? "initial");
-    if (!request.authorization) return { decisionRequired: "lease-takeover",
-      operation: "migration", holderName: "Remote editor", authorization: "one-shot" };
-    throw Object.assign(new Error("private backup path"), { name: "SafeBoundaryError",
-      code: "MIGRATION_FAILED" });
-  };
-  assert.equal((await session.migrate()).status, "attention");
-  assert.equal((await session.confirmLeaseTakeover()).status, "failed");
-  assert.equal((await session.confirmLeaseTakeover()).status, "unavailable");
-  const state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("view expected");
-  assert.deepEqual(state.attention, { kind: "migration-decision", canMigrate: true,
-    failureCode: "MIGRATION_FAILED" });
-  assert.equal(JSON.stringify(state).includes("one-shot"), false);
-  assert.equal(JSON.stringify(state).includes("private backup path"), false);
-  assert.equal((await session.migrate()).status, "attention");
-  assert.deepEqual(requests, ["initial", "one-shot", "initial"]);
   session.dispose();
 });
 

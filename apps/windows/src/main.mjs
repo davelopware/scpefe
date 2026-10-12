@@ -8,7 +8,6 @@ import { randomUUID } from "node:crypto";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { DocumentLifecycleHost } from "./document-lifecycle-host.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
-import { registerMigrationHandler } from "./migration-flow.mjs";
 import { createSafeIpc } from "./error-boundary.mjs";
 import { registerWindowFocusProtection } from "./window-focus-protection.mjs";
 import { acknowledgementCredentials, acknowledgementTargetHash,
@@ -203,9 +202,6 @@ if (hasInstanceLock) app.whenReady().then(async () => {
   });
   registerCompactionHandler({ ipcMain: safeIpcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
-  registerMigrationHandler({ ipcMain: safeIpcMain, getService: () => lifecycleHost.service,
-    dialog, window, authorizations: lifecycleHost.leaseTakeovers,
-    validateAuthorization: leaseRequestAuthorization });
   safeIpcMain.handle("document:change-password", (_event, request) =>
     lifecycleHost.service.changePassword(validatePasswordChangeRequest(request)));
   safeIpcMain.handle("security:assess-password-policy", (_event, password) =>

@@ -51,15 +51,26 @@ for (const [status, expected] of [
     await fs.writeFile(profilePath, JSON.stringify({ name: "Ada",
       email: "ada@example.test", deviceName: "Desk" }));
     const native = {
-      openDocument(bytes: Buffer) {
+      inspectDocument(bytes: Buffer) {
         const parsed = JSON.parse(bytes.toString()) as { content: string;
           head: string; graph: object[] };
         return { content: parsed.content, readOnly: true, canEdit: true,
           documentId, baseRevision: parsed.head, revisionGraph: parsed.graph,
           journalKey: Buffer.from(journalKey) };
       },
-      mergeDocument() {
-        throw Object.assign(new Error(`native status ${status}`), { status });
+      createContainerContext() {
+        let opened: Buffer;
+        return {
+          open(bytes: Buffer) { opened = bytes; }, unlock() {}, close() {},
+          status() { return { locked: false }; },
+          read() {
+            const parsed = JSON.parse(opened.toString()) as { content: string };
+            return { documentId, content: parsed.content };
+          },
+          assessMerge() {
+            throw Object.assign(new Error(`native status ${status}`), { status });
+          },
+        };
       },
     };
     const service = new DocumentService({ native, fs, profilePath,

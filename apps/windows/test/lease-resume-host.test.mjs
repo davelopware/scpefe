@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { DocumentLifecycleHost } from "../src/document-lifecycle-host.mjs";
 import { DocumentService } from "../src/document-service.mjs";
+import { statefulFake } from "./support/stateful-native-fake.mjs";
 
 test("the production host resumes its own editing lease after lock and unlock", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-host-lease-resume-"));
@@ -21,7 +22,8 @@ test("the production host resumes its own editing lease after lock and unlock", 
   const currentLease = async () => decodeLease(await fs.readFile(target));
   let selectedTarget = target;
   await fs.writeFile(target, encodeLease(initialLease));
-  const native = {
+  const native = statefulFake({
+    leaseEncodedInBytes: true,
     openDocument(bytes, password) {
       return { content: "base", readOnly: true, canEdit: true,
         recoverySlot: password === "master words",
@@ -31,7 +33,7 @@ test("the production host resumes its own editing lease after lock and unlock", 
     updateLease(bytes, _password, next) {
       return encodeLease(next);
     },
-  };
+  });
   const handlers = new Map();
   const host = await new DocumentLifecycleHost({
     ipc: { handle: (name, handler) => handlers.set(name, handler) },

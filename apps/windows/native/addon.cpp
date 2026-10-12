@@ -423,23 +423,6 @@ scpefe_status monotonic_time(void *, std::uint64_t *value)
     return SCPEFE_STATUS_OK;
 }
 
-bool revised_v3_bytes(const std::uint8_t *bytes, std::size_t size)
-{
-    static constexpr std::uint8_t magic[]{'S','C','P','E','F','E',0,3};
-    if (!bytes || size < 72 + 110 + 33
-        || !std::equal(std::begin(magic), std::end(magic), bytes)) return false;
-    const auto read_le = [&](std::size_t offset, std::size_t count) {
-        std::uint64_t value = 0;
-        for (std::size_t i = 0; i < count; ++i)
-            value |= std::uint64_t(bytes[offset + i]) << (8 * i);
-        return value;
-    };
-    const auto slots = read_le(32, 4);
-    const auto payload = read_le(64, 8);
-    return slots >= 1 && slots <= 9 && size >= 72 + 110 * slots
-        && payload == size - (72 + 110 * slots);
-}
-
 napi_value open_revised_document(napi_env env, const std::uint8_t *bytes,
     std::size_t size, const SecretBytes &password)
 {
@@ -1039,6 +1022,100 @@ napi_value container_prepare_save(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value container_assess_merge(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 4;
+        napi_value args[4];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 4)
+            throw std::runtime_error("assessMerge expects local bytes, two passwords, and input");
+        const auto [local, local_size] = buffer_value(env, args[0]);
+        const SecretBytes local_password{env, args[1]};
+        const SecretBytes target_password{env, args[2]};
+        const std::string name = string_value(env, property(env, args[3], "name"));
+        const std::string email = string_value(env, property(env, args[3], "email"));
+        const std::string device = string_value(env, property(env, args[3], "deviceName"));
+        const std::string content = string_value(env, property(env, args[3], "content"));
+        double timestamp = 0;
+        check(env, napi_get_value_double(env,
+            property(env, args[3], "timestampMs"), &timestamp));
+        if (!std::isfinite(timestamp) || timestamp < 0 || std::floor(timestamp) != timestamp)
+            throw std::runtime_error("invalid merge timestamp");
+        const scpefe_container_merge_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION, 0, local, local_size,
+            target_password.data(), target_password.size(),
+            local_password.data(), local_password.size(),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size(), content.data(), content.size(),
+            static_cast<std::uint64_t>(timestamp),
+        };
+        const auto status = scpefe_container_assess_merge(owner->active, &request);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_get_boolean(env, true, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_prepare_merge(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 4;
+        napi_value args[4];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 4)
+            throw std::runtime_error("prepareMerge expects local bytes, two passwords, and input");
+        const auto [local, local_size] = buffer_value(env, args[0]);
+        const SecretBytes local_password{env, args[1]};
+        const SecretBytes target_password{env, args[2]};
+        const std::string name = string_value(env, property(env, args[3], "name"));
+        const std::string email = string_value(env, property(env, args[3], "email"));
+        const std::string device = string_value(env, property(env, args[3], "deviceName"));
+        const std::string content = string_value(env, property(env, args[3], "content"));
+        double timestamp = 0;
+        check(env, napi_get_value_double(env,
+            property(env, args[3], "timestampMs"), &timestamp));
+        double operation = 0;
+        check(env, napi_get_value_double(env,
+            property(env, args[3], "operationId"), &operation));
+        if (!std::isfinite(timestamp) || timestamp < 0 || std::floor(timestamp) != timestamp
+            || !std::isfinite(operation) || operation < 1
+            || operation > 9007199254740991.0 || std::floor(operation) != operation)
+            throw std::runtime_error("invalid merge timestamp or operation ID");
+        const scpefe_container_merge_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION,
+            static_cast<std::uint64_t>(operation), local, local_size,
+            target_password.data(), target_password.size(),
+            local_password.data(), local_password.size(),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size(), content.data(), content.size(),
+            static_cast<std::uint64_t>(timestamp),
+        };
+        scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+        const auto status = scpefe_container_prepare_merge(owner->active,
+            &request, &candidate);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value bytes = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_container_copy_candidate(owner->active,
+                    candidate.operation_id, output, capacity, size);
+            });
+        if (!bytes) return nullptr;
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_set_named_property(env, result, "bytes", bytes));
+        set_number(env, result, "operationId",
+            static_cast<double>(candidate.operation_id));
+        set_number(env, result, "effects", candidate.effect_mask);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value container_prepare_compaction(napi_env env, napi_callback_info info)
 {
     try {
@@ -1457,6 +1534,8 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"leaseAdvice", nullptr, container_lease_advice, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareLeaseChange", nullptr, container_prepare_lease_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSave", nullptr, container_prepare_save, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"prepareMerge", nullptr, container_prepare_merge, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"assessMerge", nullptr, container_assess_merge, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareCompaction", nullptr, container_prepare_compaction, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareActivity", nullptr, container_prepare_activity, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"completeActivity", nullptr, container_complete_activity, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1478,59 +1557,6 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
         return object;
     } catch (const std::exception &error) {
         napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
-    }
-}
-
-napi_value create_document(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 1;
-        napi_value args[1];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 1) throw std::runtime_error("createDocument expects one object");
-        const std::string name = string_value(env, property(env, args[0], "name"));
-        const std::string email = string_value(env, property(env, args[0], "email"));
-        const std::string device = string_value(env, property(env, args[0], "deviceName"));
-        const std::string content = string_value(env, property(env, args[0], "content"));
-        const SecretBytes owner{env, property(env, args[0], "ownerPassword")};
-        napi_value recovery_value = property(env, args[0], "recoveryPassword");
-        napi_valuetype recovery_type;
-        check(env, napi_typeof(env, recovery_value, &recovery_type));
-        const bool has_recovery = recovery_type == napi_string;
-        SecretBytes recovery;
-        if (has_recovery) recovery.assign(env, recovery_value);
-        double timestamp = 0;
-        check(env, napi_get_value_double(
-            env, property(env, args[0], "timestampMs"), &timestamp));
-        const scpefe_new_document_v1 document{
-            sizeof(scpefe_new_document_v1),
-            name.data(), name.size(), email.data(), email.size(),
-            device.data(), device.size(), content.data(), content.size(),
-            static_cast<std::uint64_t>(timestamp),
-            owner.data(), owner.size(),
-            has_recovery ? recovery.data() : nullptr,
-            has_recovery ? recovery.size() : 0,
-        };
-        std::size_t size = 0;
-        scpefe_status status = scpefe_new_document_create(
-            &document, nullptr, 0, &size);
-        if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        void *bytes = nullptr;
-        napi_value buffer;
-        check(env, napi_create_buffer(env, size, &bytes, &buffer));
-        status = scpefe_new_document_create(
-            &document, static_cast<std::uint8_t *>(bytes), size, &size);
-        if (status != SCPEFE_STATUS_OK) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        return buffer;
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
     }
 }
 
@@ -1576,218 +1602,19 @@ napi_value assess_password_policy(napi_env env, napi_callback_info info)
     }
 }
 
-napi_value open_document(napi_env env, napi_callback_info info)
+napi_value inspect_document(napi_env env, napi_callback_info info)
 {
-    scpefe_unlocked_container *unlocked = nullptr;
-    scpefe_decoded_snapshot_revision *revision = nullptr;
     try {
         size_t argc = 2;
         napi_value args[2];
         check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
         if (argc != 2)
-            throw std::runtime_error("openDocument expects a Buffer and password");
-        bool is_buffer = false;
-        check(env, napi_is_buffer(env, args[0], &is_buffer));
-        if (!is_buffer)
-            throw std::runtime_error("openDocument expects a Buffer and password");
-        void *bytes = nullptr;
-        size_t size = 0;
-        check(env, napi_get_buffer_info(env, args[0], &bytes, &size));
+            throw std::runtime_error("inspectDocument expects a Buffer and password");
+        const auto [bytes, size] = buffer_value(env, args[0]);
         const SecretBytes password{env, args[1]};
-        if (revised_v3_bytes(static_cast<const std::uint8_t *>(bytes), size))
-            return open_revised_document(env,
-                static_cast<const std::uint8_t *>(bytes), size, password);
-        scpefe_status status = scpefe_password_container_unlock(
-            static_cast<const std::uint8_t *>(bytes), size,
-            password.data(), password.size(),
-            &unlocked);
-        if (status != SCPEFE_STATUS_OK) {
-            scpefe_decoded_snapshot_revision_destroy(revision);
-            revision = nullptr;
-            scpefe_unlocked_container_destroy(unlocked);
-            unlocked = nullptr;
-            throw_status(env, status);
-            return nullptr;
-        }
-        scpefe_unlocked_container_v1 unlocked_view{};
-        unlocked_view.struct_size = sizeof(unlocked_view);
-        status = scpefe_unlocked_container_view(unlocked, &unlocked_view);
-        scpefe_unlocked_slot_access_v1 slot_access{};
-        slot_access.struct_size = sizeof(slot_access);
-        if (status == SCPEFE_STATUS_OK)
-            status = scpefe_unlocked_container_slot_access(unlocked, &slot_access);
-        scpefe_editing_lease_v1 editing_lease{};
-        editing_lease.struct_size = sizeof(editing_lease);
-        if (status == SCPEFE_STATUS_OK)
-            status = scpefe_unlocked_container_editing_lease(unlocked, &editing_lease);
-        scpefe_revision_limits_v1 limits{};
-        limits.struct_size = sizeof(limits);
-        if (status == SCPEFE_STATUS_OK)
-            status = scpefe_revision_limits_default(&limits);
-        if (status == SCPEFE_STATUS_OK)
-            status = scpefe_snapshot_revision_decode(
-                unlocked_view.encoded_snapshot_revision,
-                unlocked_view.encoded_snapshot_revision_size, &limits, &revision);
-        scpefe_snapshot_revision_v1 view{};
-        view.struct_size = sizeof(view);
-        if (status == SCPEFE_STATUS_OK)
-            status = scpefe_decoded_snapshot_revision_view(revision, &view);
-        if (status != SCPEFE_STATUS_OK) {
-            scpefe_decoded_snapshot_revision_destroy(revision);
-            revision = nullptr;
-            scpefe_unlocked_container_destroy(unlocked);
-            unlocked = nullptr;
-            throw_status(env, status);
-            return nullptr;
-        }
-        napi_value result;
-        check(env, napi_create_object(env, &result));
-        set_number(env, result, "containerFormatVersion",
-            static_cast<const std::uint8_t *>(bytes)[7]);
-        if (slot_access.must_be_changed)
-            set_string(env, result, "content", "", 0);
-        else
-            set_string(env, result, "content", view.content, view.content_size);
-        set_string(env, result, "profileName", view.client_profile_name,
-            view.client_profile_name_size);
-        set_string(env, result, "profileEmail", view.client_profile_email,
-            view.client_profile_email_size);
-        set_string(env, result, "deviceName", view.device_name,
-            view.device_name_size);
-        set_number(env, result, "revisionTimestampMs", view.timestamp_ms);
-        set_boolean(env, result, "readOnly", true);
-        set_boolean(env, result, "canEdit",
-            slot_access.can_edit != 0 && !slot_access.must_be_changed);
-        set_boolean(env, result, "canAddPasswords",
-            slot_access.can_add_passwords != 0 && !slot_access.must_be_changed);
-        set_boolean(env, result, "canRemovePasswords",
-            slot_access.can_remove_passwords != 0 && !slot_access.must_be_changed);
-        set_boolean(env, result, "mustBeChanged", slot_access.must_be_changed != 0);
-        set_boolean(env, result, "recoverySlot", slot_access.recovery_slot != 0);
-        const std::string slot_id = hexadecimal(
-            slot_access.slot_id, slot_access.slot_id_size);
-        set_string(env, result, "slotId", slot_id.data(), slot_id.size());
-        const bool revision_matches_slot = view.slot_id_size == slot_access.slot_id_size
-            && std::equal(view.slot_id, view.slot_id + view.slot_id_size,
-                slot_access.slot_id);
-        const char *identity_name = slot_access.identity_name_size != 0
-            ? slot_access.identity_name
-            : (revision_matches_slot ? view.slot_identity_name : "");
-        const std::size_t identity_name_size = slot_access.identity_name_size != 0
-            ? slot_access.identity_name_size
-            : (revision_matches_slot ? view.slot_identity_name_size : 0);
-        const char *identity_email = slot_access.identity_email_size != 0
-            ? slot_access.identity_email
-            : (revision_matches_slot ? view.slot_identity_email : "");
-        const std::size_t identity_email_size = slot_access.identity_email_size != 0
-            ? slot_access.identity_email_size
-            : (revision_matches_slot ? view.slot_identity_email_size : 0);
-        set_string(env, result, "slotIdentityName", identity_name,
-            identity_name_size);
-        set_string(env, result, "slotIdentityEmail", identity_email,
-            identity_email_size);
-        std::size_t managed_count = 0;
-        status = scpefe_unlocked_container_managed_slot_count(
-            unlocked, &managed_count);
-        if (status != SCPEFE_STATUS_OK) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        napi_value managed_slots;
-        check(env, napi_create_array_with_length(env, managed_count, &managed_slots));
-        for (std::size_t index = 0; index < managed_count; ++index) {
-            scpefe_managed_slot_v1 managed{};
-            managed.struct_size = sizeof(managed);
-            status = scpefe_unlocked_container_managed_slot(
-                unlocked, index, &managed);
-            if (status != SCPEFE_STATUS_OK) {
-                throw_status(env, status);
-                return nullptr;
-            }
-            napi_value item;
-            check(env, napi_create_object(env, &item));
-            const std::string managed_id = hexadecimal(
-                managed.slot_id, managed.slot_id_size);
-            set_string(env, item, "slotId", managed_id.data(), managed_id.size());
-            set_boolean(env, item, "canEdit", managed.can_edit != 0);
-            set_boolean(env, item, "canAddPasswords", managed.can_add_passwords != 0);
-            set_boolean(env, item, "canRemovePasswords", managed.can_remove_passwords != 0);
-            set_boolean(env, item, "mustBeChanged", managed.must_be_changed != 0);
-            set_boolean(env, item, "slotIdKnown", managed.slot_id_known != 0);
-            set_boolean(env, item, "permissionsKnown", managed.permissions_known != 0);
-            set_boolean(env, item, "identityKnown", managed.identity_known != 0);
-            set_boolean(env, item, "mustBeChangedKnown",
-                managed.must_be_changed_known != 0);
-            set_string(env, item, "identityName", managed.identity_name,
-                managed.identity_name_size);
-            set_string(env, item, "identityEmail", managed.identity_email,
-                managed.identity_email_size);
-            check(env, napi_set_element(env, managed_slots, index, item));
-        }
-        check(env, napi_set_named_property(env, result, "managedSlots", managed_slots));
-        napi_value lease;
-        check(env, napi_create_object(env, &lease));
-        set_boolean(env, lease, "active", editing_lease.active != 0);
-        const std::string lease_session = hexadecimal(
-            editing_lease.session_id, editing_lease.session_id_size);
-        set_string(env, lease, "sessionId", lease_session.data(), lease_session.size());
-        set_number(env, lease, "heartbeatCounter", editing_lease.heartbeat_counter);
-        set_number(env, lease, "holderUtcMs", editing_lease.holder_utc_ms);
-        set_number(env, lease, "durationMs", editing_lease.duration_ms);
-        set_string(env, lease, "holderName", editing_lease.holder_name,
-            editing_lease.holder_name_size);
-        set_string(env, lease, "holderEmail", editing_lease.holder_email,
-            editing_lease.holder_email_size);
-        set_string(env, lease, "deviceName", editing_lease.device_name,
-            editing_lease.device_name_size);
-        check(env, napi_set_named_property(env, result, "lease", lease));
-        const std::string document_id = hexadecimal(
-            unlocked_view.document_id, unlocked_view.document_id_size);
-        set_string(env, result, "documentId", document_id.data(), document_id.size());
-        std::array<std::uint8_t, 32> revision_id{};
-        if (crypto_generichash(revision_id.data(), revision_id.size(),
-            unlocked_view.encoded_snapshot_revision,
-            unlocked_view.encoded_snapshot_revision_size, nullptr, 0) != 0) {
-            throw std::runtime_error("Unable to identify the base revision");
-        }
-        const std::string base_revision = hexadecimal(
-            revision_id.data(), revision_id.size());
-        set_string(env, result, "baseRevision", base_revision.data(),
-            base_revision.size());
-        set_revision_graph(env, result, revision_id.data(), view);
-        set_boolean(env, result, "manuallySealed", view.manually_sealed != 0);
-        set_string(env, result, "historyEventType", view.event_type,
-            view.event_type_size);
-        set_string(env, result, "historyEventDetail", view.event_detail,
-            view.event_detail_size);
-        std::array<std::uint8_t, SCPEFE_WORK_JOURNAL_KEY_SIZE> journal_key{};
-        std::size_t journal_key_size = 0;
-        status = scpefe_unlocked_container_work_journal_key(
-            unlocked, journal_key.data(), journal_key.size(), &journal_key_size);
-        if (status != SCPEFE_STATUS_OK) {
-            sodium_memzero(journal_key.data(), journal_key.size());
-            scpefe_decoded_snapshot_revision_destroy(revision);
-            revision = nullptr;
-            scpefe_unlocked_container_destroy(unlocked);
-            unlocked = nullptr;
-            throw_status(env, status);
-            return nullptr;
-        }
-        try {
-            set_buffer(env, result, "journalKey", journal_key.data(), journal_key_size);
-        } catch (...) {
-            sodium_memzero(journal_key.data(), journal_key.size());
-            throw;
-        }
-        sodium_memzero(journal_key.data(), journal_key.size());
-        scpefe_decoded_snapshot_revision_destroy(revision);
-        scpefe_unlocked_container_destroy(unlocked);
-        return result;
+        return open_revised_document(env, bytes, size, password);
     } catch (const std::exception &error) {
-        scpefe_decoded_snapshot_revision_destroy(revision);
-        scpefe_unlocked_container_destroy(unlocked);
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
     }
 }
 
@@ -1824,473 +1651,16 @@ std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> parse_slot_id(
     return result;
 }
 
-napi_value update_lease(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3;
-        napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        bool is_buffer = false;
-        if (argc != 3) throw std::runtime_error("updateLease expects a Buffer, password, and lease");
-        check(env, napi_is_buffer(env, args[0], &is_buffer));
-        if (!is_buffer) throw std::runtime_error("updateLease expects a Buffer");
-        void *container = nullptr;
-        size_t container_size = 0;
-        check(env, napi_get_buffer_info(env, args[0], &container, &container_size));
-        const SecretBytes password{env, args[1]};
-        const bool active = boolean_value(env, property(env, args[2], "active"));
-        const auto session = parse_session_id(string_value(
-            env, property(env, args[2], "sessionId")));
-        const std::string name = string_value(env, property(env, args[2], "holderName"));
-        const std::string email = string_value(env, property(env, args[2], "holderEmail"));
-        const std::string device = string_value(env, property(env, args[2], "deviceName"));
-        const scpefe_editing_lease_v1 lease{
-            sizeof(scpefe_editing_lease_v1), active, session.data(), session.size(),
-            number_value(env, property(env, args[2], "heartbeatCounter")),
-            number_value(env, property(env, args[2], "holderUtcMs")),
-            number_value(env, property(env, args[2], "durationMs")),
-            name.data(), name.size(), email.data(), email.size(),
-            device.data(), device.size(),
-        };
-        const scpefe_editing_lease_update_v1 update{
-            sizeof(scpefe_editing_lease_update_v1),
-            static_cast<const std::uint8_t *>(container), container_size,
-            password.data(), password.size(),
-            lease,
-        };
-        std::size_t size = 0;
-        scpefe_status status = scpefe_editing_lease_update(&update, nullptr, 0, &size);
-        if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        void *bytes = nullptr;
-        napi_value result;
-        check(env, napi_create_buffer(env, size, &bytes, &result));
-        status = scpefe_editing_lease_update(&update,
-            static_cast<std::uint8_t *>(bytes), size, &size);
-        if (status != SCPEFE_STATUS_OK) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        return result;
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value compact_document(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3;
-        napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3)
-            throw std::runtime_error(
-                "compactDocument expects a Buffer, password, and held lease");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes password{env, args[1]};
-        const auto session = parse_session_id(string_value(
-            env, property(env, args[2], "sessionId")));
-        const scpefe_compaction_v1 request{
-            sizeof(request), container, container_size,
-            password.data(), password.size(), session.data(), session.size(),
-            number_value(env, property(env, args[2], "heartbeatCounter")),
-        };
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_compact_document(&request, output, capacity, size);
-        });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value migrate_document(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3;
-        napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3)
-            throw std::runtime_error("migrateDocument expects a Buffer, password, and input");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes password{env, args[1]};
-        const std::string name = string_value(env, property(env, args[2], "name"));
-        const std::string email = string_value(env, property(env, args[2], "email"));
-        const std::string device = string_value(env, property(env, args[2], "deviceName"));
-        const auto session = parse_session_id(string_value(
-            env, property(env, args[2], "sessionId")));
-        scpefe_editing_lease_v1 lease{sizeof(lease), 1, session.data(), session.size(),
-            number_value(env, property(env, args[2], "heartbeatCounter")),
-            number_value(env, property(env, args[2], "holderUtcMs")),
-            number_value(env, property(env, args[2], "durationMs")),
-            name.data(), name.size(), email.data(), email.size(),
-            device.data(), device.size()};
-        const scpefe_migration_v1 request{sizeof(request), container, container_size,
-            password.data(), password.size(), name.data(), name.size(),
-            email.data(), email.size(), device.data(), device.size(),
-            number_value(env, property(env, args[2], "timestampMs")), lease};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_migrate_document(&request, output, capacity, size);
-        });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value change_password(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3;
-        napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3)
-            throw std::runtime_error(
-                "changePassword expects a Buffer, current password, and new password");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes current{env, args[1]};
-        const SecretBytes replacement{env, args[2]};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_password_container_change_password(
-                container, container_size, current.data(), current.size(),
-                replacement.data(), replacement.size(), output, capacity, size);
-        });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value save_document(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3;
-        napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3)
-            throw std::runtime_error("saveDocument expects a Buffer, password, and input");
-        bool is_buffer = false;
-        check(env, napi_is_buffer(env, args[0], &is_buffer));
-        if (!is_buffer)
-            throw std::runtime_error("saveDocument expects a Buffer");
-        void *container = nullptr;
-        size_t container_size = 0;
-        check(env, napi_get_buffer_info(env, args[0], &container, &container_size));
-        const SecretBytes password{env, args[1]};
-        const std::string name = string_value(env, property(env, args[2], "name"));
-        const std::string email = string_value(env, property(env, args[2], "email"));
-        const std::string device = string_value(env, property(env, args[2], "deviceName"));
-        const std::string content = string_value(env, property(env, args[2], "content"));
-        double timestamp = 0;
-        check(env, napi_get_value_double(
-            env, property(env, args[2], "timestampMs"), &timestamp));
-        const scpefe_manual_save_v1 save{
-            sizeof(scpefe_manual_save_v1),
-            static_cast<const std::uint8_t *>(container), container_size,
-            password.data(), password.size(),
-            name.data(), name.size(), email.data(), email.size(),
-            device.data(), device.size(), content.data(), content.size(),
-            static_cast<std::uint64_t>(timestamp),
-        };
-        std::size_t size = 0;
-        scpefe_status status = scpefe_manual_save(&save, nullptr, 0, &size);
-        if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        void *bytes = nullptr;
-        napi_value buffer;
-        check(env, napi_create_buffer(env, size, &bytes, &buffer));
-        status = scpefe_manual_save(
-            &save, static_cast<std::uint8_t *>(bytes), size, &size);
-        if (status != SCPEFE_STATUS_OK) {
-            throw_status(env, status);
-            return nullptr;
-        }
-        return buffer;
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value regular_save_document(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3;
-        napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3)
-            throw std::runtime_error(
-                "regularSaveDocument expects a Buffer, password, and input");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes password{env, args[1]};
-        const std::string name = string_value(env, property(env, args[2], "name"));
-        const std::string email = string_value(env, property(env, args[2], "email"));
-        const std::string device = string_value(env, property(env, args[2], "deviceName"));
-        const std::string content = string_value(env, property(env, args[2], "content"));
-        double timestamp = 0;
-        check(env, napi_get_value_double(
-            env, property(env, args[2], "timestampMs"), &timestamp));
-        const scpefe_regular_save_v1 save{
-            sizeof(scpefe_regular_save_v1), container, container_size,
-            password.data(), password.size(), name.data(), name.size(),
-            email.data(), email.size(), device.data(), device.size(),
-            content.data(), content.size(), static_cast<std::uint64_t>(timestamp),
-        };
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_regular_save(&save, output, capacity, size);
-        });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value discard_provisional(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 2;
-        napi_value args[2];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 2)
-            throw std::runtime_error("discardProvisional expects a Buffer and password");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes password{env, args[1]};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_provisional_save_discard(container, container_size,
-                password.data(), password.size(), output, capacity, size);
-        });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value merge_document(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 4;
-        napi_value args[4];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 4)
-            throw std::runtime_error(
-                "mergeDocument expects current and local Buffers, password, and input");
-        const auto [current, current_size] = buffer_value(env, args[0]);
-        const auto [local, local_size] = buffer_value(env, args[1]);
-        const SecretBytes password{env, args[2]};
-        bool has_target_password = false;
-        check(env, napi_has_named_property(env, args[3], "targetPassword",
-            &has_target_password));
-        SecretBytes target_password;
-        if (has_target_password)
-            target_password.assign(env, property(env, args[3], "targetPassword"));
-        const std::string name = string_value(env, property(env, args[3], "name"));
-        const std::string email = string_value(env, property(env, args[3], "email"));
-        const std::string device = string_value(env, property(env, args[3], "deviceName"));
-        const std::string content = string_value(env, property(env, args[3], "content"));
-        double timestamp = 0;
-        check(env, napi_get_value_double(
-            env, property(env, args[3], "timestampMs"), &timestamp));
-        if (revised_v3_bytes(current, current_size)
-            && revised_v3_bytes(local, local_size)) {
-            const auto *current_password = has_target_password
-                ? target_password.data() : password.data();
-            const auto current_password_size = has_target_password
-                ? target_password.size() : password.size();
-            const scpefe_revised_merge_save_v1 revised{
-                sizeof(revised), SCPEFE_ABI_VERSION,
-                current, current_size, local, local_size,
-                current_password, current_password_size,
-                password.data(), password.size(),
-                name.data(), name.size(), email.data(), email.size(),
-                device.data(), device.size(), content.data(), content.size(),
-                static_cast<std::uint64_t>(timestamp),
-            };
-            return output_buffer(env, [&](std::uint8_t *output,
-                std::size_t capacity, std::size_t *size) {
-                return scpefe_revised_merge_save(&revised, output, capacity, size);
-            });
-        }
-        const scpefe_merge_save_v1 save{
-            sizeof(scpefe_merge_save_v1), current, current_size, local, local_size,
-            password.data(), password.size(), name.data(), name.size(),
-            email.data(), email.size(), device.data(), device.size(),
-            content.data(), content.size(), static_cast<std::uint64_t>(timestamp),
-        };
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_merge_save(&save, output, capacity, size);
-        });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what());
-        return nullptr;
-    }
-}
-
-napi_value add_invitation(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3; napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3) throw std::runtime_error(
-            "addInvitation expects a Buffer, creator password, and request");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes creator{env, args[1]};
-        const SecretBytes temporary{env, property(env, args[2], "temporaryPassword")};
-        const auto label = string_value(env, property(env, args[2], "temporaryLabel"));
-        const scpefe_invitation_create_v1 request{
-            sizeof(request), container, container_size,
-            creator.data(), creator.size(), temporary.data(), temporary.size(),
-            boolean_value(env, property(env, args[2], "canEdit")),
-            boolean_value(env, property(env, args[2], "canAddPasswords")),
-            boolean_value(env, property(env, args[2], "canRemovePasswords")),
-            label.data(), label.size()};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) { return scpefe_password_container_add_invitation(
-                &request, output, capacity, size); });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
-    }
-}
-
-napi_value claim_invitation(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3; napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3) throw std::runtime_error(
-            "claimInvitation expects a Buffer, temporary password, and request");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes temporary{env, args[1]};
-        const SecretBytes replacement{env, property(env, args[2], "newPassword")};
-        const auto name = string_value(env, property(env, args[2], "name"));
-        const auto email = string_value(env, property(env, args[2], "email"));
-        const scpefe_invitation_claim_v1 request{
-            sizeof(request), container, container_size,
-            temporary.data(), temporary.size(), replacement.data(), replacement.size(),
-            name.data(), name.size(), email.data(), email.size()};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) { return scpefe_password_container_claim_invitation(
-                &request, output, capacity, size); });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
-    }
-}
-
-napi_value update_slot_permissions(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3; napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3) throw std::runtime_error(
-            "updateSlotPermissions expects a Buffer, administrator password, and request");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes administrator{env, args[1]};
-        const auto slot_id = parse_slot_id(string_value(
-            env, property(env, args[2], "slotId")));
-        const scpefe_slot_permissions_update_v1 request{
-            sizeof(request), container, container_size,
-            administrator.data(), administrator.size(), slot_id.data(), slot_id.size(),
-            boolean_value(env, property(env, args[2], "canEdit")),
-            boolean_value(env, property(env, args[2], "canAddPasswords")),
-            boolean_value(env, property(env, args[2], "canRemovePasswords"))};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) { return scpefe_password_container_update_slot_permissions(
-                &request, output, capacity, size); });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
-    }
-}
-
-napi_value remove_slot(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3; napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3) throw std::runtime_error(
-            "removeSlot expects a Buffer, administrator password, and slot ID");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes administrator{env, args[1]};
-        const auto slot_id = parse_slot_id(string_value(env, args[2]));
-        const scpefe_slot_remove_v1 request{sizeof(request), container, container_size,
-            administrator.data(), administrator.size(), slot_id.data(), slot_id.size()};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) { return scpefe_password_container_remove_slot(
-                &request, output, capacity, size); });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
-    }
-}
-
-napi_value reconcile_identity(napi_env env, napi_callback_info info)
-{
-    try {
-        size_t argc = 3; napi_value args[3];
-        check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-        if (argc != 3) throw std::runtime_error(
-            "reconcileIdentity expects a Buffer, password, and profile");
-        const auto [container, container_size] = buffer_value(env, args[0]);
-        const SecretBytes password{env, args[1]};
-        const auto name = string_value(env, property(env, args[2], "name"));
-        const auto email = string_value(env, property(env, args[2], "email"));
-        const scpefe_slot_identity_reconcile_v1 request{
-            sizeof(request), container, container_size, password.data(), password.size(),
-            name.data(), name.size(), email.data(), email.size()};
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) { return scpefe_password_container_reconcile_identity(
-                &request, output, capacity, size); });
-    } catch (const std::exception &error) {
-        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
-    }
-}
-
 napi_value initialize(napi_env env, napi_value exports)
 {
     napi_property_descriptor methods[] = {
         {"createContainerContext", nullptr, create_container_context, nullptr,
             nullptr, nullptr, napi_default, nullptr},
-        {"createDocument", nullptr, create_document, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
         {"passwordMeetsPolicy", nullptr, password_meets_policy, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"assessPasswordPolicy", nullptr, assess_password_policy, nullptr, nullptr, nullptr,
             napi_default, nullptr},
-        {"openDocument", nullptr, open_document, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"saveDocument", nullptr, save_document, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"regularSaveDocument", nullptr, regular_save_document, nullptr, nullptr,
-            nullptr, napi_default, nullptr},
-        {"discardProvisional", nullptr, discard_provisional, nullptr, nullptr,
-            nullptr, napi_default, nullptr},
-        {"mergeDocument", nullptr, merge_document, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"updateLease", nullptr, update_lease, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"compactDocument", nullptr, compact_document, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"migrateDocument", nullptr, migrate_document, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"changePassword", nullptr, change_password, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"addInvitation", nullptr, add_invitation, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"claimInvitation", nullptr, claim_invitation, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"updateSlotPermissions", nullptr, update_slot_permissions, nullptr, nullptr,
-            nullptr, napi_default, nullptr},
-        {"removeSlot", nullptr, remove_slot, nullptr, nullptr, nullptr,
-            napi_default, nullptr},
-        {"reconcileIdentity", nullptr, reconcile_identity, nullptr, nullptr, nullptr,
+        {"inspectDocument", nullptr, inspect_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
     };
     check(env, napi_define_properties(env, exports, std::size(methods), methods));

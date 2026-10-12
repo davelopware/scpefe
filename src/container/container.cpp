@@ -1,11 +1,8 @@
 #include "container/container.hpp"
 #include "container/container_error.hpp"
 #include "container/revised_v3_container.hpp"
-#include "container/recoverable_password_container.hpp"
-#include "document/manual_save.hpp"
-#include "document/provisional_save.hpp"
+#include "document/merge_save.hpp"
 #include "format/revision_limits.hpp"
-#include "format/snapshot_revision.hpp"
 #include "format/text_validation.hpp"
 #include "security/password_strength.hpp"
 
@@ -15,30 +12,6 @@
 
 namespace scpefe::container {
 namespace {
-
-extern "C" int crypto_generichash(unsigned char *, std::size_t,
-    const unsigned char *, unsigned long long, const unsigned char *, std::size_t);
-
-std::array<std::uint8_t, 32> legacy_head(const UnlockedContainerData &data)
-{
-    if (data.encoded_snapshot_revision.empty())
-        throw ContainerFailure{ContainerError::unsupported_format};
-    std::array<std::uint8_t, 32> head{};
-    if (crypto_generichash(head.data(), head.size(),
-        data.encoded_snapshot_revision.data(), data.encoded_snapshot_revision.size(),
-        nullptr, 0) != 0)
-        throw ContainerFailure{ContainerError::crypto_error};
-    return head;
-}
-
-std::string legacy_content(const UnlockedContainerData &data)
-{
-    if (data.encoded_snapshot_revision.empty()) return {};
-    auto revision = format::SnapshotRevision::decode(
-        data.encoded_snapshot_revision.data(), data.encoded_snapshot_revision.size(),
-        format::RevisionLimits::defaults());
-    return revision.data().content;
-}
 
 std::uint8_t permission_bits(const Permissions &permissions)
 {
@@ -96,30 +69,10 @@ void Container::open_document(const std::uint8_t *bytes, std::size_t size)
     if (bytes && size >= sizeof(obsolete_v2_magic)
         && std::memcmp(bytes, obsolete_v2_magic, sizeof(obsolete_v2_magic)) == 0)
         throw ContainerFailure{ContainerError::unsupported_format};
-    if (!persistence_.recognizes_revised_envelope(bytes, size)) {
-        open_legacy_document(bytes, size);
-        return;
-    }
     if (state_.access != Access::closed) throw StateError::invalid_transition;
     persistence_.validate_revised_envelope(bytes, size);
     std::vector<std::uint8_t> incoming(bytes, bytes + size);
     committed_bytes_.swap(incoming);
-    revised_v3_ = true;
-    try {
-        install_transition(Open{});
-    } catch (...) {
-        committed_bytes_.swap(incoming);
-        revised_v3_ = false;
-        throw;
-    }
-}
-
-void Container::open_legacy_document(const std::uint8_t *bytes, std::size_t size)
-{
-    if (state_.access != Access::closed) throw StateError::invalid_transition;
-    persistence_.validate_legacy_envelope(bytes, size);
-    std::vector<std::uint8_t> incoming(bytes, bytes + size);
-    committed_bytes_.swap(incoming);
     try {
         install_transition(Open{});
     } catch (...) {
@@ -128,7 +81,7 @@ void Container::open_legacy_document(const std::uint8_t *bytes, std::size_t size
     }
 }
 
-const UnlockedContainerData &Container::unlock_legacy_document(
+const UnlockedContainerData &Container::unlock_document(
     const std::uint8_t *password, std::size_t password_size)
 {
     if (state_.access != Access::open || state_.screen != Screen::locked
@@ -139,11 +92,8 @@ const UnlockedContainerData &Container::unlock_legacy_document(
         throw ContainerFailure{ContainerError::invalid_argument};
     const bool authenticating_target = !target_bytes_.empty();
     const auto &source = authenticating_target ? target_bytes_ : committed_bytes_;
-    auto decoded = revised_v3_
-        ? persistence_.unlock_revised_envelope(source.data(), source.size(),
-            password, password_size, format::RevisionLimits::defaults())
-        : persistence_.unlock_legacy_envelope(source.data(), source.size(),
-            password, password_size, format::RevisionLimits::defaults());
+    auto decoded = persistence_.unlock_revised_envelope(source.data(), source.size(),
+        password, password_size, format::RevisionLimits::defaults());
     if (document_id_ && decoded.document_id != *document_id_)
         throw ContainerFailure{ContainerError::malformed_container};
     if (authenticating_target && state_.target_access
@@ -162,14 +112,10 @@ const UnlockedContainerData &Container::unlock_legacy_document(
     const bool retain_local_data = unlocked_.has_value()
         && decoded.slot_id == unlocked_->slot_id;
     if (!retain_local_data) {
-        if (decoded.revision_graph) {
-            const auto content = decoded.revision_graph->reconstruct(
-                decoded.revision_graph->content_head());
-            if (!content) throw ContainerFailure{ContainerError::malformed_container};
-            content_clear_ = *content;
-        } else {
-            content_clear_ = legacy_content(decoded);
-        }
+        const auto content = decoded.revision_graph->reconstruct(
+            decoded.revision_graph->content_head());
+        if (!content) throw ContainerFailure{ContainerError::malformed_container};
+        content_clear_ = *content;
         unlocked_.emplace(std::move(decoded));
     }
     try {
@@ -193,41 +139,30 @@ TransitionResult Container::apply_target_document(
         throw StateError::invalid_transition;
     if (password == nullptr || password_size == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
-    if (revised_v3_)
-        persistence_.validate_revised_envelope(target_bytes, target_size);
-    else persistence_.validate_legacy_envelope(target_bytes, target_size);
-    auto decoded = revised_v3_
-        ? persistence_.unlock_revised_envelope(target_bytes, target_size,
-            password, password_size, format::RevisionLimits::defaults())
-        : persistence_.unlock_legacy_envelope(target_bytes, target_size,
-            password, password_size, format::RevisionLimits::defaults());
+    persistence_.validate_revised_envelope(target_bytes, target_size);
+    auto decoded = persistence_.unlock_revised_envelope(target_bytes, target_size,
+        password, password_size, format::RevisionLimits::defaults());
     if (decoded.document_id != *document_id_) {
-        if (revised_v3_)
-            throw format::MergeFailure{format::MergeProblem::unrelated_target};
-        throw ContainerFailure{ContainerError::malformed_container};
+        throw format::MergeFailure{format::MergeProblem::unrelated_target};
     }
     if (unlocked_ && decoded.work_journal_key != unlocked_->work_journal_key)
         throw format::MergeFailure{format::MergeProblem::unrelated_target};
-    if (revised_v3_ && unlocked_)
+    if (unlocked_)
         (void)unlocked_->revision_graph->assess_target(*decoded.revision_graph);
     const bool active_slot_matched = decoded.slot_id == *state_.active_slot;
     bool wrapper_changed = !active_slot_matched;
     if (active_slot_matched) {
         try {
-            const auto current = revised_v3_
-                ? persistence_.unlock_revised_envelope(committed_bytes_.data(),
-                    committed_bytes_.size(), password, password_size,
-                    format::RevisionLimits::defaults())
-                : persistence_.unlock_legacy_envelope(committed_bytes_.data(),
-                    committed_bytes_.size(), password, password_size,
-                    format::RevisionLimits::defaults());
+            const auto current = persistence_.unlock_revised_envelope(
+                committed_bytes_.data(), committed_bytes_.size(), password,
+                password_size, format::RevisionLimits::defaults());
             wrapper_changed = current.slot_id != decoded.slot_id;
         } catch (const ContainerFailure &failure) {
             if (failure.error != ContainerError::authentication_failed) throw;
             wrapper_changed = true;
         }
     }
-    if (revised_v3_ && active_slot_matched && unlocked_) {
+    if (active_slot_matched && unlocked_) {
         const auto slot_index = [&](const format::RevisionGraph &graph) {
             const auto &slots = graph.slots();
             const auto found = std::find_if(slots.begin(), slots.end(),
@@ -254,32 +189,6 @@ TransitionResult Container::apply_target_document(
         target_bytes_.swap(incoming);
         throw;
     }
-}
-
-TransitionResult Container::apply_target_legacy_document(
-    const std::uint8_t *target_bytes, std::size_t target_size,
-    const std::uint8_t *password, std::size_t password_size)
-{
-    return apply_target_document(target_bytes, target_size, password, password_size);
-}
-
-std::vector<std::uint8_t> Container::compact_legacy_document(
-    const std::uint8_t *password, std::size_t password_size,
-    const std::array<std::uint8_t, 16> &lease_session_id,
-    std::uint64_t heartbeat_counter) const
-{
-    if (state_.access != Access::open || state_.screen != Screen::unlocked
-        || state_.edit != EditMode::editing || state_.lease != Lease::held
-        || !state_.permissions.can_edit || !state_.permissions.can_add_passwords
-        || !state_.permissions.can_remove_passwords
-        || state_.attention != Attention::none
-        || state_.publication != PublicationPhase::idle
-        || committed_bytes_.empty()) throw StateError::invalid_transition;
-    if (password == nullptr || password_size == 0)
-        throw ContainerFailure{ContainerError::invalid_argument};
-    return history_.compact_legacy_document(committed_bytes_.data(),
-        committed_bytes_.size(), password, password_size,
-        lease_session_id, heartbeat_counter);
 }
 
 bool Container::can_read_clear() const
@@ -380,13 +289,9 @@ TransitionResult Container::prepare_lease_change(std::uint64_t operation_id,
     if (!password || password_size == 0 || change.session_id == SlotId{}
         || change.duration_ms == 0 || change.duration_ms > INT64_MAX)
         throw ContainerFailure{ContainerError::invalid_argument};
-    const auto authenticated = revised_v3_
-        ? persistence_.unlock_revised_envelope(committed_bytes_.data(),
-            committed_bytes_.size(), password, password_size,
-            format::RevisionLimits::defaults())
-        : persistence_.unlock_legacy_envelope(committed_bytes_.data(),
-            committed_bytes_.size(), password, password_size,
-            format::RevisionLimits::defaults());
+    const auto authenticated = persistence_.unlock_revised_envelope(
+        committed_bytes_.data(), committed_bytes_.size(), password, password_size,
+        format::RevisionLimits::defaults());
     if (authenticated.slot_id != unlocked_->slot_id)
         throw ContainerFailure{ContainerError::authentication_failed};
     const auto &prior = authenticated.editing_lease;
@@ -449,7 +354,6 @@ TransitionResult Container::prepare_lease_change(std::uint64_t operation_id,
     proposed.lease_change = true;
     proposed.lease_held_after = next.active;
     proposed.lease_session_after = change.session_id;
-    if (revised_v3_) {
         const auto &graph = *authenticated.revision_graph;
         proposed.source_head = graph.head();
         format::RevisionLease lease;
@@ -470,15 +374,6 @@ TransitionResult Container::prepare_lease_change(std::uint64_t operation_id,
             format::RevisionLimits::defaults());
         if (proposed.adopted_data.revision_graph->head() != graph.head())
             throw ContainerFailure{ContainerError::crypto_error};
-    } else {
-        proposed.source_head = legacy_head(authenticated);
-        proposed.bytes = RecoverablePasswordContainer::replace_editing_lease(
-            committed_bytes_.data(), committed_bytes_.size(), password,
-            password_size, next);
-        proposed.adopted_data = persistence_.unlock_legacy_envelope(
-            proposed.bytes.data(), proposed.bytes.size(), password, password_size,
-            format::RevisionLimits::defaults());
-    }
     if (proposed.adopted_data.document_id != unlocked_->document_id
         || proposed.adopted_data.slot_id != unlocked_->slot_id)
         throw ContainerFailure{ContainerError::authentication_failed};
@@ -514,7 +409,6 @@ TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regula
     proposed.operation_id = operation_id;
     proposed.submitted_generation = content_generation_;
     proposed.discard = discard;
-    if (revised_v3_) {
         const auto &graph = *unlocked_->revision_graph;
         const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
             [&](const auto &slot) { return slot.id == unlocked_->slot_id; });
@@ -535,31 +429,77 @@ TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regula
             if (!content) throw ContainerFailure{ContainerError::malformed_container};
             proposed.discarded_content = *content;
         }
-    } else {
-        proposed.source_head = legacy_head(*unlocked_);
-        if (discard) {
-            proposed.bytes = document::ProvisionalSave::discard(committed_bytes_.data(),
-                committed_bytes_.size(), password, password_size);
-        } else if (regular) {
-            proposed.bytes = document::ProvisionalSave::create(committed_bytes_.data(),
-                committed_bytes_.size(), password, password_size, profile_name,
-                profile_email, device_name, *content_clear_, timestamp_ms);
-        } else {
-            proposed.bytes = document::ManualSave::create(committed_bytes_.data(),
-                committed_bytes_.size(), password, password_size, profile_name,
-                profile_email, device_name, *content_clear_, timestamp_ms);
-        }
-        proposed.adopted_data = persistence_.unlock_legacy_envelope(proposed.bytes.data(),
-            proposed.bytes.size(), password, password_size,
-            format::RevisionLimits::defaults());
-        if (discard) proposed.discarded_content = legacy_content(proposed.adopted_data);
-    }
-    if (proposed.adopted_data.document_id != unlocked_->document_id
+        if (proposed.adopted_data.document_id != unlocked_->document_id
         || proposed.adopted_data.slot_id != unlocked_->slot_id)
         throw ContainerFailure{ContainerError::authentication_failed};
     candidate_.emplace(std::move(proposed));
     try {
         return install_transition(BeginPublication{operation_id, PublicationKind::save});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
+}
+
+void Container::assess_merge(const std::uint8_t *local_bytes, std::size_t local_size,
+    const std::uint8_t *target_password, std::size_t target_password_size,
+    const std::uint8_t *local_password, std::size_t local_password_size,
+    std::string_view profile_name, std::string_view profile_email,
+    std::string_view device_name, std::string_view resolved_content,
+    std::uint64_t timestamp_ms) const
+{
+    if (state_.access != Access::open
+        || state_.screen != Screen::unlocked || committed_bytes_.empty())
+        throw StateError::invalid_transition;
+    if (!local_bytes || local_size == 0 || !target_password
+        || target_password_size == 0 || !local_password || local_password_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    (void)document::MergeSave::create_revised(
+        committed_bytes_.data(), committed_bytes_.size(), local_bytes, local_size,
+        target_password, target_password_size, local_password, local_password_size,
+        profile_name, profile_email, device_name, resolved_content, timestamp_ms);
+}
+
+TransitionResult Container::prepare_merge(std::uint64_t operation_id,
+    const std::uint8_t *local_bytes, std::size_t local_size,
+    const std::uint8_t *target_password, std::size_t target_password_size,
+    const std::uint8_t *local_password, std::size_t local_password_size,
+    std::string_view profile_name, std::string_view profile_email,
+    std::string_view device_name, std::string_view resolved_content,
+    std::uint64_t timestamp_ms)
+{
+    if (transitioning_ || candidate_ || !unlocked_
+        || !unlocked_->revision_graph || state_.access != Access::open
+        || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle
+        || state_.edit != EditMode::editing || state_.lease != Lease::held
+        || !state_.permissions.can_edit || state_.attention != Attention::none
+        || state_.target_access)
+        throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (!local_bytes || local_size == 0 || !target_password
+        || target_password_size == 0 || !local_password || local_password_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    submit_content(resolved_content);
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.source_head = unlocked_->revision_graph->head();
+    proposed.submitted_generation = content_generation_;
+    proposed.bytes = document::MergeSave::create_revised(
+        committed_bytes_.data(), committed_bytes_.size(), local_bytes, local_size,
+        target_password, target_password_size, local_password, local_password_size,
+        profile_name, profile_email, device_name, resolved_content, timestamp_ms);
+    proposed.adopted_data = persistence_.unlock_revised_envelope(
+        proposed.bytes.data(), proposed.bytes.size(), target_password,
+        target_password_size, format::RevisionLimits::defaults());
+    if (proposed.adopted_data.document_id != unlocked_->document_id
+        || proposed.adopted_data.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id,
+            PublicationKind::save});
     } catch (...) {
         candidate_.reset();
         throw;
@@ -576,7 +516,7 @@ TransitionResult Container::prepare_compaction(std::uint64_t operation_id,
     std::string_view device, std::uint64_t timestamp_ms)
 {
     if (transitioning_ || candidate_ || !unlocked_ || !content_clear_
-        || !revised_v3_ || !unlocked_->revision_graph
+        || !unlocked_->revision_graph
         || state_.access != Access::open || state_.screen != Screen::unlocked
         || state_.publication != PublicationPhase::idle
         || state_.edit != EditMode::editing || state_.lease != Lease::held
@@ -648,83 +588,11 @@ TransitionResult Container::prepare_slot_change(std::uint64_t operation_id,
         throw StateError::stale_operation;
     if (!actor_password || actor_password_size == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
-    const auto authenticated = revised_v3_
-        ? persistence_.unlock_revised_envelope(committed_bytes_.data(),
-            committed_bytes_.size(), actor_password, actor_password_size,
-            format::RevisionLimits::defaults())
-        : persistence_.unlock_legacy_envelope(committed_bytes_.data(),
-            committed_bytes_.size(), actor_password, actor_password_size,
-            format::RevisionLimits::defaults());
+    const auto authenticated = persistence_.unlock_revised_envelope(
+        committed_bytes_.data(), committed_bytes_.size(), actor_password,
+        actor_password_size, format::RevisionLimits::defaults());
     if (authenticated.slot_id != unlocked_->slot_id)
         throw ContainerFailure{ContainerError::authentication_failed};
-    if (!revised_v3_) {
-        ContainerCandidate proposed;
-        proposed.operation_id = operation_id;
-        proposed.source_head = legacy_head(*unlocked_);
-        proposed.submitted_generation = content_generation_;
-        proposed.slot_change = true;
-        const auto *bytes = committed_bytes_.data();
-        const auto size = committed_bytes_.size();
-        const auto permissions = change.permissions;
-        switch (change.kind) {
-        case SlotChangeKind::change_password:
-            proposed.bytes = RecoverablePasswordContainer::change_password(bytes, size,
-                actor_password, actor_password_size, change.new_password,
-                change.new_password_size);
-            break;
-        case SlotChangeKind::add_invitation:
-            proposed.bytes = RecoverablePasswordContainer::add_invitation(bytes, size,
-                actor_password, actor_password_size, change.new_password,
-                change.new_password_size, permissions, std::string(change.name));
-            break;
-        case SlotChangeKind::claim_invitation:
-            proposed.bytes = RecoverablePasswordContainer::claim_invitation(bytes, size,
-                actor_password, actor_password_size, change.new_password,
-                change.new_password_size, std::string(change.name),
-                std::string(change.email));
-            break;
-        case SlotChangeKind::reconcile_identity:
-            proposed.bytes = RecoverablePasswordContainer::reconcile_identity(bytes, size,
-                actor_password, actor_password_size, std::string(change.name),
-                std::string(change.email));
-            if (!content_clear_) throw StateError::invalid_transition;
-            proposed.bytes = document::ManualSave::create(
-                proposed.bytes.data(), proposed.bytes.size(), actor_password,
-                actor_password_size, client_name, client_email, device,
-                *content_clear_, timestamp_ms);
-            break;
-        case SlotChangeKind::update_permissions:
-            proposed.bytes = RecoverablePasswordContainer::update_slot_permissions(
-                bytes, size, actor_password, actor_password_size,
-                change.target_id, permissions);
-            break;
-        case SlotChangeKind::remove_slot:
-            proposed.bytes = RecoverablePasswordContainer::remove_slot(bytes, size,
-                actor_password, actor_password_size, change.target_id);
-            proposed.removes_active_slot = change.target_id == unlocked_->slot_id;
-            break;
-        }
-        if (!proposed.removes_active_slot) {
-            const bool changed_password = change.kind == SlotChangeKind::change_password
-                || change.kind == SlotChangeKind::claim_invitation;
-            proposed.adopted_data = persistence_.unlock_legacy_envelope(
-                proposed.bytes.data(), proposed.bytes.size(),
-                changed_password ? change.new_password : actor_password,
-                changed_password ? change.new_password_size : actor_password_size,
-                format::RevisionLimits::defaults());
-            if (proposed.adopted_data.document_id != unlocked_->document_id
-                || proposed.adopted_data.slot_id != unlocked_->slot_id)
-                throw ContainerFailure{ContainerError::crypto_error};
-        }
-        candidate_.emplace(std::move(proposed));
-        try {
-            return install_transition(BeginPublication{operation_id,
-                PublicationKind::slot_change});
-        } catch (...) {
-            candidate_.reset();
-            throw;
-        }
-    }
     const auto &graph = *unlocked_->revision_graph;
     if (graph.records().back().provisional)
         throw StateError::invalid_transition;
@@ -794,7 +662,7 @@ TransitionResult Container::prepare_activity_attempt(std::uint64_t operation_id,
     std::string_view device, std::uint64_t timestamp_ms)
 {
     if (transitioning_ || candidate_ || pending_activity_ || !unlocked_
-        || !content_clear_ || !revised_v3_ || !unlocked_->revision_graph
+        || !content_clear_ || !unlocked_->revision_graph
         || state_.access != Access::open || state_.screen != Screen::unlocked
         || state_.publication != PublicationPhase::idle
         || state_.attention != Attention::none || state_.target_access
@@ -871,7 +739,7 @@ TransitionResult Container::restore_activity_outcome(
     const std::uint8_t *observed_target, std::size_t observed_size)
 {
     if (transitioning_ || candidate_ || pending_activity_ || !unlocked_
-        || !revised_v3_ || !unlocked_->revision_graph
+        || !unlocked_->revision_graph
         || state_.access != Access::open || state_.screen != Screen::unlocked
         || state_.publication != PublicationPhase::idle
         || state_.attention != Attention::none || state_.target_access
@@ -1054,7 +922,6 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
         committed_bytes_.clear();
         target_bytes_.clear();
         document_id_.reset();
-        revised_v3_ = false;
         local_lease_session_.reset();
     }
     const auto operation_id = state_.operation_id.value_or(before.operation_id.value_or(0));

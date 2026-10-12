@@ -10,7 +10,7 @@
 
 namespace scpefe::core {
 
-/* Computes history cutoffs and adapts current byte ABI compaction. */
+/* Computes history cutoffs for revised-v3 compaction. */
 class HistoryService {
 public:
     /* Permits deterministic history substitution in context tests. */
@@ -24,12 +24,7 @@ public:
         const format::RevisionSlot &actor, std::string_view client_name,
         std::string_view client_email, std::string_view device,
         std::uint64_t timestamp_ms) const;
-    /* Compacts one authenticated prerefactor byte ABI document candidate. */
-    virtual std::vector<std::uint8_t> compact_legacy_document(
-        const std::uint8_t *bytes, std::size_t size,
-        const std::uint8_t *password, std::size_t password_size,
-        const std::array<std::uint8_t, 16> &lease_session_id,
-        std::uint64_t heartbeat_counter) const;
+
 };
 
 } // namespace scpefe::core
