@@ -76,13 +76,18 @@ function Invoke-PackagedTest {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
         [Parameter(Mandatory = $true)][string]$Script,
-        [Parameter(Mandatory = $true)][string]$Addon
+        [Parameter(Mandatory = $true)][string]$Addon,
+        [string]$TypeScriptLoaderUrl
     )
 
     Write-Host "> $Executable $Script $Addon"
     $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $StartInfo.FileName = $Executable
-    $StartInfo.Arguments = '"{0}" "{1}"' -f $Script, $Addon
+    $StartInfo.Arguments = if ($TypeScriptLoaderUrl) {
+        '--import "{0}" "{1}" "{2}"' -f $TypeScriptLoaderUrl, $Script, $Addon
+    } else {
+        '"{0}" "{1}"' -f $Script, $Addon
+    }
     $StartInfo.UseShellExecute = $false
     $Process = [System.Diagnostics.Process]::Start($StartInfo)
     try {

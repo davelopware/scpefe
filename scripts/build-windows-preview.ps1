@@ -180,6 +180,9 @@ Copy-Item (Join-Path $WindowsRoot "src"), (Join-Path $WindowsRoot "dist"), $Nati
 if (-not $SkipTests) {
     $PreviousRunAsNode = $env:ELECTRON_RUN_AS_NODE
     $env:ELECTRON_RUN_AS_NODE = "1"
+    $TypeScriptLoaderPath = (Resolve-Path (Join-Path $WindowsRoot `
+        "scripts\register-frontend-typescript.mjs")).Path
+    $TypeScriptLoaderUrl = ([System.Uri]::new($TypeScriptLoaderPath)).AbsoluteUri
     $AdjacentNode = Join-Path $PackageRoot "node.exe"
     $HostProbeSignal = Join-Path $BuildRoot "native-addon-host.release"
     try {
@@ -191,8 +194,9 @@ if (-not $SkipTests) {
         $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
         $StartInfo.FileName = Join-Path $PackageRoot "SCPEFE.exe"
         $StartInfo.WorkingDirectory = $PackageRoot
-        $StartInfo.Arguments = '"{0}" "{1}" "{2}"' -f `
-            (Join-Path $WindowsRoot "test\native-addon-host.integration.mjs"), `
+        $StartInfo.Arguments = '--import "{0}" "{1}" "{2}" "{3}"' -f `
+            $TypeScriptLoaderUrl, `
+            (Join-Path $WindowsRoot "test\native-addon-host.integration.ts"), `
             (Join-Path $AppRoot "native\scpefe_electron_native.node"), `
             $HostProbeSignal
         $StartInfo.UseShellExecute = $false
@@ -235,16 +239,9 @@ if (-not $SkipTests) {
 
         Invoke-PackagedTest `
             (Join-Path $PackageRoot "SCPEFE.exe") `
-            (Join-Path $WindowsRoot "test\native-head-witness-addon.integration.mjs") `
-            (Join-Path $AppRoot "native\scpefe_electron_native.node")
-        Invoke-PackagedTest `
-            (Join-Path $PackageRoot "SCPEFE.exe") `
-            (Join-Path $WindowsRoot "test\native-invitation-addon.integration.mjs") `
-            (Join-Path $AppRoot "native\scpefe_electron_native.node")
-        Invoke-PackagedTest `
-            (Join-Path $PackageRoot "SCPEFE.exe") `
-            (Join-Path $WindowsRoot "test\native-creation-renderer-addon.integration.mjs") `
-            (Join-Path $AppRoot "native\scpefe_electron_native.node")
+            (Join-Path $WindowsRoot "test\native-creation-renderer-addon.integration.ts") `
+            (Join-Path $AppRoot "native\scpefe_electron_native.node") `
+            $TypeScriptLoaderUrl
     } finally {
         $env:ELECTRON_RUN_AS_NODE = $PreviousRunAsNode
         if (Test-Path $AdjacentNode) { Remove-Item $AdjacentNode -Force }

@@ -2,6 +2,7 @@ import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WINDOWS_ROOT = path.resolve(SCRIPT_DIRECTORY, "..");
@@ -204,7 +205,7 @@ export async function verifyProductionBundle(windowsRoot) {
 export async function discoverDesktopTests(windowsRoot) {
   const testRoot = path.join(windowsRoot, "test");
   return (await readdir(testRoot, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".test.mjs"))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".desktop.ts"))
     .map((entry) => path.join(testRoot, entry.name))
     .sort();
 }
@@ -229,7 +230,9 @@ export async function runDesktopTestGate({
   }
   await execute(
     nodeCommand,
-    ["--test", "--test-concurrency=1", ...testFiles],
+    ["--import", pathToFileURL(path.join(DEFAULT_WINDOWS_ROOT,
+      "scripts/register-frontend-typescript.mjs")).href,
+    "--test", "--test-concurrency=1", ...testFiles],
     windowsRoot,
   );
 }
