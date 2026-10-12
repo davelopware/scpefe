@@ -1,7 +1,11 @@
 #include "container/container.hpp"
 #include "container/container_error.hpp"
 #include "document/new_document.hpp"
+#include "document/manual_save.hpp"
+#include "document/provisional_save.hpp"
 #include "format/revision_limits.hpp"
+#include "format/snapshot_revision.hpp"
+#include "format/text_validation.hpp"
 #include "security/password_strength.hpp"
 
 #include <algorithm>
@@ -10,6 +14,30 @@
 
 namespace scpefe::container {
 namespace {
+
+extern "C" int crypto_generichash(unsigned char *, std::size_t,
+    const unsigned char *, unsigned long long, const unsigned char *, std::size_t);
+
+std::array<std::uint8_t, 32> legacy_head(const UnlockedContainerData &data)
+{
+    if (data.encoded_snapshot_revision.empty())
+        throw ContainerFailure{ContainerError::unsupported_format};
+    std::array<std::uint8_t, 32> head{};
+    if (crypto_generichash(head.data(), head.size(),
+        data.encoded_snapshot_revision.data(), data.encoded_snapshot_revision.size(),
+        nullptr, 0) != 0)
+        throw ContainerFailure{ContainerError::crypto_error};
+    return head;
+}
+
+std::string legacy_content(const UnlockedContainerData &data)
+{
+    if (data.encoded_snapshot_revision.empty()) return {};
+    auto revision = format::SnapshotRevision::decode(
+        data.encoded_snapshot_revision.data(), data.encoded_snapshot_revision.size(),
+        format::RevisionLimits::defaults());
+    return revision.data().content;
+}
 
 std::uint8_t permission_bits(const Permissions &permissions)
 {
@@ -113,14 +141,25 @@ const UnlockedContainerData &Container::unlock_legacy_document(
         (decoded.permissions & 2u) != 0, (decoded.permissions & 4u) != 0};
     const Unlock request{decoded.slot_id, rights, !decoded.must_be_changed,
         authenticating_target};
-    // Target authentication changes effective access, not the local committed
-    // document or its retained clear projection.
-    const bool retain_local_data = authenticating_target && unlocked_.has_value();
-    if (!retain_local_data) unlocked_.emplace(std::move(decoded));
+    // Reauthentication of the same slot restores access without replacing
+    // submitted clear text with the older confirmed image.
+    const bool retain_local_data = unlocked_.has_value()
+        && decoded.slot_id == unlocked_->slot_id;
+    if (!retain_local_data) {
+        if (decoded.revision_graph) {
+            const auto content = decoded.revision_graph->reconstruct(
+                decoded.revision_graph->content_head());
+            if (!content) throw ContainerFailure{ContainerError::malformed_container};
+            content_clear_ = *content;
+        } else {
+            content_clear_ = legacy_content(decoded);
+        }
+        unlocked_.emplace(std::move(decoded));
+    }
     try {
         install_transition(request);
     } catch (...) {
-        if (!retain_local_data) unlocked_.reset();
+        if (!retain_local_data) { unlocked_.reset(); content_clear_.reset(); }
         throw;
     }
     document_id_ = unlocked_->document_id;
@@ -198,6 +237,119 @@ const UnlockedContainerData *Container::read_unlocked() const
     return can_read_clear() && unlocked_ ? &*unlocked_ : nullptr;
 }
 
+const std::string *Container::read_content_clear() const
+{
+    return can_read_clear() && content_clear_ ? &*content_clear_ : nullptr;
+}
+
+void Container::submit_content(std::string_view content)
+{
+    if (transitioning_ || state_.access != Access::open
+        || state_.screen != Screen::unlocked || state_.edit != EditMode::editing
+        || !state_.permissions.can_edit || state_.attention != Attention::none)
+        throw StateError::invalid_transition;
+    if (content.size() > format::RevisionLimits::defaults().max_text_bytes())
+        throw ContainerFailure{ContainerError::limit_exceeded};
+    if (!format::valid_canonical_document_text(content.data(), content.size()))
+        throw ContainerFailure{ContainerError::invalid_argument};
+    content_clear_ = std::string(content);
+    ++content_generation_;
+}
+
+TransitionResult Container::confirm_edit_lease()
+{
+    return install_transition(AcquireEdit{Lease::held});
+}
+
+TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regular,
+    bool discard, const std::uint8_t *password, std::size_t password_size,
+    std::string_view profile_name, std::string_view profile_email,
+    std::string_view device_name, std::uint64_t timestamp_ms)
+{
+    if (transitioning_ || candidate_ || !unlocked_ || !content_clear_
+        || state_.access != Access::open || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle
+        || state_.edit != EditMode::editing || state_.lease != Lease::held
+        || !state_.permissions.can_edit || state_.attention != Attention::none
+        || state_.target_access)
+        throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (unlocked_->must_be_changed)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (!password || password_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.submitted_generation = content_generation_;
+    proposed.discard = discard;
+    if (revised_v3_) {
+        const auto &graph = *unlocked_->revision_graph;
+        const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
+            [&](const auto &slot) { return slot.id == unlocked_->slot_id; });
+        if (actor == graph.slots().end() || actor->must_be_changed)
+            throw ContainerFailure{ContainerError::invalid_argument};
+        proposed.source_head = graph.head();
+        auto encoded = graph.save_content(*content_clear_, profile_name,
+            profile_email, device_name, *actor, timestamp_ms, regular, discard);
+        proposed.bytes = persistence_.replace_revised_graph(committed_bytes_.data(),
+            committed_bytes_.size(), password, password_size,
+            encoded.data(), encoded.size());
+        proposed.adopted_data = persistence_.unlock_revised_envelope(
+            proposed.bytes.data(), proposed.bytes.size(), password, password_size,
+            format::RevisionLimits::defaults());
+        if (discard) {
+            const auto content = proposed.adopted_data.revision_graph->reconstruct(
+                proposed.adopted_data.revision_graph->content_head());
+            if (!content) throw ContainerFailure{ContainerError::malformed_container};
+            proposed.discarded_content = *content;
+        }
+    } else {
+        proposed.source_head = legacy_head(*unlocked_);
+        if (discard) {
+            proposed.bytes = document::ProvisionalSave::discard(committed_bytes_.data(),
+                committed_bytes_.size(), password, password_size);
+        } else if (regular) {
+            proposed.bytes = document::ProvisionalSave::create(committed_bytes_.data(),
+                committed_bytes_.size(), password, password_size, profile_name,
+                profile_email, device_name, *content_clear_, timestamp_ms);
+        } else {
+            proposed.bytes = document::ManualSave::create(committed_bytes_.data(),
+                committed_bytes_.size(), password, password_size, profile_name,
+                profile_email, device_name, *content_clear_, timestamp_ms);
+        }
+        proposed.adopted_data = persistence_.unlock_legacy_envelope(proposed.bytes.data(),
+            proposed.bytes.size(), password, password_size,
+            format::RevisionLimits::defaults());
+        if (discard) proposed.discarded_content = legacy_content(proposed.adopted_data);
+    }
+    if (proposed.adopted_data.document_id != unlocked_->document_id
+        || proposed.adopted_data.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id, PublicationKind::save});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
+}
+
+TransitionResult Container::acknowledge_save(std::uint64_t operation_id,
+    PublicationOutcome outcome)
+{
+    if (!candidate_ || candidate_->operation_id != operation_id)
+        throw StateError::stale_operation;
+    return install_transition(AcknowledgePublication{operation_id, outcome});
+}
+
+TransitionResult Container::resolve_save(std::uint64_t operation_id, bool published)
+{
+    if (!candidate_ || candidate_->operation_id != operation_id)
+        throw StateError::stale_operation;
+    return install_transition(ResolveAmbiguity{operation_id, published});
+}
+
 TransitionResult Container::transition(const StateTransition &attempt)
 {
     if (!std::holds_alternative<Lock>(attempt)
@@ -216,11 +368,28 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
     const auto before = state_;
     transitioning_ = true;
     state_ = result.state;
+    const auto *ack = std::get_if<AcknowledgePublication>(&attempt);
+    const auto *resolution = std::get_if<ResolveAmbiguity>(&attempt);
+    const bool verified = (ack && ack->outcome == PublicationOutcome::verified)
+        || (resolution && resolution->published);
+    const bool rejected = (ack && ack->outcome == PublicationOutcome::definite_failure)
+        || (resolution && !resolution->published);
+    if (candidate_ && verified) {
+        committed_bytes_.swap(candidate_->bytes);
+        unlocked_ = std::move(candidate_->adopted_data);
+        if (candidate_->discard && content_generation_ == candidate_->submitted_generation)
+            content_clear_ = std::move(candidate_->discarded_content);
+        candidate_.reset();
+    } else if (candidate_ && rejected) {
+        candidate_.reset();
+    }
     if (unlocked_ && (std::holds_alternative<Unlock>(attempt)
         || std::holds_alternative<ApplyTargetPermissions>(attempt)))
         unlocked_->permissions = permission_bits(state_.permissions);
     if (std::holds_alternative<Close>(attempt)) {
         unlocked_.reset();
+        content_clear_.reset();
+        candidate_.reset();
         committed_bytes_.clear();
         target_bytes_.clear();
         document_id_.reset();

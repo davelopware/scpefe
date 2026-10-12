@@ -11,9 +11,21 @@
 #include <cstdint>
 #include <vector>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace scpefe::container {
+
+/* Owns one exact serialized proposal until its publication is resolved. */
+struct ContainerCandidate {
+    std::uint64_t operation_id{};
+    std::array<std::uint8_t, 32> source_head{};
+    std::vector<std::uint8_t> bytes;
+    UnlockedContainerData adopted_data;
+    std::uint64_t submitted_generation{};
+    bool discard{};
+    std::string discarded_content;
+};
 
 /* Owns one container's installed state and observer subscriptions. */
 class Container {
@@ -50,6 +62,23 @@ public:
     bool can_read_clear() const;
     /* Borrows authenticated values only while clear reads are permitted. */
     const UnlockedContainerData *read_unlocked() const;
+    /* Returns submitted clear text, which may be newer than the confirmed image. */
+    const std::string *read_content_clear() const;
+    /* Submits canonical text without changing the confirmed image or head. */
+    void submit_content(std::string_view content);
+    /* Accepts the host's confirmed editing lease before a save publication. */
+    TransitionResult confirm_edit_lease();
+    /* Serializes one manual, regular, or discard proposal exactly once. */
+    TransitionResult prepare_save(std::uint64_t operation_id, bool regular,
+        bool discard, const std::uint8_t *password, std::size_t password_size,
+        std::string_view profile_name, std::string_view profile_email,
+        std::string_view device_name, std::uint64_t timestamp_ms);
+    /* Returns the unresolved proposal for immediate caller copies. */
+    const ContainerCandidate *candidate() const { return candidate_ ? &*candidate_ : nullptr; }
+    /* Applies a host result for the matching proposal; only verified success adopts it. */
+    TransitionResult acknowledge_save(std::uint64_t operation_id, PublicationOutcome outcome);
+    /* Resolves an ambiguous host result against the exact retained proposal. */
+    TransitionResult resolve_save(std::uint64_t operation_id, bool published);
     /* Borrows the encrypted committed image for an immediate caller copy. */
     const std::vector<std::uint8_t> &committed_bytes() const { return committed_bytes_; }
     /* Installs Lock, Close, ReleaseEdit, or RaiseAttention only. */
@@ -73,6 +102,9 @@ private:
     std::vector<std::uint8_t> target_bytes_;
     std::optional<std::array<std::uint8_t, 16>> document_id_;
     std::optional<UnlockedContainerData> unlocked_;
+    std::optional<std::string> content_clear_;
+    std::uint64_t content_generation_{};
+    std::optional<ContainerCandidate> candidate_;
     ContainerState state_{};
     std::vector<ContainerStateObserver *> observers_;
     bool transitioning_{};

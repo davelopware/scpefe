@@ -60,6 +60,15 @@ container::UnlockedContainerData PersistenceService::unlock_revised_envelope(
         bytes, size, password, password_size, limits);
 }
 
+std::vector<std::uint8_t> PersistenceService::replace_revised_graph(
+    const std::uint8_t *bytes, std::size_t size,
+    const std::uint8_t *password, std::size_t password_size,
+    const std::uint8_t *graph, std::size_t graph_size) const
+{
+    return container::RevisedV3Container::replace_graph(bytes, size,
+        password, password_size, graph, graph_size);
+}
+
 void PersistenceService::validate_legacy_envelope(
     const std::uint8_t *bytes, std::size_t size) const
 {

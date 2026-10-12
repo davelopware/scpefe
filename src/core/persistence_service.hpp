@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 #include "container/unlocked_container_data.hpp"
 #include "format/revision_limits.hpp"
 
@@ -26,6 +27,11 @@ public:
         const std::uint8_t *bytes, std::size_t size,
         const std::uint8_t *password, std::size_t password_size,
         const format::RevisionLimits &limits) const;
+    /* Serializes one revised-v3 payload exactly once with a fresh payload nonce. */
+    virtual std::vector<std::uint8_t> replace_revised_graph(
+        const std::uint8_t *bytes, std::size_t size,
+        const std::uint8_t *password, std::size_t password_size,
+        const std::uint8_t *graph, std::size_t graph_size) const;
     /* Validates the transitional byte ABI envelope before Open, without a password. */
     virtual void validate_legacy_envelope(const std::uint8_t *bytes,
         std::size_t size) const;

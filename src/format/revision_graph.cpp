@@ -2,6 +2,7 @@
 
 #include "format/blake2b.hpp"
 #include "format/cbor_reader.hpp"
+#include "format/cbor_writer.hpp"
 #include "format/diagnostic_json_writer.hpp"
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
@@ -286,6 +287,7 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
 RevisionRecord parse_record(CborReader &reader, const std::uint8_t *encoded,
     const RevisionLimits &limits)
 {
+    const auto record_start = reader.position();
     const auto fields = reader.map(3);
     if (fields < 3 || fields > 7) malformed();
     RevisionRecord record;
@@ -323,6 +325,7 @@ RevisionRecord parse_record(CborReader &reader, const std::uint8_t *encoded,
         || (record.foreign != record.resolved_by.has_value())
         || (record.foreign && record.provisional)
         || (record.kind == 2 && record.provisional)) malformed();
+    record.record_cbor.assign(encoded + record_start, encoded + reader.position());
     return record;
 }
 
@@ -513,26 +516,35 @@ RevisionGraph RevisionGraph::decode(const std::uint8_t *bytes, std::size_t size,
     if (fields != 8 && fields != 9) malformed();
     std::uint64_t k = 0;
     key(reader, k, 1); if (reader.unsigned_integer() != 1) unsupported();
-    key(reader, k, 2); auto parsed_slots = parse_slots(reader);
+    RevisionGraph graph;
+    key(reader, k, 2); auto field_start = reader.position();
+    auto parsed_slots = parse_slots(reader);
+    graph.field_ranges_[2] = {field_start, reader.position() - field_start};
     key(reader, k, 3);
+    field_start = reader.position();
     const auto owner = parse_owner(reader);
+    graph.field_ranges_[3] = {field_start, reader.position() - field_start};
     if (owner.id != parsed_slots.owner.id || owner.name != parsed_slots.owner.name
         || owner.email != parsed_slots.owner.email) malformed();
-    key(reader, k, 4); auto lease = parse_lease(reader);
+    key(reader, k, 4); field_start = reader.position();
+    auto lease = parse_lease(reader);
+    graph.field_ranges_[4] = {field_start, reader.position() - field_start};
     key(reader, k, 5);
     const auto count = reader.array(2);
     if (count == 0) malformed();
-    RevisionGraph graph;
     graph.records_.reserve(count);
     for (std::size_t i = 0; i < count; ++i)
         graph.records_.push_back(parse_record(reader, bytes, limits));
     key(reader, k, 6); graph.head_ = read_id(reader);
     key(reader, k, 7); graph.content_head_ = read_id(reader);
     key(reader, k, 8);
+    field_start = reader.position();
     const auto feature_count = reader.array(2);
     if (feature_count != 0) unsupported();
+    graph.field_ranges_[8] = {field_start, reader.position() - field_start};
     if (fields == 9) {
         key(reader, k, 9);
+        field_start = reader.position();
         const auto extension_count = reader.map(2);
         std::uint64_t previous = 999;
         for (std::size_t i = 0; i < extension_count; ++i) {
@@ -541,6 +553,7 @@ RevisionGraph RevisionGraph::decode(const std::uint8_t *bytes, std::size_t size,
             previous = extension_key;
             reader.skip_extension(3);
         }
+        graph.field_ranges_[9] = {field_start, reader.position() - field_start};
     }
     if (!reader.finished()) malformed();
     validate_graph(graph.records_, graph.head_, graph.content_head_, limits);
@@ -601,6 +614,114 @@ std::optional<std::string> RevisionGraph::compare(const RevisionId &before_id,
     append(*before, '-');
     append(*after, '+');
     return result;
+}
+
+std::vector<std::uint8_t> RevisionGraph::save_content(std::string_view content,
+    std::string_view profile_name, std::string_view profile_email,
+    std::string_view device, const RevisionSlot &actor,
+    std::uint64_t timestamp_ms, bool regular, bool discard) const
+{
+    const auto limits = RevisionLimits::defaults();
+    if (timestamp_ms > std::numeric_limits<std::int64_t>::max()
+        || content.size() > limits.max_text_bytes()
+        || !valid_canonical_document_text(content.data(), content.size()))
+        throw RevisionFailure{RevisionError::invalid_argument};
+    std::size_t retained = records_.size();
+    const bool provisional = records_.back().provisional;
+    if (discard && !provisional)
+        throw RevisionFailure{RevisionError::invalid_argument};
+    RevisionId new_head = head_, new_content_head = content_head_;
+    std::vector<std::uint8_t> new_record;
+    if (provisional) {
+        --retained;
+        new_head = records_.back().previous.value();
+        new_content_head = records_.back().content_parent.value();
+    }
+    if (!discard) {
+        if (provisional && !regular && content == reconstruct(content_head_).value()
+            && timestamp_ms == records_.back().timestamp_ms
+            && actor.id == records_.back().actor_slot
+            && actor.name == records_.back().actor_name
+            && actor.email == records_.back().actor_email
+            && profile_name == records_.back().client_name
+            && profile_email == records_.back().client_email
+            && device == records_.back().device) {
+            CborWriter record;
+            record.map(4);
+            record.unsigned_integer(1); record.bytes(records_.back().id.data(), 32);
+            record.unsigned_integer(2); record.raw(records_.back().immutable_cbor.data(),
+                records_.back().immutable_cbor.size());
+            record.unsigned_integer(3); record.unsigned_integer(records_.back().storage);
+            record.unsigned_integer(4); record.raw(records_.back().body_cbor.data(),
+                records_.back().body_cbor.size());
+            new_record = record.take_output();
+            new_head = new_content_head = records_.back().id;
+        } else {
+            CborWriter body;
+            body.array(3); body.unsigned_integer(0);
+            body.unsigned_integer(content.size());
+            body.array(content.empty() ? 0 : 1);
+            if (!content.empty()) {
+                body.array(2); body.unsigned_integer(1);
+                body.bytes(reinterpret_cast<const std::uint8_t *>(content.data()),
+                    content.size());
+            }
+            const auto body_bytes = body.take_output();
+            const auto content_hash = digest(content_prefix,
+                reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
+            const auto body_digest = digest(body_prefix, body_bytes.data(), body_bytes.size());
+            CborWriter immutable;
+            immutable.map(13);
+            immutable.unsigned_integer(1); immutable.unsigned_integer(1);
+            immutable.unsigned_integer(2); immutable.bytes(new_head.data(), 32);
+            immutable.unsigned_integer(3); immutable.bytes(new_content_head.data(), 32);
+            immutable.unsigned_integer(4); immutable.array(0);
+            immutable.unsigned_integer(5); immutable.unsigned_integer(timestamp_ms);
+            immutable.unsigned_integer(6); immutable.bytes(actor.id.data(), actor.id.size());
+            const auto actor_name = actor.name.empty() ? profile_name
+                : std::string_view(actor.name);
+            const auto actor_email = actor.email.empty() ? profile_email
+                : std::string_view(actor.email);
+            immutable.unsigned_integer(7); immutable.text(actor_name.data(), actor_name.size());
+            immutable.unsigned_integer(8); immutable.text(actor_email.data(), actor_email.size());
+            immutable.unsigned_integer(9); immutable.text(profile_name.data(), profile_name.size());
+            immutable.unsigned_integer(10); immutable.text(profile_email.data(), profile_email.size());
+            immutable.unsigned_integer(11); immutable.text(device.data(), device.size());
+            immutable.unsigned_integer(12); immutable.bytes(content_hash.data(), 32);
+            immutable.unsigned_integer(13); immutable.bytes(body_digest.data(), 32);
+            const auto immutable_bytes = immutable.take_output();
+            const auto id = digest(id_prefix, immutable_bytes.data(), immutable_bytes.size());
+            CborWriter record;
+            record.map(regular ? 5 : 4);
+            record.unsigned_integer(1); record.bytes(id.data(), id.size());
+            record.unsigned_integer(2); record.raw(immutable_bytes.data(), immutable_bytes.size());
+            record.unsigned_integer(3); record.unsigned_integer(2);
+            record.unsigned_integer(4); record.raw(body_bytes.data(), body_bytes.size());
+            if (regular) { record.unsigned_integer(5); record.boolean(true); }
+            new_record = record.take_output();
+            new_head = new_content_head = id;
+        }
+    }
+    CborWriter writer;
+    writer.map(field_ranges_[9].second ? 9 : 8);
+    writer.unsigned_integer(1); writer.unsigned_integer(1);
+    const auto field = [&](unsigned key) {
+        const auto [offset, length] = field_ranges_[key];
+        writer.unsigned_integer(key);
+        writer.raw(encoded_.data() + offset, length);
+    };
+    field(2); field(3); field(4);
+    writer.unsigned_integer(5); writer.array(retained + (discard ? 0 : 1));
+    for (std::size_t i = 0; i < retained; ++i)
+        writer.raw(records_[i].record_cbor.data(), records_[i].record_cbor.size());
+    if (!discard) writer.raw(new_record.data(), new_record.size());
+    writer.unsigned_integer(6); writer.bytes(new_head.data(), new_head.size());
+    writer.unsigned_integer(7); writer.bytes(new_content_head.data(), new_content_head.size());
+    field(8);
+    if (field_ranges_[9].second) field(9);
+    auto encoded = writer.take_output();
+    (void)RevisionGraph::decode(encoded.data(), encoded.size(), limits);
+    return encoded;
 }
 
 std::string RevisionGraph::diagnostic_json(bool include_content) const

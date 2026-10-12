@@ -38,7 +38,8 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_INVALID_STATE = 14,
     SCPEFE_STATUS_LOCKED = 15,
     SCPEFE_STATUS_BODY_UNAVAILABLE = 16,
-    SCPEFE_STATUS_REVISION_NOT_FOUND = 17
+    SCPEFE_STATUS_REVISION_NOT_FOUND = 17,
+    SCPEFE_STATUS_STALE_OPERATION = 18
 } scpefe_status;
 
 /* Stable reasons returned when assessing a newly proposed password. */
@@ -365,7 +366,8 @@ typedef struct scpefe_container_status_v1 {
     int must_change_password;
 } scpefe_container_status_v1;
 
-/* View of owned authenticated text; encoded_revision is empty for revised-v3 history. */
+/* View of submitted clear text and the confirmed legacy revision; the latter is
+ * empty for revised-v3 history and may lag submitted text. */
 typedef struct scpefe_owned_snapshot_view_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -376,6 +378,57 @@ typedef struct scpefe_owned_snapshot_view_v1 {
     const char *content;
     size_t content_size;
 } scpefe_owned_snapshot_view_v1;
+
+/* Save intent for a submitted clear text snapshot or sealed-base discard. */
+typedef enum scpefe_save_kind {
+    SCPEFE_SAVE_MANUAL = 1,
+    SCPEFE_SAVE_REGULAR = 2,
+    SCPEFE_SAVE_DISCARD = 3
+} scpefe_save_kind;
+
+/* Host actions required by the returned publication transition. */
+typedef enum scpefe_publication_effect {
+    SCPEFE_EFFECT_REREAD_TARGET = 1u << 0,
+    SCPEFE_EFFECT_JOURNAL_CANDIDATE = 1u << 1,
+    SCPEFE_EFFECT_PUBLISH_CANDIDATE = 1u << 2,
+    SCPEFE_EFFECT_ADOPT_CANDIDATE = 1u << 3,
+    SCPEFE_EFFECT_CLEAR_JOURNAL = 1u << 4,
+    SCPEFE_EFFECT_RECOVER_CANDIDATE = 1u << 5
+} scpefe_publication_effect;
+
+/* One versioned save request; the password is used only while preparing. */
+typedef struct scpefe_container_save_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    scpefe_save_kind kind;
+    const uint8_t *password;
+    size_t password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    uint64_t timestamp_ms;
+} scpefe_container_save_v1;
+
+/* Copied publication metadata and required host actions. */
+typedef struct scpefe_candidate_info_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    uint8_t source_head[SCPEFE_REVISION_ID_SIZE];
+    size_t byte_size;
+    uint32_t effect_mask;
+} scpefe_candidate_info_v1;
+
+/* Reports a verified, definite-failure, or ambiguous host result. */
+typedef enum scpefe_publication_outcome {
+    SCPEFE_PUBLICATION_VERIFIED = 1,
+    SCPEFE_PUBLICATION_DEFINITE_FAILURE = 2,
+    SCPEFE_PUBLICATION_AMBIGUOUS = 3
+} scpefe_publication_outcome;
 
 /* All byte counts are limits applied before allocating or copying data. */
 typedef struct scpefe_revision_limits_v1 {
@@ -521,7 +574,7 @@ SCPEFE_API scpefe_status scpefe_container_close(scpefe_container *container);
 /* Copies current lock and authenticated permission state. */
 SCPEFE_API scpefe_status scpefe_container_status(
     const scpefe_container *container, scpefe_container_status_v1 *status);
-/* Copies authenticated content into an owner independent of future state. */
+/* Copies submitted clear content into an owner independent of future state. */
 SCPEFE_API scpefe_status scpefe_container_read(
     const scpefe_container *container, scpefe_owned_snapshot **snapshot);
 /* Copies authenticated revised-v3 history into an independent owned graph. */
@@ -536,6 +589,23 @@ SCPEFE_API void scpefe_owned_snapshot_destroy(scpefe_owned_snapshot *snapshot);
 SCPEFE_API scpefe_status scpefe_container_copy_bytes(
     const scpefe_container *container, uint8_t *output,
     size_t output_capacity, size_t *output_size);
+/* Records a host-confirmed editing lease for this unlocked session. */
+SCPEFE_API scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *container);
+/* Replaces submitted clear content without changing confirmed encrypted bytes. */
+SCPEFE_API scpefe_status scpefe_container_submit_content(scpefe_container *container,
+    const char *content, size_t content_size);
+/* Prepares and retains one exact candidate for host publication. */
+SCPEFE_API scpefe_status scpefe_container_prepare_save(scpefe_container *container,
+    const scpefe_container_save_v1 *save, scpefe_candidate_info_v1 *candidate);
+/* Copies the retained candidate bytes without preparing or encrypting again. */
+SCPEFE_API scpefe_status scpefe_container_copy_candidate(const scpefe_container *container,
+    uint64_t operation_id, uint8_t *output, size_t capacity, size_t *output_size);
+/* Applies one host result and returns the required follow-up actions. */
+SCPEFE_API scpefe_status scpefe_container_acknowledge_save(scpefe_container *container,
+    uint64_t operation_id, scpefe_publication_outcome outcome, uint32_t *effect_mask);
+/* Resolves an ambiguous publication after the host has checked the exact bytes. */
+SCPEFE_API scpefe_status scpefe_container_resolve_save(scpefe_container *container,
+    uint64_t operation_id, int published, uint32_t *effect_mask);
 
 /* Populates caller storage with the default revision allocation limits. */
 SCPEFE_API scpefe_status scpefe_revision_limits_default(

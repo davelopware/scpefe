@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace scpefe::format {
@@ -47,7 +49,7 @@ struct RevisionRecord {
     std::string actor_name, actor_email, client_name, client_email, device;
     RevisionId content_hash{}, body_digest{};
     std::string event_type, event_detail;
-    std::vector<std::uint8_t> immutable_cbor, event_details_cbor;
+    std::vector<std::uint8_t> immutable_cbor, event_details_cbor, record_cbor;
     std::optional<RevisionId> resolved_by;
     std::optional<RevisionId> compaction_cutoff;
     std::optional<std::uint64_t> retained_deltas;
@@ -85,11 +87,17 @@ public:
     /* Computes a bounded readable line comparison for available revisions. */
     std::optional<std::string> compare(const RevisionId &before,
         const RevisionId &after) const;
+    /* Builds a validated manual, regular, or provisional-discard graph. */
+    std::vector<std::uint8_t> save_content(std::string_view content,
+        std::string_view profile_name, std::string_view profile_email,
+        std::string_view device, const RevisionSlot &actor,
+        std::uint64_t timestamp_ms, bool regular, bool discard) const;
     /* Returns a redacted JSON summary unless clear text is explicitly requested. */
     std::string diagnostic_json(bool include_content) const;
 
 private:
     std::vector<std::uint8_t> encoded_;
+    std::array<std::pair<std::size_t, std::size_t>, 10> field_ranges_{};
     std::vector<RevisionRecord> records_;
     std::vector<RevisionSlot> slots_;
     RevisionLease lease_;
