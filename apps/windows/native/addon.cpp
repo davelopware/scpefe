@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <memory>
 #include <limits>
@@ -832,6 +833,160 @@ napi_value container_confirm_edit_lease(napi_env env, napi_callback_info info)
     }
 }
 
+std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> parse_slot_id(
+    const std::string &input);
+
+napi_value container_lease_mode(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        scpefe_container_lease_mode_v1 mode{sizeof(mode), SCPEFE_ABI_VERSION};
+        const auto status = scpefe_container_lease_mode(owner->active, &mode);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        set_boolean(env, result, "editing", mode.is_editing != 0);
+        const char *relation = mode.lease_status == SCPEFE_LEASE_HELD ? "held"
+            : mode.lease_status == SCPEFE_LEASE_OTHER_HOLDER ? "other-holder"
+            : mode.lease_status == SCPEFE_LEASE_UNCERTAIN ? "uncertain" : "none";
+        set_string(env, result, "leaseStatus", relation, std::strlen(relation));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_authenticated_lease(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        scpefe_owned_authenticated_state *raw = nullptr;
+        const auto status = scpefe_container_authenticated_state(owner->active, &raw);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_owned_authenticated_state,
+            decltype(&scpefe_owned_authenticated_state_destroy)>
+            state(raw, scpefe_owned_authenticated_state_destroy);
+        scpefe_owned_authenticated_state_view_v1 view{};
+        view.struct_size = sizeof(view);
+        view.abi_version = SCPEFE_ABI_VERSION;
+        const auto viewed = scpefe_owned_authenticated_state_view(state.get(), &view);
+        if (viewed != SCPEFE_STATUS_OK) { throw_status(env, viewed); return nullptr; }
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        set_boolean(env, result, "active", view.lease_active != 0);
+        const auto session = hexadecimal(view.lease_session_id,
+            sizeof(view.lease_session_id));
+        set_string(env, result, "sessionId", session.data(), session.size());
+        set_number(env, result, "heartbeatCounter", view.lease_heartbeat_counter);
+        set_number(env, result, "holderUtcMs", view.lease_holder_utc_ms);
+        set_number(env, result, "durationMs", view.lease_duration_ms);
+        set_string(env, result, "holderName", view.lease_holder_name,
+            view.lease_holder_name_size);
+        set_string(env, result, "holderEmail", view.lease_holder_email,
+            view.lease_holder_email_size);
+        set_string(env, result, "deviceName", view.lease_device_name,
+            view.lease_device_name_size);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_lease_advice(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 1) throw std::runtime_error("leaseAdvice expects host evidence");
+        const auto session = parse_slot_id(string_value(env,
+            property(env, args[0], "suspendedSessionId")));
+        scpefe_container_lease_advice_v1 advice{};
+        advice.struct_size = sizeof(advice);
+        advice.abi_version = SCPEFE_ABI_VERSION;
+        std::copy(session.begin(), session.end(), advice.suspended_session_id);
+        advice.suspended_heartbeat_counter = number_value(env,
+            property(env, args[0], "suspendedCounter"));
+        advice.now_utc_ms = number_value(env, property(env, args[0], "nowUtcMs"));
+        advice.unchanged_monotonic_ms = number_value(env,
+            property(env, args[0], "unchangedMonotonicMs"));
+        const auto status = scpefe_container_lease_advice(owner->active, &advice);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        const char *entry = advice.entry == SCPEFE_LEASE_ENTRY_ACQUIRE ? "acquire"
+            : advice.entry == SCPEFE_LEASE_ENTRY_RESUME ? "resume"
+            : advice.entry == SCPEFE_LEASE_ENTRY_TAKEOVER ? "takeover"
+            : advice.entry == SCPEFE_LEASE_ENTRY_CONFIRM_TAKEOVER ? "confirm-takeover"
+            : advice.entry == SCPEFE_LEASE_ENTRY_CHANGED ? "changed" : "blocked";
+        napi_value result;
+        check(env, napi_create_string_utf8(env, entry, NAPI_AUTO_LENGTH, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_prepare_lease_change(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 3) throw std::runtime_error(
+            "prepareLeaseChange expects action, password, and input");
+        const auto action = string_value(env, args[0]);
+        const auto native_action = action == "acquire" ? SCPEFE_LEASE_ACQUIRE
+            : action == "refresh" ? SCPEFE_LEASE_REFRESH
+            : action == "release" ? SCPEFE_LEASE_RELEASE
+            : action == "resume" ? SCPEFE_LEASE_RESUME
+            : action == "takeover" ? SCPEFE_LEASE_TAKEOVER
+            : throw std::runtime_error("unknown lease action");
+        const SecretBytes password{env, args[1]};
+        const auto input = args[2];
+        const auto session = parse_slot_id(string_value(env,
+            property(env, input, "sessionId")));
+        const auto expected = parse_slot_id(string_value(env,
+            property(env, input, "expectedSessionId")));
+        const auto name = string_value(env, property(env, input, "holderName"));
+        const auto email = string_value(env, property(env, input, "holderEmail"));
+        const auto device = string_value(env, property(env, input, "deviceName"));
+        const scpefe_container_lease_change_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION,
+            number_value(env, property(env, input, "operationId")), native_action,
+            password.data(), password.size(), session.data(), session.size(),
+            boolean_value(env, property(env, input, "expectedActive")),
+            expected.data(), expected.size(),
+            number_value(env, property(env, input, "expectedHeartbeatCounter")),
+            number_value(env, property(env, input, "expectedHolderUtcMs")),
+            number_value(env, property(env, input, "expectedDurationMs")),
+            number_value(env, property(env, input, "nowUtcMs")),
+            number_value(env, property(env, input, "unchangedMonotonicMs")),
+            number_value(env, property(env, input, "durationMs")),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size(),
+            boolean_value(env, property(env, input, "explicitTakeover"))};
+        scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+        const auto status = scpefe_container_prepare_lease_change(
+            owner->active, &request, &candidate);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value bytes = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_container_copy_candidate(owner->active,
+                    candidate.operation_id, output, capacity, size);
+            });
+        if (!bytes) return nullptr;
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_set_named_property(env, result, "bytes", bytes));
+        set_number(env, result, "operationId", candidate.operation_id);
+        set_number(env, result, "effects", candidate.effect_mask);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value container_prepare_save(napi_env env, napi_callback_info info)
 {
     try {
@@ -1090,6 +1245,10 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"bytes", nullptr, container_bytes, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"status", nullptr, container_status, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"confirmEditLease", nullptr, container_confirm_edit_lease, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"leaseMode", nullptr, container_lease_mode, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"authenticatedLease", nullptr, container_authenticated_lease, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"leaseAdvice", nullptr, container_lease_advice, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"prepareLeaseChange", nullptr, container_prepare_lease_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSave", nullptr, container_prepare_save, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSlotChange", nullptr, container_prepare_slot_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"slots", nullptr, container_slots, nullptr, nullptr, nullptr, napi_default, nullptr},

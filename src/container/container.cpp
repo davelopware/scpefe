@@ -279,6 +279,36 @@ TransitionResult Container::confirm_edit_lease()
     return install_transition(AcquireEdit{Lease::held});
 }
 
+LeaseEntry Container::advise_lease_entry(
+    const std::array<std::uint8_t, 16> &suspended_session,
+    std::uint64_t suspended_counter, std::uint64_t now_utc_ms,
+    std::uint64_t unchanged_monotonic_ms) const
+{
+    if (!unlocked_ || state_.access != Access::open
+        || state_.screen != Screen::unlocked || state_.publication != PublicationPhase::idle
+        || state_.attention != Attention::none || !state_.permissions.can_edit
+        || state_.edit != EditMode::read_only
+        || unlocked_->must_be_changed)
+        throw StateError::invalid_transition;
+    const auto &lease = unlocked_->editing_lease;
+    if (!lease.active) return LeaseEntry::acquire;
+    const bool local = local_lease_session_
+        && *local_lease_session_ == suspended_session
+        && lease.session_id == suspended_session;
+    if (local && lease.heartbeat_counter != suspended_counter)
+        return LeaseEntry::changed;
+    const bool clock_advanced = now_utc_ms >= lease.holder_utc_ms;
+    const auto age = clock_advanced ? now_utc_ms - lease.holder_utc_ms : 0;
+    if (local && clock_advanced && age < lease.duration_ms)
+        return LeaseEntry::resume;
+    if ((clock_advanced && age >= lease.duration_ms)
+        || unchanged_monotonic_ms >= lease.duration_ms)
+        return LeaseEntry::takeover;
+    if (!clock_advanced || unlocked_->owner_slot || unlocked_->recovery_slot)
+        return LeaseEntry::confirm_takeover;
+    return LeaseEntry::blocked;
+}
+
 TransitionResult Container::prepare_lease_change(std::uint64_t operation_id,
     const LeaseChange &change, const std::uint8_t *password,
     std::size_t password_size)

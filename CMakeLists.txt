@@ -173,7 +173,8 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-password-policy-addon.integration.mjs
                 $<TARGET_FILE:scpefe_electron_native>
         )
-        foreach(lifecycle_test IN ITEMS native-container-lifecycle native-document-service-lifecycle)
+        foreach(lifecycle_test IN ITEMS native-container-lifecycle
+                native-document-service-lifecycle native-lease-workflows)
             add_test(
                 NAME scpefe.${lifecycle_test}
                 COMMAND ${NODE_EXECUTABLE}

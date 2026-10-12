@@ -48,6 +48,10 @@ struct LeaseChange {
     bool explicit_takeover{};
 };
 
+/* Core decision for entering Edit mode from authenticated lease evidence. */
+enum class LeaseEntry { acquire, resume, takeover, confirm_takeover,
+    blocked, changed };
+
 /* Owns one container's installed state and observer subscriptions. */
 class Container {
 public:
@@ -108,6 +112,10 @@ public:
     TransitionResult prepare_lease_change(std::uint64_t operation_id,
         const LeaseChange &change, const std::uint8_t *password,
         std::size_t password_size);
+    /* Decides lease entry from the authenticated image and host clock evidence. */
+    LeaseEntry advise_lease_entry(const std::array<std::uint8_t, 16> &suspended_session,
+        std::uint64_t suspended_counter, std::uint64_t now_utc_ms,
+        std::uint64_t unchanged_monotonic_ms) const;
     /* Returns the unresolved proposal for immediate caller copies. */
     const ContainerCandidate *candidate() const { return candidate_ ? &*candidate_ : nullptr; }
     /* Applies a host result for the matching proposal; only verified success adopts it. */

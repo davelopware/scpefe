@@ -236,15 +236,10 @@ export class DocumentLifecycleHost {
     this.#clearInactiveTimer();
     this.leaseTakeovers.clear(); const previous = this.service;
     const priorLockedTarget = this.lockedTarget;
-    if (target !== this.lockedTarget) {
-      await previous.releaseSuspendedLeases?.();
-    }
+    await previous.releaseSuspendedLeases?.();
     assertCurrent();
     if (this.service !== previous || this.lockedTarget !== priorLockedTarget) {
       throw new Error("The document changed before replacement could be adopted");
-    }
-    if (target === this.lockedTarget) {
-      previous.transferSuspendedLeaseTo?.(staged.candidate, target);
     }
     this.service = staged.candidate; staged.candidate.acceptCreatedDocument?.();
     this.currentTarget = target; this.lockedTarget = target;

@@ -479,6 +479,27 @@ typedef struct scpefe_container_lease_mode_v1 {
     scpefe_lease_status lease_status;
 } scpefe_container_lease_mode_v1;
 
+/* Authenticated core decision for entering Edit mode with host clock evidence. */
+typedef enum scpefe_lease_entry {
+    SCPEFE_LEASE_ENTRY_ACQUIRE = 1,
+    SCPEFE_LEASE_ENTRY_RESUME = 2,
+    SCPEFE_LEASE_ENTRY_TAKEOVER = 3,
+    SCPEFE_LEASE_ENTRY_CONFIRM_TAKEOVER = 4,
+    SCPEFE_LEASE_ENTRY_BLOCKED = 5,
+    SCPEFE_LEASE_ENTRY_CHANGED = 6
+} scpefe_lease_entry;
+
+/* Input and result for a lease decision; zero session means no suspended lease. */
+typedef struct scpefe_container_lease_advice_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t suspended_session_id[SCPEFE_LEASE_SESSION_ID_SIZE];
+    uint64_t suspended_heartbeat_counter;
+    uint64_t now_utc_ms;
+    uint64_t unchanged_monotonic_ms;
+    scpefe_lease_entry entry;
+} scpefe_container_lease_advice_v1;
+
 /* Credential or authenticated slot metadata operation for one candidate. */
 typedef enum scpefe_slot_change_kind {
     SCPEFE_SLOT_CHANGE_PASSWORD = 1,
@@ -743,6 +764,9 @@ SCPEFE_API scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *c
 /* Reads edit mode while unlocked; authenticated-state snapshots provide lease details. */
 SCPEFE_API scpefe_status scpefe_container_lease_mode(
     const scpefe_container *container, scpefe_container_lease_mode_v1 *mode);
+/* Classifies lease entry using authenticated state and observed elapsed time. */
+SCPEFE_API scpefe_status scpefe_container_lease_advice(
+    const scpefe_container *container, scpefe_container_lease_advice_v1 *advice);
 /* Prepares authenticated lease bytes without appending a content revision.
  * The host must reread and compare exact source bytes from copy_bytes before
  * publishing: source_head alone cannot detect another lease heartbeat. */
