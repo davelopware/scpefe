@@ -39,6 +39,6 @@ export type DocumentOpened = { content: string; readOnly: boolean; canEdit: bool
 export type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
 export type DialogName = "profile" | "open" | "export" | "about"
-  | "unlock" | "passwords" | "compaction" | null;
+  | "unlock" | "passwords" | "compaction" | "activity" | null;
 export type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
   | "recovery" | "unreadable" | "publication" | null;

@@ -16,7 +16,9 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePasswordChangeRequest, validateInvitationCreateRequest,
   validateInvitationResult, validateInvitationClaimRequest,
   validateSlotPermissionsRequest,
-  validateSlotId, validateRegularSaveResult, validateSlotRemovalResult } from "./contracts.mjs";
+  validateSlotId, validateRegularSaveResult, validateSlotRemovalResult,
+  validateRevisionActivityRequest, validateRevisionActivityId,
+  validateRevisionActivityPage, validateRevisionActivityComparison } from "./contracts.mjs";
 import { decodeBoundaryError, isCatalogCode } from "./error-boundary.mjs";
 
 const ipcRenderer = Object.freeze({
@@ -166,6 +168,17 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   activity: async () => {
     await ipcRenderer.invoke("document:activity");
   },
+  revisionActivityPage: async (offset, count) => {
+    const request = validateRevisionActivityRequest(offset, count);
+    return validateRevisionActivityPage(await ipcRenderer.invoke(
+      "document:revision-activity", request), offset, count);
+  },
+  revisionActivityComparison: async (beforeId, afterId) =>
+    validateRevisionActivityComparison(await ipcRenderer.invoke(
+      "document:revision-compare", {
+        beforeId: validateRevisionActivityId(beforeId),
+        afterId: validateRevisionActivityId(afterId),
+      })),
   restoreRecoveredWork: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:restore-recovery",
       validateTakeoverRequest(request));

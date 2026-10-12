@@ -122,6 +122,10 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
         if (channel === "document:remove-slot") {
           return { removed: true, warningCode: "SLOT_REMOVED", opened: editOpened };
         }
+        if (channel === "document:revision-activity") {
+          return { items: [], nextOffset: request.offset, hasMore: false };
+        }
+        if (channel === "document:revision-compare") return { available: false };
         return null;
       } },
   };
@@ -145,6 +149,7 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "claimInvitation", "cancelInvitationClaim", "reconcileIdentity",
     "updateSlotPermissions", "removeSlot",
     "exportPlaintext", "updateWorkingCopy", "activity",
+    "revisionActivityPage", "revisionActivityComparison",
     "restoreRecoveredWork", "cancelLeaseTakeover", "discardRecoveredWork",
     "acceptHeadMismatch", "discardUnreadableJournal", "closeDocument", "exitApplication", "resolveProtection",
     "lock", "onLockStarted", "onLocked",
@@ -158,6 +163,15 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
   assert.equal(JSON.stringify(await exposed.saveProfile({
     name: "Ada", email: "ada@example.test", deviceName: "Desk",
   })).includes("profile.json"), false, "host-only profile paths do not cross preload");
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.revisionActivityPage(0, 20))),
+    { items: [], nextOffset: 0, hasMore: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.revisionActivityComparison(
+    "ab".repeat(32), "cd".repeat(32)))), { available: false });
+  const activityInvocations = invocations.length;
+  await assert.rejects(exposed.revisionActivityPage(-1, 20), /page request/);
+  await assert.rejects(exposed.revisionActivityComparison("invalid", "cd".repeat(32)),
+    /activity ID/);
+  assert.equal(invocations.length, activityInvocations);
   let regularSave;
   const stopRegularSave = exposed.onRegularSave((value) => { regularSave = value; });
   rendererListeners.get("document:regular-saved")({}, { published: true,

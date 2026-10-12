@@ -13,7 +13,8 @@ import { OpenRequestQueue } from "./switch-document.mjs";
 import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
   validatePassword, validateProfile, validateTakeoverCancellation,
-  validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
+  validateTakeoverRequest, validateWorkingCopy, validateRevisionActivityRequest,
+  validateRevisionActivityId } from "./contracts.mjs";
 import { safeEventCode } from "./error-boundary.mjs";
 import { DISCARD_UNREADABLE_JOURNAL_CONFIRMATION } from "./document-service.mjs";
 
@@ -327,6 +328,15 @@ export class DocumentLifecycleHost {
     this.#register("document:update-working-copy", (working) =>
       this.service.updateWorkingCopy(validateWorkingCopy(working)));
     this.#register("document:activity", () => this.notifyActivity());
+    this.#register("document:revision-activity", (request) => {
+      const { offset, count } = validateRevisionActivityRequest(
+        request?.offset, request?.count);
+      return this.service.revisionActivityPage(offset, count);
+    });
+    this.#register("document:revision-compare", (request) =>
+      this.service.revisionActivityComparison(
+        validateRevisionActivityId(request?.beforeId),
+        validateRevisionActivityId(request?.afterId)));
     this.#register("document:save", async (content) => {
       let result;
       const canonical = canonicalizeDocumentText(content);

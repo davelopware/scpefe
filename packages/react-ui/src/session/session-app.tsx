@@ -12,6 +12,7 @@ import { SecurityDialogs, type SecurityDialogsHandle } from "../security/securit
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
 import { clearMountedPasswordFields } from "../security/password-entry.ts";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
+import { RevisionActivityDialog, type RevisionActivityHost } from "./revision-activity.tsx";
 import { SessionPresentation } from "./session-presentation.ts";
 import type { DialogAction } from "../dialogs/dialog-host.tsx";
 import { useSessionEvents } from "./use-session-events.ts";
@@ -35,6 +36,7 @@ export interface SharedAppProps {
   shellHost: ShellHost;
   creationTargetHost: CreationTargetHost;
   securityClipboard: SecurityClipboardHost;
+  revisionActivityHost?: RevisionActivityHost;
   completion: {
     setSessionSource(source: { getPendingWorkCount(): number;
       subscribe(listener: () => void): () => void } | null): void;
@@ -54,7 +56,7 @@ export interface SharedAppProps {
 }
 
 export function SharedApp({ sessionHost, journalTransport, events,
-  shellHost, creationTargetHost, securityClipboard,
+  shellHost, creationTargetHost, securityClipboard, revisionActivityHost,
   completion: rendererLifecycleCompletion,
   catalogText, safeRendererErrorMessage, closeWindow, sourceCommit, assessProposedPassword,
   proposedPasswordRejectionMessage, CreationSecurityDialog,
@@ -195,7 +197,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const shellCommands = createShellCommands({ session,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
-      modalBusy: modalBusy.current }),
+      modalBusy: modalBusy.current, activityAvailable: Boolean(revisionActivityHost) }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -216,7 +218,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
         returnFocus?.isConnected ? returnFocus : document.activeElement as HTMLElement | null);
     } else if (command === "export") {
       shellDialogs.current?.showExport();
-    } else if (command === "passwords" || command === "profile" || command === "about") {
+    } else if (command === "passwords" || command === "profile"
+      || command === "about" || command === "activity") {
       setDialog(command as DialogName);
     } else if (command === "save") await runSave();
     else if (command === "backup") {
@@ -358,6 +361,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
       message={presentation.statusMessage(message)} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
+    {dialog === "activity" && activeDocument && revisionActivityHost
+      && <RevisionActivityDialog host={revisionActivityHost}
+        returnFocus={dialogReturnFocus.current} close={() => setDialog(null)}
+        safeError={safeRendererErrorMessage} />}
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}
       completion={rendererLifecycleCompletion} Dialog={CreationSecurityDialog}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}

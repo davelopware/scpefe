@@ -5,6 +5,124 @@ const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
 const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
 const MAX_REGULAR_SAVE_INTERVAL_MS = 86_400_000;
 const utf8Encoder = new TextEncoder();
+const REVISION_ID = /^[0-9a-f]{64}$/;
+const ACTOR_SLOT_ID = /^[0-9a-f]{32}$/;
+
+function decodeRevisionEventDetails(hex) {
+  if (hex === undefined) return undefined;
+  if (typeof hex !== "string" || hex.length > 8192
+      || hex.length % 2 !== 0 || !/^[0-9a-f]*$/.test(hex)) {
+    throw new TypeError("host returned invalid revision event details");
+  }
+  const bytes = Uint8Array.from(hex.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16));
+  let at = 0;
+  const take = (length) => {
+    if (!Number.isSafeInteger(length) || length < 0 || at + length > bytes.length) {
+      throw new TypeError("host returned invalid revision event details");
+    }
+    const value = bytes.subarray(at, at + length);
+    at += length;
+    return value;
+  };
+  const head = (major) => {
+    const first = take(1)[0];
+    if (first >> 5 !== major) throw new TypeError("host returned invalid revision event details");
+    const width = first & 31;
+    if (width < 24) return width;
+    const size = ({ 24: 1, 25: 2, 26: 4, 27: 8 })[width];
+    if (!size) throw new TypeError("host returned invalid revision event details");
+    return [...take(size)].reduce((value, byte) => value * 256 + byte, 0);
+  };
+  const binary = (expected) => {
+    const value = take(head(2));
+    if (value.length !== expected) throw new TypeError("host returned invalid revision event details");
+    return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const count = head(5);
+  if (count > 5) throw new TypeError("host returned invalid revision event details");
+  const details = {};
+  let prior = 0;
+  for (let index = 0; index < count; index += 1) {
+    const key = head(0);
+    if (key <= prior) throw new TypeError("host returned invalid revision event details");
+    prior = key;
+    if (key === 1) details.affectedSlotId = binary(16);
+    else if (key === 2) details.cutoffRevision = binary(32);
+    else if (key === 3) details.retainedDeltas = head(0);
+    else if (key === 4) details.outcome = head(0);
+    else if (key === 5) details.note = new TextDecoder("utf-8", { fatal: true })
+      .decode(take(head(3)));
+    else throw new TypeError("host returned invalid revision event details");
+  }
+  if (at !== bytes.length) throw new TypeError("host returned invalid revision event details");
+  return Object.freeze(details);
+}
+
+export function validateRevisionActivityRequest(offset, count) {
+  if (!Number.isSafeInteger(offset) || offset < 0
+      || !Number.isSafeInteger(count) || count < 1 || count > 50) {
+    throw new TypeError("invalid revision activity page request");
+  }
+  return Object.freeze({ offset, count });
+}
+
+export function validateRevisionActivityId(value) {
+  if (typeof value !== "string" || !REVISION_ID.test(value)) {
+    throw new TypeError("invalid revision activity ID");
+  }
+  return value;
+}
+
+export function validateRevisionActivityPage(value, offset = 0, count = 20) {
+  validateRevisionActivityRequest(offset, count);
+  if (!value || typeof value !== "object" || !Array.isArray(value.items)
+      || value.items.length > count || !Number.isSafeInteger(value.nextOffset)
+      || value.nextOffset !== offset + value.items.length
+      || typeof value.hasMore !== "boolean"
+      || (value.unavailable !== undefined && (value.unavailable !== true
+        || value.items.length !== 0 || value.hasMore))) {
+    throw new TypeError("host returned an invalid revision activity page");
+  }
+  const optionalId = (id) => id === undefined || REVISION_ID.test(id);
+  const items = value.items.map((item) => {
+    const details = decodeRevisionEventDetails(item?.eventDetailsCbor);
+    if (!item || typeof item !== "object" || !REVISION_ID.test(item.revisionId)
+        || !optionalId(item.previousHead) || !optionalId(item.contentParent)
+        || !optionalId(item.resolvedBy) || !Array.isArray(item.mergeSources)
+        || item.mergeSources.length > 8
+        || item.mergeSources.some((id) => typeof id !== "string" || !REVISION_ID.test(id))
+        || !Number.isSafeInteger(item.timestampMs) || item.timestampMs < 0
+        || !ACTOR_SLOT_ID.test(item.actorSlotId)
+        || ["actorName", "actorEmail", "clientName", "clientEmail", "device", "eventType"]
+          .some((field) => typeof item[field] !== "string" || item[field].length > 4096)
+        || ![0, 1, 2].includes(item.kind) || ![0, 1, 2, 3, 4, 5].includes(item.storageKind)
+        || ["foreign", "provisional", "bodyAvailable", "textAvailable"]
+          .some((field) => typeof item[field] !== "boolean")
+        || (item.detailsTruncated !== undefined && item.detailsTruncated !== true)
+        || (details && ((details.retainedDeltas !== undefined
+          && (!Number.isSafeInteger(details.retainedDeltas)
+            || details.retainedDeltas < 0))
+          || (details.outcome !== undefined && ![0, 1, 2].includes(details.outcome))
+          || (details.note !== undefined && details.note.length > 4096)))) {
+      throw new TypeError("host returned invalid revision activity metadata");
+    }
+    const { eventDetailsCbor: _encoded, ...metadata } = item;
+    return Object.freeze({ ...metadata, mergeSources: Object.freeze([...item.mergeSources]),
+      ...(details ? { details } : {}) });
+  });
+  return Object.freeze({ items: Object.freeze(items), nextOffset: value.nextOffset,
+    hasMore: value.hasMore, ...(value.unavailable ? { unavailable: true } : {}) });
+}
+
+export function validateRevisionActivityComparison(value) {
+  if (!value || typeof value !== "object" || typeof value.available !== "boolean"
+      || (value.available && typeof value.text !== "string")
+      || (!value.available && value.text !== undefined)) {
+    throw new TypeError("host returned an invalid revision comparison");
+  }
+  return value.available ? Object.freeze({ available: true, text: value.text })
+    : Object.freeze({ available: false });
+}
 
 function utf8ByteLength(value) {
   return utf8Encoder.encode(value).byteLength;

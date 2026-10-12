@@ -17,3 +17,4 @@ export type { SessionHost, JournalTransportHost, SessionEventsHost,
   SecurityClipboardHost } from "./session/host-roles.ts";
 export type { ShellHost } from "./shell/shell-dialogs.tsx";
 export type { CreationTargetHost } from "./security/creation-flow.tsx";
+export type { RevisionActivityHost, RevisionActivity } from "./session/revision-activity.tsx";

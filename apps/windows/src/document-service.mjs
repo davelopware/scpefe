@@ -495,6 +495,41 @@ export class DocumentService {
     this.containerBytes = null;
   }
 
+  #withRevisionHistory(read) {
+    const active = this.active;
+    if (!active || this.lockOperation) throw new Error("Unlock a document to view activity");
+    if (!this.native.createContainerContext || active.migrationRequired) {
+      throw new Error("Revision activity is unavailable for this container");
+    }
+    const context = this.native.createContainerContext();
+    let opened = false;
+    try {
+      context.open(active.baseContainer);
+      opened = true;
+      context.unlock(active.password);
+      return read(context);
+    } finally {
+      if (opened) context.close();
+    }
+  }
+
+  revisionActivityPage(offset, count) {
+    try {
+      return this.#withRevisionHistory((context) => context.historyPage(offset, count));
+    } catch (error) {
+      if (error?.code === "SCPEFE_NATIVE"
+          && error.message === "SCPEFE operation failed with status 8") {
+        return { items: [], nextOffset: offset, hasMore: false, unavailable: true };
+      }
+      throw error;
+    }
+  }
+
+  revisionActivityComparison(beforeId, afterId) {
+    return this.#withRevisionHistory((context) =>
+      context.historyCompare(beforeId, afterId));
+  }
+
   #discardContainerContext() {
     try { this.container = this.native.createContainerContext?.() ?? null; }
     catch { this.container = null; }

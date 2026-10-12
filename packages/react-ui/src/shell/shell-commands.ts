@@ -3,13 +3,14 @@ import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource } from "@
 /** Commands exposed by the shared shell. */
 export type ShellCommand = "new" | "open" | "save" | "backup" | "export" | "close"
   | "exit" | "edit" | "undo" | "redo" | "find" | "replace" | "lock"
-  | "unlock" | "passwords" | "profile" | "compact" | "about";
+  | "unlock" | "passwords" | "profile" | "compact" | "about" | "activity";
 
 /** Presentation facts read at invocation rather than stored as command state. */
 export interface ShellCommandFacts {
   activeAdoption: number | null;
   profileReady: boolean;
   modalBusy: boolean;
+  activityAvailable?: boolean;
 }
 
 /** One eligibility and invocation path for menus, shortcuts and status. */
@@ -48,6 +49,7 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
       case "undo": return active && commands?.undo === true;
       case "redo": return active && commands?.redo === true;
       case "compact": return active && commands?.compact === true;
+      case "activity": return active && view.activityAvailable === true;
       case "find": case "replace": case "lock": case "passwords": return active;
     }
   }

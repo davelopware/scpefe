@@ -3,10 +3,13 @@
 #include <node_api.h>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -120,7 +123,9 @@ std::uint64_t number_value(napi_env env, napi_value value)
 {
     double result = 0;
     check(env, napi_get_value_double(env, value, &result));
-    if (result < 0) throw std::runtime_error("expected a non-negative number");
+    if (!std::isfinite(result) || result < 0 || result > 9007199254740991.0
+        || static_cast<double>(static_cast<std::uint64_t>(result)) != result)
+        throw std::runtime_error("expected a non-negative safe integer");
     return static_cast<std::uint64_t>(result);
 }
 
@@ -190,6 +195,26 @@ std::string hexadecimal(const std::uint8_t *value, std::size_t size)
     return result;
 }
 
+std::array<std::uint8_t, SCPEFE_REVISION_ID_SIZE> revision_id(napi_env env,
+    napi_value value)
+{
+    const auto input = string_value(env, value);
+    if (input.size() != SCPEFE_REVISION_ID_SIZE * 2)
+        throw std::runtime_error("expected a revision ID");
+    std::array<std::uint8_t, SCPEFE_REVISION_ID_SIZE> result{};
+    const auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        const int high = digit(input[i * 2]), low = digit(input[i * 2 + 1]);
+        if (high < 0 || low < 0) throw std::runtime_error("expected a revision ID");
+        result[i] = static_cast<std::uint8_t>((high << 4) | low);
+    }
+    return result;
+}
+
 void throw_status(napi_env env, scpefe_status status)
 {
     const std::string message = "SCPEFE operation failed with status "
@@ -235,6 +260,153 @@ struct ContainerContext {
         if (context) scpefe_context_destroy(context);
     }
 };
+
+ContainerContext *container_context(napi_env env, napi_callback_info info,
+    size_t &argc, napi_value *args);
+
+using RevisionGraphOwner = std::unique_ptr<scpefe_revision_graph,
+    decltype(&scpefe_revision_graph_destroy)>;
+
+RevisionGraphOwner revision_graph(napi_env env, ContainerContext *owner)
+{
+    scpefe_revision_graph *graph = nullptr;
+    const auto status = scpefe_container_revision_graph(owner->active, &graph);
+    if (status != SCPEFE_STATUS_OK) {
+        throw_status(env, status); return {nullptr, scpefe_revision_graph_destroy};
+    }
+    return {graph, scpefe_revision_graph_destroy};
+}
+
+void set_revision_id(napi_env env, napi_value object, const char *name,
+    const std::uint8_t *id)
+{
+    const auto hex = hexadecimal(id, SCPEFE_REVISION_ID_SIZE);
+    set_string(env, object, name, hex.data(), hex.size());
+}
+
+void set_event_details(napi_env env, napi_value object,
+    const scpefe_revision_metadata_v1 &metadata)
+{
+    if (!metadata.event_details_cbor_size) return;
+    if (metadata.event_details_cbor_size > 4096) {
+        set_boolean(env, object, "detailsTruncated", true);
+        return;
+    }
+    const auto hex = hexadecimal(metadata.event_details_cbor,
+        metadata.event_details_cbor_size);
+    set_string(env, object, "eventDetailsCbor", hex.data(), hex.size());
+}
+
+napi_value container_history_page(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 2) throw std::runtime_error("historyPage expects offset and count");
+        const auto offset = number_value(env, args[0]);
+        const auto count = number_value(env, args[1]);
+        if (offset > std::numeric_limits<std::size_t>::max()
+            || offset > 9007199254740991ULL - count || count == 0
+            || count > 50) throw std::runtime_error("invalid history page bounds");
+        auto graph = revision_graph(env, owner);
+        if (!graph) return nullptr;
+        scpefe_revision_page *page = nullptr;
+        auto status = scpefe_revision_graph_list(graph.get(),
+            static_cast<std::size_t>(offset), static_cast<std::size_t>(count + 1), &page);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_revision_page, decltype(&scpefe_revision_page_destroy)>
+            owned(page, scpefe_revision_page_destroy);
+        std::size_t available = 0;
+        status = scpefe_revision_page_count(page, &available);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        const auto length = std::min(available, static_cast<std::size_t>(count));
+        napi_value result, items;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_create_array_with_length(env, length, &items));
+        for (std::size_t i = 0; i < length; ++i) {
+            scpefe_revision_metadata_v1 metadata{};
+            metadata.struct_size = sizeof(metadata);
+            status = scpefe_revision_page_metadata(page, i, &metadata);
+            if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+            napi_value item, sources;
+            check(env, napi_create_object(env, &item));
+            set_revision_id(env, item, "revisionId", metadata.id);
+            if (metadata.has_previous_head)
+                set_revision_id(env, item, "previousHead", metadata.previous_head);
+            if (metadata.has_content_parent)
+                set_revision_id(env, item, "contentParent", metadata.content_parent);
+            if (metadata.has_resolved_by)
+                set_revision_id(env, item, "resolvedBy", metadata.resolved_by);
+            check(env, napi_create_array_with_length(env, metadata.merge_source_count, &sources));
+            for (std::size_t j = 0; j < metadata.merge_source_count; ++j) {
+                const auto hex = hexadecimal(metadata.merge_source_ids
+                    + j * SCPEFE_REVISION_ID_SIZE, SCPEFE_REVISION_ID_SIZE);
+                napi_value source;
+                check(env, napi_create_string_utf8(env, hex.data(), hex.size(), &source));
+                check(env, napi_set_element(env, sources, j, source));
+            }
+            check(env, napi_set_named_property(env, item, "mergeSources", sources));
+            set_number(env, item, "timestampMs", metadata.timestamp_ms);
+            const auto slot = hexadecimal(metadata.actor_slot_id, SCPEFE_SLOT_ID_SIZE);
+            set_string(env, item, "actorSlotId", slot.data(), slot.size());
+            set_string(env, item, "actorName", metadata.actor_name, metadata.actor_name_size);
+            set_string(env, item, "actorEmail", metadata.actor_email, metadata.actor_email_size);
+            set_string(env, item, "clientName", metadata.client_name, metadata.client_name_size);
+            set_string(env, item, "clientEmail", metadata.client_email, metadata.client_email_size);
+            set_string(env, item, "device", metadata.device, metadata.device_size);
+            set_string(env, item, "eventType", metadata.event_type, metadata.event_type_size);
+            set_number(env, item, "kind", metadata.original_kind);
+            set_number(env, item, "storageKind", metadata.storage_kind);
+            set_boolean(env, item, "foreign", metadata.foreign != 0);
+            set_boolean(env, item, "provisional", metadata.provisional != 0);
+            set_boolean(env, item, "bodyAvailable", metadata.body_available != 0);
+            set_boolean(env, item, "textAvailable", metadata.text_available != 0);
+            set_event_details(env, item, metadata);
+            check(env, napi_set_element(env, items, i, item));
+        }
+        check(env, napi_set_named_property(env, result, "items", items));
+        set_number(env, result, "nextOffset", offset + length);
+        set_boolean(env, result, "hasMore", available > count);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_history_compare(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 2) throw std::runtime_error("historyCompare expects two revision IDs");
+        const auto before = revision_id(env, args[0]);
+        const auto after = revision_id(env, args[1]);
+        auto graph = revision_graph(env, owner);
+        if (!graph) return nullptr;
+        scpefe_revision_result *comparison = nullptr;
+        const auto status = scpefe_revision_graph_compare(graph.get(),
+            before.data(), after.data(), &comparison);
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        if (status == SCPEFE_STATUS_BODY_UNAVAILABLE) {
+            set_boolean(env, result, "available", false); return result;
+        }
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_revision_result, decltype(&scpefe_revision_result_destroy)>
+            owned(comparison, scpefe_revision_result_destroy);
+        scpefe_revision_result_view_v1 view{};
+        view.struct_size = sizeof(view);
+        const auto view_status = scpefe_revision_result_view(owned.get(), &view);
+        if (view_status != SCPEFE_STATUS_OK) { throw_status(env, view_status); return nullptr; }
+        set_boolean(env, result, "available", true);
+        set_string(env, result, "text", view.text, view.text_size);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
 
 scpefe_status monotonic_time(void *, std::uint64_t *value)
 {
@@ -453,6 +625,8 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"read", nullptr, container_read, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"bytes", nullptr, container_bytes, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"status", nullptr, container_status, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"historyPage", nullptr, container_history_page, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"historyCompare", nullptr, container_history_compare, nullptr, nullptr, nullptr, napi_default, nullptr},
         };
         check(env, napi_define_properties(env, object, std::size(methods), methods));
         check(env, napi_wrap(env, object, owner.get(),
