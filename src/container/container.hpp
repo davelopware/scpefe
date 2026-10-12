@@ -106,6 +106,15 @@ public:
         bool discard, const std::uint8_t *password, std::size_t password_size,
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device_name, std::uint64_t timestamp_ms);
+    /* Prepares a v3 compaction only from a clean sealed image and exact verified backup. */
+    TransitionResult prepare_compaction(std::uint64_t operation_id,
+        const std::uint8_t *password, std::size_t password_size,
+        const std::array<std::uint8_t, 16> &lease_session_id,
+        std::uint64_t lease_heartbeat_counter, bool explicit_decision,
+        bool clean_state_confirmed, const std::uint8_t *verified_backup,
+        std::size_t verified_backup_size, std::size_t retain_deltas,
+        std::string_view client_name, std::string_view client_email,
+        std::string_view device, std::uint64_t timestamp_ms);
     /* Prepares one authenticated slot change and exact encrypted candidate. */
     TransitionResult prepare_slot_change(std::uint64_t operation_id,
         const SlotChange &change, const std::uint8_t *actor_password,

@@ -721,6 +721,76 @@ scpefe_status scpefe_container_prepare_save(scpefe_container *handle,
     }
 }
 
+scpefe_status scpefe_container_prepare_compaction(scpefe_container *handle,
+    const scpefe_container_compaction_v1 *request,
+    scpefe_candidate_info_v1 *info)
+{
+    using scpefe::format::span_is_valid;
+    using scpefe::format::valid_utf8;
+    if (!request || !info || request->struct_size < sizeof(*request)
+        || info->struct_size < sizeof(*info)
+        || !span_is_valid(request->password, request->password_size)
+        || request->password_size == 0
+        || request->lease_session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
+        || !span_is_valid(request->lease_session_id, request->lease_session_id_size)
+        || !span_is_valid(request->verified_backup_bytes,
+            request->verified_backup_size)
+        || request->verified_backup_size == 0
+        || (request->explicit_decision != 0 && request->explicit_decision != 1)
+        || (request->clean_state_confirmed != 0
+            && request->clean_state_confirmed != 1)
+        || (request->backup_verified != 0 && request->backup_verified != 1)
+        || (request->use_default_retention != 0
+            && request->use_default_retention != 1)
+        || !valid_utf8(request->client_name, request->client_name_size)
+        || !valid_utf8(request->client_email, request->client_email_size)
+        || !valid_utf8(request->device_name, request->device_name_size)
+        || !request->client_name_size || !request->client_email_size
+        || !request->device_name_size)
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (request->abi_version != SCPEFE_ABI_VERSION
+        || info->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    const auto limits = scpefe::format::RevisionLimits::defaults();
+    if (request->password_size > 4096
+        || request->verified_backup_size
+            > scpefe::container::RecoverablePasswordContainer::max_container_bytes()
+        || request->client_name_size > limits.max_text_bytes()
+        || request->client_email_size > limits.max_text_bytes()
+        || request->device_name_size > limits.max_text_bytes())
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        std::array<std::uint8_t, SCPEFE_LEASE_SESSION_ID_SIZE> session{};
+        std::copy_n(request->lease_session_id, session.size(), session.begin());
+        auto &container = handle->owner->implementation.make_container();
+        const auto result = container.prepare_compaction(request->operation_id,
+            request->password, request->password_size, session,
+            request->lease_heartbeat_counter, request->explicit_decision != 0,
+            request->clean_state_confirmed != 0 && request->backup_verified != 0,
+            request->verified_backup_bytes, request->verified_backup_size,
+            request->use_default_retention ? 10 : request->retain_deltas,
+            {request->client_name, request->client_name_size},
+            {request->client_email, request->client_email_size},
+            {request->device_name, request->device_name_size},
+            request->timestamp_ms);
+        const auto *candidate = container.candidate();
+        *info = {sizeof(*info), SCPEFE_ABI_VERSION, candidate->operation_id, {},
+            candidate->bytes.size(), effect_mask(result)};
+        std::memcpy(info->source_head, candidate->source_head.data(),
+            candidate->source_head.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return map_error(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
 scpefe_status scpefe_container_copy_candidate(const scpefe_container *handle,
     uint64_t operation_id, uint8_t *output, size_t capacity, size_t *output_size)
 {

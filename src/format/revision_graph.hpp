@@ -115,6 +115,11 @@ public:
         std::string_view content, std::string_view profile_name,
         std::string_view profile_email, std::string_view device,
         const RevisionSlot &actor, std::uint64_t timestamp_ms) const;
+    /* Anchors an existing content revision and appends an attributed compaction event. */
+    std::vector<std::uint8_t> compact_at(std::size_t content_cutoff,
+        const RevisionSlot &actor, std::string_view client_name,
+        std::string_view client_email, std::string_view device,
+        std::uint64_t timestamp_ms) const;
     /* Appends a credential metadata event with a replacement slot collection. */
     std::vector<std::uint8_t> append_slot_event(
         const std::vector<RevisionSlot> &slots, const RevisionSlot &actor,

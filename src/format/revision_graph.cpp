@@ -987,6 +987,102 @@ std::vector<std::uint8_t> RevisionGraph::merge_with(
     return encoded;
 }
 
+std::vector<std::uint8_t> RevisionGraph::compact_at(std::size_t content_cutoff,
+    const RevisionSlot &actor, std::string_view client_name,
+    std::string_view client_email, std::string_view device,
+    std::uint64_t timestamp_ms) const
+{
+    const auto limits = RevisionLimits::defaults();
+    if (records_.back().provisional || timestamp_ms > std::numeric_limits<std::int64_t>::max()
+        || client_name.empty() || client_email.empty() || device.empty()
+        || (actor.permissions & 7u) != 7u || actor.must_be_changed)
+        throw RevisionFailure{RevisionError::invalid_argument};
+    const auto member = std::find_if(slots_.begin(), slots_.end(),
+        [&](const auto &slot) { return slot.id == actor.id; });
+    if (member == slots_.end() || member->permissions != actor.permissions
+        || member->must_be_changed)
+        throw RevisionFailure{RevisionError::invalid_argument};
+
+    std::vector<std::size_t> content_indices;
+    for (std::size_t i = 0; i < records_.size(); ++i)
+        if (!records_[i].foreign && records_[i].kind != 2)
+            content_indices.push_back(i);
+    if (content_cutoff >= content_indices.size())
+        throw RevisionFailure{RevisionError::invalid_argument};
+    const auto cutoff = content_indices[content_cutoff];
+    const auto text = reconstruct(records_[cutoff].id);
+    if (!text) throw RevisionFailure{RevisionError::invalid_argument};
+
+    CborWriter checkpoint;
+    checkpoint.array(3); checkpoint.unsigned_integer(0);
+    checkpoint.unsigned_integer(text->size());
+    checkpoint.bytes(reinterpret_cast<const std::uint8_t *>(text->data()), text->size());
+    const auto checkpoint_bytes = checkpoint.take_output();
+    const auto retained_deltas = content_indices.size() - content_cutoff - 1;
+    CborWriter details;
+    details.map(2);
+    details.unsigned_integer(2); details.bytes(records_[cutoff].id.data(), 32);
+    details.unsigned_integer(3); details.unsigned_integer(retained_deltas);
+    const auto detail_bytes = details.take_output();
+    CborWriter immutable;
+    immutable.map(13);
+    immutable.unsigned_integer(1); immutable.unsigned_integer(2);
+    immutable.unsigned_integer(2); immutable.bytes(head_.data(), 32);
+    immutable.unsigned_integer(4); immutable.array(0);
+    immutable.unsigned_integer(5); immutable.unsigned_integer(timestamp_ms);
+    immutable.unsigned_integer(6); immutable.bytes(actor.id.data(), actor.id.size());
+    const auto actor_name = actor.name.empty() ? client_name : std::string_view(actor.name);
+    const auto actor_email = actor.email.empty() ? client_email : std::string_view(actor.email);
+    immutable.unsigned_integer(7); immutable.text(actor_name.data(), actor_name.size());
+    immutable.unsigned_integer(8); immutable.text(actor_email.data(), actor_email.size());
+    immutable.unsigned_integer(9); immutable.text(client_name.data(), client_name.size());
+    immutable.unsigned_integer(10); immutable.text(client_email.data(), client_email.size());
+    immutable.unsigned_integer(11); immutable.text(device.data(), device.size());
+    immutable.unsigned_integer(12); immutable.bytes(records_.back().content_hash.data(), 32);
+    immutable.unsigned_integer(14); immutable.text("compaction", 10);
+    immutable.unsigned_integer(15); immutable.raw(detail_bytes.data(), detail_bytes.size());
+    const auto immutable_bytes = immutable.take_output();
+    const auto event_id = digest(id_prefix, immutable_bytes.data(), immutable_bytes.size());
+
+    CborWriter writer;
+    writer.map(field_ranges_[9].second ? 9 : 8);
+    writer.unsigned_integer(1); writer.unsigned_integer(1);
+    const auto field = [&](unsigned key) {
+        const auto [offset, length] = field_ranges_[key];
+        writer.unsigned_integer(key); writer.raw(encoded_.data() + offset, length);
+    };
+    field(2); field(3); field(4);
+    writer.unsigned_integer(5); writer.array(records_.size() + 1);
+    for (std::size_t i = 0; i < records_.size(); ++i) {
+        const auto &record = records_[i];
+        if (record.foreign || record.kind == 2 || i > cutoff) {
+            writer.raw(record.record_cbor.data(), record.record_cbor.size());
+            continue;
+        }
+        const bool anchor = i == cutoff;
+        writer.map(anchor ? 4 : 3);
+        writer.unsigned_integer(1); writer.bytes(record.id.data(), 32);
+        writer.unsigned_integer(2);
+        writer.raw(record.immutable_cbor.data(), record.immutable_cbor.size());
+        writer.unsigned_integer(3); writer.unsigned_integer(anchor ? 3 : 4);
+        if (anchor) {
+            writer.unsigned_integer(4);
+            writer.raw(checkpoint_bytes.data(), checkpoint_bytes.size());
+        }
+    }
+    writer.map(3);
+    writer.unsigned_integer(1); writer.bytes(event_id.data(), event_id.size());
+    writer.unsigned_integer(2); writer.raw(immutable_bytes.data(), immutable_bytes.size());
+    writer.unsigned_integer(3); writer.unsigned_integer(0);
+    writer.unsigned_integer(6); writer.bytes(event_id.data(), event_id.size());
+    writer.unsigned_integer(7); writer.bytes(content_head_.data(), content_head_.size());
+    field(8);
+    if (field_ranges_[9].second) field(9);
+    auto encoded = writer.take_output();
+    (void)RevisionGraph::decode(encoded.data(), encoded.size(), limits);
+    return encoded;
+}
+
 std::vector<std::uint8_t> RevisionGraph::append_slot_event(
     const std::vector<RevisionSlot> &slots, const RevisionSlot &actor,
     const std::array<std::uint8_t, 16> &affected_slot,

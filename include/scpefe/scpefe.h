@@ -458,6 +458,35 @@ typedef struct scpefe_container_save_v1 {
     uint64_t timestamp_ms;
 } scpefe_container_save_v1;
 
+/* Compaction intent. The host sets backup_verified only after a durable backup
+ * read-back and passes its exact bytes; the library compares them with the
+ * committed source. clean_state_confirmed includes the host's work journal. */
+typedef struct scpefe_container_compaction_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    const uint8_t *password;
+    size_t password_size;
+    const uint8_t *lease_session_id;
+    size_t lease_session_id_size;
+    uint64_t lease_heartbeat_counter;
+    int explicit_decision;
+    int clean_state_confirmed;
+    int backup_verified;
+    const uint8_t *verified_backup_bytes;
+    size_t verified_backup_size;
+    /* When set, retain_deltas is ignored and ten content deltas are retained. */
+    int use_default_retention;
+    size_t retain_deltas;
+    const char *client_name;
+    size_t client_name_size;
+    const char *client_email;
+    size_t client_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    uint64_t timestamp_ms;
+} scpefe_container_compaction_v1;
+
 /* Copied publication metadata and required host actions. */
 typedef struct scpefe_candidate_info_v1 {
     uint32_t struct_size;
@@ -825,6 +854,11 @@ SCPEFE_API scpefe_status scpefe_container_submit_content(scpefe_container *conta
 /* Prepares and retains one exact candidate for host publication. */
 SCPEFE_API scpefe_status scpefe_container_prepare_save(scpefe_container *container,
     const scpefe_container_save_v1 *save, scpefe_candidate_info_v1 *candidate);
+/* Prepares an attributed compaction after the host verifies its exact backup. */
+SCPEFE_API scpefe_status scpefe_container_prepare_compaction(
+    scpefe_container *container,
+    const scpefe_container_compaction_v1 *compaction,
+    scpefe_candidate_info_v1 *candidate);
 /* Prepares one authenticated slot operation as an event-only candidate. */
 SCPEFE_API scpefe_status scpefe_container_prepare_slot_change(
     scpefe_container *container, const scpefe_container_slot_change_v1 *change,

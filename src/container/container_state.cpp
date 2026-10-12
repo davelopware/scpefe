@@ -168,9 +168,13 @@ TransitionResult ContainerStateManagerService::apply(
                 && current.operation_id != begin->operation_id);
         } else {
             require(current.publication == PublicationPhase::idle);
-            if (begin->kind == PublicationKind::save)
+            if (begin->kind == PublicationKind::save
+                || begin->kind == PublicationKind::compaction)
                 require(current.edit == EditMode::editing && current.permissions.can_edit
                     && current.lease == Lease::held);
+            if (begin->kind == PublicationKind::compaction)
+                require(current.permissions.can_add_passwords
+                    && current.permissions.can_remove_passwords);
             if (begin->kind == PublicationKind::lease_change)
                 require(current.screen == Screen::locked || current.permissions.can_edit);
         }
