@@ -77,7 +77,7 @@ test("desktop gate builds and validates production assets before serial tests", 
     "--test-concurrency=1",
   ]);
   assert.deepEqual(calls[1].arguments_.slice(4), [
-    path.join(root, "test", "example.desktop.ts"),
+    "./test/example.desktop.ts",
   ]);
   assert.equal(calls[1].cwd, root);
 });
