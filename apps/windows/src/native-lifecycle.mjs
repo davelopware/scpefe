@@ -51,6 +51,7 @@ export class NativeLifecycleCoordinator {
       catch { await this.lockActive("app-exit"); }
     }
     await service.releaseSuspendedLeases?.();
+    service.closeContainer?.();
     this.releasing = true;
     this.closeWindow();
   }

@@ -1222,6 +1222,8 @@ test("lock start immediately drops working text and retains only target identity
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
   await session.openSelected("secret password");
+  assert.equal(session.getSnapshot().kind, "edit");
+  assert.equal(session.edit("unpublished private edit"), true);
   session.lockStarted();
   const locked = session.getSnapshot();
   assert.equal(locked.kind, "locked");
@@ -1230,6 +1232,11 @@ test("lock start immediately drops working text and retains only target identity
   assert.equal("document" in locked, false);
   assert.equal("working" in locked, false);
   assert.equal(JSON.stringify(locked).includes("private text"), false);
+  assert.equal(JSON.stringify(locked).includes("unpublished private edit"), false);
+  host.unlockDocument = async () => { throw new Error("wrong password"); };
+  assert.equal((await session.unlock("wrong password")).status, "failed");
+  assert.equal(session.getSnapshot().kind, "locked");
+  host.unlockDocument = async () => host.openResult;
   host.openResult = opened("reopened text");
   host.editResult = opened("reopened text", false);
   assert.equal((await session.unlock("another password")).status, "opened");

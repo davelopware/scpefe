@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 const native = createRequire(import.meta.url)(process.argv[2]);
 const expectedExports = [
   "addInvitation", "assessPasswordPolicy", "changePassword", "claimInvitation",
-  "compactDocument", "createDocument", "discardProvisional", "mergeDocument",
+  "compactDocument", "createContainerContext", "createDocument", "discardProvisional", "mergeDocument",
   "migrateDocument", "openDocument", "passwordMeetsPolicy", "reconcileIdentity",
   "regularSaveDocument", "removeSlot", "saveDocument", "updateLease",
   "updateSlotPermissions",

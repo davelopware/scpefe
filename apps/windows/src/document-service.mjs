@@ -44,6 +44,9 @@ export class DocumentService {
     onLockStart = () => {}, onLocked = () => {}, onJournalWarning = () => {},
     onRegularSave = () => {} }) {
     this.native = native;
+    this.container = native.createContainerContext?.() ?? null;
+    this.containerTarget = null;
+    this.containerBytes = null;
     this.fs = fs;
     this.profilePath = profilePath;
     this.settingsPath = settingsPath ?? path.join(path.dirname(profilePath), "settings.json");
@@ -194,25 +197,33 @@ export class DocumentService {
       const error = new TypeError("Recovery password does not meet policy");
       error.code = "RECOVERY_PASSWORD_WEAK"; throw error;
     }
-    const candidate = this.native.createDocument({
-      ...profile,
-      ...input,
-      timestampMs: Date.now(),
-    });
+    const createInput = { ...profile, ...input, timestampMs: Date.now() };
+    const candidate = this.container
+      ? this.container.create(createInput) : this.native.createDocument(createInput);
+    if (this.container) this.containerTarget = target;
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      this.closeContainer();
       throw new Error("Native bridge did not produce a container");
     }
-    await this.#queuePublication(async () => {
-      await this.#atomicWrite(target, candidate, false);
-      const published = await this.fs.readFile(target);
-      if (!published.equals(candidate)) throw new Error("Published container verification failed");
-      this.createdTarget = target;
-      this.createdBytes = Buffer.from(published);
-      const opened = this.#validateNativeOpened(
-        this.native.openDocument(published, input.ownerPassword));
-      await this.witnesses.observe(target, this.#observation(opened));
-      opened.journalKey.fill(0);
-    });
+    if (this.container) {
+      this.containerBytes = Buffer.from(candidate);
+    }
+    try {
+      await this.#queuePublication(async () => {
+        await this.#atomicWrite(target, candidate, false);
+        const published = await this.fs.readFile(target);
+        if (!published.equals(candidate)) throw new Error("Published container verification failed");
+        this.createdTarget = target;
+        this.createdBytes = Buffer.from(published);
+        const opened = this.#validateNativeOpened(
+          this.native.openDocument(published, input.ownerPassword));
+        await this.witnesses.observe(target, this.#observation(opened));
+        opened.journalKey.fill(0);
+      });
+    } catch (error) {
+      this.closeContainer();
+      throw error;
+    }
     return { created: true };
   }
 
@@ -424,6 +435,7 @@ export class DocumentService {
           updateTime: recovery.updateTime,
           ...(recovery.authorName ? { authorName: recovery.authorName } : {}),
           ...(recovery.deviceName ? { deviceName: recovery.deviceName } : {}) } } : {}) });
+    this.#openActiveContainer(target, bytes, activePassword, nativeOpened);
     this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
@@ -438,6 +450,56 @@ export class DocumentService {
     nativeOpened.journalKey.fill(0);
     this.notifyActivity();
     return opened;
+  }
+
+  #openActiveContainer(target, bytes, password, nativeOpened) {
+    // The stateful ABI deliberately excludes unreleased v1/v2 migration inputs.
+    if (!this.container || nativeOpened.containerFormatVersion < 3) return;
+    if (this.active) throw new Error("Close the active document before opening another");
+    const sameImage = this.containerTarget === target
+      && this.containerBytes?.equals(bytes);
+    if (this.containerTarget && !sameImage) this.closeContainer();
+    let openedHere = false;
+    try {
+      if (!sameImage) {
+        this.container.open(bytes);
+        this.containerTarget = target;
+        this.containerBytes = Buffer.from(bytes);
+        openedHere = true;
+      }
+      if (!sameImage || this.container.status().locked) this.container.unlock(password);
+      if (!nativeOpened.opened.invitationRequired) {
+        const snapshot = this.container.read();
+        if (snapshot.documentId !== nativeOpened.documentId
+            || snapshot.slotId !== nativeOpened.opened.slotId
+            || snapshot.content !== nativeOpened.opened.content) {
+          throw new Error("Native container handle disagrees with authenticated document");
+        }
+      }
+    } catch (error) {
+      try {
+        if (openedHere) this.closeContainer();
+        else if (sameImage && !this.container.status().locked) this.container.lock();
+      } catch {
+        this.#discardContainerContext();
+        this.onJournalWarning("NATIVE_LOCK_FAILED");
+      }
+      throw error;
+    }
+  }
+
+  closeContainer() {
+    if (!this.containerTarget) return;
+    this.container.close();
+    this.containerTarget = null;
+    this.containerBytes = null;
+  }
+
+  #discardContainerContext() {
+    try { this.container = this.native.createContainerContext?.() ?? null; }
+    catch { this.container = null; }
+    this.containerTarget = null;
+    this.containerBytes = null;
   }
 
   async enterEditMode({ takeoverToken } = {}) {
@@ -1192,6 +1254,14 @@ export class DocumentService {
   }
 
   async #finishLock(active, reason) {
+    if (this.containerTarget) {
+      try { this.container.lock(); }
+      catch (error) {
+        try { this.closeContainer(); }
+        catch { this.#discardContainerContext(); }
+        this.onJournalWarning("NATIVE_LOCK_FAILED");
+      }
+    }
     this.#cancelCheckpoint();
     this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);

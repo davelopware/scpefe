@@ -3,8 +3,10 @@
 #include <node_api.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -221,6 +223,247 @@ napi_value output_buffer(napi_env env, Operation operation)
     status = operation(static_cast<std::uint8_t *>(bytes), size, &size);
     if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
     return result;
+}
+
+struct ContainerContext {
+    scpefe_context *context{};
+    scpefe_container *active{};
+
+    ~ContainerContext()
+    {
+        if (active) scpefe_container_close(active);
+        if (context) scpefe_context_destroy(context);
+    }
+};
+
+scpefe_status monotonic_time(void *, std::uint64_t *value)
+{
+    if (!value) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *value = static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::milliseconds>(std::chrono::steady_clock::now()
+            .time_since_epoch()).count());
+    return SCPEFE_STATUS_OK;
+}
+
+ContainerContext *container_context(napi_env env, napi_callback_info info,
+    size_t &argc, napi_value *args)
+{
+    napi_value receiver;
+    check(env, napi_get_cb_info(env, info, &argc, args, &receiver, nullptr));
+    ContainerContext *context = nullptr;
+    check(env, napi_unwrap(env, receiver, reinterpret_cast<void **>(&context)));
+    if (!context) throw std::runtime_error("container context is closed");
+    return context;
+}
+
+napi_value container_open(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 1) throw std::runtime_error("open expects a Buffer");
+        auto [bytes, size] = buffer_value(env, args[0]);
+        scpefe_container_open_v1 request{sizeof(request), SCPEFE_ABI_VERSION, bytes, size};
+        scpefe_container *handle = nullptr;
+        const auto status = scpefe_container_open(owner->context, &request, &handle);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        owner->active = handle;
+        return args[0];
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_create(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 1) throw std::runtime_error("create expects one object");
+        const std::string name = string_value(env, property(env, args[0], "name"));
+        const std::string email = string_value(env, property(env, args[0], "email"));
+        const std::string device = string_value(env, property(env, args[0], "deviceName"));
+        const std::string content = string_value(env, property(env, args[0], "content"));
+        const SecretBytes password{env, property(env, args[0], "ownerPassword")};
+        napi_value recovery_value = property(env, args[0], "recoveryPassword");
+        napi_valuetype recovery_type;
+        check(env, napi_typeof(env, recovery_value, &recovery_type));
+        const bool has_recovery = recovery_type == napi_string;
+        SecretBytes recovery;
+        if (has_recovery) recovery.assign(env, recovery_value);
+        double timestamp = 0;
+        check(env, napi_get_value_double(
+            env, property(env, args[0], "timestampMs"), &timestamp));
+        const scpefe_new_document_v1 document{
+            sizeof(scpefe_new_document_v1),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size(), content.data(), content.size(),
+            static_cast<std::uint64_t>(timestamp),
+            password.data(), password.size(),
+            has_recovery ? recovery.data() : nullptr,
+            has_recovery ? recovery.size() : 0,
+        };
+        const scpefe_container_create_v1 request{
+            sizeof(scpefe_container_create_v1), SCPEFE_ABI_VERSION, document};
+        scpefe_container *handle = nullptr;
+        const auto status = scpefe_container_create(owner->context, &request, &handle);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        owner->active = handle;
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_container_copy_bytes(handle, output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_unlock(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 1) throw std::runtime_error("unlock expects a password");
+        const SecretBytes password{env, args[0]};
+        scpefe_password_input_v1 input{sizeof(input), SCPEFE_ABI_VERSION,
+            password.data(), password.size()};
+        const auto status = scpefe_container_unlock(owner->active, &input);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_get_boolean(env, true, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_lock(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        const auto status = scpefe_container_lock(owner->active);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_get_boolean(env, true, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_close(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        const auto status = scpefe_container_close(owner->active);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        owner->active = nullptr;
+        napi_value result;
+        check(env, napi_get_boolean(env, true, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_read(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        scpefe_owned_snapshot *snapshot = nullptr;
+        const auto status = scpefe_container_read(owner->active, &snapshot);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_owned_snapshot, decltype(&scpefe_owned_snapshot_destroy)>
+            owned(snapshot, scpefe_owned_snapshot_destroy);
+        scpefe_owned_snapshot_view_v1 view{};
+        view.struct_size = sizeof(view);
+        view.abi_version = SCPEFE_ABI_VERSION;
+        const auto view_status = scpefe_owned_snapshot_view(owned.get(), &view);
+        if (view_status != SCPEFE_STATUS_OK) {
+            throw_status(env, view_status); return nullptr;
+        }
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        set_string(env, result, "content", view.content, view.content_size);
+        const auto id = hexadecimal(view.document_id, SCPEFE_DOCUMENT_ID_SIZE);
+        set_string(env, result, "documentId", id.data(), id.size());
+        const auto slot = hexadecimal(view.slot_id, SCPEFE_SLOT_ID_SIZE);
+        set_string(env, result, "slotId", slot.data(), slot.size());
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_bytes(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
+            std::size_t *size) {
+            return scpefe_container_copy_bytes(owner->active, output, capacity, size);
+        });
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_status(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        scpefe_container_status_v1 status{sizeof(status), SCPEFE_ABI_VERSION};
+        const auto result = scpefe_container_status(owner->active, &status);
+        if (result != SCPEFE_STATUS_OK) { throw_status(env, result); return nullptr; }
+        napi_value object;
+        check(env, napi_create_object(env, &object));
+        set_boolean(env, object, "locked", status.is_locked != 0);
+        return object;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value create_container_context(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        check(env, napi_get_cb_info(env, info, &argc, nullptr, nullptr, nullptr));
+        auto owner = std::make_unique<ContainerContext>();
+        scpefe_host_services_v1 services{sizeof(services), SCPEFE_ABI_VERSION,
+            nullptr, monotonic_time};
+        const auto status = scpefe_context_create(&services, &owner->context);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value object;
+        check(env, napi_create_object(env, &object));
+        napi_property_descriptor methods[] = {
+            {"create", nullptr, container_create, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"open", nullptr, container_open, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"unlock", nullptr, container_unlock, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"lock", nullptr, container_lock, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"close", nullptr, container_close, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"read", nullptr, container_read, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"bytes", nullptr, container_bytes, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"status", nullptr, container_status, nullptr, nullptr, nullptr, napi_default, nullptr},
+        };
+        check(env, napi_define_properties(env, object, std::size(methods), methods));
+        check(env, napi_wrap(env, object, owner.get(),
+            [](napi_env, void *data, void *) {
+                delete static_cast<ContainerContext *>(data);
+            }, nullptr, nullptr));
+        owner.release();
+        return object;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
 }
 
 napi_value create_document(napi_env env, napi_callback_info info)
@@ -969,6 +1212,8 @@ napi_value reconcile_identity(napi_env env, napi_callback_info info)
 napi_value initialize(napi_env env, napi_value exports)
 {
     napi_property_descriptor methods[] = {
+        {"createContainerContext", nullptr, create_container_context, nullptr,
+            nullptr, nullptr, napi_default, nullptr},
         {"createDocument", nullptr, create_document, nullptr, nullptr, nullptr,
             napi_default, nullptr},
         {"passwordMeetsPolicy", nullptr, password_meets_policy, nullptr, nullptr, nullptr,

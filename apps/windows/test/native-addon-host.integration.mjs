@@ -9,6 +9,7 @@ assert.ok(releasePath, "release signal path is required");
 
 const native = createRequire(import.meta.url)(addonPath);
 assert.equal(typeof native.createDocument, "function");
+assert.equal(typeof native.createContainerContext, "function");
 console.log("SCPEFE_NATIVE_HOST_READY");
 
 const deadline = Date.now() + 30_000;

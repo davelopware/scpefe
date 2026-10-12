@@ -6,8 +6,12 @@ function canceledReplacement() {
 
 /* Disposes a staged candidate without changing the authoritative current session. */
 export async function disposeReplacement(staged) {
-  if (staged?.created) await staged.candidate.abandonCreatedDocument();
-  else if (staged?.candidate?.active) await staged.candidate.lock("replacement-canceled");
+  try {
+    if (staged?.created) await staged.candidate.abandonCreatedDocument();
+    else if (staged?.candidate?.active) await staged.candidate.lock("replacement-canceled");
+  } finally {
+    staged?.candidate?.closeContainer?.();
+  }
 }
 
 /* Authenticates an Open target in an isolated service while the current session stays live. */

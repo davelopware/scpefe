@@ -166,6 +166,7 @@ export class DocumentLifecycleHost {
       if (this.lockedTarget) {
         await this.service.releaseSuspendedLease?.(this.lockedTarget);
       }
+      this.service.closeContainer?.();
       this.currentTarget = null; this.lockedTarget = null; this.selectedOpenTarget = null;
     });
     if (closed) {
@@ -246,10 +247,17 @@ export class DocumentLifecycleHost {
     }
     this.service = staged.candidate; staged.candidate.acceptCreatedDocument?.();
     this.currentTarget = target; this.lockedTarget = target;
-    if (previous !== this.service && previous.active) {
-      void previous.lock("document-replaced").catch((error) =>
-        this.#emit("document:journal-warning",
-          safeEventCode(error, "document:lock")));
+    if (previous !== this.service) {
+      if (previous.active) {
+        try { await previous.lock("document-replaced"); }
+        catch (error) {
+          this.#emit("document:journal-warning", safeEventCode(error, "document:lock"));
+        }
+      }
+      try { previous.closeContainer?.(); }
+      catch (error) {
+        this.#emit("document:journal-warning", safeEventCode(error, "document:close"));
+      }
     }
   }
 
@@ -405,7 +413,7 @@ export class DocumentLifecycleHost {
 
   async #unlock(password) {
     if (!this.lockedTarget) throw new Error("No locked document is available");
-    const opened = await this.replacements.open(this.lockedTarget, password);
+    const opened = await this.service.openDocument(this.lockedTarget, password);
     await this.sendJournalSummary();
     return { ...opened, targetName: this.basename(this.lockedTarget) };
   }
@@ -444,7 +452,9 @@ export class DocumentLifecycleHost {
 
   async #claim(password) {
     let opened;
-    try { opened = await this.replacements.claim(password); }
+    try { opened = this.service.active?.opened.invitationRequired
+      ? await this.service.claimInvitation(password)
+      : await this.replacements.claim(password); }
     catch (error) {
       if (this.externalLifecycle.invitation
           && error?.code === "DOCUMENT_REPLACEMENT_CANCELED") {
