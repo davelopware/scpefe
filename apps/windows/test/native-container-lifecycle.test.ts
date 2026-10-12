@@ -16,6 +16,7 @@ interface ContainerContext {
 interface NativeAddon {
   createDocument(request: object): Buffer;
   createContainerContext(): ContainerContext;
+  openDocument(bytes: Buffer, password: string): { content: string };
 }
 
 const addonPath = process.env.SCPEFE_NATIVE_ADDON_PATH;
@@ -32,6 +33,7 @@ test("one context retains its handle through Lock and authenticated Unlock", {
   const bytes = context.create({ name: "Ada", email: "ada@example.test",
     deviceName: "Ada PC", content: "private words", ownerPassword: password,
     timestampMs: 1 });
+  assert.equal(native.openDocument(bytes, password).content, "private words");
   assert.equal(context.status().locked, false);
   assert.throws(() => context.open(bytes), /status 14/);
   const first = context.read();
