@@ -426,6 +426,59 @@ typedef struct scpefe_candidate_info_v1 {
     uint32_t effect_mask;
 } scpefe_candidate_info_v1;
 
+/* Lease-only publication intent; expected fields must match the authenticated image. */
+typedef enum scpefe_lease_action {
+    SCPEFE_LEASE_ACQUIRE = 1,
+    SCPEFE_LEASE_REFRESH = 2,
+    SCPEFE_LEASE_RELEASE = 3,
+    SCPEFE_LEASE_RESUME = 4,
+    SCPEFE_LEASE_TAKEOVER = 5
+} scpefe_lease_action;
+
+/* Host-observed stale evidence is elapsed monotonic time without an advancing heartbeat. */
+typedef struct scpefe_container_lease_change_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    scpefe_lease_action action;
+    const uint8_t *password;
+    size_t password_size;
+    const uint8_t *session_id;
+    size_t session_id_size;
+    int expected_active;
+    const uint8_t *expected_session_id;
+    size_t expected_session_id_size;
+    uint64_t expected_heartbeat_counter;
+    uint64_t expected_holder_utc_ms;
+    uint64_t expected_duration_ms;
+    uint64_t now_utc_ms;
+    uint64_t unchanged_monotonic_ms;
+    uint64_t duration_ms;
+    const char *holder_name;
+    size_t holder_name_size;
+    const char *holder_email;
+    size_t holder_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    int explicit_takeover;
+} scpefe_container_lease_change_v1;
+
+/* Authenticated lease relation to this local container session. */
+typedef enum scpefe_lease_status {
+    SCPEFE_LEASE_NONE = 0,
+    SCPEFE_LEASE_HELD = 1,
+    SCPEFE_LEASE_OTHER_HOLDER = 2,
+    SCPEFE_LEASE_UNCERTAIN = 3
+} scpefe_lease_status;
+
+/* Copied current mode; lease metadata is available in authenticated-state snapshots. */
+typedef struct scpefe_container_lease_mode_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    int is_editing;
+    scpefe_lease_status lease_status;
+} scpefe_container_lease_mode_v1;
+
 /* Credential or authenticated slot metadata operation for one candidate. */
 typedef enum scpefe_slot_change_kind {
     SCPEFE_SLOT_CHANGE_PASSWORD = 1,
@@ -685,8 +738,17 @@ SCPEFE_API void scpefe_owned_snapshot_destroy(scpefe_owned_snapshot *snapshot);
 SCPEFE_API scpefe_status scpefe_container_copy_bytes(
     const scpefe_container *container, uint8_t *output,
     size_t output_capacity, size_t *output_size);
-/* Records a host-confirmed editing lease for this unlocked session. */
+/* Legacy host-confirmed mode switch retained for existing host workflows. */
 SCPEFE_API scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *container);
+/* Reads edit mode while unlocked; authenticated-state snapshots provide lease details. */
+SCPEFE_API scpefe_status scpefe_container_lease_mode(
+    const scpefe_container *container, scpefe_container_lease_mode_v1 *mode);
+/* Prepares authenticated lease bytes without appending a content revision.
+ * The host must reread and compare exact source bytes from copy_bytes before
+ * publishing: source_head alone cannot detect another lease heartbeat. */
+SCPEFE_API scpefe_status scpefe_container_prepare_lease_change(
+    scpefe_container *container, const scpefe_container_lease_change_v1 *change,
+    scpefe_candidate_info_v1 *candidate);
 /* Replaces submitted clear content without changing confirmed encrypted bytes. */
 SCPEFE_API scpefe_status scpefe_container_submit_content(scpefe_container *container,
     const char *content, size_t content_size);
@@ -721,10 +783,10 @@ SCPEFE_API void scpefe_owned_authenticated_state_destroy(
 /* Copies the retained candidate bytes without preparing or encrypting again. */
 SCPEFE_API scpefe_status scpefe_container_copy_candidate(const scpefe_container *container,
     uint64_t operation_id, uint8_t *output, size_t capacity, size_t *output_size);
-/* Applies one host result and returns the required follow-up actions. */
+/* Applies one host result for a save, slot, or lease candidate. */
 SCPEFE_API scpefe_status scpefe_container_acknowledge_save(scpefe_container *container,
     uint64_t operation_id, scpefe_publication_outcome outcome, uint32_t *effect_mask);
-/* Resolves an ambiguous publication after the host has checked the exact bytes. */
+/* Resolves an ambiguous candidate after the host has checked the exact bytes. */
 SCPEFE_API scpefe_status scpefe_container_resolve_save(scpefe_container *container,
     uint64_t operation_id, int published, uint32_t *effect_mask);
 

@@ -27,7 +27,25 @@ struct ContainerCandidate {
     bool discard{};
     bool removes_active_slot{};
     bool slot_change{};
+    bool lease_change{};
+    bool lease_held_after{};
+    std::array<std::uint8_t, 16> lease_session_after{};
     std::string discarded_content;
+};
+
+/* Names an authenticated lease operation and the evidence observed by the host. */
+enum class LeaseAction { acquire, refresh, release, resume, takeover };
+
+/* Carries a session's requested lease and a fresh expected prior lease witness. */
+struct LeaseChange {
+    LeaseAction action;
+    std::array<std::uint8_t, 16> session_id{};
+    bool expected_active{};
+    std::array<std::uint8_t, 16> expected_session_id{};
+    std::uint64_t expected_counter{}, expected_holder_utc_ms{}, expected_duration_ms{};
+    std::uint64_t now_utc_ms{}, unchanged_monotonic_ms{}, duration_ms{};
+    std::string_view holder_name, holder_email, device_name;
+    bool explicit_takeover{};
 };
 
 /* Owns one container's installed state and observer subscriptions. */
@@ -86,6 +104,10 @@ public:
         std::size_t actor_password_size, std::string_view client_name,
         std::string_view client_email, std::string_view device,
         std::uint64_t timestamp_ms);
+    /* Prepares a lease-only candidate after authenticating the current slot. */
+    TransitionResult prepare_lease_change(std::uint64_t operation_id,
+        const LeaseChange &change, const std::uint8_t *password,
+        std::size_t password_size);
     /* Returns the unresolved proposal for immediate caller copies. */
     const ContainerCandidate *candidate() const { return candidate_ ? &*candidate_ : nullptr; }
     /* Applies a host result for the matching proposal; only verified success adopts it. */
@@ -122,6 +144,7 @@ private:
     std::vector<ContainerStateObserver *> observers_;
     bool transitioning_{};
     bool revised_v3_{};
+    std::optional<std::array<std::uint8_t, 16>> local_lease_session_;
 };
 
 } // namespace scpefe::container

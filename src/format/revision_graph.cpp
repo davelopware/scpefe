@@ -648,6 +648,38 @@ const RevisionRecord *RevisionGraph::find(const RevisionId &id) const
     return it == records_.end() ? nullptr : &*it;
 }
 
+std::vector<std::uint8_t> RevisionGraph::replace_lease(const RevisionLease &lease) const
+{
+    CborWriter writer;
+    writer.map(field_ranges_[9].second ? 9 : 8);
+    writer.unsigned_integer(1); writer.unsigned_integer(1);
+    const auto field = [&](unsigned key) {
+        const auto [offset, length] = field_ranges_[key];
+        writer.unsigned_integer(key);
+        writer.raw(encoded_.data() + offset, length);
+    };
+    field(2); field(3);
+    writer.unsigned_integer(4); writer.map(8);
+    writer.unsigned_integer(1); writer.boolean(lease.active);
+    writer.unsigned_integer(2); writer.bytes(lease.session_id.data(), lease.session_id.size());
+    writer.unsigned_integer(3); writer.unsigned_integer(lease.heartbeat_counter);
+    writer.unsigned_integer(4); writer.unsigned_integer(lease.holder_utc_ms);
+    writer.unsigned_integer(5); writer.unsigned_integer(lease.duration_ms);
+    writer.unsigned_integer(6); writer.text(lease.holder_name.data(), lease.holder_name.size());
+    writer.unsigned_integer(7); writer.text(lease.holder_email.data(), lease.holder_email.size());
+    writer.unsigned_integer(8); writer.text(lease.device.data(), lease.device.size());
+    writer.unsigned_integer(5); writer.array(records_.size());
+    for (const auto &record : records_)
+        writer.raw(record.record_cbor.data(), record.record_cbor.size());
+    writer.unsigned_integer(6); writer.bytes(head_.data(), head_.size());
+    writer.unsigned_integer(7); writer.bytes(content_head_.data(), content_head_.size());
+    field(8);
+    if (field_ranges_[9].second) field(9);
+    auto encoded = writer.take_output();
+    (void)RevisionGraph::decode(encoded.data(), encoded.size(), RevisionLimits::defaults());
+    return encoded;
+}
+
 std::optional<std::string> RevisionGraph::reconstruct(const RevisionId &id) const
 {
     const auto it = std::find_if(records_.begin(), records_.end(),
