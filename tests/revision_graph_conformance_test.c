@@ -167,6 +167,27 @@ int main(int argc, char **argv)
     }
     {
         scpefe_revision_graph *graph = NULL;
+        bytes input = {0};
+        size_t size = 99;
+        char sentinel = 'Q';
+        CHECK(decode(argv[1], "valid/expanding-diagnostic", &limits, &graph, &input) == 0);
+        CHECK(input.size < 2u * 1024u * 1024u);
+        CHECK(scpefe_revision_graph_diagnostic_json(graph, 0, NULL, 0, &size)
+            == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+        CHECK(size > 0 && size < 32u * 1024u * 1024u);
+        size = 99;
+        CHECK(scpefe_revision_graph_diagnostic_json(graph, 1, NULL, 0, &size)
+            == SCPEFE_STATUS_LIMIT_EXCEEDED);
+        CHECK(size == 0);
+        size = 99;
+        CHECK(scpefe_revision_graph_diagnostic_json(graph, 1, &sentinel, 1, &size)
+            == SCPEFE_STATUS_LIMIT_EXCEEDED);
+        CHECK(size == 0 && sentinel == 'Q');
+        scpefe_revision_graph_destroy(graph);
+        free(input.data);
+    }
+    {
+        scpefe_revision_graph *graph = NULL;
         scpefe_revision_page *page = NULL;
         scpefe_revision_metadata_v1 head = {0}, change = {0}, baseline = {0};
         scpefe_revision_result *body = NULL, *comparison = NULL;

@@ -605,6 +605,18 @@ std::optional<std::string> RevisionGraph::compare(const RevisionId &before_id,
 
 std::string RevisionGraph::diagnostic_json(bool include_content) const
 {
+    if (include_content) {
+        // A tiny copy delta can repeat a large text in every displayed record.
+        // Reject that expansion before reconstructing any historical text.
+        std::size_t minimum_content_bytes = 0;
+        for (const auto &record : records_) {
+            if (record.foreign || record.kind == 2 || !record.text_available) continue;
+            if (record.body_length > DiagnosticJsonWriter::max_output_bytes
+                - minimum_content_bytes)
+                throw RevisionFailure{RevisionError::limit_exceeded};
+            minimum_content_bytes += static_cast<std::size_t>(record.body_length);
+        }
+    }
     DiagnosticJsonWriter json;
     json.raw("{\"schema\":\"container-v3\",\"head\":");
     json.hex(head_.data(), head_.size());

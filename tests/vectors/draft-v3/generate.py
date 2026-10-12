@@ -176,6 +176,22 @@ def main():
     rows.append({**write("valid/repeated-compaction", cbor(repeated_compaction)),
         "expect": "accept; earlier compaction cutoff body was pruned by a later compaction"})
 
+    # 64 KiB of text plus tiny copy deltas remains a small payload while an
+    # opt-in diagnostic would repeat more than 32 MiB of historical content.
+    expanding_text = b"x" * (64 * 1024 - 1) + b"\n"
+    expanding_full = [0, len(expanding_text), expanding_text]
+    expanding_base = record(metadata(0, expanding_text, body=expanding_full),
+                            1, expanding_full)
+    expanding_records = [expanding_base]
+    expanding_delta = [0, len(expanding_text), [[0, 0, len(expanding_text)]]]
+    for _ in range(512):
+        predecessor = expanding_records[-1][1]
+        expanding_records.append(record(metadata(1, expanding_text, predecessor,
+                                                 predecessor, expanding_delta),
+                                        2, expanding_delta))
+    rows.append({**write("valid/expanding-diagnostic", cbor(payload(expanding_records))),
+        "expect": "accept graph; redacted diagnostic fits, opt-in content exceeds 32 MiB"})
+
     remote_text = b"alpha\nremote\n"
     remote_delta = [0, len(remote_text), [[0, 0, 6], [1, b"remote\n"]]]
     remote_meta = metadata(1, remote_text, base[1], base[1], remote_delta)

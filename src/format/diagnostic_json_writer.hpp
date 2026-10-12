@@ -9,6 +9,8 @@ namespace scpefe::format {
 /* Builds compact diagnostic JSON with consistent escaping and hex encoding. */
 class DiagnosticJsonWriter {
 public:
+    /* Maximum diagnostic JSON bytes, excluding the caller's terminating NUL. */
+    static constexpr std::size_t max_output_bytes = 32u * 1024u * 1024u;
     /* Appends trusted JSON syntax or already-encoded content. */
     void raw(const std::string &value);
     /* Appends one JSON syntax character. */
@@ -21,6 +23,8 @@ public:
     std::string take_output();
 
 private:
+    /* Rejects any append that would exceed the diagnostic output contract. */
+    void ensure_room(std::size_t additional) const;
     std::string output_;
 };
 

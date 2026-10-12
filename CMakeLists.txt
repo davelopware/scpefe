@@ -294,6 +294,13 @@ if(BUILD_TESTING)
         add_executable(scpefe_revision_test tests/revision_test.c)
         target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_diagnostic_json_writer_test
+            tests/diagnostic_json_writer_test.cpp
+            src/format/diagnostic_json_writer.cpp)
+        target_compile_features(scpefe_diagnostic_json_writer_test PRIVATE cxx_std_20)
+        target_include_directories(scpefe_diagnostic_json_writer_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
         set(SCPEFE_REVISION_OWNERSHIP_SOURCES ${SCPEFE_PORTABLE_FORMAT_SOURCES})
         list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/revision_abi.cpp)
         list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/history_abi.cpp)
@@ -386,6 +393,8 @@ if(BUILD_TESTING)
         )
         add_test(NAME scpefe.revision-ownership
             COMMAND scpefe_revision_ownership_test)
+        add_test(NAME scpefe.diagnostic-json-writer
+            COMMAND scpefe_diagnostic_json_writer_test)
         add_test(NAME scpefe.managed-slot-ownership
             COMMAND scpefe_managed_slot_ownership_test)
         add_test(

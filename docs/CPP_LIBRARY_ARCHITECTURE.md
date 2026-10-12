@@ -59,7 +59,7 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 | [`CborReader`](../src/format/cbor_reader.hpp) | Parses the strict deterministic-CBOR subset and enforces bounds, canonical encoding, and nesting limits. |
 | [`CborWriter`](../src/format/cbor_writer.hpp) | Writes deterministic CBOR primitives used to serialize a revision. |
 | [`RevisionLimits`](../src/format/revision_limits.hpp) | Carries maximum input, text, byte-string, collection, nesting, and parent counts for revision processing. |
-| [`DiagnosticJsonWriter`](../src/format/diagnostic_json_writer.hpp) | Escapes strings and formats bytes for the developer-facing JSON view. Content is included only when requested. |
+| [`DiagnosticJsonWriter`](../src/format/diagnostic_json_writer.hpp) | Escapes strings and formats bytes for the developer-facing JSON view, with a 32 MiB output ceiling. Content is included only when requested; size probes return a limit error before reconstructing clearly oversized history. |
 
 [`SnapshotRevisionData` and `RevisionGraphNodeData`](../src/format/snapshot_revision_data.hpp) hold the semantic revision fields and ancestor graph nodes. A revision contains the current snapshot text, content hash, author and device attribution, parent IDs, and optional provisional or event fields. The ancestor graph stores IDs and parent links used for related-head checks; it does not store every ancestor's text. [`text_validation.hpp`](../src/format/text_validation.hpp) checks UTF-8 and canonical document text. [`RevisionFailure`](../src/format/revision_error.hpp) carries errors to the ABI layer, where they become C status codes. The matching bridge is [`revision_abi.cpp`](../src/abi/revision_abi.cpp).
 

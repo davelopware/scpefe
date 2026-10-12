@@ -585,7 +585,9 @@ SCPEFE_API scpefe_status scpefe_revision_result_view(
     const scpefe_revision_result *result, scpefe_revision_result_view_v1 *view);
 /* Releases a copied body, reconstructed text, or comparison. */
 SCPEFE_API void scpefe_revision_result_destroy(scpefe_revision_result *result);
-/* Writes redacted JSON by default; content requires an explicit nonzero flag. */
+/* Writes redacted JSON by default; content requires a nonzero flag. JSON is
+ * limited to 32 MiB (excluding NUL); oversized output, including size probes,
+ * returns LIMIT_EXCEEDED with output_size set to zero. */
 SCPEFE_API scpefe_status scpefe_revision_graph_diagnostic_json(
     const scpefe_revision_graph *graph, int include_content,
     char *output, size_t output_capacity, size_t *output_size);

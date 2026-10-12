@@ -36,6 +36,12 @@
     "expect": "accept; earlier compaction cutoff body was pruned by a later compaction"
   },
   {
+    "path": "valid/expanding-diagnostic.hex",
+    "bytes": 217546,
+    "sha256": "60f9301531616b1bbcd39d43d6625ec7292aabd3063dacbe0e2bd01d543f9977",
+    "expect": "accept graph; redacted diagnostic fits, opt-in content exceeds 32 MiB"
+  },
+  {
     "path": "valid/foreign-merge.hex",
     "bytes": 1398,
     "sha256": "6640226832f26faa2f874134d26e640cf5362aae29774e4a2bdd1b57c8d4e486",

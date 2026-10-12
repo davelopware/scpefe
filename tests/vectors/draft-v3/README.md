@@ -23,6 +23,7 @@ rows; the native stateful C ABI test authenticates the saved checkpoint envelope
 | `valid/pruned-checkpoint.hex` | Baseline body unavailable; original IDs unchanged; checkpoint at existing delta ID reconstructs `alpha\nbeta\n`. |
 | `valid/pruned-checkpoint-container.hex` | Authenticated saved history with unavailable baseline body and reconstructable checkpoint. |
 | `valid/repeated-compaction.hex` | A later compaction prunes the first cutoff's checkpoint while retaining the first compaction event and its immutable details. |
+| `valid/expanding-diagnostic.hex` | Tiny copy deltas preserve 64 KiB text across 513 records; redacted JSON fits, but opt-in historical content exceeds the 32 MiB diagnostic cap. |
 | `valid/foreign-merge.hex` | Imported foreign body is unavailable; its original ID and attribution survive; merge delta reconstructs from the canonical local parent. |
 | `invalid/nonminimal-key.hex` | Reject longer-than-necessary CBOR map-key encoding. |
 | `invalid/duplicate-key.hex` | Reject duplicate top-level key. |

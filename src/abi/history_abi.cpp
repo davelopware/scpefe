@@ -286,6 +286,7 @@ scpefe_status scpefe_revision_graph_diagnostic_json(const scpefe_revision_graph 
     int include_content, char *output, size_t capacity, size_t *output_size)
 {
     if (!graph || !output_size) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *output_size = 0;
     try {
         const auto json = graph->value.diagnostic_json(include_content != 0);
         *output_size = json.size();
