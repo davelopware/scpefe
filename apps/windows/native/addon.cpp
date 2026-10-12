@@ -1039,6 +1039,69 @@ napi_value container_prepare_save(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value container_prepare_compaction(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 2) throw std::runtime_error(
+            "prepareCompaction expects a password and verified host evidence");
+        const SecretBytes password{env, args[0]};
+        const auto input = args[1];
+        const auto session = parse_slot_id(string_value(env,
+            property(env, input, "sessionId")));
+        const auto [backup, backup_size] = buffer_value(env,
+            property(env, input, "verifiedBackupBytes"));
+        const auto name = string_value(env, property(env, input, "clientName"));
+        const auto email = string_value(env, property(env, input, "clientEmail"));
+        const auto device = string_value(env, property(env, input, "deviceName"));
+        scpefe_container_compaction_v1 request{};
+        request.struct_size = sizeof(request);
+        request.abi_version = SCPEFE_ABI_VERSION;
+        request.operation_id = number_value(env, property(env, input, "operationId"));
+        request.password = password.data();
+        request.password_size = password.size();
+        request.lease_session_id = session.data();
+        request.lease_session_id_size = session.size();
+        request.lease_heartbeat_counter = number_value(env,
+            property(env, input, "heartbeatCounter"));
+        request.explicit_decision = boolean_value(env,
+            property(env, input, "explicitDecision"));
+        request.clean_state_confirmed = boolean_value(env,
+            property(env, input, "cleanStateConfirmed"));
+        request.backup_verified = boolean_value(env,
+            property(env, input, "backupVerified"));
+        request.verified_backup_bytes = backup;
+        request.verified_backup_size = backup_size;
+        request.client_name = name.data();
+        request.client_name_size = name.size();
+        request.client_email = email.data();
+        request.client_email_size = email.size();
+        request.device_name = device.data();
+        request.device_name_size = device.size();
+        request.timestamp_ms = number_value(env, property(env, input, "timestampMs"));
+        scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+        const auto status = scpefe_container_prepare_compaction(
+            owner->active, &request, &candidate);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value bytes = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_container_copy_candidate(owner->active,
+                    candidate.operation_id, output, capacity, size);
+            });
+        if (!bytes) return nullptr;
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_set_named_property(env, result, "bytes", bytes));
+        set_number(env, result, "operationId", candidate.operation_id);
+        set_number(env, result, "effects", candidate.effect_mask);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value container_finish_save(napi_env env, napi_callback_info info)
 {
     try {
@@ -1250,6 +1313,7 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"leaseAdvice", nullptr, container_lease_advice, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareLeaseChange", nullptr, container_prepare_lease_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSave", nullptr, container_prepare_save, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"prepareCompaction", nullptr, container_prepare_compaction, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSlotChange", nullptr, container_prepare_slot_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"slots", nullptr, container_slots, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"finishSave", nullptr, container_finish_save, nullptr, nullptr, nullptr, napi_default, nullptr},

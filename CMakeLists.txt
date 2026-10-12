@@ -156,12 +156,6 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 $<TARGET_FILE:scpefe_electron_native>
         )
         add_test(
-            NAME scpefe.native-addon-compaction
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-compaction-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
             NAME scpefe.native-addon-migration
             COMMAND ${NODE_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-migration-addon.integration.mjs
@@ -175,7 +169,7 @@ if(SCPEFE_BUILD_NODE_ADDON)
         )
         foreach(lifecycle_test IN ITEMS native-container-lifecycle
                 native-document-service-lifecycle native-lease-workflows
-                native-divergence-abi)
+                native-divergence-abi native-compaction-flow)
             add_test(
                 NAME scpefe.${lifecycle_test}
                 COMMAND ${NODE_EXECUTABLE}

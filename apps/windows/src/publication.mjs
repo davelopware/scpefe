@@ -155,7 +155,7 @@ export class PublicationService {
     }
   }
 
-  async publishReplica({ target, candidate }) {
+  async publishReplica({ target, candidate, returnVerifiedBytes = false }) {
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new TypeError("backup candidate must contain container bytes");
     }
@@ -191,7 +191,9 @@ export class PublicationService {
         throw new Error("Backup replica verification failed");
       }
       await this.fs.unlink(transactionFile);
-      return { completed: true };
+      return returnVerifiedBytes
+        ? { completed: true, verifiedBytes: published }
+        : { completed: true };
     } catch (error) {
       if (handle) await handle.close().catch(() => {});
       if (publishedTarget
