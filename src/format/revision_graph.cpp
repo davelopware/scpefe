@@ -1090,12 +1090,39 @@ std::vector<std::uint8_t> RevisionGraph::append_slot_event(
     std::string_view client_name, std::string_view client_email,
     std::string_view device, std::uint64_t timestamp_ms) const
 {
+    return append_event(slots, actor, affected_slot, event_type, event_detail,
+        std::nullopt, client_name, client_email, device, timestamp_ms);
+}
+
+std::vector<std::uint8_t> RevisionGraph::append_activity_event(
+    const RevisionSlot &actor, std::string_view event_type,
+    std::string_view event_detail, std::uint8_t activity_status,
+    std::string_view client_name, std::string_view client_email,
+    std::string_view device, std::uint64_t timestamp_ms) const
+{
+    if (activity_status > 2)
+        throw RevisionFailure{RevisionError::invalid_argument};
+    return append_event(slots_, actor, actor.id, event_type, event_detail,
+        activity_status, client_name, client_email, device, timestamp_ms);
+}
+
+std::vector<std::uint8_t> RevisionGraph::append_event(
+    const std::vector<RevisionSlot> &slots, const RevisionSlot &actor,
+    const std::array<std::uint8_t, 16> &affected_slot,
+    std::string_view event_type, std::string_view event_detail,
+    std::optional<std::uint8_t> activity_status,
+    std::string_view client_name, std::string_view client_email,
+    std::string_view device, std::uint64_t timestamp_ms) const
+{
     if (records_.back().provisional || slots.empty() || slots.size() > 9
         || event_type.empty() || timestamp_ms > std::numeric_limits<std::int64_t>::max())
         throw RevisionFailure{RevisionError::invalid_argument};
     CborWriter details;
-    details.map(event_detail.empty() ? 1 : 2);
+    details.map(1 + (activity_status ? 1 : 0) + (event_detail.empty() ? 0 : 1));
     details.unsigned_integer(1); details.bytes(affected_slot.data(), affected_slot.size());
+    if (activity_status) {
+        details.unsigned_integer(4); details.unsigned_integer(*activity_status);
+    }
     if (!event_detail.empty()) {
         details.unsigned_integer(5); details.text(event_detail.data(), event_detail.size());
     }

@@ -428,7 +428,12 @@ typedef enum scpefe_publication_effect {
     SCPEFE_EFFECT_PRESERVE_UNSAVED_WORK = 1u << 6,
     SCPEFE_EFFECT_CLEAR_DISPLAY = 1u << 7,
     SCPEFE_EFFECT_STOP_HEARTBEAT = 1u << 8,
-    SCPEFE_EFFECT_REAUTHENTICATE_TARGET = 1u << 9
+    SCPEFE_EFFECT_REAUTHENTICATE_TARGET = 1u << 9,
+    SCPEFE_EFFECT_PERFORM_BACKUP = 1u << 10,
+    SCPEFE_EFFECT_PERFORM_EXPORT = 1u << 11,
+    SCPEFE_EFFECT_RECORD_SUCCESS_OUTCOME = 1u << 12,
+    SCPEFE_EFFECT_RECORD_FAILURE_OUTCOME = 1u << 13,
+    SCPEFE_EFFECT_JOURNAL_ACTIVITY_OUTCOME = 1u << 14
 } scpefe_publication_effect;
 
 /* Authenticated target image observed before any merge or publication. */
@@ -486,6 +491,59 @@ typedef struct scpefe_container_compaction_v1 {
     size_t device_name_size;
     uint64_t timestamp_ms;
 } scpefe_container_compaction_v1;
+
+/* Selects which external action follows a published activity attempt. */
+typedef enum scpefe_activity_kind {
+    SCPEFE_ACTIVITY_BACKUP = 1,
+    SCPEFE_ACTIVITY_EXPORT = 2
+} scpefe_activity_kind;
+
+/* One activity event intent against an exact source image observed by the host.
+ * The host must reread and compare the target again before publishing the
+ * candidate, and must journal an outcome that cannot be published. */
+typedef struct scpefe_container_activity_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    scpefe_activity_kind kind;
+    int clean_state_confirmed;
+    const uint8_t *observed_target;
+    size_t observed_target_size;
+    const uint8_t *password;
+    size_t password_size;
+    const char *client_name;
+    size_t client_name_size;
+    const char *client_email;
+    size_t client_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    uint64_t timestamp_ms;
+} scpefe_container_activity_v1;
+
+/* A published attempt awaiting a host action or an outcome publication. */
+typedef struct scpefe_activity_status_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    int has_pending;
+    scpefe_activity_kind kind;
+    uint64_t attempt_operation_id;
+    uint8_t attempt_head[SCPEFE_REVISION_ID_SIZE];
+    int host_action_complete;
+    int succeeded;
+    int outcome_pending;
+} scpefe_activity_status_v1;
+
+/* Host-journaled outcome used to resume after reopening the attempt image. */
+typedef struct scpefe_activity_recovery_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    scpefe_activity_kind kind;
+    uint64_t attempt_operation_id;
+    uint8_t attempt_head[SCPEFE_REVISION_ID_SIZE];
+    int succeeded;
+    const uint8_t *observed_target;
+    size_t observed_target_size;
+} scpefe_activity_recovery_v1;
 
 /* Copied publication metadata and required host actions. */
 typedef struct scpefe_candidate_info_v1 {
@@ -859,6 +917,24 @@ SCPEFE_API scpefe_status scpefe_container_prepare_compaction(
     scpefe_container *container,
     const scpefe_container_compaction_v1 *compaction,
     scpefe_candidate_info_v1 *candidate);
+/* Prepares an event-only attempt; external work starts only after verified acknowledgement. */
+SCPEFE_API scpefe_status scpefe_container_prepare_activity_attempt(
+    scpefe_container *container, const scpefe_container_activity_v1 *activity,
+    scpefe_candidate_info_v1 *candidate);
+/* Records the host action and requests an app-private pending-outcome journal. */
+SCPEFE_API scpefe_status scpefe_container_complete_activity(
+    scpefe_container *container, uint64_t attempt_operation_id,
+    int succeeded, uint32_t *effect_mask);
+/* Restores a journaled result only if the current source head is its attempt. */
+SCPEFE_API scpefe_status scpefe_container_restore_activity_outcome(
+    scpefe_container *container, const scpefe_activity_recovery_v1 *recovery);
+/* Prepares the success or failure event for the published attempt. */
+SCPEFE_API scpefe_status scpefe_container_prepare_activity_outcome(
+    scpefe_container *container, const scpefe_container_activity_v1 *activity,
+    scpefe_candidate_info_v1 *candidate);
+/* Copies the pending action or outcome so the host can journal or display it. */
+SCPEFE_API scpefe_status scpefe_container_activity_status(
+    const scpefe_container *container, scpefe_activity_status_v1 *status);
 /* Prepares one authenticated slot operation as an event-only candidate. */
 SCPEFE_API scpefe_status scpefe_container_prepare_slot_change(
     scpefe_container *container, const scpefe_container_slot_change_v1 *change,

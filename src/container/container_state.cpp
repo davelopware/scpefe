@@ -90,7 +90,11 @@ TransitionResult ContainerStateManagerService::apply(
             && current.publication != PublicationPhase::publishing
             && current.publication != PublicationPhase::awaiting_host_action);
         if (current.publication != PublicationPhase::idle)
-            result.effects.push_back({EffectKind::preserve_unsaved_work,
+            result.effects.push_back({current.publication_kind
+                == PublicationKind::activity_outcome
+                    || current.publication == PublicationPhase::outcome_pending
+                ? EffectKind::journal_activity_outcome
+                : EffectKind::preserve_unsaved_work,
                 current.operation_id.value_or(0)});
         if (current.edit == EditMode::editing)
             result.effects.push_back({EffectKind::stop_heartbeat});
@@ -196,7 +200,7 @@ TransitionResult ContainerStateManagerService::apply(
         } else {
             if (current.publication_kind == PublicationKind::activity_outcome) {
                 next.publication = PublicationPhase::outcome_pending;
-                result.effects.push_back({EffectKind::preserve_unsaved_work,
+                result.effects.push_back({EffectKind::journal_activity_outcome,
                     ack->operation_id});
             } else {
                 clear_publication(next);
@@ -210,6 +214,19 @@ TransitionResult ContainerStateManagerService::apply(
         result.effects.push_back({complete->succeeded
             ? EffectKind::record_success_outcome : EffectKind::record_failure_outcome,
             complete->operation_id});
+        result.effects.push_back({EffectKind::journal_activity_outcome,
+            complete->operation_id});
+    } else if (const auto *restore = std::get_if<RestorePendingActivity>(&attempt)) {
+        require(current.access == Access::open && current.screen == Screen::unlocked
+            && current.publication == PublicationPhase::idle
+            && current.attention == Attention::none
+            && restore->attempt_operation_id > current.last_operation_id
+            && (restore->attempt_kind == PublicationKind::backup_attempt
+                || restore->attempt_kind == PublicationKind::export_attempt));
+        next.publication = PublicationPhase::outcome_pending;
+        next.operation_id = restore->attempt_operation_id;
+        next.last_operation_id = restore->attempt_operation_id;
+        next.publication_kind = restore->attempt_kind;
     } else if (const auto *resolve = std::get_if<ResolveAmbiguity>(&attempt)) {
         require_operation(current, resolve->operation_id);
         require(current.publication == PublicationPhase::recovery_required);
@@ -217,7 +234,7 @@ TransitionResult ContainerStateManagerService::apply(
         else {
             if (current.publication_kind == PublicationKind::activity_outcome) {
                 next.publication = PublicationPhase::outcome_pending;
-                result.effects.push_back({EffectKind::preserve_unsaved_work,
+                result.effects.push_back({EffectKind::journal_activity_outcome,
                     resolve->operation_id});
             } else {
                 clear_publication(next);

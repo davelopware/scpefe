@@ -247,6 +247,7 @@ int main(int argc, char **argv)
     auto completed = step(CompleteHostAction{21, true});
     assert(simulated.publication == PublicationPhase::outcome_pending);
     assert(completed.effects[0].kind == EffectKind::record_success_outcome);
+    assert(completed.effects[1].kind == EffectKind::journal_activity_outcome);
     step(BeginPublication{22, PublicationKind::activity_outcome});
     step(AcknowledgePublication{22, PublicationOutcome::ambiguous});
     assert(simulated.publication == PublicationPhase::recovery_required);
@@ -259,11 +260,12 @@ int main(int argc, char **argv)
     assert(export_attempt.effects.back().kind == EffectKind::perform_export);
     auto export_failure = step(CompleteHostAction{23, false});
     assert(export_failure.effects[0].kind == EffectKind::record_failure_outcome);
+    assert(export_failure.effects[1].kind == EffectKind::journal_activity_outcome);
     step(BeginPublication{24, PublicationKind::activity_outcome});
     step(AcknowledgePublication{24, PublicationOutcome::definite_failure});
     assert(simulated.publication == PublicationPhase::outcome_pending);
     auto closed = step(Close{});
-    assert(closed.effects[0].kind == EffectKind::preserve_unsaved_work);
+    assert(closed.effects[0].kind == EffectKind::journal_activity_outcome);
 
     // The same injected services drive actual context document operations.
     const std::uint8_t weak_password[]{'w'};
