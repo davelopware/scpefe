@@ -476,6 +476,45 @@ typedef struct scpefe_owned_slot_view_v1 {
     size_t email_size;
 } scpefe_owned_slot_view_v1;
 
+/* Owned copy of authenticated host state, including the work-journal key. */
+typedef struct scpefe_owned_authenticated_state scpefe_owned_authenticated_state;
+
+/* Borrowed view valid only while its authenticated-state owner remains alive. */
+typedef struct scpefe_owned_authenticated_state_view_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t document_id[SCPEFE_DOCUMENT_ID_SIZE];
+    uint8_t slot_id[SCPEFE_SLOT_ID_SIZE];
+    uint8_t work_journal_key[SCPEFE_WORK_JOURNAL_KEY_SIZE];
+    uint8_t revision_head[SCPEFE_REVISION_ID_SIZE];
+    uint64_t revision_timestamp_ms;
+    int manually_sealed;
+    int owner_slot, recovery_slot, must_change_password;
+    const char *client_name;
+    size_t client_name_size;
+    const char *client_email;
+    size_t client_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    const char *event_type;
+    size_t event_type_size;
+    const char *event_detail;
+    size_t event_detail_size;
+    const char *identity_name;
+    size_t identity_name_size;
+    const char *identity_email;
+    size_t identity_email_size;
+    int lease_active;
+    uint8_t lease_session_id[SCPEFE_SLOT_ID_SIZE];
+    uint64_t lease_heartbeat_counter, lease_holder_utc_ms, lease_duration_ms;
+    const char *lease_holder_name;
+    size_t lease_holder_name_size;
+    const char *lease_holder_email;
+    size_t lease_holder_email_size;
+    const char *lease_device_name;
+    size_t lease_device_name_size;
+} scpefe_owned_authenticated_state_view_v1;
+
 /* Reports a verified, definite-failure, or ambiguous host result. */
 typedef enum scpefe_publication_outcome {
     SCPEFE_PUBLICATION_VERIFIED = 1,
@@ -669,6 +708,16 @@ SCPEFE_API scpefe_status scpefe_owned_slots_view(
     const scpefe_owned_slots *slots, size_t index, scpefe_owned_slot_view_v1 *view);
 /* Releases independently copied slot metadata. */
 SCPEFE_API void scpefe_owned_slots_destroy(scpefe_owned_slots *slots);
+/* Copies authenticated slot, lease, and journal-key state into an owned result. */
+SCPEFE_API scpefe_status scpefe_container_authenticated_state(
+    const scpefe_container *container, scpefe_owned_authenticated_state **state);
+/* Borrows one authenticated-state snapshot until its owner is destroyed. */
+SCPEFE_API scpefe_status scpefe_owned_authenticated_state_view(
+    const scpefe_owned_authenticated_state *state,
+    scpefe_owned_authenticated_state_view_v1 *view);
+/* Clears the journal key and releases one authenticated-state snapshot. */
+SCPEFE_API void scpefe_owned_authenticated_state_destroy(
+    scpefe_owned_authenticated_state *state);
 /* Copies the retained candidate bytes without preparing or encrypting again. */
 SCPEFE_API scpefe_status scpefe_container_copy_candidate(const scpefe_container *container,
     uint64_t operation_id, uint8_t *output, size_t capacity, size_t *output_size);

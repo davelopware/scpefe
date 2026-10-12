@@ -67,6 +67,8 @@ public:
     bool requires_password_change() const;
     /* Borrows authenticated values only while clear reads are permitted. */
     const UnlockedContainerData *read_unlocked() const;
+    /* Borrows authenticated slot and journal state even during invitation claim. */
+    const UnlockedContainerData *read_authenticated_state() const;
     /* Returns submitted clear text, which may be newer than the confirmed image. */
     const std::string *read_content_clear() const;
     /* Submits canonical text without changing the confirmed image or head. */
@@ -78,7 +80,7 @@ public:
         bool discard, const std::uint8_t *password, std::size_t password_size,
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device_name, std::uint64_t timestamp_ms);
-    /* Prepares one authenticated slot event and exact encrypted candidate. */
+    /* Prepares one authenticated slot change and exact encrypted candidate. */
     TransitionResult prepare_slot_change(std::uint64_t operation_id,
         const SlotChange &change, const std::uint8_t *actor_password,
         std::size_t actor_password_size, std::string_view client_name,

@@ -1,6 +1,7 @@
 #include "container/container.hpp"
 #include "container/container_error.hpp"
 #include "container/revised_v3_container.hpp"
+#include "container/recoverable_password_container.hpp"
 #include "document/manual_save.hpp"
 #include "document/provisional_save.hpp"
 #include "format/revision_limits.hpp"
@@ -244,6 +245,12 @@ const UnlockedContainerData *Container::read_unlocked() const
     return can_read_clear() && unlocked_ ? &*unlocked_ : nullptr;
 }
 
+const UnlockedContainerData *Container::read_authenticated_state() const
+{
+    return state_.access == Access::open && state_.screen == Screen::unlocked
+        && unlocked_ ? &*unlocked_ : nullptr;
+}
+
 const std::string *Container::read_content_clear() const
 {
     return can_read_clear() && content_clear_ ? &*content_clear_ : nullptr;
@@ -349,7 +356,7 @@ TransitionResult Container::prepare_slot_change(std::uint64_t operation_id,
     std::string_view client_email, std::string_view device,
     std::uint64_t timestamp_ms)
 {
-    if (transitioning_ || candidate_ || !revised_v3_ || !unlocked_
+    if (transitioning_ || candidate_ || !unlocked_
         || state_.access != Access::open || state_.screen != Screen::unlocked
         || state_.publication != PublicationPhase::idle
         || state_.attention != Attention::none || state_.target_access)
@@ -358,11 +365,83 @@ TransitionResult Container::prepare_slot_change(std::uint64_t operation_id,
         throw StateError::stale_operation;
     if (!actor_password || actor_password_size == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
-    const auto authenticated = persistence_.unlock_revised_envelope(
-        committed_bytes_.data(), committed_bytes_.size(), actor_password,
-        actor_password_size, format::RevisionLimits::defaults());
+    const auto authenticated = revised_v3_
+        ? persistence_.unlock_revised_envelope(committed_bytes_.data(),
+            committed_bytes_.size(), actor_password, actor_password_size,
+            format::RevisionLimits::defaults())
+        : persistence_.unlock_legacy_envelope(committed_bytes_.data(),
+            committed_bytes_.size(), actor_password, actor_password_size,
+            format::RevisionLimits::defaults());
     if (authenticated.slot_id != unlocked_->slot_id)
         throw ContainerFailure{ContainerError::authentication_failed};
+    if (!revised_v3_) {
+        ContainerCandidate proposed;
+        proposed.operation_id = operation_id;
+        proposed.source_head = legacy_head(*unlocked_);
+        proposed.submitted_generation = content_generation_;
+        proposed.slot_change = true;
+        const auto *bytes = committed_bytes_.data();
+        const auto size = committed_bytes_.size();
+        const auto permissions = change.permissions;
+        switch (change.kind) {
+        case SlotChangeKind::change_password:
+            proposed.bytes = RecoverablePasswordContainer::change_password(bytes, size,
+                actor_password, actor_password_size, change.new_password,
+                change.new_password_size);
+            break;
+        case SlotChangeKind::add_invitation:
+            proposed.bytes = RecoverablePasswordContainer::add_invitation(bytes, size,
+                actor_password, actor_password_size, change.new_password,
+                change.new_password_size, permissions, std::string(change.name));
+            break;
+        case SlotChangeKind::claim_invitation:
+            proposed.bytes = RecoverablePasswordContainer::claim_invitation(bytes, size,
+                actor_password, actor_password_size, change.new_password,
+                change.new_password_size, std::string(change.name),
+                std::string(change.email));
+            break;
+        case SlotChangeKind::reconcile_identity:
+            proposed.bytes = RecoverablePasswordContainer::reconcile_identity(bytes, size,
+                actor_password, actor_password_size, std::string(change.name),
+                std::string(change.email));
+            if (!content_clear_) throw StateError::invalid_transition;
+            proposed.bytes = document::ManualSave::create(
+                proposed.bytes.data(), proposed.bytes.size(), actor_password,
+                actor_password_size, client_name, client_email, device,
+                *content_clear_, timestamp_ms);
+            break;
+        case SlotChangeKind::update_permissions:
+            proposed.bytes = RecoverablePasswordContainer::update_slot_permissions(
+                bytes, size, actor_password, actor_password_size,
+                change.target_id, permissions);
+            break;
+        case SlotChangeKind::remove_slot:
+            proposed.bytes = RecoverablePasswordContainer::remove_slot(bytes, size,
+                actor_password, actor_password_size, change.target_id);
+            proposed.removes_active_slot = change.target_id == unlocked_->slot_id;
+            break;
+        }
+        if (!proposed.removes_active_slot) {
+            const bool changed_password = change.kind == SlotChangeKind::change_password
+                || change.kind == SlotChangeKind::claim_invitation;
+            proposed.adopted_data = persistence_.unlock_legacy_envelope(
+                proposed.bytes.data(), proposed.bytes.size(),
+                changed_password ? change.new_password : actor_password,
+                changed_password ? change.new_password_size : actor_password_size,
+                format::RevisionLimits::defaults());
+            if (proposed.adopted_data.document_id != unlocked_->document_id
+                || proposed.adopted_data.slot_id != unlocked_->slot_id)
+                throw ContainerFailure{ContainerError::crypto_error};
+        }
+        candidate_.emplace(std::move(proposed));
+        try {
+            return install_transition(BeginPublication{operation_id,
+                PublicationKind::slot_change});
+        } catch (...) {
+            candidate_.reset();
+            throw;
+        }
+    }
     const auto &graph = *unlocked_->revision_graph;
     if (graph.records().back().provisional)
         throw StateError::invalid_transition;

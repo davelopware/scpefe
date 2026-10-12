@@ -106,6 +106,25 @@ struct scpefe_owned_slots {
     std::vector<scpefe::format::RevisionSlot> values;
 };
 
+struct scpefe_owned_authenticated_state {
+    std::array<std::uint8_t, SCPEFE_DOCUMENT_ID_SIZE> document_id{};
+    std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> slot_id{};
+    std::array<std::uint8_t, SCPEFE_WORK_JOURNAL_KEY_SIZE> journal_key{};
+    std::array<std::uint8_t, SCPEFE_REVISION_ID_SIZE> head{};
+    std::uint64_t timestamp{};
+    bool manually_sealed{};
+    bool owner{}, recovery{}, must_change{};
+    std::string identity_name, identity_email;
+    std::string client_name, client_email, device, event_type, event_detail;
+    scpefe::container::EditingLeaseData lease;
+
+    ~scpefe_owned_authenticated_state()
+    {
+        volatile std::uint8_t *bytes = journal_key.data();
+        for (std::size_t i = 0; i < journal_key.size(); ++i) bytes[i] = 0;
+    }
+};
+
 struct scpefe_context {
     explicit scpefe_context(scpefe::core::Context value)
         : implementation(std::move(value)) {}
@@ -739,3 +758,93 @@ scpefe_status scpefe_owned_slots_view(const scpefe_owned_slots *slots,
 }
 
 void scpefe_owned_slots_destroy(scpefe_owned_slots *slots) { delete slots; }
+
+scpefe_status scpefe_container_authenticated_state(const scpefe_container *handle,
+    scpefe_owned_authenticated_state **state)
+{
+    if (!state) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *state = nullptr;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    const auto &container = handle->owner->implementation.make_container();
+    const auto *unlocked = container.read_authenticated_state();
+    if (!unlocked) return SCPEFE_STATUS_LOCKED;
+    try {
+        auto result = std::make_unique<scpefe_owned_authenticated_state>();
+        result->document_id = unlocked->document_id;
+        result->slot_id = unlocked->slot_id;
+        result->journal_key = unlocked->work_journal_key;
+        result->owner = unlocked->owner_slot;
+        result->recovery = unlocked->recovery_slot;
+        result->must_change = unlocked->must_be_changed;
+        result->identity_name = unlocked->slot_identity_name;
+        result->identity_email = unlocked->slot_identity_email;
+        result->lease = unlocked->editing_lease;
+        if (unlocked->revision_graph) {
+            const auto &graph = *unlocked->revision_graph;
+            const auto &latest = graph.records().back();
+            result->head = graph.head();
+            result->timestamp = latest.timestamp_ms;
+            result->manually_sealed = !latest.provisional;
+            result->client_name = latest.client_name;
+            result->client_email = latest.client_email;
+            result->device = latest.device;
+            result->event_type = latest.event_type;
+            result->event_detail = latest.event_detail;
+        }
+        *state = result.release();
+        return SCPEFE_STATUS_OK;
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_owned_authenticated_state_view(
+    const scpefe_owned_authenticated_state *state,
+    scpefe_owned_authenticated_state_view_v1 *view)
+{
+    if (!state || !view || view->struct_size < sizeof(*view))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (view->abi_version != SCPEFE_ABI_VERSION) return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    *view = scpefe_owned_authenticated_state_view_v1{};
+    view->struct_size = sizeof(*view);
+    view->abi_version = SCPEFE_ABI_VERSION;
+    std::copy(state->document_id.begin(), state->document_id.end(), view->document_id);
+    std::copy(state->slot_id.begin(), state->slot_id.end(), view->slot_id);
+    std::copy(state->journal_key.begin(), state->journal_key.end(), view->work_journal_key);
+    std::copy(state->head.begin(), state->head.end(), view->revision_head);
+    view->revision_timestamp_ms = state->timestamp;
+    view->manually_sealed = state->manually_sealed;
+    view->owner_slot = state->owner;
+    view->recovery_slot = state->recovery;
+    view->must_change_password = state->must_change;
+    view->client_name = state->client_name.data();
+    view->client_name_size = state->client_name.size();
+    view->client_email = state->client_email.data();
+    view->client_email_size = state->client_email.size();
+    view->device_name = state->device.data();
+    view->device_name_size = state->device.size();
+    view->event_type = state->event_type.data();
+    view->event_type_size = state->event_type.size();
+    view->event_detail = state->event_detail.data();
+    view->event_detail_size = state->event_detail.size();
+    view->identity_name = state->identity_name.data();
+    view->identity_name_size = state->identity_name.size();
+    view->identity_email = state->identity_email.data();
+    view->identity_email_size = state->identity_email.size();
+    view->lease_active = state->lease.active;
+    std::copy(state->lease.session_id.begin(), state->lease.session_id.end(),
+        view->lease_session_id);
+    view->lease_heartbeat_counter = state->lease.heartbeat_counter;
+    view->lease_holder_utc_ms = state->lease.holder_utc_ms;
+    view->lease_duration_ms = state->lease.duration_ms;
+    view->lease_holder_name = state->lease.holder_name.data();
+    view->lease_holder_name_size = state->lease.holder_name.size();
+    view->lease_holder_email = state->lease.holder_email.data();
+    view->lease_holder_email_size = state->lease.holder_email.size();
+    view->lease_device_name = state->lease.device_name.data();
+    view->lease_device_name_size = state->lease.device_name.size();
+    return SCPEFE_STATUS_OK;
+}
+
+void scpefe_owned_authenticated_state_destroy(
+    scpefe_owned_authenticated_state *state) { delete state; }
