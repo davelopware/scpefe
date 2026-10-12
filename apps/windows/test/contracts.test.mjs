@@ -264,17 +264,11 @@ test("compaction results bind the verified backup and continuity heads", () => {
   /invalid compaction result/);
 });
 
-test("legacy migration permission is projected independently of blocked edit mode", () => {
-  const base = { content: "legacy", readOnly: true, canEdit: false,
-    publicationState: "target-published", migrationRequired: true };
-  assert.equal(validateOpenedDocument({ ...base,
-    migrationCanEdit: false }).migrationCanEdit, false);
-  assert.equal(validateOpenedDocument({ ...base,
-    migrationCanEdit: true }).migrationCanEdit, true);
-  assert.throws(() => validateOpenedDocument({ ...base,
-    migrationCanEdit: "yes" }), /migration permission/);
-  assert.throws(() => validateOpenedDocument({ content: "current", readOnly: true,
-    canEdit: true, migrationCanEdit: true }), /migration permission/);
+test("opened document projects current edit permission without migration state", () => {
+  const opened = validateOpenedDocument({ content: "current", readOnly: true,
+    canEdit: false, publicationState: "target-published" });
+  assert.equal(opened.canEdit, false);
+  assert.equal(Object.hasOwn(opened, "migrationRequired"), false);
 });
 
 test("plaintext export contracts expose only canonical text and line-ending choice", () => {

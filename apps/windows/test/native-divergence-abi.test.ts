@@ -14,6 +14,10 @@ interface Context {
   unlock(password: string): true;
   close(): true;
   confirmEditLease(): true;
+  assessMerge(local: Buffer, localPassword: string, targetPassword: string,
+    input: object): true;
+  prepareMerge(local: Buffer, localPassword: string, targetPassword: string,
+    input: object): { bytes: Buffer; operationId: number };
   prepareSave(kind: string, password: string, input: object):
     { bytes: Buffer; operationId: number };
   prepareSlotChange(kind: string, password: string, input: object):
@@ -27,11 +31,26 @@ interface Context {
 }
 interface Native {
   createContainerContext(): Context;
-  mergeDocument(target: Buffer, local: Buffer, localPassword: string,
-    input: object): Buffer;
-  openDocument(bytes: Buffer, password: string): {
+  inspectDocument(bytes: Buffer, password: string): {
     content: string; baseRevision: string; canEdit: boolean; slotId: string;
   };
+}
+
+function merge(target: Buffer, local: Buffer, localPassword: string,
+  details: object & { targetPassword?: string }): Buffer {
+  assert.ok(native);
+  const targetPassword = details.targetPassword ?? localPassword;
+  const context = native.createContainerContext();
+  try {
+    context.open(target);
+    context.unlock(targetPassword);
+    context.assessMerge(local, localPassword, targetPassword, details);
+    context.confirmEditLease();
+    const candidate = context.prepareMerge(local, localPassword,
+      targetPassword, { ...details, operationId: 1 });
+    context.finishSave(candidate.operationId, "verified");
+    return candidate.bytes;
+  } finally { context.close(); }
 }
 
 const addonPath = process.env.SCPEFE_NATIVE_ADDON_PATH;
@@ -83,11 +102,11 @@ test("Windows revised merge imports foreign metadata and respects target wrapper
   owner.close();
   const local = branch(base, "local\n", 2);
   const target = branch(base, "target\n", 3);
-  const localHead = native.openDocument(local, password).baseRevision;
-  const targetHead = native.openDocument(target, password).baseRevision;
-  const merged = native.mergeDocument(target, local, password,
+  const localHead = native.inspectDocument(local, password).baseRevision;
+  const targetHead = native.inspectDocument(target, password).baseRevision;
+  const merged = merge(target, local, password,
     input("resolved\n", 4));
-  const opened = native.openDocument(merged, password);
+  const opened = native.inspectDocument(merged, password);
   assert.equal(opened.content, "resolved\n");
   const history = native.createContainerContext();
   try {
@@ -117,15 +136,15 @@ test("Windows revised merge imports foreign metadata and respects target wrapper
     changed.finishSave(candidate.operationId, "verified");
     rotated = candidate.bytes;
   } finally { changed.close(); }
-  assert.throws(() => native.mergeDocument(rotated, local, password,
+  assert.throws(() => merge(rotated, local, password,
     input("resolved\n", 6)), (error: any) => error.status === 10);
-  const reauthenticated = native.mergeDocument(rotated, local, password,
+  const reauthenticated = merge(rotated, local, password,
     { ...input("resolved\n", 6), targetPassword: rotatedPassword });
-  assert.equal(native.openDocument(reauthenticated, rotatedPassword).content,
+  assert.equal(native.inspectDocument(reauthenticated, rotatedPassword).content,
     "resolved\n");
-  assert.throws(() => native.openDocument(reauthenticated, password),
+  assert.throws(() => native.inspectDocument(reauthenticated, password),
     (error: any) => error.status === 10);
-  assert.throws(() => native.mergeDocument(base, local, password,
+  assert.throws(() => merge(base, local, password,
     input("resolved\n", 7)), (error: any) => error.status === 21);
 });
 
@@ -150,7 +169,7 @@ test("Windows publishes a revised merge through its recovery journal", {
     publicationCapabilities: { sameFilesystemTransaction: true,
       replacementGuarantee: "atomic-replace" } };
   const service = new DocumentService(options);
-  const baseOpened = native.openDocument(base, password) as unknown as {
+  const baseOpened = native.inspectDocument(base, password) as unknown as {
     documentId: string; journalKey: Buffer; baseRevision: string };
   let record = await service.publications.prepare({
     documentId: baseOpened.documentId, journalKey: baseOpened.journalKey,
@@ -170,7 +189,7 @@ test("Windows publishes a revised merge through its recovery journal", {
   await service.saveDivergenceResolution("resolved\n",
     { journalScope: "merge", revision: 1 });
   const merged = await fs.readFile(target);
-  assert.equal(native.openDocument(merged, password).content, "resolved\n");
+  assert.equal(native.inspectDocument(merged, password).content, "resolved\n");
   const history = native.createContainerContext();
   try {
     history.open(merged);
@@ -200,16 +219,16 @@ test("Windows merge distinguishes demotion from removal of an editor slot", {
     { newPassword: temporary, name: "Editor", canEdit: true });
   const claimed = slotChange(invited, "claim", temporary, 2,
     { newPassword: editor, name: "Grace", email: "grace@example.test" });
-  const editorSlotId = native.openDocument(claimed, editor).slotId;
+  const editorSlotId = native.inspectDocument(claimed, editor).slotId;
   const local = branch(claimed, "local\n", 4, editor);
   const target = branch(claimed, "remote\n", 5);
   const demoted = slotChange(target, "permissions", password, 3,
     { slotId: editorSlotId, canEdit: false });
-  assert.throws(() => native.mergeDocument(demoted, local, editor,
+  assert.throws(() => merge(demoted, local, editor,
     input("resolved\n", 6)), (error: any) => error.status === 24);
   const removed = slotChange(target, "remove", password, 4,
     { slotId: editorSlotId });
-  assert.throws(() => native.mergeDocument(removed, local, editor,
+  assert.throws(() => merge(removed, local, editor,
     { ...input("resolved\n", 7), targetPassword: password }),
   (error: any) => error.status === 23);
 });
@@ -236,7 +255,7 @@ test("Windows reauthenticates a rotated target without losing the local journal"
     witnessDirectory: path.join(directory, "witnesses"),
     publicationCapabilities: { sameFilesystemTransaction: true,
       replacementGuarantee: "atomic-replace" } });
-  const opened = native.openDocument(base, password) as unknown as {
+  const opened = native.inspectDocument(base, password) as unknown as {
     documentId: string; journalKey: Buffer; baseRevision: string };
   let record = await service.publications.prepare({
     documentId: opened.documentId, journalKey: opened.journalKey,
@@ -255,7 +274,7 @@ test("Windows reauthenticates a rotated target without losing the local journal"
     targetPassword: rotatedPassword });
   assert.equal(draft.hasConflicts, true);
   await service.saveDivergenceResolution("resolved\n");
-  assert.equal(native.openDocument(await fs.readFile(target), rotatedPassword).content,
+  assert.equal(native.inspectDocument(await fs.readFile(target), rotatedPassword).content,
     "resolved\n");
   assert.equal(await service.journals.read(opened.documentId, opened.journalKey), null);
 });

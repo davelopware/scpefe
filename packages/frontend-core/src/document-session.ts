@@ -11,8 +11,6 @@ export interface SessionDocument {
   readonly canEdit?: boolean;
   readonly publicationState?: "target-published" | "pending-publication" | "conflict";
   readonly activityOutcomePending?: true;
-  readonly migrationRequired?: true;
-  readonly migrationCanEdit?: boolean;
   readonly recovery?: SessionRecoveryRecord;
   readonly headMismatch?: { readonly kind: "rollback" | "divergence"
     | "replacement" | "witness-error"; readonly title?: string;
@@ -55,7 +53,6 @@ export interface SessionCommands {
   readonly reconcileIdentity: boolean;
   readonly updateSlotPermissions: boolean;
   readonly removeSlot: boolean;
-  readonly migrate: boolean;
   readonly compact: boolean;
 }
 
@@ -134,7 +131,7 @@ export interface SessionProtectionAttention {
 /** Host-issued one-shot lease challenge; authorization stays inside the session. */
 export interface SessionLeaseDecision {
   readonly decisionRequired: "lease-takeover";
-  readonly operation: "edit" | "recovery" | "divergence" | "migration";
+  readonly operation: "edit" | "recovery" | "divergence";
   readonly holderName: string;
   readonly authorization: string;
   readonly reason?: "master";
@@ -190,14 +187,6 @@ export interface SessionUnreadableJournalAttention {
   readonly failureCode?: SessionFailureCode;
 }
 
-/** Migration needs a verified backup and may require a fresh lease decision. */
-export interface SessionMigrationAttention {
-  readonly kind: "migration-decision";
-  readonly canMigrate: boolean;
-  readonly canceled?: true;
-  readonly failureCode?: SessionFailureCode;
-}
-
 /** A full administrator's one-time acknowledgement of irreversible compaction. */
 export interface SessionCompactionAttention {
   readonly kind: "compaction-decision";
@@ -221,7 +210,7 @@ export interface SessionRecoveryDiscovery {
 export type SessionAttention = SessionLeaseAttention | SessionEditAttention
   | SessionPublicationAttention | SessionSaveAttention | SessionRecoveryAttention
   | SessionHeadAttention | SessionUnreadableJournalAttention
-  | SessionRecoveryDiscoveryAttention | SessionMigrationAttention
+  | SessionRecoveryDiscoveryAttention
   | SessionCompactionAttention | SessionProtectionAttention;
 
 /** A host-produced merge draft for the lease-gated divergence workflow. */
@@ -259,9 +248,6 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
     | SessionLeaseDecision>;
   beginDivergenceResolution(request?: { readonly authorization?: string;
     readonly targetPassword?: string }): Promise<SessionMergeDraft | SessionLeaseDecision>;
-  migrateDocument(request?: { readonly authorization?: string }): Promise<
-    { readonly opened: Doc; readonly compatibilityCode: string }
-    | SessionLeaseDecision | null>;
   compactDocument?(request: { readonly confirmed: true }): Promise<{
     readonly opened: Doc; readonly previousHead: string; readonly head: string } | null>;
   saveDocument(content: string, submittedVersion?: Readonly<{
@@ -309,7 +295,7 @@ export type SessionPendingOperation = "open" | "unlock" | "lock" | "close"
   | "divergence"
   | "password-change" | "invitation-create" | "invitation-claim"
   | "invitation-cancel" | "identity-reconcile" | "permissions-update"
-  | "slot-remove" | "migration" | "compaction";
+  | "slot-remove" | "compaction";
 
 /** A secret-free closed application state. */
 export interface ClosedSessionSnapshot {
@@ -391,8 +377,7 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
   | Readonly<{ status: "head-accepted" }>
   | Readonly<{ status: "unreadable-discarded" }>
   | Readonly<{ status: "divergence"; hasConflicts: boolean }>
-  | Readonly<{ status: "migration"; compatibilityCode: string }>
-  | Readonly<{ status: "migration-canceled" | "compaction-canceled" }>
+  | Readonly<{ status: "compaction-canceled" }>
   | Readonly<{ status: "external-canceled" }>
   | Readonly<{ status: "protection-canceled" | "protection-resolved" }>
   | Readonly<{ status: "compaction"; previousHead: string; head: string }>
@@ -407,7 +392,7 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
 export type SessionFailureCode = "OPERATION_FAILED" | "OPEN_FAILED"
   | "UNLOCK_FAILED" | "LOCK_CHECKPOINT_FAILED" | "LIFECYCLE_FAILED"
   | "WEAK_PASSWORD" | "PASSWORD_ALREADY_IN_USE"
-  | "MIGRATION_FAILED" | "COMPACTION_FAILED"
+  | "COMPACTION_FAILED"
   | "MERGE_TARGET_REAUTHENTICATION" | "MERGE_ACCESS_REVOKED"
   | "MERGE_PERMISSION_DENIED" | "MERGE_BASE_UNAVAILABLE"
   | "MERGE_UNRELATED_TARGET" | "MERGE_TARGET_ROLLBACK";
@@ -419,7 +404,7 @@ const CLOSED: ClosedSessionSnapshot = Object.freeze({ kind: "closed" });
 const SAFE_HOST_CODES = new Set<SessionFailureCode>([
   "OPERATION_FAILED", "OPEN_FAILED", "UNLOCK_FAILED", "LOCK_CHECKPOINT_FAILED",
   "LIFECYCLE_FAILED", "WEAK_PASSWORD", "PASSWORD_ALREADY_IN_USE",
-  "MIGRATION_FAILED", "COMPACTION_FAILED",
+  "COMPACTION_FAILED",
   "MERGE_TARGET_REAUTHENTICATION", "MERGE_ACCESS_REVOKED",
   "MERGE_PERMISSION_DENIED", "MERGE_BASE_UNAVAILABLE",
   "MERGE_UNRELATED_TARGET", "MERGE_TARGET_ROLLBACK",
@@ -465,8 +450,6 @@ export class DocumentSession<Doc extends SessionDocument,
   private recoveryFailureCode: SessionFailureCode | null = null;
   private headFailureCode: SessionFailureCode | null = null;
   private unreadableFailureCode: SessionFailureCode | null = null;
-  private migrationFailureCode: SessionFailureCode | null = null;
-  private migrationCanceled = false;
   private compactionFailureCode: SessionFailureCode | null = null;
   private compactionConfirmation = false;
   private resolvingDivergence = false;
@@ -570,8 +553,6 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.resolvingDivergence = false;
@@ -623,10 +604,6 @@ export class DocumentSession<Doc extends SessionDocument,
     }
     if (safeDocument.unreadableJournal !== current.document.unreadableJournal) {
       this.unreadableFailureCode = null;
-    }
-    if (safeDocument.migrationRequired !== current.document.migrationRequired) {
-      this.migrationFailureCode = null;
-      this.migrationCanceled = false;
     }
     this.snapshot = this.openSnapshot(safeDocument, current.adoption,
       safeDocument.targetName ?? current.targetName, current.pending);
@@ -1027,45 +1004,6 @@ export class DocumentSession<Doc extends SessionDocument,
     });
   }
 
-  /** Begins migration only for the current, host-authorized legacy document. */
-  migrate(): Promise<DocumentSessionOutcome<Doc>> {
-    const generation = this.generation;
-    const adoption = this.currentAdoption();
-    return this.enqueue(() => this.runMigration(generation, adoption));
-  }
-
-  private async runMigration(generation: number, adoption: number | null,
-    authorization?: string): Promise<DocumentSessionOutcome<Doc>> {
-    if (!this.matchesAdoption(generation, adoption)
-      || (this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
-      || !this.snapshot.commands.migrate) return Object.freeze({ status: "unavailable" });
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
-    this.publishPending(authorization ? "lease-confirm" : "migration");
-    try {
-      const result = await this.host.migrateDocument(authorization ? { authorization } : {});
-      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
-      if (result !== null && "decisionRequired" in result) {
-        this.clearPending();
-        this.stageLeaseDecision(result, adoption!);
-        return Object.freeze({ status: "attention" });
-      }
-      if (result === null) {
-        this.migrationCanceled = true;
-        this.clearPending();
-        return Object.freeze({ status: "migration-canceled" });
-      }
-      this.replaceWorkingDocument(result.opened, "open");
-      return Object.freeze({ status: "migration",
-        compatibilityCode: result.compatibilityCode });
-    } catch (error) {
-      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
-      this.migrationFailureCode = hostFailureCode(error);
-      this.clearPending();
-      return Object.freeze({ status: "failed", code: this.migrationFailureCode });
-    }
-  }
-
   /** Stages a per-adoption irreversible compaction decision. */
   requestCompaction(): DocumentSessionOutcome<Doc> {
     if (this.snapshot.kind !== "edit" || !this.snapshot.commands.compact) {
@@ -1156,7 +1094,7 @@ export class DocumentSession<Doc extends SessionDocument,
         return Object.freeze({ status: "divergence", hasConflicts: result.hasConflicts });
       }
       this.clearPending();
-      return this.runMigration(generation, adoption, authorization);
+      return Object.freeze({ status: "unavailable" });
     } catch (error) {
       if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       if (operation === "recovery") this.recoveryFailureCode = hostFailureCode(error);
@@ -1881,8 +1819,6 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.resolvingDivergence = false;
@@ -1924,8 +1860,6 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.resolvingDivergence = false;
@@ -2107,8 +2041,6 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.snapshot = this.openSnapshot(nextDocument, current.adoption,
@@ -2125,7 +2057,7 @@ export class DocumentSession<Doc extends SessionDocument,
     }
     const securityReady = !this.invitationStaged && !working.dirty
       && !document.recovery && !document.headMismatch
-      && !document.unreadableJournal && !document.migrationRequired
+      && !document.unreadableJournal
       && this.publicationState === "target-published" && pending === undefined;
     const administrationReady = securityReady && !document.readOnly
       && !document.profileMismatch;
@@ -2136,7 +2068,7 @@ export class DocumentSession<Doc extends SessionDocument,
           || document.publicationState === "target-published")
         && !document.recovery && !document.headMismatch && !document.profileMismatch
         && !document.unreadableJournal
-        && !document.migrationRequired,
+       ,
       write: !document.readOnly && !document.recovery && !document.headMismatch
         && !document.unreadableJournal && pending !== "compaction",
       undo: !document.readOnly && !document.recovery && !document.headMismatch
@@ -2148,7 +2080,7 @@ export class DocumentSession<Doc extends SessionDocument,
       backup: !working.dirty && this.publicationState === "target-published"
         && !document.provisional && !document.recovery && !document.headMismatch
         && !document.activityOutcomePending
-        && !document.profileMismatch && !document.migrationRequired
+        && !document.profileMismatch
         && !document.unreadableJournal && pending === undefined,
       export: !document.activityOutcomePending && pending === undefined,
       publicationRetry: (this.publicationState === "pending-publication"
@@ -2162,7 +2094,7 @@ export class DocumentSession<Doc extends SessionDocument,
         && pending === undefined,
       recoveryRestore: Boolean(document.recovery) && document.canEdit === true
         && !document.headMismatch && !document.profileMismatch
-        && !document.unreadableJournal && !document.migrationRequired
+        && !document.unreadableJournal
         && this.publicationState === "target-published" && pending === undefined,
       recoveryDiscard: Boolean(document.recovery) && !document.headMismatch
         && !document.unreadableJournal && pending === undefined,
@@ -2176,11 +2108,6 @@ export class DocumentSession<Doc extends SessionDocument,
       updateSlotPermissions: administrationReady && document.canAddPasswords === true
         && document.canRemovePasswords === true,
       removeSlot: administrationReady && document.canRemovePasswords === true,
-      migrate: document.readOnly && document.migrationRequired === true
-        && document.migrationCanEdit === true && !working.dirty
-        && !document.recovery && !document.headMismatch && !document.profileMismatch
-        && !document.unreadableJournal && this.publicationState === "target-published"
-        && pending === undefined,
       compact: administrationReady && document.canAddPasswords === true
         && document.canRemovePasswords === true && this.host.compactDocument !== undefined,
     });
@@ -2209,10 +2136,6 @@ export class DocumentSession<Doc extends SessionDocument,
         canRestore: commands.recoveryRestore,
         ...(this.recoveryFailureCode
           ? { failureCode: this.recoveryFailureCode } : {}) })
-      : document.migrationRequired ? Object.freeze({ kind: "migration-decision",
-        canMigrate: commands.migrate,
-        ...(this.migrationCanceled ? { canceled: true } : {}),
-        ...(this.migrationFailureCode ? { failureCode: this.migrationFailureCode } : {}) })
       : this.compactionConfirmation ? Object.freeze({ kind: "compaction-decision",
         ...(this.compactionFailureCode ? { failureCode: this.compactionFailureCode } : {}) })
       : (this.publicationState === "pending-publication"

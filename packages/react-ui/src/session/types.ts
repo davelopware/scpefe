@@ -22,7 +22,7 @@ export type ManagedSlot = { slotId: string; identityName: string; identityEmail:
   mustBeChangedKnown?: boolean; identityKnown?: boolean };
 export type MergeDraft = { content: string; hasConflicts: boolean;
   ancestorRevision: string; localRevision: string; currentRevision: string };
-export type LeaseOperation = "edit" | "recovery" | "divergence" | "migration";
+export type LeaseOperation = "edit" | "recovery" | "divergence";
 export type LeaseDecision = { decisionRequired: "lease-takeover"; operation: LeaseOperation;
   holderName: string; authorization: string; reason?: "master" };
 export type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
@@ -32,14 +32,13 @@ export type DocumentOpened = { content: string; readOnly: boolean; canEdit: bool
   recoverySlot?: boolean; slotId?: string; slotIdentityName?: string;
   slotIdentityEmail?: string;
   headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
-  managedSlots?: ManagedSlot[]; provisional?: true; migrationRequired?: true;
-  migrationCanEdit?: boolean;
+  managedSlots?: ManagedSlot[]; provisional?: true;
   unreadableJournal?: true;
   activityOutcomePending?: true;
-  migrationWarning?: string };
+};
 export type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
 export type DialogName = "profile" | "open" | "export" | "about"
   | "unlock" | "passwords" | "compaction" | "activity" | null;
-export type OpenedDialogName = "claim" | "migration" | "profile-mismatch" | "head"
+export type OpenedDialogName = "claim" | "profile-mismatch" | "head"
   | "recovery" | "unreadable" | "publication" | null;

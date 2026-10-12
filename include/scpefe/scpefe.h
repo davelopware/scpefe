@@ -109,242 +109,6 @@ typedef struct scpefe_revision_graph scpefe_revision_graph;
 typedef struct scpefe_revision_page scpefe_revision_page;
 /* Opaque owner of a copied revision body or reconstructed text. */
 typedef struct scpefe_revision_result scpefe_revision_result;
-/* Opaque owner of one authenticated, unlocked container. */
-typedef struct scpefe_unlocked_container scpefe_unlocked_container;
-
-/* Borrowed view of the semantic values authenticated during container unlock. */
-typedef struct scpefe_unlocked_container_v1 {
-    uint32_t struct_size;
-    const uint8_t *document_id;
-    size_t document_id_size;
-    const uint8_t *encoded_snapshot_revision;
-    size_t encoded_snapshot_revision_size;
-} scpefe_unlocked_container_v1;
-
-/* Borrowed policy and identity of the password slot used for this unlock. */
-typedef struct scpefe_unlocked_slot_access_v1 {
-    uint32_t struct_size;
-    const uint8_t *slot_id;
-    size_t slot_id_size;
-    int can_edit;
-    int recovery_slot;
-    int can_add_passwords;
-    int can_remove_passwords;
-    int must_be_changed;
-    const char *identity_name;
-    size_t identity_name_size;
-    const char *identity_email;
-    size_t identity_email_size;
-} scpefe_unlocked_slot_access_v1;
-
-/* Inputs for adding one constrained temporary-password invitation slot. */
-typedef struct scpefe_invitation_create_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *creator_password;
-    size_t creator_password_size;
-    const uint8_t *temporary_password;
-    size_t temporary_password_size;
-    int can_edit;
-    int can_add_passwords;
-    int can_remove_passwords;
-    const char *temporary_label;
-    size_t temporary_label_size;
-} scpefe_invitation_create_v1;
-
-/* Inputs for replacing and binding an invitation credential on first use. */
-typedef struct scpefe_invitation_claim_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *temporary_password;
-    size_t temporary_password_size;
-    const uint8_t *new_password;
-    size_t new_password_size;
-    const char *profile_name;
-    size_t profile_name_size;
-    const char *profile_email;
-    size_t profile_email_size;
-} scpefe_invitation_claim_v1;
-
-/* Inputs for changing one managed ordinary slot's cooperative permissions. */
-typedef struct scpefe_slot_permissions_update_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *administrator_password;
-    size_t administrator_password_size;
-    const uint8_t *slot_id;
-    size_t slot_id_size;
-    int can_edit;
-    int can_add_passwords;
-    int can_remove_passwords;
-} scpefe_slot_permissions_update_v1;
-
-/* Inputs for removing one managed ordinary password slot. */
-typedef struct scpefe_slot_remove_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *administrator_password;
-    size_t administrator_password_size;
-    const uint8_t *slot_id;
-    size_t slot_id_size;
-} scpefe_slot_remove_v1;
-
-/* Inputs for explicitly reconciling the authenticated ordinary slot identity. */
-typedef struct scpefe_slot_identity_reconcile_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *password;
-    size_t password_size;
-    const char *profile_name;
-    size_t profile_name_size;
-    const char *profile_email;
-    size_t profile_email_size;
-} scpefe_slot_identity_reconcile_v1;
-
-/* Borrowed administrative view of one ordinary invitation slot. */
-typedef struct scpefe_managed_slot_v1 {
-    uint32_t struct_size;
-    const uint8_t *slot_id;
-    size_t slot_id_size;
-    int can_edit;
-    int can_add_passwords;
-    int can_remove_passwords;
-    int must_be_changed;
-    const char *identity_name;
-    size_t identity_name_size;
-    const char *identity_email;
-    size_t identity_email_size;
-    int slot_id_known;
-    int permissions_known;
-    int identity_known;
-    int must_be_changed_known;
-} scpefe_managed_slot_v1;
-
-/* Borrowed authenticated details of the encrypted advisory editing lease. */
-typedef struct scpefe_editing_lease_v1 {
-    uint32_t struct_size;
-    int active;
-    const uint8_t *session_id;
-    size_t session_id_size;
-    uint64_t heartbeat_counter;
-    uint64_t holder_utc_ms;
-    uint64_t duration_ms;
-    const char *holder_name;
-    size_t holder_name_size;
-    const char *holder_email;
-    size_t holder_email_size;
-    const char *device_name;
-    size_t device_name_size;
-} scpefe_editing_lease_v1;
-
-/* Inputs for replacing encrypted lease state without changing document history. */
-typedef struct scpefe_editing_lease_update_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *password;
-    size_t password_size;
-    scpefe_editing_lease_v1 lease;
-} scpefe_editing_lease_update_v1;
-
-/* Validated inputs used to seal and publish a child snapshot revision. */
-typedef struct scpefe_manual_save_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *password;
-    size_t password_size;
-    const char *profile_name;
-    size_t profile_name_size;
-    const char *profile_email;
-    size_t profile_email_size;
-    const char *device_name;
-    size_t device_name_size;
-    const char *content;
-    size_t content_size;
-    uint64_t timestamp_ms;
-} scpefe_manual_save_v1;
-
-/* Validated inputs used to create or amend one provisional snapshot revision. */
-typedef scpefe_manual_save_v1 scpefe_regular_save_v1;
-
-/* Inputs for replacing sealed history with one shallow continuity baseline. */
-typedef struct scpefe_compaction_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *password;
-    size_t password_size;
-    const uint8_t *lease_session_id;
-    size_t lease_session_id_size;
-    uint64_t lease_heartbeat_counter;
-} scpefe_compaction_v1;
-
-/* Inputs for migrating one supported older container and acquiring its lease. */
-typedef struct scpefe_migration_v1 {
-    uint32_t struct_size;
-    const uint8_t *container;
-    size_t container_size;
-    const uint8_t *password;
-    size_t password_size;
-    const char *profile_name;
-    size_t profile_name_size;
-    const char *profile_email;
-    size_t profile_email_size;
-    const char *device_name;
-    size_t device_name_size;
-    uint64_t timestamp_ms;
-    scpefe_editing_lease_v1 lease;
-} scpefe_migration_v1;
-
-/* Validated inputs used to seal a user-resolved two-parent merge revision. */
-typedef struct scpefe_merge_save_v1 {
-    uint32_t struct_size;
-    const uint8_t *current_container;
-    size_t current_container_size;
-    const uint8_t *local_container;
-    size_t local_container_size;
-    const uint8_t *password;
-    size_t password_size;
-    const char *profile_name;
-    size_t profile_name_size;
-    const char *profile_email;
-    size_t profile_email_size;
-    const char *device_name;
-    size_t device_name_size;
-    const char *content;
-    size_t content_size;
-    uint64_t timestamp_ms;
-} scpefe_merge_save_v1;
-
-/* Inputs for a revised-v3 merge with independent local and target credentials. */
-typedef struct scpefe_revised_merge_save_v1 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    const uint8_t *target_container;
-    size_t target_container_size;
-    const uint8_t *local_container;
-    size_t local_container_size;
-    const uint8_t *target_password;
-    size_t target_password_size;
-    const uint8_t *local_password;
-    size_t local_password_size;
-    const char *profile_name;
-    size_t profile_name_size;
-    const char *profile_email;
-    size_t profile_email_size;
-    const char *device_name;
-    size_t device_name_size;
-    const char *content;
-    size_t content_size;
-    uint64_t timestamp_ms;
-} scpefe_revised_merge_save_v1;
-
 /* Validated inputs used to publish a new owner-protected document. */
 typedef struct scpefe_new_document_v1 {
     uint32_t struct_size;
@@ -397,8 +161,8 @@ typedef struct scpefe_container_status_v1 {
     int must_change_password;
 } scpefe_container_status_v1;
 
-/* View of submitted clear text and the confirmed legacy revision; the latter is
- * empty for revised-v3 history and may lag submitted text. */
+/* View of submitted clear text; encoded_revision is empty for revised-v3
+ * history and content may be newer than the confirmed encrypted image. */
 typedef struct scpefe_owned_snapshot_view_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -462,6 +226,28 @@ typedef struct scpefe_container_save_v1 {
     size_t device_name_size;
     uint64_t timestamp_ms;
 } scpefe_container_save_v1;
+
+/* One authenticated divergent-replica merge retained until host publication. */
+typedef struct scpefe_container_merge_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    const uint8_t *local_container;
+    size_t local_container_size;
+    const uint8_t *target_password;
+    size_t target_password_size;
+    const uint8_t *local_password;
+    size_t local_password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    const char *content;
+    size_t content_size;
+    uint64_t timestamp_ms;
+} scpefe_container_merge_v1;
 
 /* Compaction intent. The host sets backup_verified only after a durable backup
  * read-back and passes its exact bytes; the library compares them with the
@@ -892,7 +678,7 @@ SCPEFE_API scpefe_status scpefe_container_copy_bytes(
 SCPEFE_API scpefe_status scpefe_container_apply_target(
     scpefe_container *container, const scpefe_container_target_v1 *target,
     uint32_t *effect_mask);
-/* Legacy host-confirmed mode switch retained for existing host workflows. */
+/* Confirms that the host has established this handle's editing lease. */
 SCPEFE_API scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *container);
 /* Reads edit mode while unlocked; authenticated-state snapshots provide lease details. */
 SCPEFE_API scpefe_status scpefe_container_lease_mode(
@@ -912,6 +698,12 @@ SCPEFE_API scpefe_status scpefe_container_submit_content(scpefe_container *conta
 /* Prepares and retains one exact candidate for host publication. */
 SCPEFE_API scpefe_status scpefe_container_prepare_save(scpefe_container *container,
     const scpefe_container_save_v1 *save, scpefe_candidate_info_v1 *candidate);
+/* Prepares a resolved merge against this handle's confirmed target image. */
+SCPEFE_API scpefe_status scpefe_container_prepare_merge(scpefe_container *container,
+    const scpefe_container_merge_v1 *merge, scpefe_candidate_info_v1 *candidate);
+/* Classifies a merge against the authenticated target without retaining bytes. */
+SCPEFE_API scpefe_status scpefe_container_assess_merge(scpefe_container *container,
+    const scpefe_container_merge_v1 *merge);
 /* Prepares an attributed compaction after the host verifies its exact backup. */
 SCPEFE_API scpefe_status scpefe_container_prepare_compaction(
     scpefe_container *container,
@@ -1064,25 +856,6 @@ SCPEFE_API scpefe_status scpefe_snapshot_revision_diagnostic_json(
     size_t *output_size
 );
 
-/* Creates a self-contained container with one owner password slot and snapshot. */
-SCPEFE_API scpefe_status scpefe_password_container_create(
-    const uint8_t *password,
-    size_t password_size,
-    const uint8_t *encoded_snapshot_revision,
-    size_t encoded_snapshot_revision_size,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Creates a complete initial document; NULL recovery_password omits recovery. */
-SCPEFE_API scpefe_status scpefe_new_document_create(
-    const scpefe_new_document_v1 *document,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
 /* Reports whether candidate bytes satisfy the policy for newly chosen passwords. */
 SCPEFE_API int scpefe_password_meets_policy(
     const uint8_t *password,
@@ -1095,173 +868,6 @@ SCPEFE_API scpefe_password_policy_assessment scpefe_assess_password_policy(
     size_t password_size
 );
 
-/* Seals a child revision and returns a replacement self-contained container. */
-SCPEFE_API scpefe_status scpefe_manual_save(
-    const scpefe_manual_save_v1 *save,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Creates or amends one provisional revision without asserting a manual save. */
-SCPEFE_API scpefe_status scpefe_regular_save(
-    const scpefe_regular_save_v1 *save,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Restores the sealed base retained by a provisional revision. */
-SCPEFE_API scpefe_status scpefe_provisional_save_discard(
-    const uint8_t *container,
-    size_t container_size,
-    const uint8_t *password,
-    size_t password_size,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Seals a resolved merge after authenticating related current and local heads. */
-SCPEFE_API scpefe_status scpefe_merge_save(
-    const scpefe_merge_save_v1 *save,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Resolves divergent revised-v3 replicas into target wrappers and one local content line. */
-SCPEFE_API scpefe_status scpefe_revised_merge_save(
-    const scpefe_revised_merge_save_v1 *save,
-    uint8_t *output, size_t output_capacity, size_t *output_size);
-
-/* Creates a shallow baseline while preserving the document and credential state. */
-SCPEFE_API scpefe_status scpefe_compact_document(
-    const scpefe_compaction_v1 *compaction,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Migrates a supported older container without requiring unknown slot passwords. */
-SCPEFE_API scpefe_status scpefe_migrate_document(
-    const scpefe_migration_v1 *migration,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Re-wraps the authenticated slot without replacing encrypted document content. */
-SCPEFE_API scpefe_status scpefe_password_container_change_password(
-    const uint8_t *container,
-    size_t container_size,
-    const uint8_t *current_password,
-    size_t current_password_size,
-    const uint8_t *new_password,
-    size_t new_password_size,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Adds an invitation slot while enforcing creator permissions and slot limits. */
-SCPEFE_API scpefe_status scpefe_password_container_add_invitation(
-    const scpefe_invitation_create_v1 *invitation,
-    uint8_t *output, size_t output_capacity, size_t *output_size
-);
-
-/* Claims an invitation by replacing its password and encrypted display identity. */
-SCPEFE_API scpefe_status scpefe_password_container_claim_invitation(
-    const scpefe_invitation_claim_v1 *claim,
-    uint8_t *output, size_t output_capacity, size_t *output_size
-);
-
-/* Changes one managed slot's permissions without demoting permanent base slots. */
-SCPEFE_API scpefe_status scpefe_password_container_update_slot_permissions(
-    const scpefe_slot_permissions_update_v1 *update,
-    uint8_t *output, size_t output_capacity, size_t *output_size
-);
-
-/* Removes one managed slot; owner and recovery/master slots are never removable. */
-SCPEFE_API scpefe_status scpefe_password_container_remove_slot(
-    const scpefe_slot_remove_v1 *remove,
-    uint8_t *output, size_t output_capacity, size_t *output_size
-);
-
-/* Rebinds the authenticated ordinary slot identity to the supplied profile. */
-SCPEFE_API scpefe_status scpefe_password_container_reconcile_identity(
-    const scpefe_slot_identity_reconcile_v1 *reconcile,
-    uint8_t *output, size_t output_capacity, size_t *output_size
-);
-
-/* Authenticates an owner password and unlocks the encrypted snapshot. */
-SCPEFE_API scpefe_status scpefe_password_container_unlock(
-    const uint8_t *container,
-    size_t container_size,
-    const uint8_t *password,
-    size_t password_size,
-    scpefe_unlocked_container **unlocked
-);
-
-/* Authenticates and unlocks while enforcing caller-selected allocation limits. */
-SCPEFE_API scpefe_status scpefe_password_container_unlock_with_limits(
-    const uint8_t *container,
-    size_t container_size,
-    const uint8_t *password,
-    size_t password_size,
-    const scpefe_revision_limits_v1 *limits,
-    scpefe_unlocked_container **unlocked
-);
-
-/* Borrows authenticated container values until the unlocked owner is destroyed. */
-SCPEFE_API scpefe_status scpefe_unlocked_container_view(
-    const scpefe_unlocked_container *unlocked,
-    scpefe_unlocked_container_v1 *view
-);
-
-/* Borrows the authenticated slot access until the unlocked owner is destroyed. */
-SCPEFE_API scpefe_status scpefe_unlocked_container_slot_access(
-    const scpefe_unlocked_container *unlocked,
-    scpefe_unlocked_slot_access_v1 *access
-);
-
-/* Returns the number of administratively visible invitation slots. */
-SCPEFE_API scpefe_status scpefe_unlocked_container_managed_slot_count(
-    const scpefe_unlocked_container *unlocked, size_t *slot_count
-);
-
-/* Borrows one administratively visible invitation slot by zero-based index. */
-SCPEFE_API scpefe_status scpefe_unlocked_container_managed_slot(
-    const scpefe_unlocked_container *unlocked, size_t index,
-    scpefe_managed_slot_v1 *slot
-);
-
-/* Borrows authenticated lease state until the unlocked owner is destroyed. */
-SCPEFE_API scpefe_status scpefe_unlocked_container_editing_lease(
-    const scpefe_unlocked_container *unlocked,
-    scpefe_editing_lease_v1 *lease
-);
-
-/* Replaces encrypted lease state while preserving the current revision. */
-SCPEFE_API scpefe_status scpefe_editing_lease_update(
-    const scpefe_editing_lease_update_v1 *update,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_size
-);
-
-/* Copies the purpose-separated key for this document's app-private work journal. */
-SCPEFE_API scpefe_status scpefe_unlocked_container_work_journal_key(
-    const scpefe_unlocked_container *unlocked,
-    uint8_t *key,
-    size_t key_capacity,
-    size_t *key_size
-);
-
-/* Releases unlocked container values and clears their storage. */
-SCPEFE_API void scpefe_unlocked_container_destroy(
-    scpefe_unlocked_container *unlocked
-);
 
 #ifdef __cplusplus
 }

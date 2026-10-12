@@ -341,8 +341,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     });
     if (result.focusIntent === "decision-action") {
       focusIfCurrent(() => { if (actionElement?.isConnected) actionElement.focus(); });
-    } else if (result.focusIntent === "migration-retry"
-      || result.focusIntent === "edit-retry"
+    } else if (result.focusIntent === "edit-retry"
       || result.focusIntent === "recovery-restore"
       || result.focusIntent === "publication-retry"
       || result.focusIntent === "save-retry") {

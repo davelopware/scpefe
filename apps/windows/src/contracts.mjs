@@ -545,14 +545,6 @@ export function validateOpenedDocument(value) {
     throw new TypeError("host returned invalid provisional state");
   }
   const provisional = value.provisional === true || value.manuallySealed === false;
-  const migrationRequired = value.migrationRequired === true;
-  if (value.migrationRequired !== undefined && typeof value.migrationRequired !== "boolean") {
-    throw new TypeError("host returned invalid migration state");
-  }
-  if (value.migrationCanEdit !== undefined
-      && (typeof value.migrationCanEdit !== "boolean" || !migrationRequired)) {
-    throw new TypeError("host returned invalid migration permission");
-  }
   let profileMismatch;
   if (value.profileMismatch !== undefined) {
     const mismatch = value.profileMismatch;
@@ -608,12 +600,8 @@ export function validateOpenedDocument(value) {
     throw new TypeError("host returned invalid activity outcome status");
   }
   return Object.freeze({ content, readOnly: true,
-    canEdit: migrationRequired ? false : value.canEdit, publicationState,
+    canEdit: value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
-    ...(migrationRequired ? { migrationRequired: true,
-      ...(value.migrationCanEdit !== undefined
-        ? { migrationCanEdit: value.migrationCanEdit } : {}),
-      migrationWarning: "Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first." } : {}),
     ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
@@ -657,7 +645,7 @@ export function validateEditMode(value) {
 export function validateLeaseDecisionResult(value) {
   if (!value || typeof value !== "object"
       || value.decisionRequired !== "lease-takeover"
-      || !["edit", "recovery", "divergence", "migration"].includes(value.operation)
+      || !["edit", "recovery", "divergence"].includes(value.operation)
       || typeof value.holderName !== "string" || !value.holderName
       || (value.reason !== undefined && value.reason !== "master")
       || typeof value.authorization !== "string"
@@ -832,17 +820,7 @@ export function validateCompactionResult(value) {
     opened: validateEditMode(value.opened) });
 }
 
-export function validateMigrationResult(value) {
-  if (!value || typeof value !== "object" || value.migrated !== true
-      || value.backupCreated !== true || value.compatibilityCode !== "MIGRATION_COMPATIBILITY"
-      || Object.keys(value).some((key) => !["migrated", "backupCreated",
-        "compatibilityCode", "opened"].includes(key))) {
-    throw new TypeError("host returned an invalid migration result");
-  }
-  return Object.freeze({ migrated: true, backupCreated: true,
-    compatibilityCode: value.compatibilityCode,
-    opened: validateEditMode(value.opened) });
-}
+
 
 export function validateWorkingCopy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

@@ -64,7 +64,7 @@ enum class LeaseEntry { acquire, resume, takeover, confirm_takeover,
 /* Owns one container's installed state and observer subscriptions. */
 class Container {
 public:
-    /* Injects the services used by state and prerefactor document operations. */
+    /* Injects services used by stateful revised-v3 document operations. */
     Container(const ContainerStateManagerService &state_manager,
         const core::PasswordService &password, const core::EncryptionService &encryption,
         const core::PersistenceService &persistence, const core::HistoryService &history);
@@ -74,26 +74,15 @@ public:
         std::string_view content, std::uint64_t timestamp_ms,
         const std::uint8_t *owner_password, std::size_t owner_password_size,
         const std::uint8_t *recovery_password, std::size_t recovery_password_size) const;
-    /* Opens a revised-v3 history or transitional v3 snapshot envelope. */
+    /* Opens a validated revised-v3 document envelope. */
     void open_document(const std::uint8_t *bytes, std::size_t size);
-    /* Validates and stores a transitional 160-byte-header envelope without a password. */
-    void open_legacy_document(const std::uint8_t *bytes, std::size_t size);
     /* Verifies the current envelope password before restoring clear access. */
-    const UnlockedContainerData &unlock_legacy_document(
+    const UnlockedContainerData &unlock_document(
         const std::uint8_t *password, std::size_t password_size);
     /* Authenticates an observed target, checks lineage, and overlays its current rights. */
     TransitionResult apply_target_document(const std::uint8_t *target_bytes,
         std::size_t target_size, const std::uint8_t *password,
         std::size_t password_size);
-    /* Preserves the older C++ spelling for transitional callers. */
-    TransitionResult apply_target_legacy_document(const std::uint8_t *target_bytes,
-        std::size_t target_size, const std::uint8_t *password,
-        std::size_t password_size);
-    /* Prepares a compaction candidate from the current committed envelope. */
-    std::vector<std::uint8_t> compact_legacy_document(
-        const std::uint8_t *password, std::size_t password_size,
-        const std::array<std::uint8_t, 16> &lease_session_id,
-        std::uint64_t heartbeat_counter) const;
     /* Returns the currently installed immutable state snapshot. */
     const ContainerState &state() const { return state_; }
     /* Reports whether this session may expose currently available clear data. */
@@ -115,6 +104,21 @@ public:
         bool discard, const std::uint8_t *password, std::size_t password_size,
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device_name, std::uint64_t timestamp_ms);
+    /* Retains an authenticated divergent-replica merge as one publication candidate. */
+    TransitionResult prepare_merge(std::uint64_t operation_id,
+        const std::uint8_t *local_bytes, std::size_t local_size,
+        const std::uint8_t *target_password, std::size_t target_password_size,
+        const std::uint8_t *local_password, std::size_t local_password_size,
+        std::string_view profile_name, std::string_view profile_email,
+        std::string_view device_name, std::string_view resolved_content,
+        std::uint64_t timestamp_ms);
+    /* Checks a proposed merge and target rights without retaining a candidate. */
+    void assess_merge(const std::uint8_t *local_bytes, std::size_t local_size,
+        const std::uint8_t *target_password, std::size_t target_password_size,
+        const std::uint8_t *local_password, std::size_t local_password_size,
+        std::string_view profile_name, std::string_view profile_email,
+        std::string_view device_name, std::string_view resolved_content,
+        std::uint64_t timestamp_ms) const;
     /* Prepares a v3 compaction only from a clean sealed image and exact verified backup. */
     TransitionResult prepare_compaction(std::uint64_t operation_id,
         const std::uint8_t *password, std::size_t password_size,
@@ -199,7 +203,6 @@ private:
     ContainerState state_{};
     std::vector<ContainerStateObserver *> observers_;
     bool transitioning_{};
-    bool revised_v3_{};
     std::optional<std::array<std::uint8_t, 16>> local_lease_session_;
 };
 

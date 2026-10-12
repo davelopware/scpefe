@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-const OPERATIONS = new Set(["edit", "recovery", "divergence", "migration"]);
+const OPERATIONS = new Set(["edit", "recovery", "divergence"]);
 
 /* Keeps native lease capabilities out of the renderer and makes every approval one-shot. */
 export class LeaseTakeoverAuthorizations {

@@ -12,6 +12,28 @@ import { DocumentService } from "../src/document-service.mjs";
 const addonPath = process.env.SCPEFE_NATIVE_ADDON_PATH;
 const native = addonPath ? createRequire(import.meta.url)(addonPath) : null;
 
+function createRevised(profile: object, content: string, password: string,
+  timestampMs: number): Buffer {
+  const context = native.createContainerContext();
+  const bytes = context.create({ ...profile, content, ownerPassword: password,
+    timestampMs });
+  context.close();
+  return bytes;
+}
+
+function saveRevised(bytes: Buffer, profile: object, content: string,
+  password: string, timestampMs: number): Buffer {
+  const context = native.createContainerContext();
+  context.open(bytes);
+  context.unlock(password);
+  context.confirmEditLease();
+  const prepared = context.prepareSave("manual", password,
+    { ...profile, content, timestampMs, operationId: 1 });
+  context.finishSave(prepared.operationId, "verified");
+  context.close();
+  return prepared.bytes;
+}
+
 test("document service keeps the native handle on Lock and reauthenticates on Unlock", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {
@@ -60,12 +82,10 @@ for (const recovery of ["published", "unavailable", "changed-target", "replaced-
     const password = "owner passphrase with independent words";
     const profile = { name: "Ada", email: "ada@example.test", deviceName: "Ada PC" };
     await fs.writeFile(profilePath, JSON.stringify(profile));
-    const base = native.createDocument({ ...profile, content: "base words",
-      ownerPassword: password, timestampMs: 1 });
+    const base = createRevised(profile, "base words", password, 1);
     await fs.writeFile(target, base);
-    const authenticatedBase = native.openDocument(base, password);
-    const candidate = native.saveDocument(base, password, { ...profile,
-      content: "pending words", timestampMs: 2 });
+    const authenticatedBase = native.inspectDocument(base, password);
+    const candidate = saveRevised(base, profile, "pending words", password, 2);
     let unavailable = recovery === "unavailable";
     const guardedFs = Object.create(fs);
     guardedFs.readFile = async (file: string, ...args: unknown[]) => {
@@ -88,12 +108,10 @@ for (const recovery of ["published", "unavailable", "changed-target", "replaced-
     authenticatedBase.journalKey.fill(0);
 
     if (recovery === "changed-target") {
-      const remote = native.saveDocument(base, password, { ...profile,
-        content: "remote words", timestampMs: 3 });
+      const remote = saveRevised(base, profile, "remote words", password, 3);
       await fs.writeFile(target, remote);
     } else if (recovery === "replaced-target") {
-      const replacement = native.createDocument({ ...profile,
-        content: "other document", ownerPassword: password, timestampMs: 4 });
+      const replacement = createRevised(profile, "other document", password, 4);
       await fs.writeFile(target, replacement);
     }
 
@@ -107,7 +125,7 @@ for (const recovery of ["published", "unavailable", "changed-target", "replaced-
     assert.equal(handle.read().content, recovery === "published" ? "pending words"
       : recovery === "changed-target" ? "remote words" : "base words");
     if (recovery === "replaced-target") {
-      assert.equal(native.openDocument(await fs.readFile(target), password)
+      assert.equal(native.inspectDocument(await fs.readFile(target), password)
         .content, "other document");
     }
     await service.lock("app-lock");
@@ -159,7 +177,7 @@ test("manual save publishes and adopts the native candidate without legacy save"
   const result = await service.saveDocument("submitted", submittedVersion);
   assert.deepEqual(result, { saved: true, content: "submitted",
     publicationState: "target-published", ...submittedVersion });
-  assert.equal(native.openDocument(await fs.readFile(target), password).content,
+  assert.equal(native.inspectDocument(await fs.readFile(target), password).content,
     "submitted");
   assert.equal(service.container.read().content, "submitted");
   service.updateWorkingCopy({ content: "submitted", cursor: { start: 9, end: 9 },
@@ -173,7 +191,7 @@ test("manual save publishes and adopts the native candidate without legacy save"
   assert.deepEqual(service.container.bytes(), await fs.readFile(target));
   assert.equal(service.active.dirty, true);
   await service.discardUnsavedForClose();
-  assert.equal(native.openDocument(await fs.readFile(target), password).content,
+  assert.equal(native.inspectDocument(await fs.readFile(target), password).content,
     "submitted");
   assert.equal(service.active.manuallySealed, true);
   await service.lock("document-close");
@@ -224,9 +242,9 @@ test("offline native candidate resumes exact journal bytes before another save",
   offline = true;
   const second = await service.saveDocument("another offline draft");
   assert.equal(second.publicationState, "pending-publication");
-  const remote = native.saveDocument(candidate, password, { name: "Ada",
-    email: "ada@example.test", deviceName: "Ada PC", content: "remote work",
-    timestampMs: Date.now() });
+  const remote = saveRevised(candidate, { name: "Ada",
+    email: "ada@example.test", deviceName: "Ada PC" }, "remote work",
+    password, Date.now());
   await fs.writeFile(target, remote);
   offline = false;
   const conflict = await service.reconnectPendingPublication();

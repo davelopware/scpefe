@@ -5,7 +5,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
 
-test("mounted shell keeps save, recovery, conflict, lease, migration, and compaction decisions truthful",
+test("mounted shell keeps save, recovery, conflict, lease, and compaction decisions truthful",
   async (t) => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "https://scpefe.invalid/",
@@ -53,7 +53,6 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     let saveAttempts = 0;
     let publicationAttempts = 0;
     let editAttempts = 0;
-    let migrationAttempts = 0;
     let compactionAttempts = 0;
     let recoveryDiscards = 0;
     let recoveryRestores = 0;
@@ -178,23 +177,6 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
         return { compacted: true, backupCreated: true,
           previousHead: "44".repeat(32), head: "55".repeat(32),
           opened: { ...base, readOnly: false } };
-      },
-      migrateDocument: async ({ authorization } = {}) => {
-        calls.push(["migrate", Boolean(authorization)]); migrationAttempts += 1;
-        if (!authorization) {
-          return { decisionRequired: "lease-takeover", operation: "migration",
-            holderName: "Future clock holder",
-            authorization: migrationAttempts < 4
-              ? "223e4567-e89b-42d3-a456-426614174000"
-              : migrationAttempts < 6
-                ? "a23e4567-e89b-42d3-a456-426614174000"
-                : "b23e4567-e89b-42d3-a456-426614174000" };
-        }
-        if (migrationAttempts === 3) return null;
-        if (migrationAttempts === 5) throw new Error("alternate backup verification failed");
-        return { migrated: true, backupCreated: true,
-          compatibilityCode: "MIGRATION_COMPATIBILITY",
-          opened: { ...base, content: "legacy private text", readOnly: false } };
       },
       cancelLeaseTakeover: async (authorization) => {
         calls.push(["cancel-takeover", authorization]); cancelAttempts += 1;
@@ -535,101 +517,4 @@ test("mounted shell keeps save, recovery, conflict, lease, migration, and compac
     await ui.waitFor(() => assert.equal(ui.queryByRole(document.body, "dialog"), null));
     await command("Edit", "Edit Contents");
     await ui.waitFor(() => assert.equal(editor.readOnly, false));
-    await command("Security", "Lock");
-    openResult = { ...base, content: "legacy private text", canEdit: false,
-      migrationRequired: true, migrationCanEdit: true,
-      migrationWarning: "A verified exact backup is required before migration." };
-    await command("Security", "Unlock");
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
-    await user.type(ui.getByLabelText(dialog, "Password"), "legacy password words");
-    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    assert.equal(editor.value, "");
-    await user.click(ui.getByRole(dialog, "button",
-      { name: "Create verified backup and migrate…" }));
-    dialog = await ui.findByRole(document.body, "dialog",
-      { name: "Confirm editing-lease takeover" });
-    assert.match(ui.getByRole(dialog, "alert").textContent, /Future clock holder/);
-    await user.click(ui.getByRole(dialog, "button", { name: "Cancel" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    await user.click(ui.getByRole(dialog, "button",
-      { name: "Create verified backup and migrate…" }));
-    dialog = await ui.findByRole(document.body, "dialog",
-      { name: "Confirm editing-lease takeover" });
-    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    assert.ok(await ui.findByText(dialog, /Migration was canceled before publication/));
-    action = ui.getByRole(dialog, "button", { name: "Create verified backup and migrate…" });
-    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
-    await user.click(action);
-    dialog = await ui.findByRole(document.body, "dialog",
-      { name: "Confirm editing-lease takeover" });
-    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    assert.ok(await ui.findByText(dialog, /operation could not be completed safely/i));
-    action = ui.getByRole(dialog, "button", { name: "Create verified backup and migrate…" });
-    await ui.waitFor(() => assert.equal(document.activeElement === action, true));
-    await user.click(action);
-    dialog = await ui.findByRole(document.body, "dialog",
-      { name: "Confirm editing-lease takeover" });
-    await user.click(ui.getByRole(dialog, "button", { name: "Force takeover and migrate" }));
-    await ui.waitFor(() => assert.equal(status("Document state"), "Edit mode"));
-    assert.equal(editor.value, "legacy private text");
-    assert.deepEqual(calls.filter(([name]) => name === "migrate"), [
-      ["migrate", false], ["migrate", false], ["migrate", true],
-      ["migrate", false], ["migrate", true], ["migrate", false], ["migrate", true],
-    ]);
-    assert.deepEqual(calls.filter(([name]) => name === "cancel-takeover").map((call) => call[1]), [
-      "323e4567-e89b-42d3-a456-426614174000",
-      "123e4567-e89b-42d3-a456-426614174000",
-      "423e4567-e89b-42d3-a456-426614174000",
-      "223e4567-e89b-42d3-a456-426614174000",
-    ]);
-
-    listeners.locked({ locked: true, journalSaved: true, warning: null });
-    assert.equal(editor.value, "");
-    assert.equal(document.body.textContent.includes("legacy private text"), false);
-
-    openResult = { ...base, content: "denied legacy text", canEdit: false,
-      migrationRequired: true, migrationCanEdit: false };
-    await command("Security", "Unlock");
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
-    await user.type(ui.getByLabelText(dialog, "Password"), "denied legacy words");
-    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    assert.equal(ui.getByRole(dialog, "button",
-      { name: "Create verified backup and migrate…" }).disabled, true);
-    assert.match(dialog.textContent, /password slot cannot migrate/i);
-    listeners.locked({ locked: true, journalSaved: true, warning: null });
-
-    openResult = { ...base, content: "live legacy text", canEdit: false,
-      migrationRequired: true, migrationCanEdit: true };
-    await command("Security", "Unlock");
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
-    await user.type(ui.getByLabelText(dialog, "Password"), "live legacy words");
-    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    let finishMigration;
-    let migrationStarted;
-    const migrationActive = new Promise((resolve) => { migrationStarted = resolve; });
-    dom.window.scpefe.migrateDocument = () => new Promise((resolve) => {
-      finishMigration = resolve; migrationStarted();
-    });
-    await user.click(ui.getByRole(dialog, "button",
-      { name: "Create verified backup and migrate…" }));
-    await migrationActive;
-    await ui.waitFor(() => assert.equal(ui.queryByText(dialog,
-      /password slot cannot migrate/i), null));
-    listeners.locked({ locked: true, journalSaved: true, warning: null });
-    openResult = base;
-    await command("Security", "Unlock");
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
-    await user.type(ui.getByLabelText(dialog, "Password"), "replacement password words");
-    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
-    finishMigration({ migrated: true, backupCreated: true,
-      compatibilityCode: "MIGRATION_COMPATIBILITY",
-      opened: { ...base, readOnly: false, content: "stale migrated text" } });
-    await ui.waitFor(() => assert.equal(status("Document state"), "Edit mode"));
-    assert.equal(editor.value, "sealed text");
-    assert.equal(document.body.textContent.includes("stale migrated text"), false);
   });

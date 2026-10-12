@@ -38,7 +38,7 @@ interface NativeAddon {
   createDocument(request: object): Buffer;
   assessPasswordPolicy(password: string): string;
   createContainerContext(): ContainerContext;
-  openDocument(bytes: Buffer, password: string): {
+  inspectDocument(bytes: Buffer, password: string): {
     content: string; documentId: string; baseRevision: string;
     invitationRequired?: boolean; mustBeChanged: boolean;
     canEdit: boolean; recoverySlot: boolean; managedSlots: Slot[];
@@ -69,7 +69,7 @@ test("revised-v3 native slot bridge owns exact candidates and projects each role
   const created = context.create({ name: "Ada", email: "ada@example.test",
     deviceName: "Ada PC", content: "shared words", ownerPassword: owner,
     recoveryPassword: recovery, timestampMs: 1 });
-  const first = native.openDocument(created, owner);
+  const first = native.inspectDocument(created, owner);
   assert.equal(first.content, "shared words");
   assert.equal(first.canEdit, true);
   assert.equal(first.recoverySlot, false);
@@ -79,7 +79,7 @@ test("revised-v3 native slot bridge owns exact candidates and projects each role
   const invitation = context.prepareSlotChange("invitation", owner,
     input(1, { newPassword: temporary, name: "Guest", canEdit: false }));
   assert.notDeepEqual(context.bytes(), invitation.bytes);
-  assert.equal(native.openDocument(invitation.bytes, temporary).mustBeChanged, true);
+  assert.equal(native.inspectDocument(invitation.bytes, temporary).mustBeChanged, true);
   assert.throws(() => context.prepareSlotChange("invitation", owner,
     input(2, { newPassword: temporary, name: "Other" })),
   (error: any) => error.status === 14);
@@ -104,7 +104,7 @@ test("revised-v3 native slot bridge owns exact candidates and projects each role
   assert.deepEqual(context.bytes(), claim.bytes);
   assert.throws(() => context.prepareSlotChange("password", temporary,
     input(3, { newPassword: rotated })), (error: any) => error.status === 10);
-  assert.equal(native.openDocument(claim.bytes, claimed).content, "shared words");
+  assert.equal(native.inspectDocument(claim.bytes, claimed).content, "shared words");
 
   context.lock();
   context.unlock(claimed);
@@ -118,11 +118,11 @@ test("revised-v3 native slot bridge owns exact candidates and projects each role
   const ownChange = context.prepareSlotChange("password", claimed,
     input(3, { newPassword: rotated }));
   context.finishSave(ownChange.operationId, "verified");
-  assert.equal(native.openDocument(ownChange.bytes, rotated).canEdit, false);
+  assert.equal(native.inspectDocument(ownChange.bytes, rotated).canEdit, false);
 
   context.lock();
   context.unlock(recovery);
-  const recovered = native.openDocument(context.bytes(), recovery);
+  const recovered = native.inspectDocument(context.bytes(), recovery);
   assert.equal(recovered.recoverySlot, true);
   assert.equal(recovered.managedSlots.length, 1);
   const permissions = context.prepareSlotChange("permissions", recovery,
@@ -165,8 +165,8 @@ test("Windows publishes a revised-v3 password candidate and claims an invitation
     newPassword: rotated });
   assert.equal(changed.content, "private words");
   assert.notEqual(service.active.baseRevision,
-    native.openDocument(created, owner).baseRevision);
-  assert.equal(native.openDocument(await fs.readFile(target), rotated).content,
+    native.inspectDocument(created, owner).baseRevision);
+  assert.equal(native.inspectDocument(await fs.readFile(target), rotated).content,
     "private words");
   service.closeContainer();
 
@@ -190,7 +190,7 @@ test("Windows publishes a revised-v3 password candidate and claims an invitation
   const claimedView = await claimant.claimInvitation(claimed);
   assert.equal(claimedView.canEdit, false);
   assert.equal(claimedView.content, "private words");
-  assert.equal(native.openDocument(await fs.readFile(target), claimed).content,
+  assert.equal(native.inspectDocument(await fs.readFile(target), claimed).content,
     "private words");
   claimant.closeContainer();
 });

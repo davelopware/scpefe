@@ -157,7 +157,7 @@ test("mounted security dialogs gate profile, filter administration, and clear on
         compactionAttempts += 1;
         return compactionAttempts === 1 ? null : { opened: editable,
           previousHead: "previous", head: "compacted" };
-      }, migrateDocument: async () => null,
+      },
       backupDocument: async () => null, exportPlaintext: async () => null,
       updateWorkingCopy: async () => ({}), lock: async () => { editing = false;
         return { locked: true, journalSaved: true, warning: null }; },
@@ -565,24 +565,6 @@ test("mounted security dialogs gate profile, filter administration, and clear on
     await user.click(ui.getByRole(dialog, "button", { name: "Close" }));
 
     await command("Security", "Lock");
-    openResult = { ...readOnly, readOnly: true, canEdit: false,
-      migrationRequired: true, migrationCanEdit: true,
-      migrationWarning: "This older container requires a verified backup before migration." };
-    await command("Security", "Unlock");
-    dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
-    await user.type(ui.getByLabelText(dialog, "Password"), "older container password words");
-    await user.click(ui.getByRole(dialog, "button", { name: "Unlock" }));
-    const migration = await ui.findByRole(document.body, "dialog", { name: "Older container" });
-    assert.match(ui.getByRole(migration, "alert").textContent,
-      /verified exact backup is required/i);
-    assert.ok(ui.getByRole(migration, "button",
-      { name: "Create verified backup and migrate…" }));
-    await user.click(ui.getByRole(migration, "button", { name: "Keep read-only and close" }));
-    await ui.waitFor(() => assert.equal(
-      ui.getByLabelText(document.body, "Document state").textContent, "Locked"));
-    assert.equal(ui.getByRole(document.body, "textbox", { name: "Document text" }).value, "",
-      "declining migration immediately removes the older document plaintext");
-
     openResult = readOnly;
     await command("Security", "Unlock");
     dialog = await ui.findByRole(document.body, "dialog", { name: "Unlock document" });
