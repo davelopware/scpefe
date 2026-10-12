@@ -141,9 +141,11 @@ class Host implements DocumentSessionHost<OpenedDocument> {
       holderName: string; authorization: string }> {
     return { ...opened(), recoveredUnsaved: true, cursor: { start: 0, end: 0 } };
   }
-  async beginDivergenceResolution(_request?: { authorization?: string }): Promise<{
+  async beginDivergenceResolution(_request?: { authorization?: string;
+    targetPassword?: string }): Promise<{
     content: string; hasConflicts: boolean; ancestorRevision: string;
-    localRevision: string; currentRevision: string }> {
+    localRevision: string; currentRevision: string } | { decisionRequired: "lease-takeover";
+      operation: "divergence"; holderName: string; authorization: string }> {
     return { content: "merge", hasConflicts: false, ancestorRevision: "a",
       localRevision: "l", currentRevision: "c" };
   }
@@ -918,6 +920,43 @@ test("failed divergence acquisition preserves even consented unsaved work for re
   assert.equal(snapshot.working.dirty, true);
   assert.deepEqual(snapshot.attention, { kind: "publication-decision", state: "conflict",
     failureCode: "OPERATION_FAILED" });
+  session.dispose();
+});
+
+test("target reauthentication retains the candidate and forwards the password through lease takeover", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("saved candidate"), publicationState: "conflict" });
+  const requests: Array<{ authorization?: string; targetPassword?: string }> = [];
+  host.beginDivergenceResolution = async (request) => {
+    requests.push(request ?? {});
+    if (!request?.targetPassword) {
+      throw Object.assign(new Error("private target path"), {
+        name: "SafeBoundaryError", code: "MERGE_TARGET_REAUTHENTICATION",
+      });
+    }
+    if (!request.authorization) return { decisionRequired: "lease-takeover" as const,
+      operation: "divergence" as const, holderName: "Ada", authorization: "opaque" };
+    return { content: "merge draft", hasConflicts: false, ancestorRevision: "a",
+      localRevision: "l", currentRevision: "c" };
+  };
+  assert.deepEqual(await session.beginDivergenceResolution(),
+    { status: "failed", code: "MERGE_TARGET_REAUTHENTICATION" });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.working.text, "saved candidate");
+  assert.equal(snapshot.attention?.kind, "publication-decision");
+  assert.deepEqual(await session.beginDivergenceResolution({ targetPassword: "new secret" }),
+    { status: "attention" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("new secret"), false);
+  assert.deepEqual(await session.confirmLeaseTakeover(),
+    { status: "divergence", hasConflicts: false });
+  assert.deepEqual(requests, [{}, { targetPassword: "new secret" },
+    { authorization: "opaque", targetPassword: "new secret" }]);
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected merge draft");
+  assert.equal(snapshot.working.text, "merge draft");
+  assert.equal(JSON.stringify(snapshot).includes("new secret"), false);
   session.dispose();
 });
 

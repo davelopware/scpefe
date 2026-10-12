@@ -13,7 +13,8 @@ import { OpenRequestQueue } from "./switch-document.mjs";
 import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
   validatePassword, validateProfile, validateTakeoverCancellation,
-  validateTakeoverRequest, validateWorkingCopy, validateRevisionActivityRequest,
+  validateTakeoverRequest, validateDivergenceRequest,
+  validateWorkingCopy, validateRevisionActivityRequest,
   validateRevisionActivityId, validateSaveSubmission } from "./contracts.mjs";
 import { safeEventCode } from "./error-boundary.mjs";
 import { DISCARD_UNREADABLE_JOURNAL_CONFIRMATION } from "./document-service.mjs";
@@ -349,11 +350,12 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:begin-divergence-resolution", (request = {}) => {
-      const validated = validateTakeoverRequest(request);
+      const validated = validateDivergenceRequest(request);
       const current = this.service;
       return runLeaseOperation({ authorizations: this.leaseTakeovers, operation: "divergence",
         service: current, authorization: validated.authorization,
-        perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken }) });
+        perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken,
+          targetPassword: validated.targetPassword }) });
     });
     this.#register("document:save-divergence-resolution", async (request) => {
       const { content, submittedVersion } = validateSaveSubmission(request);

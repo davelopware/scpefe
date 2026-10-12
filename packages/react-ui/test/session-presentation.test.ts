@@ -692,6 +692,7 @@ test("pending publication distinguishes unavailable, conflict, and published out
     const presentation = new SessionPresentation(session, () => "safe failure");
     assert.deepEqual(presentation.view().selectedDecision, {
       kind: "publication-decision", state: "pending-publication", failureMessage: null,
+      failureCode: null,
     });
     await presentation.act("reconnect-publication");
     assert.equal(presentation.view().safeMessage, state === "pending-publication"
@@ -717,12 +718,43 @@ test("discard failure keeps a locally saved candidate and retry focus", async ()
   await presentation.act("discard-publication");
   assert.deepEqual(presentation.view().selectedDecision, {
     kind: "publication-decision", state: "pending-publication",
-    failureMessage: "safe failure",
+    failureMessage: "safe failure", failureCode: "OPERATION_FAILED",
   });
   assert.equal(presentation.view().safeMessage,
     "Publication discard needs attention: safe failure");
   assert.equal(presentation.view().focusIntent, "decision-action");
   assert.equal(JSON.stringify(presentation.view()).includes("private"), false);
+  session.dispose();
+});
+
+test("target reauthentication action supplies a new credential without displaying it", async () => {
+  const requests: Array<{ targetPassword?: string }> = [];
+  const host = { beginDivergenceResolution: async (request?: { targetPassword?: string }) => {
+    requests.push(request ?? {});
+    if (!request?.targetPassword) {
+      throw Object.assign(new Error("private target path"), {
+        name: "SafeBoundaryError", code: "MERGE_TARGET_REAUTHENTICATION",
+      });
+    }
+    return { content: "merge draft", hasConflicts: false, ancestorRevision: "a",
+      localRevision: "l", currentRevision: "c" };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, publicationState: "conflict" });
+  const presentation = new SessionPresentation(session, () => "Enter the current target password.");
+  await presentation.act("reconnect-publication");
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "publication-decision", state: "conflict",
+    failureMessage: "Enter the current target password.",
+    failureCode: "MERGE_TARGET_REAUTHENTICATION",
+  });
+  await presentation.act("authenticate-target", "new secret");
+  assert.deepEqual(requests, [{}, { targetPassword: "new secret" }]);
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(JSON.stringify(presentation.view()).includes("new secret"), false);
+  assert.equal(session.getSnapshot().kind, "edit");
   session.dispose();
 });
 

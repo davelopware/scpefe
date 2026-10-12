@@ -256,8 +256,8 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   restoreRecoveredWork(request?: { readonly authorization?: string }): Promise<
     (Doc & { readonly recoveredUnsaved: true; readonly cursor: WorkingCopySelection })
     | SessionLeaseDecision>;
-  beginDivergenceResolution(request?: { readonly authorization?: string }):
-    Promise<SessionMergeDraft | SessionLeaseDecision>;
+  beginDivergenceResolution(request?: { readonly authorization?: string;
+    readonly targetPassword?: string }): Promise<SessionMergeDraft | SessionLeaseDecision>;
   migrateDocument(request?: { readonly authorization?: string }): Promise<
     { readonly opened: Doc; readonly compatibilityCode: string }
     | SessionLeaseDecision | null>;
@@ -402,7 +402,10 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
 export type SessionFailureCode = "OPERATION_FAILED" | "OPEN_FAILED"
   | "UNLOCK_FAILED" | "LOCK_CHECKPOINT_FAILED" | "LIFECYCLE_FAILED"
   | "WEAK_PASSWORD" | "PASSWORD_ALREADY_IN_USE"
-  | "MIGRATION_FAILED" | "COMPACTION_FAILED";
+  | "MIGRATION_FAILED" | "COMPACTION_FAILED"
+  | "MERGE_TARGET_REAUTHENTICATION" | "MERGE_ACCESS_REVOKED"
+  | "MERGE_PERMISSION_DENIED" | "MERGE_BASE_UNAVAILABLE"
+  | "MERGE_UNRELATED_TARGET" | "MERGE_TARGET_ROLLBACK";
 
 /** Lock warnings with an intentionally bounded presentation vocabulary. */
 export type SessionLockWarningCode = "LOCK_CHECKPOINT_FAILED" | "OPERATION_FAILED";
@@ -412,6 +415,9 @@ const SAFE_HOST_CODES = new Set<SessionFailureCode>([
   "OPERATION_FAILED", "OPEN_FAILED", "UNLOCK_FAILED", "LOCK_CHECKPOINT_FAILED",
   "LIFECYCLE_FAILED", "WEAK_PASSWORD", "PASSWORD_ALREADY_IN_USE",
   "MIGRATION_FAILED", "COMPACTION_FAILED",
+  "MERGE_TARGET_REAUTHENTICATION", "MERGE_ACCESS_REVOKED",
+  "MERGE_PERMISSION_DENIED", "MERGE_BASE_UNAVAILABLE",
+  "MERGE_UNRELATED_TARGET", "MERGE_TARGET_ROLLBACK",
 ]);
 
 function hostFailureCode(error: unknown): SessionFailureCode {
@@ -445,6 +451,7 @@ export class DocumentSession<Doc extends SessionDocument,
   private workingCopy: WorkingCopy | null = null;
   private stopWorkingCopy: (() => void) | null = null;
   private leaseDecision: SessionLeaseDecision | null = null;
+  private mergeTargetPassword: string | null = null;
   private queuedLeaseOperation: "lease-confirm" | "lease-cancel" | null = null;
   private editFailureCode: SessionFailureCode | null = null;
   private publicationState: SessionPublicationState = "target-published";
@@ -550,6 +557,7 @@ export class DocumentSession<Doc extends SessionDocument,
       ? null : this.snapshot.targetName);
     this.clearWorkingCopy();
     this.leaseDecision = null;
+    this.mergeTargetPassword = null;
     this.queuedLeaseOperation = null;
     this.editFailureCode = null;
     this.publicationFailureCode = null;
@@ -1000,13 +1008,17 @@ export class DocumentSession<Doc extends SessionDocument,
     const generation = this.generation;
     const adoption = this.currentAdoption();
     const operation = decision.operation;
+    let targetPassword = this.mergeTargetPassword;
+    this.mergeTargetPassword = null;
     let authorization = decision.authorization;
     return this.enqueue(() => {
       const used = authorization;
       authorization = "";
+      const credential = targetPassword;
+      targetPassword = null;
       return operation === "edit"
         ? this.runEditOperation(generation, used, "lease-confirm", adoption)
-        : this.runOtherLeaseOperation(generation, operation, used, adoption);
+        : this.runOtherLeaseOperation(generation, operation, used, adoption, credential);
     });
   }
 
@@ -1107,7 +1119,8 @@ export class DocumentSession<Doc extends SessionDocument,
 
   private async runOtherLeaseOperation(generation: number,
     operation: Exclude<SessionLeaseDecision["operation"], "edit">,
-    authorization: string, adoption: number | null): Promise<DocumentSessionOutcome<Doc>> {
+    authorization: string, adoption: number | null,
+    targetPassword: string | null = null): Promise<DocumentSessionOutcome<Doc>> {
     if (!this.matchesAdoption(generation, adoption)) {
       return Object.freeze({ status: "superseded" });
     }
@@ -1125,10 +1138,12 @@ export class DocumentSession<Doc extends SessionDocument,
         return Object.freeze({ status: "recovery" });
       }
       if (operation === "divergence") {
-        const result = await this.host.beginDivergenceResolution({ authorization });
+        const result = await this.host.beginDivergenceResolution({ authorization,
+          ...(targetPassword ? { targetPassword } : {}) });
         if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
         if ("decisionRequired" in result) {
           this.clearPending();
+          this.mergeTargetPassword = targetPassword;
           this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
@@ -1152,6 +1167,7 @@ export class DocumentSession<Doc extends SessionDocument,
     const decision = this.leaseDecision;
     if (!decision) return Promise.resolve(Object.freeze({ status: "unavailable" }));
     this.leaseDecision = null;
+    this.mergeTargetPassword = null;
     this.queuedLeaseOperation = "lease-cancel";
     this.publishWorkingCopy();
     const generation = this.generation;
@@ -1334,7 +1350,8 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   /** Starts conflict resolution under the same adoption and command ordering as publication. */
-  beginDivergenceResolution(options: { readonly discardUnsaved?: boolean } = {}):
+  beginDivergenceResolution(options: { readonly discardUnsaved?: boolean;
+    readonly targetPassword?: string } = {}):
     Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
     const adoption = this.currentAdoption();
@@ -1353,12 +1370,14 @@ export class DocumentSession<Doc extends SessionDocument,
       this.publicationFailureCode = null;
       this.publishPending("divergence");
       try {
-        const result = await this.host.beginDivergenceResolution();
+        const result = await this.host.beginDivergenceResolution(
+          options.targetPassword ? { targetPassword: options.targetPassword } : undefined);
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
         if ("decisionRequired" in result) {
           this.clearPending();
+          this.mergeTargetPassword = options.targetPassword ?? null;
           this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
@@ -2310,6 +2329,7 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   private clearWorkingCopy(): void {
+    this.mergeTargetPassword = null;
     this.stopWorkingCopy?.();
     this.stopWorkingCopy = null;
     this.workingCopy?.dispose();

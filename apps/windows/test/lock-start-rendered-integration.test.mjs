@@ -197,6 +197,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     return candidate;
   }, mergeDocument(currentBytes, localBytes, _password, input) {
     const candidate = Buffer.from(`saved:${input.content}`);
+    // The preflight merge can produce the existing local candidate in this fake.
+    // Keep its original ancestry until a distinct resolution is published.
+    if (candidate.equals(localBytes)) return candidate;
     const revision = createHash("sha256").update(candidate).digest("hex");
     const current = createHash("sha256").update(currentBytes).digest("hex");
     const local = createHash("sha256").update(localBytes).digest("hex");

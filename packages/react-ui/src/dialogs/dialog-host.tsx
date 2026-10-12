@@ -14,6 +14,7 @@ export type DialogAction = "retry-edit" | "continue-read-only"
   | "retry-save" | "continue-editing" | "lock" | "migrate" | "open-passwords" | "accept-head"
   | "discard-recovery" | "restore-recovery" | "discard-unreadable"
   | "discard-publication" | "reconnect-publication" | "compact"
+  | "authenticate-target"
   | "compaction-canceled" | "protection-cancel" | "protection-save"
   | "protection-discard" | "keep-newer-edits" | "export-newer-edits"
   | "discard-newer-edits";
@@ -34,7 +35,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   returnFocus: HTMLElement | null;
   selectedDecision: SessionPresentationView["selectedDecision"];
   focusIntent: SessionPresentationView["focusIntent"];
-  onAction(action: DialogAction): void | Promise<void>;
+  onAction(action: DialogAction, targetPassword?: string): void | Promise<void>;
   ref?: React.Ref<DialogHostHandle>;
 }): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
@@ -210,6 +211,20 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
         {publicationDecision.failureMessage
           && <p className="dialog-error" role="alert">
             {publicationDecision.failureMessage}</p>}
+        {publicationDecision.failureCode === "MERGE_TARGET_REAUTHENTICATION"
+          && <form onSubmit={(event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const password = String(new FormData(form).get("targetPassword") ?? "");
+            form.reset();
+            void onAction("authenticate-target", password);
+          }}>
+            <label>Current target password
+              <input type="password" name="targetPassword" autoComplete="off"
+                required minLength={1} />
+            </label>
+            <button type="submit">Authenticate target and resolve</button>
+          </form>}
         <div className="dialog-actions"><button disabled={snapshot.kind !== "read-only"
           && snapshot.kind !== "edit" || !snapshot.commands.publicationDiscard}
           onClick={() => void onAction("discard-publication")}>Discard pending save</button>

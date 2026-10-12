@@ -679,6 +679,18 @@ export function validateTakeoverRequest(value = {}) {
     ? {} : { authorization: value.authorization });
 }
 
+export function validateDivergenceRequest(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).some((key) => !["authorization", "targetPassword"].includes(key))) {
+    throw new TypeError("divergence request is invalid");
+  }
+  const takeover = validateTakeoverRequest(
+    value.authorization === undefined ? {} : { authorization: value.authorization });
+  return Object.freeze({ ...takeover,
+    ...(value.targetPassword === undefined ? {}
+      : { targetPassword: validatePassword(value.targetPassword) }) });
+}
+
 export function validateTakeoverCancellation(value) {
   const validated = validateTakeoverRequest({ authorization: value });
   return validated.authorization;

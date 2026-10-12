@@ -43,6 +43,25 @@ function proposedPasswordAccepted(native, password) {
   return typeof assess === "function" && assess.call(native, password) === "accepted";
 }
 
+const MERGE_STATUS_CODES = Object.freeze({
+  20: "MERGE_UNRELATED_TARGET",
+  21: "MERGE_TARGET_ROLLBACK",
+  22: "MERGE_BASE_UNAVAILABLE",
+  23: "MERGE_ACCESS_REVOKED",
+  24: "MERGE_PERMISSION_DENIED",
+});
+
+function mergeDecisionError(error) {
+  const status = error?.status;
+  const code = MERGE_STATUS_CODES[status]
+    ?? (status === 10 ? "MERGE_TARGET_REAUTHENTICATION" : null);
+  if (!code) return error;
+  const decision = new Error(code);
+  decision.code = code;
+  decision.cause = error;
+  return decision;
+}
+
 export class DocumentService {
   constructor({ native, fs, profilePath, settingsPath, journalDirectory,
     publicationCapabilities, witnessDirectory,
@@ -1182,7 +1201,7 @@ export class DocumentService {
       content: active.pendingRecord.text });
   }
 
-  async beginDivergenceResolution({ takeoverToken } = {}) {
+  async beginDivergenceResolution({ takeoverToken, targetPassword } = {}) {
     const active = this.active;
     if (!active?.pendingPublication || active.pendingRecord?.state !== "conflict") {
       throw new Error("No divergent pending publication is available");
@@ -1190,9 +1209,39 @@ export class DocumentService {
     if (!active.slotCanEdit) {
       throw new Error("The active password slot does not permit editing");
     }
-    this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
-    await this.#acquireActiveLease(active,
-      { takeoverToken, issueTakeoverToken: true });
+    const localPassword = active.password;
+    const currentPassword = targetPassword === undefined
+      ? localPassword : validatePassword(targetPassword);
+    this.#validateCandidate(active.pendingRecord, localPassword, active.documentId);
+    // Authenticate lineage and current target rights before changing its lease.
+    // A denied merge leaves the encrypted conflict journal exactly as it was.
+    const preflightTarget = await this.fs.readFile(active.target);
+    const preflightLocal = Buffer.from(
+      active.pendingRecord.publication.candidate, "base64");
+    const profile = await this.loadProfile();
+    if (this.active !== active || this.lockOperation) {
+      const error = new Error("The document was locked during divergence preflight");
+      error.code = "SESSION_LOCKED";
+      throw error;
+    }
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    try {
+      this.native.mergeDocument(preflightTarget, preflightLocal, localPassword,
+        { ...profile, content: active.pendingRecord.text,
+          timestampMs: this.now(), targetPassword: currentPassword });
+    } catch (error) {
+      throw mergeDecisionError(error);
+    }
+    active.password = currentPassword;
+    active.mergeLocalPassword = localPassword;
+    try {
+      await this.#acquireActiveLease(active,
+        { takeoverToken, issueTakeoverToken: true });
+    } catch (error) {
+      active.password = localPassword;
+      active.mergeLocalPassword = null;
+      throw error;
+    }
     active.editMode = true;
     try {
       const currentBytes = await this.fs.readFile(active.target);
@@ -1200,12 +1249,12 @@ export class DocumentService {
         this.native.openDocument(currentBytes, active.password));
       const localBytes = Buffer.from(active.pendingRecord.publication.candidate, "base64");
       const local = this.#validateNativeOpened(
-        this.native.openDocument(localBytes, active.password));
+        this.native.openDocument(localBytes, localPassword));
       const ancestorBytes = Buffer.from(
         active.pendingRecord.publication.mergeAncestor
           ?? active.pendingRecord.publication.base, "base64");
       const ancestor = this.#validateNativeOpened(
-        this.native.openDocument(ancestorBytes, active.password));
+        this.native.openDocument(ancestorBytes, localPassword));
       try {
         if (!current.journalKey.equals(local.journalKey)
             || !current.journalKey.equals(ancestor.journalKey)) {
@@ -1255,6 +1304,8 @@ export class DocumentService {
     } catch (error) {
       active.editMode = false;
       await this.#stopHeartbeat();
+      active.password = localPassword;
+      active.mergeLocalPassword = null;
       throw error;
     }
   }
@@ -1294,9 +1345,15 @@ export class DocumentService {
           }
           const localBytes = Buffer.from(
             active.pendingRecord.publication.candidate, "base64");
-          const candidate = this.native.mergeDocument(
-            currentBytes, localBytes, active.password,
-            { ...profile, content: canonical, timestampMs: Date.now() });
+          let candidate;
+          try {
+            candidate = this.native.mergeDocument(
+              currentBytes, localBytes, active.mergeLocalPassword ?? active.password,
+              { ...profile, content: canonical, timestampMs: Date.now(),
+                targetPassword: active.password });
+          } catch (error) {
+            throw mergeDecisionError(error);
+          }
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a merge container");
           }
@@ -1309,6 +1366,15 @@ export class DocumentService {
         }
       });
     } catch (error) {
+      if (MERGE_STATUS_CODES[error?.cause?.status]
+          || error?.code === "MERGE_TARGET_REAUTHENTICATION") {
+        await this.#stopHeartbeat();
+        active.editMode = false;
+        if (active.mergeLocalPassword) {
+          active.password = active.mergeLocalPassword;
+          active.mergeLocalPassword = null;
+        }
+      }
       if (error.publicationPrepared) {
         active.pendingSubmittedVersion = submittedVersion;
         active.pendingRecord = await this.journals.read(
@@ -1355,6 +1421,7 @@ export class DocumentService {
       active.documentId, active.journalKey, active.pendingRecord);
     active.pendingPublication = false;
     active.pendingRecord = null;
+    active.mergeLocalPassword = null;
     active.unresolvedJournal = false;
     active.working = null;
     active.dirty = false;
@@ -2907,9 +2974,12 @@ export class DocumentService {
     active.pendingSubmittedVersion = null;
     active.pendingPublication = false;
     active.pendingRecord = null;
+    active.mergeLocalPassword = null;
     active.manuallySealed = reopened.manuallySealed;
     active.unresolvedJournal = false;
     active.recovery = null;
+    active.continuousDue = null;
+    if (newerWork) this.#scheduleCheckpoint();
   }
 
   async #discardProvisional(active) {
