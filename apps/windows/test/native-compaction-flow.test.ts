@@ -104,3 +104,44 @@ test("failed backup and unsaved journal leave history intact", {
   await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION), /clean/);
   assert.deepEqual(await fs.readFile(target), before);
 });
+
+test("edits arriving during backup or publication are rejected without losing work", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { service, target } = await setup(t);
+  const before = await fs.readFile(target);
+  const originalBackup = service.publications.publishReplica.bind(
+    service.publications);
+  const originalPublish = service.publications.publish.bind(
+    service.publications);
+  let rejected = 0;
+  const lateEdit = () => {
+    assert.throws(() => service.updateWorkingCopy({
+      content: "late unsaved words", cursor: { start: 18, end: 18 },
+    }), /Compaction is in progress/);
+    rejected += 1;
+  };
+  service.publications.publishReplica = async (request: object) => {
+    const backup = await originalBackup(request);
+    lateEdit();
+    return backup;
+  };
+  service.publications.publish = async (request: object) => {
+    lateEdit();
+    return originalPublish(request);
+  };
+
+  const result = await service.compactDocument(COMPACTION_CONFIRMATION);
+  assert.equal(rejected, 2);
+  assert.equal(result.compacted, true);
+  assert.equal(service.active.working.content, "version 1");
+  assert.equal(service.active.dirty, false);
+  assert.equal(await service.journals.read(
+    service.active.documentId, service.active.journalKey), null);
+  assert.notDeepEqual(await fs.readFile(target), before);
+  assert.deepEqual(service.container.bytes(), await fs.readFile(target));
+  assert.equal(service.active.opened.content, "version 1");
+  service.updateWorkingCopy({ content: "new work after compaction",
+    cursor: { start: 25, end: 25 } });
+  assert.equal(service.active.dirty, true);
+});

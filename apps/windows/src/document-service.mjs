@@ -1472,6 +1472,9 @@ export class DocumentService {
 
   updateWorkingCopy(value) {
     if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
+    if (this.active.compactionInProgress) {
+      throw new Error("Compaction is in progress; editing is unavailable");
+    }
     if (this.active.pendingPublication && !this.active.pendingRecord?.merge) {
       throw new Error("Resolve the interrupted publication before editing");
     }
@@ -2076,6 +2079,18 @@ export class DocumentService {
         || path.resolve(selectedBackupTarget) === path.resolve(active.target)) {
       throw new TypeError("A distinct pre-compaction backup target is required");
     }
+    if (active.compactionInProgress) {
+      throw new Error("Compaction is already in progress");
+    }
+    active.compactionInProgress = true;
+    try {
+      return await this.#performCompaction(active, selectedBackupTarget);
+    } finally {
+      active.compactionInProgress = false;
+    }
+  }
+
+  async #performCompaction(active, selectedBackupTarget) {
     let reopened;
     let published;
     const previousHead = active.baseRevision;
