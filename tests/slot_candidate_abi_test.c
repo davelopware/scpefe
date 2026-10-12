@@ -39,6 +39,7 @@ static int publish(scpefe_container *container,
     scpefe_candidate_info_v1 info = {0};
     uint32_t effects = 0;
     info.struct_size = sizeof(info);
+    info.abi_version = SCPEFE_ABI_VERSION;
     CHECK(scpefe_container_prepare_slot_change(container, request, &info)
         == SCPEFE_STATUS_OK);
     CHECK(info.operation_id == request->operation_id && info.byte_size > 100);
@@ -116,6 +117,15 @@ int main(void)
         == SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE);
     change.new_password = rotated;
     change.new_password_size = sizeof(rotated) - 1;
+    info.abi_version = SCPEFE_ABI_VERSION + 1;
+    CHECK(scpefe_container_prepare_slot_change(container, &change, &info)
+        == SCPEFE_STATUS_UNSUPPORTED_ABI);
+    {
+        size_t ignored_size = 0;
+        CHECK(scpefe_container_copy_candidate(container, change.operation_id,
+            NULL, 0, &ignored_size) == SCPEFE_STATUS_STALE_OPERATION);
+    }
+    info.abi_version = SCPEFE_ABI_VERSION;
     CHECK(publish(container, &change) == 0);
     CHECK(scpefe_container_lock(container) == SCPEFE_STATUS_OK);
     {

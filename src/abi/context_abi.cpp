@@ -622,7 +622,8 @@ scpefe_status scpefe_container_prepare_slot_change(scpefe_container *handle,
         || request->client_name_size == 0 || request->client_email_size == 0
         || request->device_size == 0)
         return SCPEFE_STATUS_INVALID_ARGUMENT;
-    if (request->abi_version != SCPEFE_ABI_VERSION)
+    if (request->abi_version != SCPEFE_ABI_VERSION
+        || candidate->abi_version != SCPEFE_ABI_VERSION)
         return SCPEFE_STATUS_UNSUPPORTED_ABI;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     if ((request->kind == SCPEFE_SLOT_UPDATE_PERMISSIONS
