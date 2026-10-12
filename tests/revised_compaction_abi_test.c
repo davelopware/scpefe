@@ -102,6 +102,62 @@ static int inspect_candidate(const uint8_t *bytes, size_t size,
     return 0;
 }
 
+static int inspect_repeated_candidate(const uint8_t *bytes, size_t size,
+    const scpefe_host_services_v1 *host, const uint8_t *password,
+    size_t password_size,
+    const uint8_t original_ids[13][SCPEFE_REVISION_ID_SIZE])
+{
+    scpefe_context *context = NULL;
+    scpefe_container *container = NULL;
+    scpefe_revision_graph *graph = NULL;
+    scpefe_revision_page *page = NULL;
+    scpefe_revision_result *result = NULL;
+    scpefe_container_open_v1 open = {sizeof(open), SCPEFE_ABI_VERSION, bytes, size};
+    scpefe_password_input_v1 auth = {sizeof(auth), SCPEFE_ABI_VERSION,
+        password, password_size};
+    size_t count = 0;
+    CHECK(scpefe_context_create(host, &context) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_container_open(context, &open, &container) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_container_unlock(container, &auth) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_container_revision_graph(container, &graph) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_revision_graph_list(graph, 0, 15, &page) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_revision_page_count(page, &count) == SCPEFE_STATUS_OK
+        && count == 15);
+    for (size_t i = 0; i < 15; ++i) {
+        scpefe_revision_metadata_v1 metadata = {0};
+        metadata.struct_size = sizeof(metadata);
+        CHECK(scpefe_revision_page_metadata(page, i, &metadata)
+            == SCPEFE_STATUS_OK);
+        if (i < 2) {
+            CHECK(metadata.original_kind == 2 && metadata.storage_kind == 0
+                && metadata.event_type_size == 10
+                && memcmp(metadata.event_type, "compaction", 10) == 0);
+            continue;
+        }
+        const size_t content_index = 14 - i;
+        CHECK(memcmp(metadata.id, original_ids[content_index],
+            SCPEFE_REVISION_ID_SIZE) == 0);
+        if (content_index < 11) {
+            CHECK(metadata.storage_kind == 4 && !metadata.body_available
+                && !metadata.text_available);
+            CHECK(scpefe_revision_graph_reconstruct(graph, metadata.id, &result)
+                == SCPEFE_STATUS_BODY_UNAVAILABLE && result == NULL);
+        } else {
+            CHECK(metadata.storage_kind == (content_index == 11 ? 3 : 2)
+                && metadata.body_available && metadata.text_available);
+            CHECK(scpefe_revision_graph_reconstruct(graph, metadata.id, &result)
+                == SCPEFE_STATUS_OK);
+            scpefe_revision_result_destroy(result);
+            result = NULL;
+        }
+    }
+    scpefe_revision_page_destroy(page);
+    scpefe_revision_graph_destroy(graph);
+    CHECK(scpefe_container_close(container) == SCPEFE_STATUS_OK);
+    scpefe_context_destroy(context);
+    return 0;
+}
+
 int main(void)
 {
     const uint8_t password[] = "0b4e79c5-7cfe-4b7c-b4f3-d89129cb7b5e";
@@ -290,10 +346,52 @@ int main(void)
     compact.retention_is_explicit = 1;
     CHECK(scpefe_container_prepare_compaction(container, &compact, &info)
         == SCPEFE_STATUS_STALE_OPERATION);
+    free(backup);
+    backup = NULL;
+    backup_size = 0;
+    CHECK(copy_bytes(container, &backup, &backup_size) == 0);
+    {
+        scpefe_container_compaction_v1 repeated = {0};
+        repeated.struct_size = sizeof(repeated);
+        repeated.abi_version = SCPEFE_ABI_VERSION;
+        repeated.operation_id = 17;
+        repeated.password = password;
+        repeated.password_size = sizeof(password) - 1;
+        repeated.lease_session_id = session;
+        repeated.lease_session_id_size = sizeof(session);
+        repeated.lease_heartbeat_counter = 1;
+        repeated.explicit_decision = 1;
+        repeated.clean_state_confirmed = 1;
+        repeated.backup_verified = 1;
+        repeated.verified_backup_bytes = backup;
+        repeated.verified_backup_size = backup_size;
+        repeated.client_name = "Ada";
+        repeated.client_name_size = 3;
+        repeated.client_email = "ada@example.test";
+        repeated.client_email_size = 16;
+        repeated.device_name = "Desk";
+        repeated.device_name_size = 4;
+        repeated.timestamp_ms = 101;
+        CHECK(repeated.retention_is_explicit == 0
+            && repeated.retain_deltas == 0);
+        CHECK(scpefe_container_prepare_compaction(container, &repeated, &info)
+            == SCPEFE_STATUS_OK);
+        CHECK(scpefe_container_copy_candidate(container, repeated.operation_id,
+            NULL, 0, &candidate_size) == SCPEFE_STATUS_BUFFER_TOO_SMALL);
+        candidate = (uint8_t *)malloc(candidate_size);
+        CHECK(candidate != NULL);
+        CHECK(scpefe_container_copy_candidate(container, repeated.operation_id,
+            candidate, candidate_size, &candidate_size) == SCPEFE_STATUS_OK);
+        CHECK(inspect_repeated_candidate(candidate, candidate_size, &host,
+            password, sizeof(password) - 1, original_ids) == 0);
+        CHECK(publish(container, repeated.operation_id) == 0);
+        free(candidate);
+        candidate = NULL;
+    }
     CHECK(scpefe_container_submit_content(container, "provisional\n", 12)
         == SCPEFE_STATUS_OK);
     save.kind = SCPEFE_SAVE_REGULAR;
-    save.operation_id = 17;
+    save.operation_id = 18;
     save.timestamp_ms = 200;
     CHECK(scpefe_container_prepare_save(container, &save, &info)
         == SCPEFE_STATUS_OK);
@@ -302,7 +400,7 @@ int main(void)
     backup = NULL;
     backup_size = 0;
     CHECK(copy_bytes(container, &backup, &backup_size) == 0);
-    compact.operation_id = 18;
+    compact.operation_id = 19;
     compact.verified_backup_bytes = backup;
     compact.verified_backup_size = backup_size;
     compact.retention_is_explicit = 1;

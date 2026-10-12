@@ -2,6 +2,8 @@
 #include "document/compaction.hpp"
 #include "format/revision_graph.hpp"
 
+#include <algorithm>
+
 namespace scpefe::core {
 
 std::size_t HistoryService::compaction_cutoff(
@@ -19,9 +21,18 @@ std::vector<std::uint8_t> HistoryService::compact_graph(
     std::uint64_t timestamp_ms) const
 {
     std::size_t count = 0;
+    std::size_t first_available = graph.records().size();
     for (const auto &record : graph.records())
-        if (!record.foreign && record.kind != 2) ++count;
-    return graph.compact_at(compaction_cutoff(count, retain_deltas), actor,
+        if (!record.foreign && record.kind != 2) {
+            if (record.text_available && first_available == graph.records().size())
+                first_available = count;
+            ++count;
+        }
+    // A prior compaction may have removed the nominal cutoff's body. Keep its
+    // existing checkpoint rather than selecting an unreconstructable revision.
+    const auto cutoff = std::max(compaction_cutoff(count, retain_deltas),
+        first_available);
+    return graph.compact_at(cutoff, actor,
         client_name, client_email, device, timestamp_ms);
 }
 
