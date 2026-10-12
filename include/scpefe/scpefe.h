@@ -475,8 +475,8 @@ typedef struct scpefe_container_compaction_v1 {
     int backup_verified;
     const uint8_t *verified_backup_bytes;
     size_t verified_backup_size;
-    /* When set, retain_deltas is ignored and ten content deltas are retained. */
-    int use_default_retention;
+    /* Zero retains ten deltas by default; one uses retain_deltas, including N=0. */
+    int retention_is_explicit;
     size_t retain_deltas;
     const char *client_name;
     size_t client_name_size;

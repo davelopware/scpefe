@@ -740,8 +740,8 @@ scpefe_status scpefe_container_prepare_compaction(scpefe_container *handle,
         || (request->clean_state_confirmed != 0
             && request->clean_state_confirmed != 1)
         || (request->backup_verified != 0 && request->backup_verified != 1)
-        || (request->use_default_retention != 0
-            && request->use_default_retention != 1)
+        || (request->retention_is_explicit != 0
+            && request->retention_is_explicit != 1)
         || !valid_utf8(request->client_name, request->client_name_size)
         || !valid_utf8(request->client_email, request->client_email_size)
         || !valid_utf8(request->device_name, request->device_name_size)
@@ -769,7 +769,7 @@ scpefe_status scpefe_container_prepare_compaction(scpefe_container *handle,
             request->lease_heartbeat_counter, request->explicit_decision != 0,
             request->clean_state_confirmed != 0 && request->backup_verified != 0,
             request->verified_backup_bytes, request->verified_backup_size,
-            request->use_default_retention ? 10 : request->retain_deltas,
+            request->retention_is_explicit ? request->retain_deltas : 10,
             {request->client_name, request->client_name_size},
             {request->client_email, request->client_email_size},
             {request->device_name, request->device_name_size},

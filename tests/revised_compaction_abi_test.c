@@ -222,6 +222,7 @@ int main(void)
     compact.device_name_size = 4;
     compact.timestamp_ms = 100;
     compact.operation_id = 14;
+    CHECK(compact.retention_is_explicit == 0 && compact.retain_deltas == 0);
     CHECK(scpefe_container_submit_content(container, "unsaved\n", 8)
         == SCPEFE_STATUS_OK);
     CHECK(scpefe_container_prepare_compaction(container, &compact, &info)
@@ -256,10 +257,10 @@ int main(void)
     compact.password_size = sizeof(password) - 1;
 
     for (size_t n = 0; n < 3; ++n) {
-        const size_t cutoff = n == 0 ? 12 : n == 1 ? 11 : 2;
+        const size_t cutoff = n == 0 ? 2 : n == 1 ? 12 : 11;
         compact.operation_id = 14 + n;
-        compact.use_default_retention = n == 2;
-        compact.retain_deltas = n;
+        if (n != 0) compact.retention_is_explicit = 1;
+        compact.retain_deltas = n == 0 ? 0 : n - 1;
         CHECK(scpefe_container_prepare_compaction(container, &compact, &info)
             == SCPEFE_STATUS_OK);
         CHECK(info.operation_id == compact.operation_id
@@ -283,6 +284,10 @@ int main(void)
         free(candidate);
         candidate = NULL;
     }
+    compact.retention_is_explicit = 2;
+    CHECK(scpefe_container_prepare_compaction(container, &compact, &info)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
+    compact.retention_is_explicit = 1;
     CHECK(scpefe_container_prepare_compaction(container, &compact, &info)
         == SCPEFE_STATUS_STALE_OPERATION);
     CHECK(scpefe_container_submit_content(container, "provisional\n", 12)
@@ -300,7 +305,7 @@ int main(void)
     compact.operation_id = 18;
     compact.verified_backup_bytes = backup;
     compact.verified_backup_size = backup_size;
-    compact.use_default_retention = 0;
+    compact.retention_is_explicit = 1;
     compact.retain_deltas = 0;
     CHECK(scpefe_container_prepare_compaction(container, &compact, &info)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
