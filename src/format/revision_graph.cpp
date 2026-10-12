@@ -448,8 +448,11 @@ void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head
             pending.pop_back();
             if (!reachable.insert(id).second) continue;
             const auto &r = records[seen.at(id)];
-            if (!r.foreign) { shared = true; continue; }
-            if (r.resolved_by != merge.id) malformed();
+            if (!r.foreign || r.resolved_by != merge.id) {
+                // An earlier merge may already have imported this same foreign ID.
+                shared = true;
+                continue;
+            }
             if (r.previous) pending.push_back(*r.previous);
             if (r.content_parent) pending.push_back(*r.content_parent);
             pending.insert(pending.end(), r.merge_sources.begin(), r.merge_sources.end());
@@ -648,6 +651,24 @@ const RevisionRecord *RevisionGraph::find(const RevisionId &id) const
     return it == records_.end() ? nullptr : &*it;
 }
 
+TargetLineage RevisionGraph::assess_target(const RevisionGraph &target) const
+{
+    if (head_ == target.head_) return TargetLineage::unchanged;
+    if (const auto *present = target.find(head_); present && !present->foreign)
+        return TargetLineage::advanced;
+    if (find(target.head_))
+        throw MergeFailure{MergeProblem::rollback};
+    bool related = false;
+    for (const auto &record : target.records_) {
+        const auto *same = find(record.id);
+        if (!same) continue;
+        if (same->immutable_cbor != record.immutable_cbor) malformed();
+        if (!same->foreign && !record.foreign) related = true;
+    }
+    if (!related) throw MergeFailure{MergeProblem::unrelated_target};
+    return TargetLineage::divergent;
+}
+
 std::vector<std::uint8_t> RevisionGraph::replace_lease(const RevisionLease &lease) const
 {
     CborWriter writer;
@@ -828,6 +849,139 @@ std::vector<std::uint8_t> RevisionGraph::save_content(std::string_view content,
     writer.unsigned_integer(7); writer.bytes(new_content_head.data(), new_content_head.size());
     field(8);
     if (field_ranges_[9].second) field(9);
+    auto encoded = writer.take_output();
+    (void)RevisionGraph::decode(encoded.data(), encoded.size(), limits);
+    return encoded;
+}
+
+std::vector<std::uint8_t> RevisionGraph::merge_with(
+    const RevisionGraph &target, std::string_view content,
+    std::string_view profile_name, std::string_view profile_email,
+    std::string_view device, const RevisionSlot &actor,
+    std::uint64_t timestamp_ms) const
+{
+    const auto limits = RevisionLimits::defaults();
+    if (records_.back().provisional || target.records_.back().provisional
+        || timestamp_ms > std::numeric_limits<std::int64_t>::max()
+        || content.size() > limits.max_text_bytes()
+        || !valid_canonical_document_text(content.data(), content.size())
+        || profile_name.empty() || profile_email.empty() || device.empty())
+        throw RevisionFailure{RevisionError::invalid_argument};
+    const auto active = std::find_if(target.slots_.begin(), target.slots_.end(),
+        [&](const auto &slot) { return slot.id == actor.id; });
+    if (active == target.slots_.end() || !active->permissions
+        || !(active->permissions & 1u) || active->must_be_changed)
+        throw RevisionFailure{RevisionError::invalid_argument};
+    if (assess_target(target) != TargetLineage::divergent)
+        throw RevisionFailure{RevisionError::invalid_argument};
+
+    std::set<RevisionId> local_ids;
+    for (const auto &record : records_) local_ids.insert(record.id);
+    std::optional<RevisionId> base;
+    for (const auto &record : target.records_) {
+        if (!local_ids.count(record.id)) continue;
+        const auto *same = find(record.id);
+        if (!same || same->immutable_cbor != record.immutable_cbor) malformed();
+        if (!same->foreign && !record.foreign && record.kind != 2)
+            base = record.id;
+    }
+    if (!base) throw MergeFailure{MergeProblem::unrelated_target};
+    if (!reconstruct(*base) && !target.reconstruct(*base))
+        throw MergeFailure{MergeProblem::unavailable_base};
+
+    const auto local_text = reconstruct(content_head_);
+    if (!local_text) throw MergeFailure{MergeProblem::unavailable_base};
+    CborWriter body;
+    body.array(3); body.unsigned_integer(0);
+    body.unsigned_integer(content.size());
+    std::size_t prefix = 0;
+    while (prefix < local_text->size() && prefix < content.size()
+        && (*local_text)[prefix] == content[prefix]) ++prefix;
+    std::size_t suffix = 0;
+    while (suffix < local_text->size() - prefix && suffix < content.size() - prefix
+        && (*local_text)[local_text->size() - suffix - 1]
+            == content[content.size() - suffix - 1]) ++suffix;
+    const auto inserted = content.size() - prefix - suffix;
+    body.array((prefix ? 1 : 0) + (inserted ? 1 : 0) + (suffix ? 1 : 0));
+    if (prefix) {
+        body.array(3); body.unsigned_integer(0);
+        body.unsigned_integer(0); body.unsigned_integer(prefix);
+    }
+    if (inserted) {
+        body.array(2); body.unsigned_integer(1);
+        body.bytes(reinterpret_cast<const std::uint8_t *>(content.data() + prefix),
+            inserted);
+    }
+    if (suffix) {
+        body.array(3); body.unsigned_integer(0);
+        body.unsigned_integer(local_text->size() - suffix);
+        body.unsigned_integer(suffix);
+    }
+    const auto body_bytes = body.take_output();
+    const auto content_hash = digest(content_prefix,
+        reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
+    const auto body_digest = digest(body_prefix, body_bytes.data(), body_bytes.size());
+    CborWriter immutable;
+    immutable.map(13);
+    immutable.unsigned_integer(1); immutable.unsigned_integer(1);
+    immutable.unsigned_integer(2); immutable.bytes(head_.data(), head_.size());
+    immutable.unsigned_integer(3); immutable.bytes(content_head_.data(), content_head_.size());
+    immutable.unsigned_integer(4); immutable.array(1);
+    immutable.bytes(target.head_.data(), target.head_.size());
+    immutable.unsigned_integer(5); immutable.unsigned_integer(timestamp_ms);
+    immutable.unsigned_integer(6); immutable.bytes(actor.id.data(), actor.id.size());
+    const auto actor_name = actor.name.empty() ? profile_name
+        : std::string_view(actor.name);
+    const auto actor_email = actor.email.empty() ? profile_email
+        : std::string_view(actor.email);
+    immutable.unsigned_integer(7); immutable.text(actor_name.data(), actor_name.size());
+    immutable.unsigned_integer(8); immutable.text(actor_email.data(), actor_email.size());
+    immutable.unsigned_integer(9); immutable.text(profile_name.data(), profile_name.size());
+    immutable.unsigned_integer(10); immutable.text(profile_email.data(), profile_email.size());
+    immutable.unsigned_integer(11); immutable.text(device.data(), device.size());
+    immutable.unsigned_integer(12); immutable.bytes(content_hash.data(), 32);
+    immutable.unsigned_integer(13); immutable.bytes(body_digest.data(), 32);
+    const auto immutable_bytes = immutable.take_output();
+    const auto id = digest(id_prefix, immutable_bytes.data(), immutable_bytes.size());
+    CborWriter merge_record;
+    merge_record.map(4);
+    merge_record.unsigned_integer(1); merge_record.bytes(id.data(), id.size());
+    merge_record.unsigned_integer(2);
+    merge_record.raw(immutable_bytes.data(), immutable_bytes.size());
+    merge_record.unsigned_integer(3); merge_record.unsigned_integer(2);
+    merge_record.unsigned_integer(4);
+    merge_record.raw(body_bytes.data(), body_bytes.size());
+    const auto merge_bytes = merge_record.take_output();
+
+    CborWriter writer;
+    writer.map(field_ranges_[9].second ? 9 : 8);
+    writer.unsigned_integer(1); writer.unsigned_integer(1);
+    const auto field = [&](const RevisionGraph &graph, unsigned key) {
+        const auto [offset, length] = graph.field_ranges_[key];
+        writer.unsigned_integer(key);
+        writer.raw(graph.encoded_.data() + offset, length);
+    };
+    field(target, 2); field(target, 3); field(target, 4);
+    const auto imported = std::count_if(target.records_.begin(), target.records_.end(),
+        [&](const auto &record) { return !local_ids.count(record.id); });
+    writer.unsigned_integer(5); writer.array(records_.size() + imported + 1);
+    for (const auto &record : records_)
+        writer.raw(record.record_cbor.data(), record.record_cbor.size());
+    for (const auto &record : target.records_) {
+        if (local_ids.count(record.id)) continue;
+        writer.map(5);
+        writer.unsigned_integer(1); writer.bytes(record.id.data(), record.id.size());
+        writer.unsigned_integer(2);
+        writer.raw(record.immutable_cbor.data(), record.immutable_cbor.size());
+        writer.unsigned_integer(3); writer.unsigned_integer(5);
+        writer.unsigned_integer(6); writer.bytes(id.data(), id.size());
+        writer.unsigned_integer(7); writer.boolean(true);
+    }
+    writer.raw(merge_bytes.data(), merge_bytes.size());
+    writer.unsigned_integer(6); writer.bytes(id.data(), id.size());
+    writer.unsigned_integer(7); writer.bytes(id.data(), id.size());
+    field(*this, 8);
+    if (field_ranges_[9].second) field(*this, 9);
     auto encoded = writer.take_output();
     (void)RevisionGraph::decode(encoded.data(), encoded.size(), limits);
     return encoded;

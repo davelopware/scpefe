@@ -40,7 +40,12 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_BODY_UNAVAILABLE = 16,
     SCPEFE_STATUS_REVISION_NOT_FOUND = 17,
     SCPEFE_STATUS_STALE_OPERATION = 18,
-    SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED = 19
+    SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED = 19,
+    SCPEFE_STATUS_UNRELATED_TARGET = 20,
+    SCPEFE_STATUS_TARGET_ROLLBACK = 21,
+    SCPEFE_STATUS_MERGE_BASE_UNAVAILABLE = 22,
+    SCPEFE_STATUS_TARGET_ACCESS_REVOKED = 23,
+    SCPEFE_STATUS_TARGET_PERMISSION_DENIED = 24
 } scpefe_status;
 
 /* Stable reasons returned when assessing a newly proposed password. */
@@ -317,6 +322,29 @@ typedef struct scpefe_merge_save_v1 {
     uint64_t timestamp_ms;
 } scpefe_merge_save_v1;
 
+/* Inputs for a revised-v3 merge with independent local and target credentials. */
+typedef struct scpefe_revised_merge_save_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *target_container;
+    size_t target_container_size;
+    const uint8_t *local_container;
+    size_t local_container_size;
+    const uint8_t *target_password;
+    size_t target_password_size;
+    const uint8_t *local_password;
+    size_t local_password_size;
+    const char *profile_name;
+    size_t profile_name_size;
+    const char *profile_email;
+    size_t profile_email_size;
+    const char *device_name;
+    size_t device_name_size;
+    const char *content;
+    size_t content_size;
+    uint64_t timestamp_ms;
+} scpefe_revised_merge_save_v1;
+
 /* Validated inputs used to publish a new owner-protected document. */
 typedef struct scpefe_new_document_v1 {
     uint32_t struct_size;
@@ -396,8 +424,22 @@ typedef enum scpefe_publication_effect {
     SCPEFE_EFFECT_PUBLISH_CANDIDATE = 1u << 2,
     SCPEFE_EFFECT_ADOPT_CANDIDATE = 1u << 3,
     SCPEFE_EFFECT_CLEAR_JOURNAL = 1u << 4,
-    SCPEFE_EFFECT_RECOVER_CANDIDATE = 1u << 5
+    SCPEFE_EFFECT_RECOVER_CANDIDATE = 1u << 5,
+    SCPEFE_EFFECT_PRESERVE_UNSAVED_WORK = 1u << 6,
+    SCPEFE_EFFECT_CLEAR_DISPLAY = 1u << 7,
+    SCPEFE_EFFECT_STOP_HEARTBEAT = 1u << 8,
+    SCPEFE_EFFECT_REAUTHENTICATE_TARGET = 1u << 9
 } scpefe_publication_effect;
+
+/* Authenticated target image observed before any merge or publication. */
+typedef struct scpefe_container_target_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *bytes;
+    size_t bytes_size;
+    const uint8_t *password;
+    size_t password_size;
+} scpefe_container_target_v1;
 
 /* One versioned save request; the password is used only while preparing. */
 typedef struct scpefe_container_save_v1 {
@@ -759,6 +801,10 @@ SCPEFE_API void scpefe_owned_snapshot_destroy(scpefe_owned_snapshot *snapshot);
 SCPEFE_API scpefe_status scpefe_container_copy_bytes(
     const scpefe_container *container, uint8_t *output,
     size_t output_capacity, size_t *output_size);
+/* Applies authenticated target rights immediately and reports host journal work. */
+SCPEFE_API scpefe_status scpefe_container_apply_target(
+    scpefe_container *container, const scpefe_container_target_v1 *target,
+    uint32_t *effect_mask);
 /* Legacy host-confirmed mode switch retained for existing host workflows. */
 SCPEFE_API scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *container);
 /* Reads edit mode while unlocked; authenticated-state snapshots provide lease details. */
@@ -973,6 +1019,11 @@ SCPEFE_API scpefe_status scpefe_merge_save(
     size_t output_capacity,
     size_t *output_size
 );
+
+/* Resolves divergent revised-v3 replicas into target wrappers and one local content line. */
+SCPEFE_API scpefe_status scpefe_revised_merge_save(
+    const scpefe_revised_merge_save_v1 *save,
+    uint8_t *output, size_t output_capacity, size_t *output_size);
 
 /* Creates a shallow baseline while preserving the document and credential state. */
 SCPEFE_API scpefe_status scpefe_compact_document(

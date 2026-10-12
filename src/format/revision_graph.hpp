@@ -15,6 +15,16 @@ namespace scpefe::format {
 
 using RevisionId = std::array<std::uint8_t, 32>;
 
+/* Names a merge condition requiring a distinct host or user decision. */
+enum class MergeProblem { unrelated_target, rollback, unavailable_base,
+    revoked_access, permission_denied };
+
+/* Carries one classified merge condition without losing its cause. */
+struct MergeFailure { MergeProblem problem; };
+
+/* Classifies one authenticated target relative to the local canonical head. */
+enum class TargetLineage { unchanged, advanced, divergent };
+
 /* Authenticated encrypted metadata for one ordered v3 password slot. */
 struct RevisionSlot {
     std::array<std::uint8_t, 16> id{}, management_id{};
@@ -88,6 +98,8 @@ public:
     const RevisionId &content_head() const { return content_head_; }
     /* Locates an immutable ID, or returns null for an unknown ID. */
     const RevisionRecord *find(const RevisionId &id) const;
+    /* Requires shared authenticated lineage and rejects a rolled-back target. */
+    TargetLineage assess_target(const RevisionGraph &target) const;
     /* Reconstructs a canonical content revision, or returns null when pruned. */
     std::optional<std::string> reconstruct(const RevisionId &id) const;
     /* Computes a bounded readable line comparison for available revisions. */
@@ -98,6 +110,11 @@ public:
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device, const RevisionSlot &actor,
         std::uint64_t timestamp_ms, bool regular, bool discard) const;
+    /* Resolves a related foreign head onto this local content line using target slots. */
+    std::vector<std::uint8_t> merge_with(const RevisionGraph &target,
+        std::string_view content, std::string_view profile_name,
+        std::string_view profile_email, std::string_view device,
+        const RevisionSlot &actor, std::uint64_t timestamp_ms) const;
     /* Appends a credential metadata event with a replacement slot collection. */
     std::vector<std::uint8_t> append_slot_event(
         const std::vector<RevisionSlot> &slots, const RevisionSlot &actor,
