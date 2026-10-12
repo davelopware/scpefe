@@ -711,15 +711,34 @@ export function validateRecoveredWork(value) {
       end: canonicalCursorOffset(value.content, value.cursor.end) }) });
 }
 
+export function validateSaveSubmission(value) {
+  if (typeof value === "string") return { content: canonicalizeDocumentText(value),
+    submittedVersion: null };
+  if (!value || typeof value !== "object" || typeof value.content !== "string"
+      || typeof value.journalScope !== "string"
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+      || !Number.isSafeInteger(value.revision) || value.revision < 0
+      || Object.keys(value).some((key) => !["content", "journalScope", "revision"].includes(key))) {
+    throw new TypeError("invalid save submission");
+  }
+  return { content: canonicalizeDocumentText(value.content),
+    submittedVersion: { journalScope: value.journalScope, revision: value.revision } };
+}
+
 export function validateSaveResult(value) {
+  const hasVersion = value?.journalScope !== undefined || value?.revision !== undefined;
   if (!value || typeof value !== "object" || value.saved !== true
       || typeof value.content !== "string"
       || !["target-published", "pending-publication", "conflict"].includes(value.publicationState)
-      || Object.keys(value).length !== 3) {
+      || Object.keys(value).length !== (hasVersion ? 5 : 3)
+      || (hasVersion && (typeof value.journalScope !== "string"
+        || !/^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+        || !Number.isSafeInteger(value.revision) || value.revision < 0))) {
     throw new TypeError("host returned an invalid save result");
   }
   return Object.freeze({ saved: true, content: canonicalizeDocumentText(value.content),
-    publicationState: value.publicationState });
+    publicationState: value.publicationState,
+    ...(hasVersion ? { journalScope: value.journalScope, revision: value.revision } : {}) });
 }
 
 export function validatePublicationResult(value) {

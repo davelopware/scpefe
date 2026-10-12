@@ -621,6 +621,128 @@ napi_value container_status(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value container_confirm_edit_lease(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        const auto status = scpefe_container_confirm_edit_lease(owner->active);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_get_boolean(env, true, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_prepare_save(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 3) throw std::runtime_error("prepareSave expects kind, password, and input");
+        const std::string kind = string_value(env, args[0]);
+        const auto save_kind = kind == "manual" ? SCPEFE_SAVE_MANUAL
+            : kind == "regular" ? SCPEFE_SAVE_REGULAR
+            : kind == "discard" ? SCPEFE_SAVE_DISCARD
+            : throw std::runtime_error("unknown save kind");
+        const SecretBytes password{env, args[1]};
+        const std::string name = string_value(env, property(env, args[2], "name"));
+        const std::string email = string_value(env, property(env, args[2], "email"));
+        const std::string device = string_value(env, property(env, args[2], "deviceName"));
+        const std::string content = string_value(env, property(env, args[2], "content"));
+        double timestamp = 0;
+        check(env, napi_get_value_double(env, property(env, args[2], "timestampMs"), &timestamp));
+        double operation = 0;
+        check(env, napi_get_value_double(env, property(env, args[2], "operationId"), &operation));
+        if (!std::isfinite(timestamp) || timestamp < 0 || !std::isfinite(operation)
+            || operation < 1 || operation > 9007199254740991.0
+            || std::floor(operation) != operation)
+            throw std::runtime_error("invalid save timestamp or operation ID");
+        auto status = scpefe_container_submit_content(owner->active, content.data(), content.size());
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        const scpefe_container_save_v1 request{sizeof(request), SCPEFE_ABI_VERSION,
+            static_cast<std::uint64_t>(operation), save_kind,
+            password.data(), password.size(), name.data(), name.size(),
+            email.data(), email.size(), device.data(), device.size(),
+            static_cast<std::uint64_t>(timestamp)};
+        scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+        status = scpefe_container_prepare_save(owner->active, &request, &candidate);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value bytes = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_container_copy_candidate(owner->active,
+                    candidate.operation_id, output, capacity, size);
+            });
+        if (!bytes) return nullptr;
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_set_named_property(env, result, "bytes", bytes));
+        set_number(env, result, "operationId", static_cast<double>(candidate.operation_id));
+        set_number(env, result, "effects", candidate.effect_mask);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_finish_save(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 2) throw std::runtime_error("finishSave expects operation ID and outcome");
+        double operation = 0;
+        check(env, napi_get_value_double(env, args[0], &operation));
+        if (!std::isfinite(operation) || operation < 1 || operation > 9007199254740991.0
+            || std::floor(operation) != operation)
+            throw std::runtime_error("invalid save operation ID");
+        const std::string outcome = string_value(env, args[1]);
+        const auto native_outcome = outcome == "verified" ? SCPEFE_PUBLICATION_VERIFIED
+            : outcome == "definite-failure" ? SCPEFE_PUBLICATION_DEFINITE_FAILURE
+            : outcome == "ambiguous" ? SCPEFE_PUBLICATION_AMBIGUOUS
+            : throw std::runtime_error("unknown save outcome");
+        std::uint32_t effects = 0;
+        const auto status = scpefe_container_acknowledge_save(owner->active,
+            static_cast<std::uint64_t>(operation), native_outcome, &effects);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_create_uint32(env, effects, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_resolve_save(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 2) throw std::runtime_error("resolveSave expects operation ID and published flag");
+        double operation = 0;
+        bool published = false;
+        check(env, napi_get_value_double(env, args[0], &operation));
+        check(env, napi_get_value_bool(env, args[1], &published));
+        if (!std::isfinite(operation) || operation < 1 || operation > 9007199254740991.0
+            || std::floor(operation) != operation)
+            throw std::runtime_error("invalid save operation ID");
+        std::uint32_t effects = 0;
+        const auto status = scpefe_container_resolve_save(owner->active,
+            static_cast<std::uint64_t>(operation), published ? 1 : 0, &effects);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_create_uint32(env, effects, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value create_container_context(napi_env env, napi_callback_info info)
 {
     try {
@@ -642,6 +764,10 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"read", nullptr, container_read, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"bytes", nullptr, container_bytes, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"status", nullptr, container_status, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"confirmEditLease", nullptr, container_confirm_edit_lease, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"prepareSave", nullptr, container_prepare_save, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"finishSave", nullptr, container_finish_save, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"resolveSave", nullptr, container_resolve_save, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"historyPage", nullptr, container_history_page, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"historyCompare", nullptr, container_history_compare, nullptr, nullptr, nullptr, napi_default, nullptr},
         };

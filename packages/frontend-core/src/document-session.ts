@@ -263,10 +263,14 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
     | SessionLeaseDecision | null>;
   compactDocument?(request: { readonly confirmed: true }): Promise<{
     readonly opened: Doc; readonly previousHead: string; readonly head: string } | null>;
-  saveDocument(content: string): Promise<{ readonly saved: true; readonly content: string;
+  saveDocument(content: string, submittedVersion?: Readonly<{
+    journalScope: string; revision: number }> | null): Promise<{ readonly saved: true;
+    readonly content: string; readonly journalScope?: string; readonly revision?: number;
     readonly publicationState: "target-published" | "pending-publication" | "conflict" }>;
-  saveDivergenceResolution(content: string): Promise<{ readonly saved: true;
+  saveDivergenceResolution(content: string, submittedVersion?: Readonly<{
+    journalScope: string; revision: number }> | null): Promise<{ readonly saved: true;
     readonly content: string;
+    readonly journalScope?: string; readonly revision?: number;
     readonly publicationState: "target-published" | "pending-publication" | "conflict" }>;
   reconnectPendingPublication(): Promise<{ readonly content: string;
     readonly publicationState: "target-published" | "pending-publication" | "conflict" }>;
@@ -458,6 +462,8 @@ export class DocumentSession<Doc extends SessionDocument,
     pendingPublications: 0 });
   private sealedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
   private acceptedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
+  private pendingPublicationVersion: Readonly<{
+    journalScope: string; revision: number }> | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly workListeners = new Set<() => void>();
   private readonly queuedCommands: QueuedCommand<Doc>[] = [];
@@ -558,6 +564,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationState = document.provisional ? "provisional"
       : document.publicationState ?? "target-published";
     this.workingCopy = new WorkingCopy(this.journalHost);
@@ -1232,16 +1239,27 @@ export class DocumentSession<Doc extends SessionDocument,
       this.publishPending("save");
       try {
         const result = await (divergence
-          ? this.host.saveDivergenceResolution(content)
-          : this.host.saveDocument(content));
+          ? this.host.saveDivergenceResolution(content, submittedVersion)
+          : this.host.saveDocument(content, submittedVersion));
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
+        }
+        if (result.journalScope !== undefined && (result.journalScope
+            !== submittedVersion?.journalScope
+          || result.revision !== submittedVersion?.revision)) {
+          throw new Error("Host save result does not identify the submitted edit revision");
         }
         this.publicationState = result.publicationState;
         if (result.publicationState !== "conflict") this.resolvingDivergence = false;
         this.publicationFailureCode = null;
         this.sealedRegularVersion = submittedVersion;
-        this.workingCopy.sealPublication(result.content, content);
+        const atSubmittedRevision = submittedVersion?.journalScope
+          === this.workingCopy.journalVersion()?.journalScope
+          && submittedVersion?.revision === this.workingCopy.journalVersion()?.revision;
+        this.workingCopy.sealPublication(result.content, submittedVersion);
+        this.pendingPublicationVersion = result.publicationState === "target-published"
+          ? null : atSubmittedRevision
+            ? this.workingCopy.journalVersion() : submittedVersion;
         const current: DocumentSessionSnapshot<Doc> = this.getSnapshot();
         if (current.kind !== "read-only" && current.kind !== "edit") {
           return Object.freeze({ status: "superseded" });
@@ -1288,7 +1306,12 @@ export class DocumentSession<Doc extends SessionDocument,
         if (current.kind !== "read-only" && current.kind !== "edit") {
           return Object.freeze({ status: "superseded" });
         }
-        this.workingCopy?.sealPublication(result.content, current.document.content);
+        const resumedVersion = this.pendingPublicationVersion
+          ?? (current.working.dirty ? null : this.workingCopy?.journalVersion() ?? null);
+        this.workingCopy?.sealPublication(result.content, resumedVersion);
+        if (result.publicationState === "target-published") {
+          this.pendingPublicationVersion = null;
+        }
         this.refreshDocument({ ...current.document, content: result.content,
           readOnly: true,
           publicationState: result.publicationState } as Doc);
@@ -1367,6 +1390,7 @@ export class DocumentSession<Doc extends SessionDocument,
         }
         this.publicationState = document.provisional ? "provisional"
           : document.publicationState ?? "target-published";
+        this.pendingPublicationVersion = null;
         this.resolvingDivergence = false;
         if (document.provisional) this.workingCopy?.adoptOpen(document.content, true);
         else this.workingCopy?.adoptPublication(document.content);
@@ -1499,7 +1523,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.acceptedRegularVersion = Object.freeze({ journalScope: result.journalScope,
       revision: result.revision });
     this.publicationState = "provisional";
-    if (current.working.text === result.content) {
+    if (version.revision === result.revision && current.working.text === result.content) {
       this.workingCopy.markProvisional(result.content);
     } else {
       this.workingCopy.markProvisional();
@@ -1515,6 +1539,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationFailureCode = null;
     this.saveFailureCode = null;
     this.workingCopy.adoptPublication(text);
@@ -1821,6 +1846,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.cancelQueuedCommands();
     if (this.snapshot.kind === "closed") {
       const { invitationStaged: _staged, externalOpen: _external, ...current } = this.snapshot;
@@ -1863,6 +1889,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.cancelQueuedCommands();
     this.snapshot = this.discovery.total > 0
       ? Object.freeze({ kind: "closed", discovery: this.discovery,
@@ -1996,6 +2023,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.saveFailureCode = null;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationState = "conflict";
     this.resolvingDivergence = true;
     this.snapshot = this.openSnapshot(nextDocument, current.adoption,
@@ -2030,6 +2058,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.saveFailureCode = null;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationState = nextDocument.provisional ? "provisional"
       : nextDocument.publicationState ?? "target-published";
     this.resolvingDivergence = false;

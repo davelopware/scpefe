@@ -27,6 +27,15 @@ function targetUnavailable(error) {
   return UNAVAILABLE_CODES.has(error?.code);
 }
 
+function newerWorkingCopy(working, submittedVersion, content) {
+  if (!working) return false;
+  if (submittedVersion && working.journalScope) {
+    return working.journalScope !== submittedVersion.journalScope
+      || working.revision !== submittedVersion.revision;
+  }
+  return working.content !== content;
+}
+
 function proposedPasswordAccepted(native, password) {
   const assess = native.assessPasswordPolicy;
   return typeof assess === "function" && assess.call(native, password) === "accepted";
@@ -47,6 +56,8 @@ export class DocumentService {
     this.container = native.createContainerContext?.() ?? null;
     this.containerTarget = null;
     this.containerBytes = null;
+    this.nextCandidateOperation = 1;
+    this.pendingNativeCandidate = null;
     this.fs = fs;
     this.profilePath = profilePath;
     this.settingsPath = settingsPath ?? path.join(path.dirname(profilePath), "settings.json");
@@ -493,6 +504,57 @@ export class DocumentService {
     this.container.close();
     this.containerTarget = null;
     this.containerBytes = null;
+    this.pendingNativeCandidate = null;
+  }
+
+  #prepareSaveCandidate(active, current, kind, profile, content) {
+    if (!this.container || typeof this.container.prepareSave !== "function"
+        || active.migrationRequired) {
+      const input = { ...profile, content, timestampMs: Date.now() };
+      const bytes = kind === "regular"
+        ? this.native.regularSaveDocument(current, active.password, input)
+        : kind === "discard"
+          ? this.native.discardProvisional(current, active.password)
+          : this.native.saveDocument(current, active.password, input);
+      return { bytes, operationId: null };
+    }
+    if (this.pendingNativeCandidate) {
+      throw new Error("Resolve the pending candidate before preparing another save");
+    }
+    if (this.containerTarget !== active.target || !this.containerBytes?.equals(current)) {
+      if (this.containerTarget) this.closeContainer();
+      this.container.open(current);
+      this.container.unlock(active.password);
+      this.containerTarget = active.target;
+      this.containerBytes = Buffer.from(current);
+    }
+    this.container.confirmEditLease();
+    const result = this.container.prepareSave(kind, active.password, {
+      ...profile, content, timestampMs: Date.now(),
+      operationId: this.nextCandidateOperation++,
+    });
+    if (!Buffer.isBuffer(result?.bytes) || result.bytes.length === 0
+        || !Number.isSafeInteger(result.operationId)) {
+      throw new Error("Native bridge did not return an exact candidate");
+    }
+    this.pendingNativeCandidate = result.operationId;
+    return result;
+  }
+
+  #finishSaveCandidate(operationId, outcome) {
+    if (operationId === null) return;
+    this.container.finishSave(operationId, outcome);
+    if (outcome !== "ambiguous") {
+      this.pendingNativeCandidate = null;
+      if (outcome === "verified") this.containerBytes = this.container.bytes();
+    }
+  }
+
+  #resolveSaveCandidate(published) {
+    if (this.pendingNativeCandidate === null) return;
+    this.container.resolveSave(this.pendingNativeCandidate, published);
+    this.pendingNativeCandidate = null;
+    if (published) this.containerBytes = this.container.bytes();
   }
 
   #withRevisionHistory(read) {
@@ -535,6 +597,7 @@ export class DocumentService {
     catch { this.container = null; }
     this.containerTarget = null;
     this.containerBytes = null;
+    this.pendingNativeCandidate = null;
   }
 
   async enterEditMode({ takeoverToken } = {}) {
@@ -1018,11 +1081,13 @@ export class DocumentService {
     const resumed = await this.publications.resume(
       active.documentId, active.journalKey, active.pendingRecord);
     if (resumed.completed) {
+      this.#resolveSaveCandidate(true);
       await this.#adoptPublishedCandidate(active);
       return validatePublicationResult({ publicationState: "target-published",
         content: active.opened.content });
     }
     if (resumed.reason === "changed") {
+      this.#resolveSaveCandidate(false);
       active.pendingRecord = await this.publications.markDiverged(
         active.documentId, active.journalKey, active.pendingRecord);
       active.opened = validateOpenedDocument({ ...active.opened,
@@ -1111,7 +1176,7 @@ export class DocumentService {
     }
   }
 
-  async saveDivergenceResolution(content) {
+  async saveDivergenceResolution(content, submittedVersion = null) {
     const active = this.active;
     if (!active?.editMode || !active.pendingPublication
         || active.pendingRecord?.state !== "conflict"
@@ -1162,19 +1227,24 @@ export class DocumentService {
       });
     } catch (error) {
       if (error.publicationPrepared) {
+        active.pendingSubmittedVersion = submittedVersion;
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
         active.opened = validateOpenedDocument({ ...active.opened,
           content: canonical, publicationState: "pending-publication" });
-        active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-        active.dirty = false;
+        const newerWork = newerWorkingCopy(active.working, submittedVersion, canonical);
+        if (!newerWork) {
+          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        }
+        active.dirty = newerWork;
       }
       throw error;
     }
+    active.pendingSubmittedVersion = submittedVersion;
     await this.#adoptPublishedCandidate(active);
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical,
-      publicationState: "target-published" });
+      publicationState: "target-published", ...(submittedVersion ?? {}) });
   }
 
   async discardPendingPublication() {
@@ -1186,6 +1256,17 @@ export class DocumentService {
       this.#cancelRegularSave();
       await this.#stopHeartbeat();
       active.editMode = false;
+    }
+    if (this.pendingNativeCandidate !== null) {
+      const checked = await this.reconnectPendingPublication();
+      if (checked.publicationState === "target-published") return active.opened;
+      if (checked.publicationState !== "conflict") {
+        const target = await this.fs.readFile(active.target);
+        if (!target.equals(Buffer.from(active.pendingRecord.publication.base, "base64"))) {
+          throw new Error("Resolve the pending candidate before discarding it");
+        }
+        this.#resolveSaveCandidate(false);
+      }
     }
     await this.publications.discard(
       active.documentId, active.journalKey, active.pendingRecord);
@@ -1247,7 +1328,10 @@ export class DocumentService {
     const working = validateWorkingCopy(value);
     this.active.working = working;
     this.active.dirty = !this.active.manuallySealed
-      || working.content !== this.active.opened.content;
+      || working.content !== this.active.opened.content
+      || Boolean(this.active.sealedWorkingVersion
+        && newerWorkingCopy(working, this.active.sealedWorkingVersion,
+          this.active.opened.content));
     if (this.active.dirty) this.#scheduleCheckpoint();
     this.notifyActivity();
     return { checkpointScheduled: this.active.dirty,
@@ -1290,7 +1374,10 @@ export class DocumentService {
 
   async #finishLock(active, reason) {
     if (this.containerTarget) {
-      try { this.container.lock(); }
+      try {
+        if (this.pendingNativeCandidate !== null) this.closeContainer();
+        else this.container.lock();
+      }
       catch (error) {
         try { this.closeContainer(); }
         catch { this.#discardContainerContext(); }
@@ -1315,8 +1402,10 @@ export class DocumentService {
     } finally {
       if (active.leaseSessionId) {
         let release = null;
-        try { release = this.#prepareSuspendedLeaseRelease(active); }
-        catch { /* Lock must clear secrets even if release preparation fails. */ }
+        if (!active.pendingPublication) {
+          try { release = this.#prepareSuspendedLeaseRelease(active); }
+          catch { /* Lock must clear secrets even if release preparation fails. */ }
+        }
         this.suspendedLeases.set(active.documentId, {
           target: active.target,
           sessionId: Buffer.from(active.leaseSessionId),
@@ -1467,9 +1556,9 @@ export class DocumentService {
             error.code = "REGULAR_SAVE_DIVERGED";
             throw error;
           }
-          candidate = this.native.regularSaveDocument(current, active.password, {
-            ...profile, content: canonical, timestampMs: Date.now(),
-          });
+          const prepared = this.#prepareSaveCandidate(
+            active, current, "regular", profile, canonical);
+          candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a provisional container");
           }
@@ -1479,6 +1568,7 @@ export class DocumentService {
             cursor: { ...active.working.cursor }, baseRevision: active.baseRevision,
             purpose: "regular-save", state: "unsaved",
             ...(mergeAncestor ? { mergeAncestor } : {}) });
+          this.#finishSaveCandidate(prepared.operationId, "verified");
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
             this.native.openDocument(published, active.password));
@@ -1490,6 +1580,10 @@ export class DocumentService {
         }
       });
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error?.code === "REGULAR_SAVE_DIVERGED") {
         return this.#preserveRegularSaveConflict(
           active, profile, canonical, mergeAncestor);
@@ -1546,7 +1640,7 @@ export class DocumentService {
     return result;
   }
 
-  async saveDocument(content) {
+  async saveDocument(content, submittedVersion = null) {
     if (!this.active) throw new Error("Open a document first");
     if (!this.active.editMode) throw new Error("Enter edit mode before saving");
     if (this.active.pendingPublication) {
@@ -1573,10 +1667,9 @@ export class DocumentService {
           current = await this.fs.readFile(active.target);
         } catch (error) {
           if (!targetUnavailable(error)) throw error;
-          const candidate = this.native.saveDocument(
-            active.baseContainer, active.password, {
-              ...profile, content: canonical, timestampMs: Date.now(),
-            });
+          const prepared = this.#prepareSaveCandidate(
+            active, active.baseContainer, "manual", profile, canonical);
+          const candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a container");
           }
@@ -1590,10 +1683,15 @@ export class DocumentService {
             cursor: { start: 0, end: 0 },
             baseRevision: active.baseRevision,
           });
+          this.#finishSaveCandidate(prepared.operationId, "ambiguous");
           active.pendingPublication = true;
+          active.pendingSubmittedVersion = submittedVersion;
           active.unresolvedJournal = true;
-          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-          active.dirty = false;
+          const newerWork = newerWorkingCopy(active.working, submittedVersion, canonical);
+          if (!newerWork) {
+            active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+          }
+          active.dirty = newerWork;
           active.opened = validateOpenedDocument({ ...active.opened,
             content: canonical, publicationState: "pending-publication" });
           return null;
@@ -1605,9 +1703,9 @@ export class DocumentService {
             || currentLease.heartbeatCounter !== active.leaseCounter) {
           throw new Error("Editing lease is no longer held by this session");
         }
-        const candidate = this.native.saveDocument(current, active.password, {
-          ...profile, content: canonical, timestampMs: Date.now(),
-        });
+        const prepared = this.#prepareSaveCandidate(
+          active, current, "manual", profile, canonical);
+        const candidate = prepared.bytes;
         if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
           throw new Error("Native bridge did not produce a container");
         }
@@ -1621,26 +1719,35 @@ export class DocumentService {
           cursor: { start: 0, end: 0 },
           baseRevision: active.baseRevision,
         });
+        this.#finishSaveCandidate(prepared.operationId, "verified");
         published = await this.fs.readFile(active.target);
         return this.#validateNativeOpened(
           this.native.openDocument(published, active.password));
       });
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error.publicationPrepared) {
         active.pendingPublication = true;
+        active.pendingSubmittedVersion = submittedVersion;
         active.unresolvedJournal = true;
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
         active.opened = validateOpenedDocument({ ...active.opened,
           content: canonical, publicationState: "pending-publication" });
-        active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-        active.dirty = false;
+        const newerWork = newerWorkingCopy(active.working, submittedVersion, canonical);
+        if (!newerWork) {
+          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        }
+        active.dirty = newerWork;
       }
       throw error;
     }
     if (!reopened) {
       return validateSaveResult({ saved: true, content: canonical,
-        publicationState: "pending-publication" });
+        publicationState: "pending-publication", ...(submittedVersion ?? {}) });
     }
     if (reopened.opened.content !== canonical) {
       reopened.journalKey.fill(0);
@@ -1658,12 +1765,14 @@ export class DocumentService {
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     const latestWorking = this.active.working;
-    const newerWork = latestWorking && latestWorking.content !== canonical;
+    const newerWork = newerWorkingCopy(latestWorking, submittedVersion, canonical);
     this.active.working = newerWork
       ? latestWorking : { content: canonical, cursor: { start: 0, end: 0 } };
     this.active.dirty = Boolean(newerWork);
     this.active.manuallySealed = true;
+    this.active.sealedWorkingVersion = submittedVersion;
     this.active.pendingPublication = false;
+    this.active.pendingSubmittedVersion = null;
     this.active.pendingRecord = null;
     this.active.unresolvedJournal = false;
     this.active.recovery = null;
@@ -1671,7 +1780,7 @@ export class DocumentService {
     if (newerWork) this.#scheduleCheckpoint();
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical,
-      publicationState: "target-published" });
+      publicationState: "target-published", ...(submittedVersion ?? {}) });
   }
 
   async exportPlaintext(target, request) {
@@ -2411,8 +2520,14 @@ export class DocumentService {
     active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
-    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
-    active.dirty = false;
+    const newerWork = newerWorkingCopy(active.working,
+      active.pendingSubmittedVersion, active.opened.content);
+    if (!newerWork) {
+      active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    }
+    active.dirty = newerWork || !reopened.manuallySealed;
+    active.sealedWorkingVersion = active.pendingSubmittedVersion ?? null;
+    active.pendingSubmittedVersion = null;
     active.pendingPublication = false;
     active.pendingRecord = null;
     active.manuallySealed = reopened.manuallySealed;
@@ -2428,6 +2543,8 @@ export class DocumentService {
       await this.#acquireActiveLease(active);
       active.editMode = true;
     }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
     try {
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
@@ -2442,7 +2559,9 @@ export class DocumentService {
             throw new Error(
               "The target changed before provisional work could be discarded");
           }
-          const candidate = this.native.discardProvisional(current, active.password);
+          const prepared = this.#prepareSaveCandidate(active, current,
+            "discard", profile, inspected.opened.content);
+          const candidate = prepared.bytes;
           const candidateOpened = this.#validateNativeOpened(
             this.native.openDocument(candidate, active.password));
           try {
@@ -2454,6 +2573,7 @@ export class DocumentService {
               base: current, candidate, text: candidateOpened.opened.content,
               cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
               purpose: "provisional-discard" });
+            this.#finishSaveCandidate(prepared.operationId, "verified");
           } finally {
             candidateOpened.journalKey.fill(0);
           }
@@ -2462,10 +2582,16 @@ export class DocumentService {
         }
       });
       await this.journals.clear(active.documentId);
+      active.working = null;
+      active.pendingSubmittedVersion = null;
       await this.#adoptPublishedCandidate(active);
       await this.exitEditMode();
       return active.opened;
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error.publicationPrepared) {
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
@@ -2566,6 +2692,7 @@ export class DocumentService {
       active.pendingRecord = await this.publications.markDiverged(
         active.documentId, active.journalKey, active.pendingRecord);
     }
+    this.#resolveSaveCandidate(false);
     active.opened = validateOpenedDocument({ ...active.opened,
       publicationState: "conflict" });
     return validatePublicationResult({ publicationState: "conflict",
