@@ -219,7 +219,12 @@ void throw_status(napi_env env, scpefe_status status)
 {
     const std::string message = "SCPEFE operation failed with status "
         + std::to_string(static_cast<unsigned int>(status));
-    napi_throw_error(env, "SCPEFE_NATIVE", message.c_str());
+    napi_value code, text, error;
+    check(env, napi_create_string_utf8(env, "SCPEFE_NATIVE", NAPI_AUTO_LENGTH, &code));
+    check(env, napi_create_string_utf8(env, message.c_str(), message.size(), &text));
+    check(env, napi_create_error(env, code, text, &error));
+    set_number(env, error, "status", static_cast<unsigned int>(status));
+    check(env, napi_throw(env, error));
 }
 
 std::pair<const std::uint8_t *, std::size_t> buffer_value(
@@ -417,6 +422,206 @@ scpefe_status monotonic_time(void *, std::uint64_t *value)
     return SCPEFE_STATUS_OK;
 }
 
+bool revised_v3_bytes(const std::uint8_t *bytes, std::size_t size)
+{
+    static constexpr std::uint8_t magic[]{'S','C','P','E','F','E',0,3};
+    if (!bytes || size < 72 + 110 + 33
+        || !std::equal(std::begin(magic), std::end(magic), bytes)) return false;
+    const auto read_le = [&](std::size_t offset, std::size_t count) {
+        std::uint64_t value = 0;
+        for (std::size_t i = 0; i < count; ++i)
+            value |= std::uint64_t(bytes[offset + i]) << (8 * i);
+        return value;
+    };
+    const auto slots = read_le(32, 4);
+    const auto payload = read_le(64, 8);
+    return slots >= 1 && slots <= 9 && size >= 72 + 110 * slots
+        && payload == size - (72 + 110 * slots);
+}
+
+napi_value open_revised_document(napi_env env, const std::uint8_t *bytes,
+    std::size_t size, const SecretBytes &password)
+{
+    scpefe_host_services_v1 host{sizeof(host), SCPEFE_ABI_VERSION,
+        nullptr, monotonic_time};
+    scpefe_context *raw_context = nullptr;
+    auto status = scpefe_context_create(&host, &raw_context);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    std::unique_ptr<scpefe_context, decltype(&scpefe_context_destroy)>
+        context(raw_context, scpefe_context_destroy);
+    scpefe_container *handle = nullptr;
+    const scpefe_container_open_v1 open{sizeof(open), SCPEFE_ABI_VERSION,
+        bytes, size};
+    status = scpefe_container_open(context.get(), &open, &handle);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    const scpefe_password_input_v1 input{sizeof(input), SCPEFE_ABI_VERSION,
+        password.data(), password.size()};
+    status = scpefe_container_unlock(handle, &input);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    scpefe_owned_authenticated_state *raw_auth = nullptr;
+    status = scpefe_container_authenticated_state(handle, &raw_auth);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    std::unique_ptr<scpefe_owned_authenticated_state,
+        decltype(&scpefe_owned_authenticated_state_destroy)>
+        auth(raw_auth, scpefe_owned_authenticated_state_destroy);
+    scpefe_owned_authenticated_state_view_v1 view{};
+    view.struct_size = sizeof(view);
+    view.abi_version = SCPEFE_ABI_VERSION;
+    status = scpefe_owned_authenticated_state_view(auth.get(), &view);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    scpefe_container_status_v1 access{sizeof(access), SCPEFE_ABI_VERSION};
+    status = scpefe_container_status(handle, &access);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    napi_value result;
+    check(env, napi_create_object(env, &result));
+    set_number(env, result, "containerFormatVersion", 3);
+    set_string(env, result, "documentId",
+        hexadecimal(view.document_id, sizeof(view.document_id)).c_str(),
+        sizeof(view.document_id) * 2);
+    const auto head = hexadecimal(view.revision_head, sizeof(view.revision_head));
+    set_string(env, result, "baseRevision", head.data(), head.size());
+    set_buffer(env, result, "journalKey", view.work_journal_key,
+        sizeof(view.work_journal_key));
+    sodium_memzero(view.work_journal_key, sizeof(view.work_journal_key));
+    set_number(env, result, "revisionTimestampMs", view.revision_timestamp_ms);
+    set_boolean(env, result, "manuallySealed", view.manually_sealed != 0);
+    set_string(env, result, "historyEventType", view.event_type, view.event_type_size);
+    set_string(env, result, "historyEventDetail", view.event_detail,
+        view.event_detail_size);
+    set_string(env, result, "profileName", view.client_name, view.client_name_size);
+    set_string(env, result, "profileEmail", view.client_email, view.client_email_size);
+    set_string(env, result, "deviceName", view.device_name, view.device_name_size);
+    set_string(env, result, "content", "", 0);
+    set_boolean(env, result, "readOnly", true);
+    set_boolean(env, result, "canEdit", access.can_edit && !access.must_change_password);
+    set_boolean(env, result, "canAddPasswords",
+        access.can_add_passwords && !access.must_change_password);
+    set_boolean(env, result, "canRemovePasswords",
+        access.can_remove_passwords && !access.must_change_password);
+    set_boolean(env, result, "mustBeChanged", view.must_change_password != 0);
+    set_boolean(env, result, "recoverySlot", view.recovery_slot != 0);
+    const auto slot_id = hexadecimal(view.slot_id, sizeof(view.slot_id));
+    set_string(env, result, "slotId", slot_id.data(), slot_id.size());
+    set_string(env, result, "slotIdentityName", view.identity_name,
+        view.identity_name_size);
+    set_string(env, result, "slotIdentityEmail", view.identity_email,
+        view.identity_email_size);
+    napi_value lease;
+    check(env, napi_create_object(env, &lease));
+    set_boolean(env, lease, "active", view.lease_active != 0);
+    const auto session = hexadecimal(view.lease_session_id,
+        sizeof(view.lease_session_id));
+    set_string(env, lease, "sessionId", session.data(), session.size());
+    set_number(env, lease, "heartbeatCounter", view.lease_heartbeat_counter);
+    set_number(env, lease, "holderUtcMs", view.lease_holder_utc_ms);
+    set_number(env, lease, "durationMs", view.lease_duration_ms);
+    set_string(env, lease, "holderName", view.lease_holder_name,
+        view.lease_holder_name_size);
+    set_string(env, lease, "holderEmail", view.lease_holder_email,
+        view.lease_holder_email_size);
+    set_string(env, lease, "deviceName", view.lease_device_name,
+        view.lease_device_name_size);
+    check(env, napi_set_named_property(env, result, "lease", lease));
+    napi_value graph_nodes;
+    check(env, napi_create_array(env, &graph_nodes));
+    std::size_t node_index = 0;
+    if (!view.must_change_password) {
+        scpefe_owned_snapshot *raw_snapshot = nullptr;
+        status = scpefe_container_read(handle, &raw_snapshot);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_owned_snapshot, decltype(&scpefe_owned_snapshot_destroy)>
+            snapshot(raw_snapshot, scpefe_owned_snapshot_destroy);
+        scpefe_owned_snapshot_view_v1 content{};
+        content.struct_size = sizeof(content);
+        content.abi_version = SCPEFE_ABI_VERSION;
+        status = scpefe_owned_snapshot_view(snapshot.get(), &content);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        set_string(env, result, "content", content.content, content.content_size);
+        scpefe_owned_slots *raw_slots = nullptr;
+        status = scpefe_container_slots(handle, &raw_slots);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_owned_slots, decltype(&scpefe_owned_slots_destroy)>
+            slots(raw_slots, scpefe_owned_slots_destroy);
+        std::size_t slot_count = 0;
+        status = scpefe_owned_slots_count(slots.get(), &slot_count);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value managed;
+        check(env, napi_create_array(env, &managed));
+        std::uint32_t managed_index = 0;
+        for (std::size_t i = 0; i < slot_count; ++i) {
+            scpefe_owned_slot_view_v1 slot{};
+            slot.struct_size = sizeof(slot);
+            status = scpefe_owned_slots_view(slots.get(), i, &slot);
+            if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+            if (slot.role != 1 || !access.can_remove_passwords) continue;
+            napi_value item;
+            check(env, napi_create_object(env, &item));
+            const auto id = hexadecimal(slot.slot_id, sizeof(slot.slot_id));
+            set_string(env, item, "slotId", id.data(), id.size());
+            set_boolean(env, item, "canEdit", slot.can_edit != 0);
+            set_boolean(env, item, "canAddPasswords", slot.can_add_passwords != 0);
+            set_boolean(env, item, "canRemovePasswords", slot.can_remove_passwords != 0);
+            set_boolean(env, item, "mustBeChanged", slot.must_change_password != 0);
+            set_boolean(env, item, "slotIdKnown", true);
+            set_boolean(env, item, "permissionsKnown", true);
+            set_boolean(env, item, "identityKnown", true);
+            set_boolean(env, item, "mustBeChangedKnown", true);
+            set_string(env, item, "identityName", slot.name, slot.name_size);
+            set_string(env, item, "identityEmail", slot.email, slot.email_size);
+            check(env, napi_set_element(env, managed, managed_index++, item));
+        }
+        check(env, napi_set_named_property(env, result, "managedSlots", managed));
+        scpefe_revision_graph *raw_graph = nullptr;
+        status = scpefe_container_revision_graph(handle, &raw_graph);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_revision_graph, decltype(&scpefe_revision_graph_destroy)>
+            graph(raw_graph, scpefe_revision_graph_destroy);
+        for (std::size_t offset = 0;; offset += 128) {
+            scpefe_revision_page *raw_page = nullptr;
+            status = scpefe_revision_graph_list(graph.get(), offset, 128, &raw_page);
+            if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+            std::unique_ptr<scpefe_revision_page, decltype(&scpefe_revision_page_destroy)>
+                page(raw_page, scpefe_revision_page_destroy);
+            std::size_t count = 0;
+            status = scpefe_revision_page_count(page.get(), &count);
+            if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+            for (std::size_t i = 0; i < count; ++i) {
+                scpefe_revision_metadata_v1 metadata{};
+                metadata.struct_size = sizeof(metadata);
+                status = scpefe_revision_page_metadata(page.get(), i, &metadata);
+                if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+                napi_value node, parents;
+                check(env, napi_create_object(env, &node));
+                check(env, napi_create_array(env, &parents));
+                const auto id = hexadecimal(metadata.id, sizeof(metadata.id));
+                set_string(env, node, "revisionId", id.data(), id.size());
+                if (metadata.has_previous_head) {
+                    napi_value parent;
+                    const auto previous = hexadecimal(metadata.previous_head,
+                        sizeof(metadata.previous_head));
+                    check(env, napi_create_string_utf8(env, previous.data(),
+                        previous.size(), &parent));
+                    check(env, napi_set_element(env, parents, 0, parent));
+                }
+                check(env, napi_set_named_property(env, node,
+                    "parentRevisionIds", parents));
+                check(env, napi_set_element(env, graph_nodes, node_index++, node));
+            }
+            if (count < 128) break;
+        }
+    }
+    if (node_index == 0) {
+        napi_value node, parents;
+        check(env, napi_create_object(env, &node));
+        check(env, napi_create_array(env, &parents));
+        set_string(env, node, "revisionId", head.data(), head.size());
+        check(env, napi_set_named_property(env, node, "parentRevisionIds", parents));
+        check(env, napi_set_element(env, graph_nodes, 0, node));
+    }
+    check(env, napi_set_named_property(env, result, "revisionGraph", graph_nodes));
+    return result;
+}
+
 ContainerContext *container_context(napi_env env, napi_callback_info info,
     size_t &argc, napi_value *args)
 {
@@ -477,33 +682,20 @@ napi_value container_create(napi_env env, napi_callback_info info)
             has_recovery ? recovery.data() : nullptr,
             has_recovery ? recovery.size() : 0,
         };
-        // The current host reader uses the milestone snapshot ABI. Keep its
-        // creation path in that format until the host migrates to revised v3.
         if (owner->active) {
             throw_status(env, SCPEFE_STATUS_INVALID_STATE);
             return nullptr;
         }
-        napi_value candidate = output_buffer(env,
-            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
-                return scpefe_new_document_create(&document, output, capacity, size);
-            });
-        if (!candidate) return nullptr;
-        auto [bytes, size] = buffer_value(env, candidate);
-        const scpefe_container_open_v1 request{
-            sizeof(request), SCPEFE_ABI_VERSION, bytes, size};
+        const scpefe_container_create_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION, document};
         scpefe_container *handle = nullptr;
-        auto status = scpefe_container_open(owner->context, &request, &handle);
+        const auto status = scpefe_container_create(owner->context, &request, &handle);
         if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
-        const scpefe_password_input_v1 unlock{
-            sizeof(unlock), SCPEFE_ABI_VERSION, password.data(), password.size()};
-        status = scpefe_container_unlock(handle, &unlock);
-        if (status != SCPEFE_STATUS_OK) {
-            scpefe_container_close(handle);
-            throw_status(env, status);
-            return nullptr;
-        }
         owner->active = handle;
-        return candidate;
+        return output_buffer(env, [&](std::uint8_t *output,
+            std::size_t capacity, std::size_t *size) {
+            return scpefe_container_copy_bytes(handle, output, capacity, size);
+        });
     } catch (const std::exception &error) {
         napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
     }
@@ -615,6 +807,10 @@ napi_value container_status(napi_env env, napi_callback_info info)
         napi_value object;
         check(env, napi_create_object(env, &object));
         set_boolean(env, object, "locked", status.is_locked != 0);
+        set_boolean(env, object, "canEdit", status.can_edit != 0);
+        set_boolean(env, object, "canAddPasswords", status.can_add_passwords != 0);
+        set_boolean(env, object, "canRemovePasswords", status.can_remove_passwords != 0);
+        set_boolean(env, object, "mustChangePassword", status.must_change_password != 0);
         return object;
     } catch (const std::exception &error) {
         napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
@@ -743,6 +939,135 @@ napi_value container_resolve_save(napi_env env, napi_callback_info info)
     }
 }
 
+std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> parse_slot_id(
+    const std::string &input);
+
+napi_value container_slots(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        scpefe_owned_slots *raw = nullptr;
+        const auto status = scpefe_container_slots(owner->active, &raw);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        std::unique_ptr<scpefe_owned_slots, decltype(&scpefe_owned_slots_destroy)>
+            slots(raw, scpefe_owned_slots_destroy);
+        std::size_t count = 0;
+        const auto count_status = scpefe_owned_slots_count(slots.get(), &count);
+        if (count_status != SCPEFE_STATUS_OK) {
+            throw_status(env, count_status); return nullptr;
+        }
+        napi_value result;
+        check(env, napi_create_array_with_length(env, count, &result));
+        for (std::size_t index = 0; index < count; ++index) {
+            scpefe_owned_slot_view_v1 view{};
+            view.struct_size = sizeof(view);
+            const auto view_status = scpefe_owned_slots_view(slots.get(), index, &view);
+            if (view_status != SCPEFE_STATUS_OK) {
+                throw_status(env, view_status); return nullptr;
+            }
+            napi_value item;
+            check(env, napi_create_object(env, &item));
+            const auto id = hexadecimal(view.slot_id, sizeof(view.slot_id));
+            const auto management_id = hexadecimal(
+                view.management_id, sizeof(view.management_id));
+            set_string(env, item, "slotId", id.data(), id.size());
+            set_string(env, item, "managementId", management_id.data(),
+                management_id.size());
+            set_number(env, item, "role", view.role);
+            set_boolean(env, item, "canEdit", view.can_edit != 0);
+            set_boolean(env, item, "canAddPasswords", view.can_add_passwords != 0);
+            set_boolean(env, item, "canRemovePasswords", view.can_remove_passwords != 0);
+            set_boolean(env, item, "mustBeChanged", view.must_change_password != 0);
+            set_string(env, item, "identityName", view.name, view.name_size);
+            set_string(env, item, "identityEmail", view.email, view.email_size);
+            check(env, napi_set_element(env, result, index, item));
+        }
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_prepare_slot_change(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 3) throw std::runtime_error(
+            "prepareSlotChange expects kind, current password, and input");
+        const auto kind = string_value(env, args[0]);
+        const auto native_kind = kind == "password" ? SCPEFE_SLOT_CHANGE_PASSWORD
+            : kind == "invitation" ? SCPEFE_SLOT_ADD_INVITATION
+            : kind == "claim" ? SCPEFE_SLOT_CLAIM_INVITATION
+            : kind == "identity" ? SCPEFE_SLOT_RECONCILE_IDENTITY
+            : kind == "permissions" ? SCPEFE_SLOT_UPDATE_PERMISSIONS
+            : kind == "remove" ? SCPEFE_SLOT_REMOVE
+            : throw std::runtime_error("unknown slot change kind");
+        const SecretBytes actor{env, args[1]};
+        const auto input = args[2];
+        const auto optional_string = [&](const char *key) {
+            const auto value = property(env, input, key);
+            napi_valuetype type;
+            check(env, napi_typeof(env, value, &type));
+            return type == napi_undefined ? std::string{} : string_value(env, value);
+        };
+        const auto optional_bool = [&](const char *key) {
+            const auto value = property(env, input, key);
+            napi_valuetype type;
+            check(env, napi_typeof(env, value, &type));
+            return type == napi_undefined ? false : boolean_value(env, value);
+        };
+        const auto new_password_value = property(env, input, "newPassword");
+        napi_valuetype new_password_type;
+        check(env, napi_typeof(env, new_password_value, &new_password_type));
+        SecretBytes new_password;
+        if (new_password_type != napi_undefined)
+            new_password.assign(env, new_password_value);
+        const auto slot_id_text = optional_string("slotId");
+        const auto slot_id = slot_id_text.empty()
+            ? std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE>{}
+            : parse_slot_id(slot_id_text);
+        const auto name = optional_string("name");
+        const auto email = optional_string("email");
+        const auto client_name = string_value(env, property(env, input, "clientName"));
+        const auto client_email = string_value(env, property(env, input, "clientEmail"));
+        const auto device = string_value(env, property(env, input, "deviceName"));
+        const scpefe_container_slot_change_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION,
+            number_value(env, property(env, input, "operationId")), native_kind,
+            actor.data(), actor.size(),
+            new_password.size() ? new_password.data() : nullptr, new_password.size(),
+            slot_id_text.empty() ? nullptr : slot_id.data(),
+            slot_id_text.empty() ? 0 : slot_id.size(),
+            optional_bool("canEdit"), optional_bool("canAddPasswords"),
+            optional_bool("canRemovePasswords"),
+            name.data(), name.size(), email.data(), email.size(),
+            client_name.data(), client_name.size(),
+            client_email.data(), client_email.size(), device.data(), device.size(),
+            number_value(env, property(env, input, "timestampMs"))};
+        scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+        const auto status = scpefe_container_prepare_slot_change(
+            owner->active, &request, &candidate);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value bytes = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_container_copy_candidate(owner->active,
+                    candidate.operation_id, output, capacity, size);
+            });
+        if (!bytes) return nullptr;
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_set_named_property(env, result, "bytes", bytes));
+        set_number(env, result, "operationId", candidate.operation_id);
+        set_number(env, result, "effects", candidate.effect_mask);
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value create_container_context(napi_env env, napi_callback_info info)
 {
     try {
@@ -766,6 +1091,8 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"status", nullptr, container_status, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"confirmEditLease", nullptr, container_confirm_edit_lease, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSave", nullptr, container_prepare_save, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"prepareSlotChange", nullptr, container_prepare_slot_change, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"slots", nullptr, container_slots, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"finishSave", nullptr, container_finish_save, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"resolveSave", nullptr, container_resolve_save, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"historyPage", nullptr, container_history_page, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -896,6 +1223,9 @@ napi_value open_document(napi_env env, napi_callback_info info)
         size_t size = 0;
         check(env, napi_get_buffer_info(env, args[0], &bytes, &size));
         const SecretBytes password{env, args[1]};
+        if (revised_v3_bytes(static_cast<const std::uint8_t *>(bytes), size))
+            return open_revised_document(env,
+                static_cast<const std::uint8_t *>(bytes), size, password);
         scpefe_status status = scpefe_password_container_unlock(
             static_cast<const std::uint8_t *>(bytes), size,
             password.data(), password.size(),
