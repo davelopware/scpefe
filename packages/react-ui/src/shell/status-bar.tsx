@@ -4,9 +4,12 @@ import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import type { ShellCommands } from "./shell-commands.ts";
 
 /** Compact status projection for the current document session. */
-export function StatusBar<Doc extends SessionDocument>({ session, active, message, commands }: {
+export function StatusBar<Doc extends SessionDocument>({ session, active, message, commands,
+  onActivityOutcome, activityActionAvailable }: {
   session: SnapshotSource<DocumentSessionSnapshot<Doc>>; active: boolean; message: string;
   commands: ShellCommands<Doc>;
+  onActivityOutcome?: (returnFocus: HTMLElement) => void;
+  activityActionAvailable?: boolean;
 }): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
   const opened = snapshot.kind === "read-only" || snapshot.kind === "edit"
@@ -50,7 +53,11 @@ export function StatusBar<Doc extends SessionDocument>({ session, active, messag
         : working?.journal.pending ? "Checkpoint pending" : "Checkpoint ready"}
     </span>}
     <span aria-label="Publication state">{opened?.activityOutcomePending
-      ? "Activity outcome pending publication" : publication}</span>
+      ? <button type="button" disabled={!activityActionAvailable}
+        onClick={(event) => onActivityOutcome?.(event.currentTarget)}>
+        {opened.activityConfirmationRequired
+          ? "Confirm interrupted activity" : "Retry activity outcome"}</button>
+      : publication}</span>
     <span>{total > 0 ? `${total} recovery item${total === 1 ? "" : "s"} need attention. ` : ""}{message}</span>
   </footer>;
 }

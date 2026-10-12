@@ -119,7 +119,8 @@ public:
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device_name, std::string_view resolved_content,
         std::uint64_t timestamp_ms) const;
-    /* Prepares a v3 compaction only from a clean sealed image and exact verified backup. */
+    /* Prepares compaction from a clean sealed image and an authenticated exact backup,
+     * including a backup-attempt replica followed by its source outcome. */
     TransitionResult prepare_compaction(std::uint64_t operation_id,
         const std::uint8_t *password, std::size_t password_size,
         const std::array<std::uint8_t, 16> &lease_session_id,

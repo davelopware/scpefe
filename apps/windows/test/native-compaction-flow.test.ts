@@ -56,18 +56,24 @@ test("stateful compaction publishes only after exact durable backup and keeps ol
   const result = await service.compactDocument(COMPACTION_CONFIRMATION);
   assert.equal(result.compacted, true);
   assert.equal(result.backupCreated, true);
-  assert.equal(result.previousHead, old[0].revisionId);
+  const after = service.container.historyPage(0, 50).items;
+  assert.equal(result.previousHead, after[1].revisionId);
   assert.notEqual(result.head, result.previousHead);
   assert.equal(service.container.bytes().equals(await fs.readFile(target)), true);
   const backups = (await fs.readdir(path.dirname(target))).filter((name) =>
     /^document\.backup-.*\.scpefe$/u.test(name));
   assert.equal(backups.length, 1);
   const backup = path.join(path.dirname(target), backups[0]);
-  assert.deepEqual(await fs.readFile(backup), before);
-  const after = service.container.historyPage(0, 50).items;
-  assert.equal(after.length, old.length + 1);
+  const backupBytes = await fs.readFile(backup);
+  assert.notDeepEqual(backupBytes, before);
+  assert.equal(native?.inspectDocument(backupBytes, password).historyEventType,
+    "backup-attempted");
+  assert.equal(after.length, old.length + 3);
   assert.equal(after[0].eventType, "compaction");
-  assert.equal(after[0].previousHead, old[0].revisionId);
+  assert.equal(after[0].previousHead, after[1].revisionId);
+  assert.equal(after[1].eventType, "backup-succeeded");
+  assert.equal(after[2].eventType, "backup-attempted");
+  assert.equal(after[2].previousHead, old[0].revisionId);
   for (const record of old) {
     assert.ok(after.some((item: { revisionId: string }) =>
       item.revisionId === record.revisionId));
@@ -89,7 +95,12 @@ test("failed backup and unsaved journal leave history intact", {
   };
   await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION),
     (error: any) => error.code === "COMPACTION_BACKUP_FAILED");
-  assert.deepEqual(await fs.readFile(target), before);
+  const failedSource = await fs.readFile(target);
+  assert.notDeepEqual(failedSource, before);
+  assert.equal(native?.inspectDocument(failedSource, password).historyEventType,
+    "backup-failed");
+  assert.equal(native?.inspectDocument(failedSource, password).content,
+    native?.inspectDocument(before, password).content);
   service.publications.publishReplica = original;
   await service.journals.write(service.active.documentId, service.active.journalKey,
     { text: "journal-only work", baseRevision: service.active.baseRevision,
@@ -102,7 +113,7 @@ test("failed backup and unsaved journal leave history intact", {
   service.updateWorkingCopy({ content: "unsaved words",
     cursor: { start: 13, end: 13 } });
   await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION), /clean/);
-  assert.deepEqual(await fs.readFile(target), before);
+  assert.deepEqual(await fs.readFile(target), failedSource);
 });
 
 test("edits arriving during backup or publication are rejected without losing work", {
@@ -132,7 +143,7 @@ test("edits arriving during backup or publication are rejected without losing wo
   };
 
   const result = await service.compactDocument(COMPACTION_CONFIRMATION);
-  assert.equal(rejected, 2);
+  assert.equal(rejected, 4);
   assert.equal(result.compacted, true);
   assert.equal(service.active.working.content, "version 1");
   assert.equal(service.active.dirty, false);

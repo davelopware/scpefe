@@ -599,6 +599,10 @@ export function validateOpenedDocument(value) {
       && typeof value.activityOutcomePending !== "boolean") {
     throw new TypeError("host returned invalid activity outcome status");
   }
+  if (value.activityConfirmationRequired !== undefined
+      && value.activityConfirmationRequired !== true) {
+    throw new TypeError("host returned invalid activity confirmation status");
+  }
   return Object.freeze({ content, readOnly: true,
     canEdit: value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
@@ -622,6 +626,8 @@ export function validateOpenedDocument(value) {
     ...(value.unreadableJournal === true ? { unreadableJournal: true } : {}),
     ...(value.activityOutcomePending === true
       ? { activityOutcomePending: true } : {}),
+    ...(value.activityConfirmationRequired === true
+      ? { activityConfirmationRequired: true } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
 
@@ -805,6 +811,16 @@ export function validateBackupResult(value) {
   }
   return Object.freeze({ backedUp: value.backedUp,
     ...(value.outcomePending ? { outcomePending: true } : {}) });
+}
+
+export function validateActivityOutcomeRequest(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).some((key) => key !== "succeeded")
+      || (value.succeeded !== undefined && typeof value.succeeded !== "boolean")) {
+    throw new TypeError("activity outcome confirmation is invalid");
+  }
+  return Object.freeze(value.succeeded === undefined
+    ? {} : { succeeded: value.succeeded });
 }
 
 export function validateCompactionResult(value) {

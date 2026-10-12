@@ -143,7 +143,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     "openExternalDocument", "cancelExternalOpen",
     "enterEditMode", "saveDocument", "reconnectPendingPublication",
     "beginDivergenceResolution", "saveDivergenceResolution",
-    "discardPendingPublication", "backupDocument", "compactDocument",
+    "discardPendingPublication", "backupDocument", "resolvePendingActivityOutcome",
+    "compactDocument",
     "changePassword", "createInvitation", "copyInvitationPassphrase",
     "claimInvitation", "cancelInvitationClaim", "reconcileIdentity",
     "updateSlotPermissions", "removeSlot",
@@ -372,6 +373,8 @@ test("sandboxed Electron loads a bundled CommonJS preload", async () => {
     ["document:open-selected", () => exposed.openSelectedDocument("password words")],
     ["document:reconnect-publication", () => exposed.reconnectPendingPublication()],
     ["document:backup", () => exposed.backupDocument()],
+    ["document:resolve-activity", () => exposed.resolvePendingActivityOutcome({
+      succeeded: true })],
     ["document:export-plaintext", () => exposed.exportPlaintext({
       content: "private text", lineEndings: "lf" })],
     ["document:change-password", () => exposed.changePassword({

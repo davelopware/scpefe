@@ -86,19 +86,36 @@ async function lockDuringNextLeaseAcquisition({ service, native, target, operati
 }
 
 function installCompactionContext(service, current, candidate, onPrepare = () => {}) {
+  const activityContext = service.container;
   let committed = current;
+  let backupAttempt;
+  let compactionOperationId;
   service.container = {
     status: () => ({ locked: false }),
     leaseMode: () => ({ editing: true, leaseStatus: "held" }),
+    prepareActivity(phase, password, request) {
+      const prepared = activityContext.prepareActivity(phase, password, request);
+      if (phase === "attempt") backupAttempt = Buffer.from(prepared.bytes);
+      return prepared;
+    },
+    activityStatus: () => activityContext.activityStatus(),
+    completeActivity: (...args) => activityContext.completeActivity(...args),
+    restoreActivity: (...args) => activityContext.restoreActivity(...args),
     prepareCompaction(_password, request) {
       onPrepare(request);
       assert.equal(request.explicitDecision, true);
       assert.equal(request.cleanStateConfirmed, true);
       assert.equal(request.backupVerified, true);
-      assert.deepEqual(request.verifiedBackupBytes, current);
+      assert.deepEqual(request.verifiedBackupBytes, backupAttempt);
+      compactionOperationId = request.operationId;
       return { bytes: candidate, operationId: request.operationId };
     },
-    finishSave(_operationId, outcome) {
+    finishSave(operationId, outcome) {
+      if (operationId !== compactionOperationId) {
+        const result = activityContext.finishSave(operationId, outcome);
+        if (outcome === "verified") committed = activityContext.bytes();
+        return result;
+      }
       if (outcome === "verified") committed = candidate;
       return 0;
     },
@@ -120,6 +137,9 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
   const sessionId = "8d".repeat(16);
   const previousHead = "91".repeat(32);
   const compactedHead = "a2".repeat(32);
+  let compactionBaseHead = previousHead;
+  let compactionBaseGraph = [{ revisionId: previousHead,
+    parentRevisionIds: ["d5".repeat(32)] }];
   const documentId = "b3".repeat(16);
   const journalKey = Buffer.alloc(32, 0x64);
   const lease = { active: true, sessionId, heartbeatCounter: 9,
@@ -140,8 +160,8 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
         journalKey: Buffer.from(journalKey), baseRevision: compactedHead,
         historyEventType: "compaction",
         revisionGraph: [{ revisionId: compactedHead,
-          parentRevisionIds: [previousHead] },
-        { revisionId: previousHead, parentRevisionIds: ["d5".repeat(32)] }] };
+          parentRevisionIds: [compactionBaseHead] },
+        ...compactionBaseGraph] };
       if (bytes.equals(leaseChanged)) return { ...common,
         journalKey: Buffer.from(journalKey),
         baseRevision: previousHead,
@@ -161,10 +181,15 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
   service.active.leaseSessionId = Buffer.from(sessionId, "hex");
   service.active.leaseCounter = 9;
   service.active.working = { content: common.content, cursor: { start: 0, end: 0 } };
-  installCompactionContext(service, current, candidate,
-    () => native.compactHook?.());
+  installCompactionContext(service, current, candidate, () => {
+    compactionBaseHead = service.active.baseRevision;
+    compactionBaseGraph = service.active.revisionGraph;
+    native.compactHook?.();
+  });
   return { directory, target, current, candidate, leaseChanged, previousHead,
-    compactedHead, documentId, journalKey, native, options, service };
+    compactedHead, documentId, journalKey, native, options, service,
+    get compactionBaseHead() { return compactionBaseHead; },
+    get compactionBaseGraph() { return compactionBaseGraph; } };
 }
 
 test("integrated native close | real DocumentService restart journal | Cancel then Discard",
@@ -854,6 +879,11 @@ test("compaction creates an exact backup then publishes retained revision metada
     const sessionId = "5a".repeat(16);
     const previousHead = "12".repeat(32);
     const compactedHead = "34".repeat(32);
+    let compactionBaseHead = previousHead;
+    let compactionBaseGraph = [
+      { revisionId: "78".repeat(32), parentRevisionIds: [] },
+      { revisionId: previousHead, parentRevisionIds: ["78".repeat(32)] },
+    ];
     const documentId = "56".repeat(16);
     const journalKey = Buffer.alloc(32, 0x77);
     const lease = { active: true, sessionId, heartbeatCounter: 7,
@@ -875,9 +905,8 @@ test("compaction creates an exact backup then publishes retained revision metada
           journalKey: Buffer.from(journalKey), baseRevision: compactedHead,
           historyEventType: "compaction",
           revisionGraph: [{ revisionId: compactedHead,
-            parentRevisionIds: [previousHead] },
-          { revisionId: previousHead, parentRevisionIds: ["78".repeat(32)] },
-          { revisionId: "78".repeat(32), parentRevisionIds: [] }] };
+            parentRevisionIds: [compactionBaseHead] },
+          ...compactionBaseGraph] };
         throw new Error("unexpected container");
       },
     };
@@ -889,6 +918,8 @@ test("compaction creates an exact backup then publishes retained revision metada
     service.active.leaseCounter = 7;
     service.active.working = { content: "current text", cursor: { start: 0, end: 0 } };
     installCompactionContext(service, current, candidate, (request) => {
+      compactionBaseHead = service.active.baseRevision;
+      compactionBaseGraph = service.active.revisionGraph;
       assert.equal(request.sessionId, sessionId);
       assert.equal(request.heartbeatCounter, 7);
     });
@@ -896,12 +927,15 @@ test("compaction creates an exact backup then publishes retained revision metada
     const result = await service.compactDocument(COMPACTION_CONFIRMATION);
 
     assert.deepEqual(result, { compacted: true, backupCreated: true,
-      previousHead, head: compactedHead, opened: service.active.opened });
+      previousHead: compactionBaseHead, head: compactedHead,
+      opened: service.active.opened });
     assert.deepEqual(await fs.readFile(target), candidate);
     assert.equal(await fs.readFile(defaultBackup, "utf8"),
       "existing backup must not be replaced");
-    assert.deepEqual(await fs.readFile(path.join(directory,
-      "notes.backup-20260920T010203Z-1.scpefe")), current);
+    const backedUp = await fs.readFile(path.join(directory,
+      "notes.backup-20260920T010203Z-1.scpefe"));
+    assert.equal(service.native.inspectDocument(backedUp,
+      "owner password words").historyEventType, "backup-attempted");
     assert.equal(service.active.editMode, true);
     assert.equal(service.active.baseRevision, compactedHead);
     assert.equal(service.active.opened.recoverySlot, true);
@@ -979,7 +1013,8 @@ test("compaction stops without rewriting when its mandatory backup fails", async
       && /required pre-compaction backup/.test(error.message)
       && /backup destination failed/.test(error.cause?.message));
   assert.equal(compactCalled, false);
-  assert.deepEqual(await fs.readFile(target), current);
+  assert.equal(service.native.inspectDocument(await fs.readFile(target),
+    "owner password words").historyEventType, "backup-failed");
 });
 
 test("failed pre-compaction backup verification removes no history", async (t) => {
@@ -1003,7 +1038,9 @@ test("failed pre-compaction backup verification removes no history", async (t) =
     (error) => error.code === "COMPACTION_BACKUP_FAILED"
       && /verification failed/.test(error.cause?.message));
   assert.equal(compactCalled, false);
-  assert.deepEqual(await fs.readFile(fixture.target), fixture.current);
+  assert.equal(fixture.service.native.inspectDocument(
+    await fs.readFile(fixture.target), "recovery or owner password")
+    .historyEventType, "backup-failed");
 });
 
 test("default backup failure followed by alternate selection completes compaction",
@@ -1028,31 +1065,35 @@ test("default backup failure followed by alternate selection completes compactio
       dialog, window: {}, confirmation: COMPACTION_CONFIRMATION });
     assert.equal(result.compacted, true);
     assert.equal(attempts, 2);
-    assert.deepEqual(await fs.readFile(alternate), fixture.current);
+  assert.equal(fixture.service.native.inspectDocument(
+    await fs.readFile(alternate), "recovery or owner password")
+    .historyEventType, "backup-attempted");
     assert.deepEqual(await fs.readFile(fixture.target), fixture.candidate);
   });
 
-test("target race after the verified backup aborts before candidate creation", async (t) => {
+test("target race after the verified backup aborts before compaction candidate creation", async (t) => {
   const fixture = await compactionFixture(t, "scpefe-compact-target-race-");
   let compactCalled = false;
   fixture.native.compactHook = () => { compactCalled = true; };
-  const normalRead = fs.readFile.bind(fs);
-  let targetReads = 0;
-  fixture.service.fs = Object.create(fs);
-  fixture.service.fs.readFile = async (file, ...args) => {
-    if (file === fixture.target && ++targetReads === 2) {
+  const publish = fixture.service.publications.publish.bind(
+    fixture.service.publications);
+  fixture.service.publications.publish = async (request) => {
+    const result = await publish(request);
+    if (request.purpose === "activity-outcome") {
       await fs.writeFile(fixture.target, fixture.leaseChanged);
     }
-    return normalRead(file, ...args);
+    return result;
   };
 
   await assert.rejects(
     fixture.service.compactDocument(COMPACTION_CONFIRMATION),
-    /target changed after the pre-compaction backup/);
+    /target or editing lease changed before compaction/);
   assert.equal(compactCalled, false);
   assert.deepEqual(await fs.readFile(fixture.target), fixture.leaseChanged);
-  assert.deepEqual(await fs.readFile(path.join(fixture.directory,
-    "document.backup-20260920T010203Z.scpefe")), fixture.current);
+  assert.equal(fixture.service.native.inspectDocument(
+    await fs.readFile(path.join(fixture.directory,
+      "document.backup-20260920T010203Z.scpefe")),
+    "recovery or owner password").historyEventType, "backup-attempted");
 });
 
 test("lease race after backup preserves the compacted candidate for conflict recovery",
@@ -1061,7 +1102,9 @@ test("lease race after backup preserves the compacted candidate for conflict rec
     const publish = fixture.service.publications.publish.bind(
       fixture.service.publications);
     fixture.service.publications.publish = async (request) => {
+    if (request.purpose === "compaction") {
       await fs.writeFile(fixture.target, fixture.leaseChanged);
+    }
       return publish(request);
     };
 
@@ -1090,8 +1133,12 @@ test("interrupted compaction publication resumes with retained witness continuit
           faultFs.rename = async (source, destination) => {
             if (fail && destination === fixture.target
                 && String(source).includes(".scpefe-txn-")) {
-              fail = false;
-              throw new Error("simulated compaction replace interruption");
+              const record = await fixture.service.journals.read(
+                fixture.documentId, fixture.journalKey);
+              if (record?.publication?.purpose === "compaction") {
+                fail = false;
+                throw new Error("simulated compaction replace interruption");
+              }
             }
             return fs.rename(source, destination);
           };
@@ -1102,8 +1149,12 @@ test("interrupted compaction publication resumes with retained witness continuit
           let fail = true;
           fixture.service.journals.clear = async (...args) => {
             if (fail) {
-              fail = false;
-              throw new Error("simulated compaction cleanup interruption");
+              const record = await fixture.service.journals.read(
+                fixture.documentId, fixture.journalKey);
+              if (record?.publication?.purpose === "compaction") {
+                fail = false;
+                throw new Error("simulated compaction cleanup interruption");
+              }
             }
             return clear(...args);
           };
@@ -1123,9 +1174,8 @@ test("interrupted compaction publication resumes with retained witness continuit
         assert.equal(restarted.active.baseRevision, fixture.compactedHead);
         assert.deepEqual(restarted.active.revisionGraph, [{
           revisionId: fixture.compactedHead,
-          parentRevisionIds: [fixture.previousHead],
-        }, { revisionId: fixture.previousHead,
-          parentRevisionIds: ["d5".repeat(32)] }]);
+          parentRevisionIds: [fixture.compactionBaseHead],
+        }, ...fixture.compactionBaseGraph]);
         assert.equal(await restarted.journals.read(
           fixture.documentId, fixture.journalKey), null);
         assert.deepEqual(await fs.readFile(fixture.target), fixture.candidate);

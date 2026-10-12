@@ -1,4 +1,6 @@
 // @ts-nocheck -- preserve the legacy fixture shapes during the source-language cutover.
+import { createHash } from "node:crypto";
+
 export function statefulFake(native) {
   if (!native || native.createContainerContext) return native;
   const generated = new Map();
@@ -123,21 +125,30 @@ export function statefulFake(native) {
       prepareActivity(phase, _actorPassword, input) {
         const bytes = syntheticBytes(committed, `activity-${phase}`);
         const current = opened();
+        const head = createHash("sha256").update(bytes).digest("hex");
+        const eventType = `${input.kind}-${phase === "attempt" ? "attempted"
+          : this.pendingActivity?.succeeded ? "succeeded" : "failed"}`;
         generated.set(key(bytes), { source: logicalSource(committed),
-          opened: { ...current } });
+          opened: { ...current, baseRevision: head, historyEventType: eventType,
+            revisionGraph: [{ revisionId: head,
+              parentRevisionIds: [current.baseRevision] },
+            ...(current.revisionGraph ?? [])] } });
         return prepare(bytes, input.operationId, { activity: { phase,
-          kind: input.kind, attemptHead: current.baseRevision } });
+          kind: input.kind, attemptHead: phase === "attempt" ? head
+            : this.pendingActivity?.attemptHead } });
       },
       activityStatus() { return this.pendingActivity ?? { hasPending: false }; },
       completeActivity(operationId, succeeded) {
         if (this.pendingActivity?.attemptOperationId !== operationId) {
           throw new Error("stale activity attempt");
         }
+        this.pendingActivity.hostActionComplete = true;
         this.pendingActivity.succeeded = succeeded;
       },
       restoreActivity(record) { this.pendingActivity = { hasPending: true,
         kind: record.kind, attemptOperationId: record.attemptOperationId,
-        attemptHead: record.attemptHead, succeeded: record.succeeded }; },
+        attemptHead: record.attemptHead, hostActionComplete: true,
+        succeeded: record.succeeded }; },
       assessMerge(local, localPassword, targetPassword, input) {
         native.mergeDocument(logicalSource(committed), local, targetPassword,
           { ...input, localPassword });
@@ -161,7 +172,8 @@ export function statefulFake(native) {
           if (pending.activity?.phase === "attempt") {
             this.pendingActivity = { hasPending: true,
               kind: pending.activity.kind, attemptOperationId: operationId,
-              attemptHead: pending.activity.attemptHead };
+              attemptHead: pending.activity.attemptHead,
+              hostActionComplete: false, succeeded: false };
           } else if (pending.activity?.phase === "outcome") {
             this.pendingActivity = { hasPending: false };
           }

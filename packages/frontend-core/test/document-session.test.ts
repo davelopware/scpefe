@@ -11,6 +11,7 @@ interface OpenedDocument {
   targetName: string;
   canEdit: boolean;
   activityOutcomePending?: true;
+  activityConfirmationRequired?: true;
   provisional?: true;
   recovery?: { content: string; state: "unsaved"; updateTime: number;
     cursor: { start: number; end: number }; authorName?: string; deviceName?: string };
@@ -172,6 +173,8 @@ class Host implements DocumentSessionHost<OpenedDocument> {
   async backupDocument(): Promise<{ backedUp: boolean; outcomePending?: true } | null> {
     return { backedUp: true };
   }
+  async resolvePendingActivityOutcome(_request: { succeeded?: boolean } = {}):
+    Promise<OpenedDocument> { return opened(); }
   async exportPlaintext(_request: { content: string; lineEndings: "lf" | "native" }):
     Promise<{ exported: boolean; outcomePending?: true } | null> {
     return { exported: true };
@@ -652,6 +655,28 @@ test("view-only activity remains eligible and a pending outcome is visible", asy
   if (exportPending.kind !== "read-only") throw new Error("expected read-only");
   assert.equal(exportPending.document.activityOutcomePending, true);
   exportSession.dispose();
+});
+
+test("confirmed interrupted activity becomes a retryable known outcome", async () => {
+  const host = new Host();
+  const requests: Array<{ succeeded?: boolean }> = [];
+  host.resolvePendingActivityOutcome = async (request = {}) => {
+    requests.push(request);
+    return { ...opened("sealed"), canEdit: false,
+      ...(requests.length === 1 ? { activityOutcomePending: true as const } : {}) };
+  };
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("sealed"), canEdit: false,
+    activityOutcomePending: true, activityConfirmationRequired: true });
+  assert.deepEqual(await session.resolveActivityOutcome(true), {
+    status: "activity-outcome", pending: true, confirmationRequired: false });
+  assert.deepEqual(await session.resolveActivityOutcome(), {
+    status: "activity-outcome", pending: false, confirmationRequired: false });
+  assert.deepEqual(requests, [{ succeeded: true }, {}]);
+  const current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(current.commands.backup, true);
+  session.dispose();
 });
 
 test("regular publication stays provisional and cannot overwrite a newer local edit", () => {

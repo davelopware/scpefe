@@ -5,6 +5,7 @@ import { validateCreateFormRequest, validateCreationResult,
   validateProfile, validateOpenedDocument, validateActiveDocument,
   validateEditMode, validateSaveResult, validateSaveSubmission,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
+  validateActivityOutcomeRequest,
   validateCompactionResult,
   validateLeaseDecisionResult, validateTakeoverRequest, validateDivergenceRequest,
   validateTakeoverCancellation,
@@ -128,6 +129,9 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     const value = await ipcRenderer.invoke("document:backup");
     return value === null ? null : validateBackupResult(value);
   },
+  resolvePendingActivityOutcome: async (request = {}) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:resolve-activity",
+      validateActivityOutcomeRequest(request))),
   compactDocument: async (request) => {
     const value = await ipcRenderer.invoke("document:compact",
       validateCompactionRequest(request));

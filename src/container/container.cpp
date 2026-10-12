@@ -527,8 +527,7 @@ TransitionResult Container::prepare_compaction(std::uint64_t operation_id,
     if (operation_id <= state_.last_operation_id)
         throw StateError::stale_operation;
     if (!explicit_decision || !clean_state_confirmed || !password || !password_size
-        || !verified_backup || verified_backup_size != committed_bytes_.size()
-        || std::memcmp(verified_backup, committed_bytes_.data(), verified_backup_size) != 0
+        || !verified_backup || !verified_backup_size
         || !local_lease_session_ || *local_lease_session_ != lease_session_id)
         throw ContainerFailure{ContainerError::invalid_argument};
     const auto authenticated = persistence_.unlock_revised_envelope(
@@ -536,6 +535,36 @@ TransitionResult Container::prepare_compaction(std::uint64_t operation_id,
         format::RevisionLimits::defaults());
     const auto &graph = *authenticated.revision_graph;
     const auto &lease = graph.lease();
+    const bool exact_current = verified_backup_size == committed_bytes_.size()
+        && std::memcmp(verified_backup, committed_bytes_.data(), verified_backup_size) == 0;
+    if (!exact_current) {
+        const auto backup = [&] {
+            try {
+                return persistence_.unlock_revised_envelope(
+                    verified_backup, verified_backup_size, password, password_size,
+                    format::RevisionLimits::defaults());
+            } catch (const ContainerFailure &) {
+                throw ContainerFailure{ContainerError::invalid_argument};
+            }
+        }();
+        const auto &backup_graph = *backup.revision_graph;
+        const auto &records = graph.records();
+        const auto &backup_lease = backup_graph.lease();
+        if (backup.document_id != authenticated.document_id
+            || backup.slot_id != authenticated.slot_id
+            || records.size() < 2
+            || backup_graph.records().size() + 1 != records.size()
+            || records.back().event_type != "backup-succeeded"
+            || records[records.size() - 2].event_type != "backup-attempted"
+            || records.back().previous != records[records.size() - 2].id
+            || backup_graph.head() != records[records.size() - 2].id
+            || backup_lease.active != lease.active
+            || backup_lease.session_id != lease.session_id
+            || backup_lease.heartbeat_counter != lease.heartbeat_counter
+            || backup_graph.reconstruct(backup_graph.content_head())
+                != graph.reconstruct(graph.content_head()))
+            throw ContainerFailure{ContainerError::invalid_argument};
+    }
     const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
         [&](const auto &slot) { return slot.id == authenticated.slot_id; });
     const auto current = graph.reconstruct(graph.content_head());
