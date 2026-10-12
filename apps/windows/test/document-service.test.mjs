@@ -39,7 +39,7 @@ async function writeProfile(directory, name, deviceName) {
   return profilePath;
 }
 
-function delayNextTargetRead(service, target) {
+function delayNextTargetRead(service, target, readsBeforeDelay = 0) {
   const readFile = service.fs.readFile.bind(service.fs);
   let release;
   const released = new Promise((resolve) => { release = resolve; });
@@ -47,7 +47,7 @@ function delayNextTargetRead(service, target) {
   const readStarted = new Promise((resolve) => { started = resolve; });
   let delayed = false;
   service.fs = { ...service.fs, async readFile(file, ...args) {
-    if (!delayed && file === target) {
+    if (!delayed && file === target && readsBeforeDelay-- <= 0) {
       delayed = true;
       started();
       await released;
@@ -57,9 +57,10 @@ function delayNextTargetRead(service, target) {
   return { readStarted, release };
 }
 
-async function lockDuringNextLeaseAcquisition({ service, native, target, operation }) {
+async function lockDuringNextLeaseAcquisition({ service, native, target, operation,
+  readsBeforeDelay = 0 }) {
   const active = service.active;
-  const delayed = delayNextTargetRead(service, target);
+  const delayed = delayNextTargetRead(service, target, readsBeforeDelay);
   const rejected = assert.rejects(operation(), (error) => error.code === "SESSION_LOCKED");
   await delayed.readStarted;
   const locking = service.lock("inactivity");
@@ -1892,7 +1893,8 @@ test("inactivity lock fences every lease-acquiring session transition", async (t
     };
     await lockDuringNextLeaseAcquisition({ service: fixture.service,
       native: fixture.options.native, target: fixture.target,
-      operation: () => fixture.service.beginDivergenceResolution() });
+      operation: () => fixture.service.beginDivergenceResolution(),
+      readsBeforeDelay: 1 });
     assert.equal(writes, 0, "no merge draft is persisted after lock starts");
   });
 

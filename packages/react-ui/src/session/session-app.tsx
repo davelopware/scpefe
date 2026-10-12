@@ -305,7 +305,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     if (result.safeMessage !== null) setMessage(result.safeMessage);
   }
 
-  async function runDialogAction(action: DialogAction) {
+  async function runDialogAction(action: DialogAction, targetPassword?: string) {
     if (action === "lock") { await lockDocument(); return; }
     if (action === "open-passwords") { setDialog("passwords"); return; }
     const actionElement = document.activeElement instanceof HTMLElement
@@ -315,8 +315,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       ? started.adoption : null;
     const nextDialog = action === "protection-cancel" || action === "protection-save"
       || action === "protection-discard"
-      ? await rendererLifecycleCompletion.track(() => presentation.act(action))
-      : await presentation.act(action);
+      ? await rendererLifecycleCompletion.track(() => presentation.act(action, targetPassword))
+      : await presentation.act(action, targetPassword);
     if (!presentationMounted.current) return;
     const current = session.getSnapshot();
     if ((current.kind === "read-only" || current.kind === "edit"

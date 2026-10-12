@@ -41,6 +41,7 @@ export interface PublicationDecision {
   readonly kind: "publication-decision";
   readonly state: "pending-publication" | "conflict";
   readonly failureMessage: string | null;
+  readonly failureCode: string | null;
 }
 
 /** Explicit choice before replacing newer working-copy edits with a merge draft. */
@@ -229,7 +230,8 @@ export class SessionPresentation {
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : attention?.kind === "publication-decision"
         ? { kind: "publication-decision" as const, state: attention.state,
-          failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
+          failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null,
+          failureCode: attention.failureCode ?? null }
       : null;
     const openedDialog: OpenedDialogName = selectedDecision?.kind === "invitation-claim" ? "claim"
       : selectedDecision?.kind === "profile-mismatch" ? "profile-mismatch"
@@ -305,14 +307,16 @@ export class SessionPresentation {
   }
 
   /** Starts a merge draft only after the session permits discarding newer edits. */
-  async beginDivergenceResolution(discardUnsaved = false): Promise<void> {
+  async beginDivergenceResolution(discardUnsaved = false,
+    targetPassword?: string): Promise<void> {
     const snapshot = this.current();
     if ((snapshot.kind !== "read-only" && snapshot.kind !== "edit")
       || snapshot.attention?.kind !== "publication-decision"
       || snapshot.attention.state !== "conflict") return;
     const adoption = snapshot.adoption;
     const epoch = this.epoch;
-    const outcome = await this.session.beginDivergenceResolution({ discardUnsaved });
+    const outcome = await this.session.beginDivergenceResolution({ discardUnsaved,
+      ...(targetPassword ? { targetPassword } : {}) });
     const current = this.current();
     if (this.disposed || this.epoch !== epoch
       || (current.kind !== "read-only" && current.kind !== "edit")
@@ -340,11 +344,11 @@ export class SessionPresentation {
   async act(action: "continue-read-only" | "retry-edit" | "retry-save"
     | "protection-cancel" | "protection-save" | "protection-discard"
     | "continue-editing" | "restore-recovery"
-    | "reconnect-publication" | "discard-publication"
+    | "reconnect-publication" | "discard-publication" | "authenticate-target"
     | "keep-newer-edits" | "export-newer-edits" | "discard-newer-edits"
     | "discard-recovery" | "accept-head" | "discard-unreadable"
     | "confirm-lease" | "cancel-lease" | "migrate" | "compact"
-    | "compaction-canceled"): Promise<"passwords" | "export" | void> {
+    | "compaction-canceled", targetPassword?: string): Promise<"passwords" | "export" | void> {
     const snapshot = this.current();
     if (this.disposed) return;
     if (action === "protection-cancel" || action === "protection-save"
@@ -374,6 +378,14 @@ export class SessionPresentation {
     }
     if ((snapshot.kind !== "read-only" && snapshot.kind !== "edit")
       || !snapshot.attention) return;
+    if (action === "authenticate-target") {
+      if (snapshot.attention.kind !== "publication-decision"
+        || snapshot.attention.state !== "conflict"
+        || snapshot.attention.failureCode !== "MERGE_TARGET_REAUTHENTICATION"
+        || !targetPassword) return;
+      await this.beginDivergenceResolution(false, targetPassword);
+      return;
+    }
     if (action === "retry-save" || action === "continue-editing") {
       if (snapshot.attention.kind !== "save-failed") return;
       if (action === "retry-save") await this.save();

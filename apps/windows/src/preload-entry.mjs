@@ -7,7 +7,8 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
   validateMigrationResult,
-  validateLeaseDecisionResult, validateTakeoverRequest, validateTakeoverCancellation,
+  validateLeaseDecisionResult, validateTakeoverRequest, validateDivergenceRequest,
+  validateTakeoverCancellation,
   validateCompactionRequest,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
@@ -110,7 +111,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     await ipcRenderer.invoke("document:reconnect-publication")),
   beginDivergenceResolution: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:begin-divergence-resolution",
-      validateTakeoverRequest(request));
+      validateDivergenceRequest(request));
     return value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateMergeDraft(value);
   },

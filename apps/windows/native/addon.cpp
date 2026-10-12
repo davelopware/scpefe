@@ -1875,6 +1875,12 @@ napi_value merge_document(napi_env env, napi_callback_info info)
         const auto [current, current_size] = buffer_value(env, args[0]);
         const auto [local, local_size] = buffer_value(env, args[1]);
         const SecretBytes password{env, args[2]};
+        bool has_target_password = false;
+        check(env, napi_has_named_property(env, args[3], "targetPassword",
+            &has_target_password));
+        SecretBytes target_password;
+        if (has_target_password)
+            target_password.assign(env, property(env, args[3], "targetPassword"));
         const std::string name = string_value(env, property(env, args[3], "name"));
         const std::string email = string_value(env, property(env, args[3], "email"));
         const std::string device = string_value(env, property(env, args[3], "deviceName"));
@@ -1882,6 +1888,26 @@ napi_value merge_document(napi_env env, napi_callback_info info)
         double timestamp = 0;
         check(env, napi_get_value_double(
             env, property(env, args[3], "timestampMs"), &timestamp));
+        if (revised_v3_bytes(current, current_size)
+            && revised_v3_bytes(local, local_size)) {
+            const auto *current_password = has_target_password
+                ? target_password.data() : password.data();
+            const auto current_password_size = has_target_password
+                ? target_password.size() : password.size();
+            const scpefe_revised_merge_save_v1 revised{
+                sizeof(revised), SCPEFE_ABI_VERSION,
+                current, current_size, local, local_size,
+                current_password, current_password_size,
+                password.data(), password.size(),
+                name.data(), name.size(), email.data(), email.size(),
+                device.data(), device.size(), content.data(), content.size(),
+                static_cast<std::uint64_t>(timestamp),
+            };
+            return output_buffer(env, [&](std::uint8_t *output,
+                std::size_t capacity, std::size_t *size) {
+                return scpefe_revised_merge_save(&revised, output, capacity, size);
+            });
+        }
         const scpefe_merge_save_v1 save{
             sizeof(scpefe_merge_save_v1), current, current_size, local, local_size,
             password.data(), password.size(), name.data(), name.size(),

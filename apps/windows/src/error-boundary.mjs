@@ -32,6 +32,12 @@ export const ERROR_CATALOG = Object.freeze({
   PUBLICATION_AUTH_CONFLICT: ["The target was replaced or failed authentication; the pending candidate was preserved as a conflict.", "Review the authenticated conflict before continuing."],
   PUBLICATION_PENDING_TARGET_UNAVAILABLE: ["The target is unavailable; the manual save remains pending locally.", "Retry publication when the target is available."],
   REGULAR_SAVE_CONFLICT: ["The target changed before regular save; unsaved work was preserved for divergence resolution.", "Resolve the authenticated conflict before continuing."],
+  MERGE_TARGET_REAUTHENTICATION: ["The target no longer accepts this password wrapper.", "Enter the current target password to authenticate access before resolving the saved conflict."],
+  MERGE_ACCESS_REVOKED: ["This password slot was removed from the current target.", "Keep the encrypted local work and ask a current administrator to review access."],
+  MERGE_PERMISSION_DENIED: ["This password slot no longer permits editing the current target.", "Keep the encrypted local work and ask a current administrator to review permissions."],
+  MERGE_BASE_UNAVAILABLE: ["The common merge base is unavailable.", "Use a verified backup for the base, or compare the two available versions manually."],
+  MERGE_UNRELATED_TARGET: ["The current target belongs to another document.", "Review the replacement before deciding where to save local work."],
+  MERGE_TARGET_ROLLBACK: ["The current target has rolled back.", "Review the older replica before deciding where to save local work."],
   RECOVERY_CHECKPOINT_FAILED: ["Recovery checkpoint failed.", "Keep the document open and retry before closing."],
   REGULAR_SAVE_FAILED: ["Regular save failed.", "The working copy remains unsaved; retry or save manually."],
 });
@@ -56,6 +62,12 @@ const INTERNAL_CODES = Object.freeze({
   DOCUMENT_PROTECTION_STALE: "LIFECYCLE_FAILED", DOCUMENT_SESSION_INVALIDATED: "LIFECYCLE_FAILED",
   DOCUMENT_REPLACEMENT_CANCELED: "LIFECYCLE_FAILED", DOCUMENT_REPLACEMENT_TARGET_CHANGED: "OPEN_FAILED",
   CLOSE_DISCARD_BLOCKED: "LIFECYCLE_FAILED", LEASE_CHANGED: "LIFECYCLE_FAILED",
+  MERGE_TARGET_REAUTHENTICATION: "MERGE_TARGET_REAUTHENTICATION",
+  MERGE_ACCESS_REVOKED: "MERGE_ACCESS_REVOKED",
+  MERGE_PERMISSION_DENIED: "MERGE_PERMISSION_DENIED",
+  MERGE_BASE_UNAVAILABLE: "MERGE_BASE_UNAVAILABLE",
+  MERGE_UNRELATED_TARGET: "MERGE_UNRELATED_TARGET",
+  MERGE_TARGET_ROLLBACK: "MERGE_TARGET_ROLLBACK",
 });
 
 export function operationErrorCode(operation = "operation") {
