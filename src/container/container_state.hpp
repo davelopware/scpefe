@@ -21,7 +21,8 @@ enum class Attention { none, conflict, target_replaced, reauthenticate };
 /* Distinguishes the stages of one serialized publication or external action. */
 enum class PublicationPhase { idle, publishing, awaiting_host_action, outcome_pending, recovery_required };
 /* Identifies the candidate's authorized purpose. */
-enum class PublicationKind { save, slot_change, lease_change, backup_attempt, export_attempt, activity_outcome };
+enum class PublicationKind { save, slot_change, lease_change, compaction,
+    backup_attempt, export_attempt, activity_outcome };
 /* Distinguishes verified publication from definite and ambiguous failures. */
 enum class PublicationOutcome { verified, definite_failure, ambiguous };
 

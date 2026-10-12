@@ -553,6 +553,73 @@ TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regula
     }
 }
 
+TransitionResult Container::prepare_compaction(std::uint64_t operation_id,
+    const std::uint8_t *password, std::size_t password_size,
+    const std::array<std::uint8_t, 16> &lease_session_id,
+    std::uint64_t lease_heartbeat_counter, bool explicit_decision,
+    bool clean_state_confirmed, const std::uint8_t *verified_backup,
+    std::size_t verified_backup_size, std::size_t retain_deltas,
+    std::string_view client_name, std::string_view client_email,
+    std::string_view device, std::uint64_t timestamp_ms)
+{
+    if (transitioning_ || candidate_ || !unlocked_ || !content_clear_
+        || !revised_v3_ || !unlocked_->revision_graph
+        || state_.access != Access::open || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle
+        || state_.edit != EditMode::editing || state_.lease != Lease::held
+        || !state_.permissions.can_edit || !state_.permissions.can_add_passwords
+        || !state_.permissions.can_remove_passwords
+        || state_.attention != Attention::none || state_.target_access
+        || !target_bytes_.empty()) throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (!explicit_decision || !clean_state_confirmed || !password || !password_size
+        || !verified_backup || verified_backup_size != committed_bytes_.size()
+        || std::memcmp(verified_backup, committed_bytes_.data(), verified_backup_size) != 0
+        || !local_lease_session_ || *local_lease_session_ != lease_session_id)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    const auto authenticated = persistence_.unlock_revised_envelope(
+        committed_bytes_.data(), committed_bytes_.size(), password, password_size,
+        format::RevisionLimits::defaults());
+    const auto &graph = *authenticated.revision_graph;
+    const auto &lease = graph.lease();
+    const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
+        [&](const auto &slot) { return slot.id == authenticated.slot_id; });
+    const auto current = graph.reconstruct(graph.content_head());
+    if (authenticated.slot_id != unlocked_->slot_id
+        || authenticated.document_id != unlocked_->document_id
+        || actor == graph.slots().end() || (actor->permissions & 7u) != 7u
+        || actor->must_be_changed || graph.records().back().provisional
+        || !current || *current != *content_clear_
+        || !lease.active || lease.session_id != lease_session_id
+        || lease.heartbeat_counter != lease_heartbeat_counter)
+        throw ContainerFailure{ContainerError::invalid_argument};
+
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.source_head = graph.head();
+    proposed.submitted_generation = content_generation_;
+    const auto encoded = history_.compact_graph(graph, retain_deltas, *actor,
+        client_name, client_email, device, timestamp_ms);
+    proposed.bytes = persistence_.replace_revised_graph(committed_bytes_.data(),
+        committed_bytes_.size(), password, password_size,
+        encoded.data(), encoded.size());
+    proposed.adopted_data = persistence_.unlock_revised_envelope(
+        proposed.bytes.data(), proposed.bytes.size(), password, password_size,
+        format::RevisionLimits::defaults());
+    if (proposed.adopted_data.document_id != unlocked_->document_id
+        || proposed.adopted_data.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id,
+            PublicationKind::compaction});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
+}
+
 TransitionResult Container::prepare_slot_change(std::uint64_t operation_id,
     const SlotChange &change, const std::uint8_t *actor_password,
     std::size_t actor_password_size, std::string_view client_name,
