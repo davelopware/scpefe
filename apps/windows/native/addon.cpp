@@ -477,16 +477,33 @@ napi_value container_create(napi_env env, napi_callback_info info)
             has_recovery ? recovery.data() : nullptr,
             has_recovery ? recovery.size() : 0,
         };
-        const scpefe_container_create_v1 request{
-            sizeof(scpefe_container_create_v1), SCPEFE_ABI_VERSION, document};
+        // The current host reader uses the milestone snapshot ABI. Keep its
+        // creation path in that format until the host migrates to revised v3.
+        if (owner->active) {
+            throw_status(env, SCPEFE_STATUS_INVALID_STATE);
+            return nullptr;
+        }
+        napi_value candidate = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_new_document_create(&document, output, capacity, size);
+            });
+        if (!candidate) return nullptr;
+        auto [bytes, size] = buffer_value(env, candidate);
+        const scpefe_container_open_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION, bytes, size};
         scpefe_container *handle = nullptr;
-        const auto status = scpefe_container_create(owner->context, &request, &handle);
+        auto status = scpefe_container_open(owner->context, &request, &handle);
         if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        const scpefe_password_input_v1 unlock{
+            sizeof(unlock), SCPEFE_ABI_VERSION, password.data(), password.size()};
+        status = scpefe_container_unlock(handle, &unlock);
+        if (status != SCPEFE_STATUS_OK) {
+            scpefe_container_close(handle);
+            throw_status(env, status);
+            return nullptr;
+        }
         owner->active = handle;
-        return output_buffer(env, [&](std::uint8_t *output, std::size_t capacity,
-            std::size_t *size) {
-            return scpefe_container_copy_bytes(handle, output, capacity, size);
-        });
+        return candidate;
     } catch (const std::exception &error) {
         napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
     }
