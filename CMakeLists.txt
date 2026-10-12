@@ -247,6 +247,8 @@ if(BUILD_TESTING)
 
         add_executable(scpefe_lifecycle_abi_test tests/lifecycle_abi_test.c)
         target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_candidate_save_test tests/candidate_save_test.c)
+        target_link_libraries(scpefe_candidate_save_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_revised_v3_history_abi_test
             tests/revised_v3_history_abi_test.c)
@@ -272,6 +274,8 @@ if(BUILD_TESTING)
             src/core/persistence_service.cpp
             src/core/history_service.cpp
             src/document/new_document.cpp
+            src/document/manual_save.cpp
+            src/document/provisional_save.cpp
             src/document/compaction.cpp
             src/document/revision_transition.cpp
             src/format/blake2b.cpp
@@ -355,6 +359,8 @@ if(BUILD_TESTING)
 
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
+        add_test(NAME scpefe.candidate-save COMMAND scpefe_candidate_save_test
+            "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.revised-v3-history-abi
             COMMAND scpefe_revised_v3_history_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.lifecycle-open-limit COMMAND scpefe_lifecycle_open_limit_test)

@@ -21,6 +21,8 @@ public:
     void bytes(const std::uint8_t *data, std::size_t size);
     /* Appends a definite UTF-8 text string. */
     void text(const char *data, std::size_t size);
+    /* Appends an already validated canonical CBOR subitem unchanged. */
+    void raw(const std::uint8_t *data, std::size_t size);
     /* Transfers ownership of the completed encoding. */
     std::vector<std::uint8_t> take_output();
 

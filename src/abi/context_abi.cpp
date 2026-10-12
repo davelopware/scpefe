@@ -3,6 +3,7 @@
 #include "core/context.hpp"
 #include "core/host_services.hpp"
 #include "container/container_error.hpp"
+#include "container/container_state.hpp"
 #include "container/recoverable_password_container.hpp"
 #include "format/revision_error.hpp"
 #include "format/revision_limits.hpp"
@@ -114,6 +115,30 @@ bool live(const scpefe_container *handle)
 {
     return handle && handle->live && handle->owner
         && handle->owner->active == handle;
+}
+
+uint32_t effect_mask(const scpefe::container::TransitionResult &result)
+{
+    using scpefe::container::EffectKind;
+    uint32_t mask = 0;
+    for (const auto &effect : result.effects) {
+        switch (effect.kind) {
+        case EffectKind::reread_target: mask |= SCPEFE_EFFECT_REREAD_TARGET; break;
+        case EffectKind::journal_candidate: mask |= SCPEFE_EFFECT_JOURNAL_CANDIDATE; break;
+        case EffectKind::publish_candidate: mask |= SCPEFE_EFFECT_PUBLISH_CANDIDATE; break;
+        case EffectKind::adopt_candidate: mask |= SCPEFE_EFFECT_ADOPT_CANDIDATE; break;
+        case EffectKind::clear_journal: mask |= SCPEFE_EFFECT_CLEAR_JOURNAL; break;
+        case EffectKind::recover_candidate: mask |= SCPEFE_EFFECT_RECOVER_CANDIDATE; break;
+        default: break;
+        }
+    }
+    return mask;
+}
+
+scpefe_status map_state_error(scpefe::container::StateError error)
+{
+    return error == scpefe::container::StateError::stale_operation
+        ? SCPEFE_STATUS_STALE_OPERATION : SCPEFE_STATUS_INVALID_STATE;
 }
 
 scpefe_status install_handle(scpefe_context *context,
@@ -325,13 +350,18 @@ scpefe_status scpefe_container_read(const scpefe_container *handle,
     if (!output) return SCPEFE_STATUS_INVALID_ARGUMENT;
     *output = nullptr;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
-    const auto *unlocked = handle->owner->implementation.make_container().read_unlocked();
+    const auto &container = handle->owner->implementation.make_container();
+    const auto *unlocked = container.read_unlocked();
     if (!unlocked) return SCPEFE_STATUS_LOCKED;
     try {
         auto snapshot = std::make_unique<scpefe_owned_snapshot>();
         snapshot->document_id = unlocked->document_id;
         snapshot->slot_id = unlocked->slot_id;
-        if (unlocked->revision_graph) {
+        const auto *clear = container.read_content_clear();
+        if (clear) {
+            snapshot->content = *clear;
+            snapshot->encoded_revision = unlocked->encoded_snapshot_revision;
+        } else if (unlocked->revision_graph) {
             const auto content = unlocked->revision_graph->reconstruct(
                 unlocked->revision_graph->content_head());
             if (!content) return SCPEFE_STATUS_BODY_UNAVAILABLE;
@@ -398,4 +428,142 @@ scpefe_status scpefe_container_copy_bytes(const scpefe_container *handle,
     if (!output || capacity < bytes.size()) return SCPEFE_STATUS_BUFFER_TOO_SMALL;
     std::memcpy(output, bytes.data(), bytes.size());
     return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *handle)
+{
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        handle->owner->implementation.make_container().confirm_edit_lease();
+        return SCPEFE_STATUS_OK;
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_container_submit_content(scpefe_container *handle,
+    const char *content, size_t content_size)
+{
+    if (!scpefe::format::span_is_valid(content, content_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        handle->owner->implementation.make_container().submit_content(
+            {content ? content : "", content_size});
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_container_prepare_save(scpefe_container *handle,
+    const scpefe_container_save_v1 *save, scpefe_candidate_info_v1 *info)
+{
+    if (!save || !info || save->struct_size < sizeof(*save)
+        || info->struct_size < sizeof(*info)
+        || !save->password || save->password_size == 0
+        || !scpefe::format::span_is_valid(save->profile_name, save->profile_name_size)
+        || !scpefe::format::span_is_valid(save->profile_email, save->profile_email_size)
+        || !scpefe::format::span_is_valid(save->device_name, save->device_name_size)
+        || save->kind < SCPEFE_SAVE_MANUAL || save->kind > SCPEFE_SAVE_DISCARD)
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (save->abi_version != SCPEFE_ABI_VERSION
+        || info->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    if (save->password_size > 4096) return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    const auto text_limit = scpefe::format::RevisionLimits::defaults().max_text_bytes();
+    if (save->profile_name_size > text_limit || save->profile_email_size > text_limit
+        || save->device_name_size > text_limit) return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (save->kind != SCPEFE_SAVE_DISCARD
+        && (!scpefe::format::valid_utf8(save->profile_name, save->profile_name_size)
+            || !scpefe::format::valid_utf8(save->profile_email, save->profile_email_size)
+            || !scpefe::format::valid_utf8(save->device_name, save->device_name_size)
+            || !save->profile_name_size || !save->profile_email_size
+            || !save->device_name_size)) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        auto &container = handle->owner->implementation.make_container();
+        const auto result = container.prepare_save(save->operation_id,
+            save->kind == SCPEFE_SAVE_REGULAR, save->kind == SCPEFE_SAVE_DISCARD,
+            save->password, save->password_size,
+            {save->profile_name ? save->profile_name : "", save->profile_name_size},
+            {save->profile_email ? save->profile_email : "", save->profile_email_size},
+            {save->device_name ? save->device_name : "", save->device_name_size},
+            save->timestamp_ms);
+        const auto *candidate = container.candidate();
+        *info = {sizeof(*info), SCPEFE_ABI_VERSION, candidate->operation_id, {},
+            candidate->bytes.size(), effect_mask(result)};
+        std::memcpy(info->source_head, candidate->source_head.data(),
+            candidate->source_head.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return map_error(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_container_copy_candidate(const scpefe_container *handle,
+    uint64_t operation_id, uint8_t *output, size_t capacity, size_t *output_size)
+{
+    if (!output_size || (!output && capacity)) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    const auto *candidate = handle->owner->implementation.make_container().candidate();
+    if (!candidate || candidate->operation_id != operation_id)
+        return SCPEFE_STATUS_STALE_OPERATION;
+    *output_size = candidate->bytes.size();
+    if (!output || capacity < candidate->bytes.size())
+        return SCPEFE_STATUS_BUFFER_TOO_SMALL;
+    std::memcpy(output, candidate->bytes.data(), candidate->bytes.size());
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_container_acknowledge_save(scpefe_container *handle,
+    uint64_t operation_id, scpefe_publication_outcome outcome, uint32_t *mask)
+{
+    if (!mask || outcome < SCPEFE_PUBLICATION_VERIFIED
+        || outcome > SCPEFE_PUBLICATION_AMBIGUOUS)
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        using scpefe::container::PublicationOutcome;
+        const auto internal = outcome == SCPEFE_PUBLICATION_VERIFIED
+            ? PublicationOutcome::verified
+            : outcome == SCPEFE_PUBLICATION_DEFINITE_FAILURE
+                ? PublicationOutcome::definite_failure : PublicationOutcome::ambiguous;
+        *mask = effect_mask(handle->owner->implementation.make_container()
+            .acknowledge_save(operation_id, internal));
+        return SCPEFE_STATUS_OK;
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_container_resolve_save(scpefe_container *handle,
+    uint64_t operation_id, int published, uint32_t *mask)
+{
+    if (!mask || (published != 0 && published != 1))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        *mask = effect_mask(handle->owner->implementation.make_container()
+            .resolve_save(operation_id, published != 0));
+        return SCPEFE_STATUS_OK;
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
 }
