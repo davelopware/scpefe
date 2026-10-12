@@ -35,6 +35,22 @@ static int mode_is(scpefe_container *container, int editing, int lease_status)
     return 0;
 }
 
+static int advice_is(scpefe_container *container, const uint8_t session[16],
+    uint64_t counter, uint64_t now, uint64_t unchanged,
+    scpefe_lease_entry expected)
+{
+    scpefe_container_lease_advice_v1 advice = {0};
+    advice.struct_size = sizeof(advice);
+    advice.abi_version = SCPEFE_ABI_VERSION;
+    memcpy(advice.suspended_session_id, session, 16);
+    advice.suspended_heartbeat_counter = counter;
+    advice.now_utc_ms = now;
+    advice.unchanged_monotonic_ms = unchanged;
+    CHECK(scpefe_container_lease_advice(container, &advice) == SCPEFE_STATUS_OK);
+    CHECK(advice.entry == expected);
+    return 0;
+}
+
 static int other_session_reads_only(scpefe_container *source,
     const scpefe_host_services_v1 *host,
     const scpefe_password_input_v1 *password, const uint8_t session_id[16])
@@ -61,6 +77,12 @@ static int other_session_reads_only(scpefe_container *source,
     CHECK(scpefe_container_unlock(container, password) == SCPEFE_STATUS_OK);
     CHECK(mode_is(container, 0, 2) == 0);
     CHECK(lease_view(container, &view) == 0 && view.lease_active);
+    CHECK(advice_is(container, (const uint8_t[16]){0}, 0,
+        view.lease_holder_utc_ms - 1, 0,
+        SCPEFE_LEASE_ENTRY_CONFIRM_TAKEOVER) == 0);
+    CHECK(advice_is(container, (const uint8_t[16]){0}, 0,
+        view.lease_holder_utc_ms + view.lease_duration_ms, 0,
+        SCPEFE_LEASE_ENTRY_TAKEOVER) == 0);
     request.struct_size = sizeof(request);
     request.abi_version = SCPEFE_ABI_VERSION;
     request.operation_id = 1;
@@ -180,6 +202,8 @@ int main(void)
     scpefe_revision_graph_destroy(graph);
     graph = NULL;
     CHECK(mode_is(container, 0, 0) == 0);
+    CHECK(advice_is(container, zero, 0, 1000, 0,
+        SCPEFE_LEASE_ENTRY_ACQUIRE) == 0);
     CHECK(lease_view(container, &view) == 0);
     CHECK(!view.lease_active && view.lease_duration_ms == 600000);
 
@@ -273,6 +297,8 @@ int main(void)
         == SCPEFE_STATUS_INVALID_STATE);
     CHECK(scpefe_container_unlock(container, &auth) == SCPEFE_STATUS_OK);
     CHECK(mode_is(container, 0, 1) == 0);
+    CHECK(advice_is(container, session_a, 2, 122000, 0,
+        SCPEFE_LEASE_ENTRY_RESUME) == 0);
     CHECK(prepare_and_publish(container, &request, 4) == 0);
     CHECK(mode_is(container, 1, 1) == 0);
 

@@ -16,6 +16,8 @@ const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
+const LEASE_PUBLISH_EFFECTS = 0b111;
+const LEASE_ADOPT_EFFECT = 0b1000;
 export const COMPACTION_CONFIRMATION = "I understand that compaction irreversibly removes older history from this container and cannot delete copies held by backups, sync tools, caches, or storage providers.";
 export const DISCARD_UNREADABLE_JOURNAL_CONFIRMATION = "Permanently discard the unreadable recovery journal for this authenticated document.";
 const UNAVAILABLE_CODES = new Set([
@@ -357,7 +359,7 @@ export class DocumentService {
     let unresolvedJournal = false;
     let unreadableJournal = false;
     try {
-      const journal = recoveredPublication ? null : await this.journals.read(
+      let journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       unresolvedJournal = journal !== null;
       if (journal?.publication) {
@@ -380,6 +382,9 @@ export class DocumentService {
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
             this.native.openDocument(published, reopenPassword));
+          journal = await this.journals.read(
+            nativeOpened.documentId, nativeOpened.journalKey);
+          unresolvedJournal = journal !== null;
           activePassword = reopenPassword;
           this.onJournalWarning("PUBLICATION_RECOVERED");
         } else if (resumed.reason === "changed") {
@@ -474,6 +479,15 @@ export class DocumentService {
     if (this.containerTarget && !sameImage) this.closeContainer();
     let openedHere = false;
     try {
+      if (sameImage && this.pendingNativeCandidate !== null) {
+        this.container.finishSave(this.pendingNativeCandidate, "definite-failure");
+        this.pendingNativeCandidate = null;
+        const suspended = this.suspendedLeases.get(nativeOpened.documentId);
+        if (suspended?.release) {
+          suspended.release.journalKey?.fill(0);
+          suspended.release = null;
+        }
+      }
       if (!sameImage) {
         this.container.open(bytes);
         this.containerTarget = target;
@@ -503,6 +517,12 @@ export class DocumentService {
 
   closeContainer() {
     if (!this.containerTarget) return;
+    for (const suspended of this.suspendedLeases.values()) {
+      if (suspended.release?.operationId === this.pendingNativeCandidate) {
+        suspended.release.journalKey.fill(0);
+        suspended.release = null;
+      }
+    }
     this.container.close();
     this.containerTarget = null;
     this.containerBytes = null;
@@ -523,14 +543,21 @@ export class DocumentService {
     if (this.pendingNativeCandidate) {
       throw new Error("Resolve the pending candidate before preparing another save");
     }
-    if (this.containerTarget !== active.target || !this.containerBytes?.equals(current)) {
+    if (this.#nativeLeaseAvailable(active)) {
+      this.#syncNativeLeaseSource(active, current);
+      const mode = this.container.leaseMode();
+      if (!mode.editing || mode.leaseStatus !== "held") {
+        throw new Error("Editing lease is no longer held by this session");
+      }
+    } else if (this.containerTarget !== active.target
+        || !this.containerBytes?.equals(current)) {
       if (this.containerTarget) this.closeContainer();
       this.container.open(current);
       this.container.unlock(active.password);
       this.containerTarget = active.target;
       this.containerBytes = Buffer.from(current);
     }
-    this.container.confirmEditLease();
+    if (!this.#nativeLeaseAvailable(active)) this.container.confirmEditLease();
     const result = this.container.prepareSave(kind, active.password, {
       ...profile, content, timestampMs: Date.now(),
       operationId: this.nextCandidateOperation++,
@@ -1486,8 +1513,26 @@ export class DocumentService {
     this.#cancelRegularSave();
     await this.#stopHeartbeat();
     await this.#flushActive(active);
-    await this.#queuePublication(async () => {
+    try { await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
+      if (this.#nativeLeaseAvailable(active)) {
+        this.#syncNativeLeaseSource(active, current);
+        const lease = this.container.authenticatedLease();
+        if (this.container.leaseMode().leaseStatus !== "held"
+            || !lease.active || !active.leaseSessionId
+            || lease.sessionId !== active.leaseSessionId.toString("hex")
+            || lease.heartbeatCounter !== active.leaseCounter) {
+          const error = new Error("Editing lease changed before it could be released");
+          error.code = "LEASE_CHANGED";
+          throw error;
+        }
+        await this.#publishNativeLease(active, current, "release",
+          active.leaseSessionId, lease, {
+            name: lease.holderName, email: lease.holderEmail,
+            deviceName: lease.deviceName,
+          });
+        return;
+      }
       const inspected = this.#validateNativeOpened(
         this.native.openDocument(current, active.password));
       const sameSession = inspected.lease.active
@@ -1502,7 +1547,10 @@ export class DocumentService {
           { ...inspected.lease, active: false });
         await this.#atomicWrite(active.target, candidate, true);
       }
-    });
+    }); } catch (error) {
+      await this.lock("lease-release-failed");
+      throw error;
+    }
     active.editMode = false;
     active.working = null;
     active.leaseSessionId = null;
@@ -1534,6 +1582,36 @@ export class DocumentService {
       if (opened.documentId !== active.documentId || !opened.lease.active
           || opened.lease.sessionId !== active.leaseSessionId.toString("hex")
           || opened.lease.heartbeatCounter !== active.leaseCounter) return null;
+      if (this.#nativeLeaseAvailable(active)
+          && this.containerTarget === active.target
+          && this.containerBytes?.equals(base)
+          && this.pendingNativeCandidate === null) {
+        const pendingWork = this.#leasePendingWork(active);
+        const lease = opened.lease;
+        const candidate = this.container.prepareLeaseChange("release", active.password, {
+          operationId: this.nextCandidateOperation++,
+          sessionId: active.leaseSessionId.toString("hex"),
+          expectedActive: true, expectedSessionId: lease.sessionId,
+          expectedHeartbeatCounter: lease.heartbeatCounter,
+          expectedHolderUtcMs: lease.holderUtcMs,
+          expectedDurationMs: lease.durationMs,
+          nowUtcMs: this.utcNow(), unchangedMonotonicMs: 0,
+          durationMs: lease.durationMs,
+          holderName: lease.holderName, holderEmail: lease.holderEmail,
+          deviceName: lease.deviceName, explicitTakeover: false,
+        });
+        if ((candidate.effects & LEASE_PUBLISH_EFFECTS) !== LEASE_PUBLISH_EFFECTS) {
+          this.container.finishSave(candidate.operationId, "definite-failure");
+          throw new Error("Native lease release omitted required effects");
+        }
+        this.pendingNativeCandidate = candidate.operationId;
+        return { base, candidate: Buffer.from(candidate.bytes),
+          operationId: candidate.operationId,
+          journalKey: Buffer.from(active.journalKey),
+          text: pendingWork?.text ?? active.opened.content ?? "",
+          cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
+          baseRevision: active.baseRevision, preserveWork: pendingWork !== null };
+      }
       const candidate = this.native.updateLease(base, active.password,
         { ...opened.lease, active: false });
       if (Buffer.from(candidate).equals(base)) {
@@ -1559,14 +1637,38 @@ export class DocumentService {
     }
     try {
       await this.#queuePublication(async () => {
-        await this.#atomicWrite(target, suspended.release.candidate, true,
-          () => this.suspendedLeases.get(documentId) === suspended,
-          suspended.release.base);
+        if (suspended.release.operationId !== undefined) {
+          await this.publications.publish({ documentId,
+            journalKey: suspended.release.journalKey, target,
+            base: suspended.release.base,
+            candidate: suspended.release.candidate,
+            text: suspended.release.text, cursor: suspended.release.cursor,
+            baseRevision: suspended.release.baseRevision,
+            purpose: "lease-change",
+            preserveWork: suspended.release.preserveWork });
+        } else {
+          await this.#atomicWrite(target, suspended.release.candidate, true,
+            () => this.suspendedLeases.get(documentId) === suspended,
+            suspended.release.base);
+        }
       });
     } catch (error) {
       if (error?.code !== "TARGET_CHANGED") throw error;
+      if (suspended.release.operationId !== undefined) {
+        this.container.finishSave(suspended.release.operationId, "definite-failure");
+        this.pendingNativeCandidate = null;
+      }
       this.suspendedLeases.delete(documentId);
       return { released: false, changed: true };
+    }
+    if (suspended.release.operationId !== undefined) {
+      const effects = this.container.finishSave(suspended.release.operationId, "verified");
+      if ((effects & LEASE_ADOPT_EFFECT) === 0) {
+        throw new Error("Native lease release was not adopted");
+      }
+      this.pendingNativeCandidate = null;
+      this.containerBytes = this.container.bytes();
+      suspended.release.journalKey.fill(0);
     }
     this.suspendedLeases.delete(documentId);
     return { released: true };
@@ -2184,6 +2286,82 @@ export class DocumentService {
       const bytes = await this.fs.readFile(active.target);
       const latest = this.#validateNativeOpened(
         this.native.openDocument(bytes, active.password));
+      if (this.#nativeLeaseAvailable(active)) {
+        const suspended = this.suspendedLeases.get(active.documentId);
+        if (suspended?.target === active.target && latest.lease.active
+            && latest.lease.sessionId === suspended.sessionId.toString("hex")
+            && latest.lease.heartbeatCounter !== suspended.counter) {
+          const error = new Error("Editing lease changed while this session was locked");
+          error.code = "LEASE_CHANGED";
+          error.lease = latest.lease;
+          throw error;
+        }
+        this.#syncNativeLeaseSource(active, bytes, { allowReplacement: true });
+        const lease = this.container.authenticatedLease();
+        if (takeoverToken !== undefined) {
+          const valid = takeoverToken !== null
+            && (typeof takeoverToken === "object" || typeof takeoverToken === "function")
+            ? this.leaseTakeoverConfirmations.get(takeoverToken) : undefined;
+          if (valid) this.leaseTakeoverConfirmations.delete(takeoverToken);
+          if (!valid || valid.documentId !== active.documentId
+              || valid.active !== active || valid.target !== active.target
+              || valid.baseRevision !== active.baseRevision
+              || valid.lease !== this.#leaseFingerprint(lease)) {
+            const error = new Error("Editing lease changed after takeover confirmation");
+            error.code = "LEASE_CHANGED";
+            error.lease = lease;
+            throw error;
+          }
+        }
+        const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
+        const observedSince = this.leaseObservations.get(key) ?? this.monotonicNow();
+        this.leaseObservations.set(key, observedSince);
+        const elapsed = Math.max(0, this.monotonicNow() - observedSince);
+        const advice = this.container.leaseAdvice({
+          suspendedSessionId: suspended?.target === active.target
+            ? suspended.sessionId.toString("hex") : "0".repeat(32),
+          suspendedCounter: suspended?.target === active.target ? suspended.counter : 0,
+          nowUtcMs: this.utcNow(), unchangedMonotonicMs: elapsed,
+        });
+        if (advice === "changed") {
+          const error = new Error("Editing lease changed while this session was locked");
+          error.code = "LEASE_CHANGED";
+          error.lease = lease;
+          throw error;
+        }
+        if (advice === "blocked" || (advice === "confirm-takeover"
+            && takeoverToken === undefined)) {
+          const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
+          error.code = this.utcNow() < lease.holderUtcMs
+            ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
+          error.lease = lease;
+          if (advice === "confirm-takeover" && issueTakeoverToken) {
+            error.takeoverToken = this.#issueLeaseTakeoverToken(active, lease);
+          }
+          throw error;
+        }
+        if (active !== this.active || this.lockOperation) {
+          const error = new Error("The document was locked while acquiring its editing lease");
+          error.code = "SESSION_LOCKED";
+          throw error;
+        }
+        const action = advice === "confirm-takeover" ? "takeover" : advice;
+        const sessionId = action === "resume" ? suspended.sessionId : this.randomSessionId();
+        const published = await this.#publishNativeLease(active, bytes, action,
+          sessionId, lease, profile, {
+            explicitTakeover: action === "takeover",
+            unchangedMonotonicMs: elapsed,
+            isCurrent: () => active === this.active && !this.lockOperation,
+          });
+        if (!this.container.leaseMode().editing
+            || this.container.leaseMode().leaseStatus !== "held") {
+          throw new Error("Native lease acquisition did not enter Edit mode");
+        }
+        active.leaseSessionId = Buffer.from(sessionId);
+        active.leaseCounter = published.heartbeatCounter;
+        this.suspendedLeases.delete(active.documentId);
+        return;
+      }
       const lease = latest.lease;
       const acquisition = this.#leaseAcquisition(active, lease,
         { takeoverToken, issueTakeoverToken });
@@ -2284,6 +2462,113 @@ export class DocumentService {
       lease.deviceName]);
   }
 
+  #nativeLeaseAvailable(active) {
+    return !active.migrationRequired && this.container
+      && typeof this.container.prepareLeaseChange === "function";
+  }
+
+  #leasePendingWork(active) {
+    if (active.dirty) {
+      if (!active.working) throw new Error("Dirty lease work has no working copy");
+      return { text: active.working.content, cursor: active.working.cursor };
+    }
+    if (active.recovery) {
+      return { text: active.recovery.text, cursor: active.recovery.cursor };
+    }
+    return null;
+  }
+
+  #syncNativeLeaseSource(active, bytes, { allowReplacement = false } = {}) {
+    if (this.containerTarget === active.target && this.containerBytes?.equals(bytes)) {
+      if (this.container.status().locked) this.container.unlock(active.password);
+      return;
+    }
+    if (this.containerTarget && !allowReplacement) {
+      const error = new Error("Editing lease source changed before publication");
+      error.code = "LEASE_CHANGED";
+      throw error;
+    }
+    if (this.containerTarget) this.closeContainer();
+    this.container.open(bytes);
+    this.container.unlock(active.password);
+    this.containerTarget = active.target;
+    this.containerBytes = Buffer.from(bytes);
+  }
+
+  async #publishNativeLease(active, source, action, sessionId, lease,
+    profile, { unchangedMonotonicMs = 0, explicitTakeover = false,
+      isCurrent = () => true } = {}) {
+    if (this.pendingNativeCandidate !== null) {
+      throw new Error("Resolve the pending candidate before changing the lease");
+    }
+    // The revision head is unchanged by heartbeats; compare the exact image.
+    if (!this.container.bytes().equals(source)) {
+      const error = new Error("Editing lease source changed before publication");
+      error.code = "LEASE_CHANGED";
+      throw error;
+    }
+    const candidate = this.container.prepareLeaseChange(action, active.password, {
+      operationId: this.nextCandidateOperation++,
+      sessionId: sessionId.toString("hex"), expectedActive: lease.active,
+      expectedSessionId: lease.sessionId,
+      expectedHeartbeatCounter: lease.heartbeatCounter,
+      expectedHolderUtcMs: lease.holderUtcMs,
+      expectedDurationMs: lease.durationMs,
+      nowUtcMs: this.utcNow(), unchangedMonotonicMs,
+      durationMs: lease.durationMs,
+      holderName: profile.name, holderEmail: profile.email,
+      deviceName: profile.deviceName, explicitTakeover,
+    });
+    if (!Buffer.isBuffer(candidate.bytes)
+        || (candidate.effects & LEASE_PUBLISH_EFFECTS) !== LEASE_PUBLISH_EFFECTS) {
+      this.container.finishSave(candidate.operationId, "definite-failure");
+      throw new Error("Native lease candidate omitted required publication effects");
+    }
+    this.pendingNativeCandidate = candidate.operationId;
+    try {
+      if (!isCurrent()) {
+        const stale = new Error("Lease publication no longer belongs to this session");
+        stale.code = "STALE_HEARTBEAT";
+        throw stale;
+      }
+      const pendingWork = this.#leasePendingWork(active);
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: source,
+        candidate: candidate.bytes,
+        text: pendingWork?.text ?? active.opened.content ?? "",
+        cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
+        baseRevision: active.baseRevision, purpose: "lease-change",
+        preserveWork: pendingWork !== null });
+      const adopted = this.container.finishSave(candidate.operationId, "verified");
+      this.pendingNativeCandidate = null;
+      if ((adopted & LEASE_ADOPT_EFFECT) === 0) {
+        throw new Error("Native lease candidate was not adopted");
+      }
+      this.containerBytes = this.container.bytes();
+      active.baseContainer = Buffer.from(candidate.bytes);
+      return this.container.authenticatedLease();
+    } catch (error) {
+      if (this.pendingNativeCandidate === candidate.operationId) {
+        let observed;
+        try { observed = await this.fs.readFile(active.target); } catch {}
+        if (error.publicationPrepared) {
+          this.container.finishSave(candidate.operationId, "ambiguous");
+          active.pendingPublication = true;
+          active.unresolvedJournal = true;
+        } else if (observed?.equals(candidate.bytes)) {
+          this.container.finishSave(candidate.operationId, "verified");
+          this.containerBytes = this.container.bytes();
+          active.baseContainer = Buffer.from(candidate.bytes);
+        } else {
+          this.container.finishSave(candidate.operationId, "definite-failure");
+        }
+        this.pendingNativeCandidate = error.publicationPrepared
+          ? candidate.operationId : null;
+      }
+      throw error;
+    }
+  }
+
   #issueLeaseTakeoverToken(active, lease, observedDocumentId = active.documentId) {
     const token = Object.freeze({});
     this.leaseTakeoverConfirmations.set(token, {
@@ -2329,6 +2614,27 @@ export class DocumentService {
       this.#requireCurrentHeartbeat(active, generation);
       const latest = this.#validateNativeOpened(
         this.native.openDocument(bytes, active.password));
+      if (this.#nativeLeaseAvailable(active)) {
+        this.#syncNativeLeaseSource(active, bytes);
+        const lease = this.container.authenticatedLease();
+        const mode = this.container.leaseMode();
+        if (!mode.editing || mode.leaseStatus !== "held"
+            || !lease.active || lease.sessionId !== active.leaseSessionId.toString("hex")
+            || lease.heartbeatCounter !== active.leaseCounter) {
+          active.editMode = false;
+          throw new Error("Editing lease was replaced by another client");
+        }
+        const profile = await this.loadProfile();
+        this.#requireCurrentHeartbeat(active, generation);
+        const published = await this.#publishNativeLease(active, bytes, "refresh",
+          active.leaseSessionId, lease, profile, {
+            isCurrent: () => active === this.active
+              && generation === this.leaseGeneration,
+          });
+        active.leaseCounter = published.heartbeatCounter;
+        this.#requireCurrentHeartbeat(active, generation);
+        return;
+      }
       if (!latest.lease.active
           || !Buffer.from(latest.lease.sessionId, "hex").equals(active.leaseSessionId)
           || latest.lease.heartbeatCounter !== active.leaseCounter) {
@@ -2389,13 +2695,22 @@ export class DocumentService {
     }
     const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
     let mergeAncestor;
+    let leaseBase;
     try {
       const invitationClaim = record.publication.purpose === "invitation-claim";
       const migration = record.publication.purpose === "format-migration";
+      const leaseChange = record.publication.purpose === "lease-change";
+      if (leaseChange) {
+        leaseBase = this.#validateNativeOpened(this.native.openDocument(
+          Buffer.from(record.publication.base, "base64"), password));
+      }
       if (opened.documentId !== documentId
           || (invitationClaim && (record.publication.reopenPassword !== password
             || record.text !== "" || opened.opened.invitationRequired))
-          || (!invitationClaim
+          || (leaseChange && (opened.opened.content !== leaseBase.opened.content
+            || opened.baseRevision !== leaseBase.baseRevision
+            || !opened.journalKey.equals(leaseBase.journalKey)))
+          || (!invitationClaim && !leaseChange
             && opened.opened.content !== (record.merge?.localContent ?? record.text))
           || (migration && (opened.containerFormatVersion !== 3
             || opened.historyEventType !== "format-migration"))) {
@@ -2414,6 +2729,7 @@ export class DocumentService {
       }
     } finally {
       mergeAncestor?.journalKey.fill(0);
+      leaseBase?.journalKey.fill(0);
       opened.journalKey.fill(0);
     }
   }
@@ -2482,7 +2798,12 @@ export class DocumentService {
         targetOpened?.journalKey.fill(0);
         const regularSave = record.publication.purpose === "regular-save"
           && !reopened.manuallySealed;
-        const recovery = regularSave ? { content: reopened.opened.content,
+        const restoredWork = record.publication.preserveWork
+          ? await this.journals.read(reopened.documentId, reopened.journalKey) : null;
+        const recovery = restoredWork?.state === "unsaved"
+          ? { content: restoredWork.text, cursor: restoredWork.cursor,
+            state: "unsaved", updateTime: restoredWork.updateTime }
+          : regularSave ? { content: reopened.opened.content,
           cursor: { start: 0, end: 0 }, state: "unsaved",
           updateTime: Number.isSafeInteger(reopened.revisionTimestampMs)
             ? reopened.revisionTimestampMs : this.now(),

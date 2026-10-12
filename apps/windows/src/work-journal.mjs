@@ -83,8 +83,11 @@ function validateRecord(value) {
         || (value.publication.purpose !== undefined
           && !["invitation-claim", "regular-save", "provisional-discard",
             "identity-reconciliation", "slot-administration", "compaction",
-            "format-migration", "password-change"]
+            "format-migration", "password-change", "lease-change"]
             .includes(value.publication.purpose))
+        || (value.publication.preserveWork !== undefined
+          && (value.publication.purpose !== "lease-change"
+            || typeof value.publication.preserveWork !== "boolean"))
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"
             || !value.publication.reopenPassword
@@ -114,6 +117,8 @@ function validateRecord(value) {
         ? { purpose: value.publication.purpose } : {}),
       ...(value.publication.reopenPassword
         ? { reopenPassword: value.publication.reopenPassword } : {}),
+      ...(value.publication.preserveWork
+        ? { preserveWork: true } : {}),
     };
   }
   return {

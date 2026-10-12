@@ -509,6 +509,28 @@ scpefe_status scpefe_container_lease_mode(const scpefe_container *handle,
     return SCPEFE_STATUS_OK;
 }
 
+scpefe_status scpefe_container_lease_advice(const scpefe_container *handle,
+    scpefe_container_lease_advice_v1 *advice)
+{
+    if (!advice || advice->struct_size < sizeof(*advice))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (advice->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        std::array<std::uint8_t, SCPEFE_LEASE_SESSION_ID_SIZE> session{};
+        std::copy_n(advice->suspended_session_id, session.size(), session.begin());
+        const auto entry = handle->owner->implementation.make_container()
+            .advise_lease_entry(session, advice->suspended_heartbeat_counter,
+                advice->now_utc_ms, advice->unchanged_monotonic_ms);
+        advice->entry = static_cast<scpefe_lease_entry>(
+            static_cast<unsigned int>(entry) + SCPEFE_LEASE_ENTRY_ACQUIRE);
+        return SCPEFE_STATUS_OK;
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    }
+}
+
 scpefe_status scpefe_container_prepare_lease_change(scpefe_container *handle,
     const scpefe_container_lease_change_v1 *change,
     scpefe_candidate_info_v1 *info)

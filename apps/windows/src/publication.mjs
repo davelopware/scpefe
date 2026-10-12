@@ -205,6 +205,7 @@ export class PublicationService {
 
   async prepare({ documentId, journalKey, target, base, candidate, text, cursor,
     baseRevision, purpose, reopenPassword, mergeAncestor,
+    preserveWork = false,
     state = "pending-publication" }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
@@ -229,6 +230,7 @@ export class PublicationService {
         candidate: candidate.toString("base64"),
         stage: "prepared",
         ...(purpose ? { purpose } : {}),
+        ...(preserveWork ? { preserveWork: true } : {}),
         ...(reopenPassword ? { reopenPassword } : {}),
       },
     };
@@ -237,12 +239,12 @@ export class PublicationService {
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, purpose, reopenPassword, mergeAncestor, state }) {
+    baseRevision, purpose, reopenPassword, mergeAncestor, preserveWork, state }) {
     let record;
     try {
       record = await this.prepare({ documentId, journalKey, target, base,
         candidate, text, cursor, baseRevision, purpose, reopenPassword,
-        mergeAncestor, state });
+        mergeAncestor, preserveWork, state });
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };
@@ -310,7 +312,15 @@ export class PublicationService {
         if (!targetUnavailable(error)) throw error;
       }
     }
-    await this.journals.clear(documentId);
+    if (record.publication.preserveWork) {
+      await this.journals.write(documentId, journalKey, {
+        text: record.text, baseRevision: record.baseRevision,
+        cursor: record.cursor, target: record.target, state: "unsaved",
+        updateTime: record.updateTime,
+      });
+    } else {
+      await this.journals.clear(documentId);
+    }
     const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
     if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
       await this.fs.unlink(record.publication.baseFile);
@@ -402,7 +412,15 @@ export class PublicationService {
     if (transaction && hash(transaction) === record.publication.candidateHash) {
       await this.fs.unlink(record.publication.transactionFile);
     }
-    await this.journals.clear(documentId);
+    if (record.publication.preserveWork) {
+      await this.journals.write(documentId, journalKey, {
+        text: record.text, baseRevision: record.baseRevision,
+        cursor: record.cursor, target: record.target, state: "unsaved",
+        updateTime: record.updateTime,
+      });
+    } else {
+      await this.journals.clear(documentId);
+    }
     const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
     if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
       await this.fs.unlink(record.publication.baseFile);
