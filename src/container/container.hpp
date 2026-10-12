@@ -29,8 +29,17 @@ struct ContainerCandidate {
     bool slot_change{};
     bool lease_change{};
     bool lease_held_after{};
+    std::optional<bool> activity_backup;
     std::array<std::uint8_t, 16> lease_session_after{};
     std::string discarded_content;
+};
+
+/* Retains the published attempt until its host outcome is recorded. */
+struct PendingActivity {
+    std::uint64_t attempt_operation_id{};
+    std::array<std::uint8_t, 32> attempt_head{};
+    bool backup{};
+    std::optional<bool> succeeded;
 };
 
 /* Names an authenticated lease operation and the evidence observed by the host. */
@@ -121,6 +130,31 @@ public:
         std::size_t actor_password_size, std::string_view client_name,
         std::string_view client_email, std::string_view device,
         std::uint64_t timestamp_ms);
+    /* Prepares a backup or export attempt against the exact observed target. */
+    TransitionResult prepare_activity_attempt(std::uint64_t operation_id,
+        bool backup, bool clean_state_confirmed,
+        const std::uint8_t *observed_target, std::size_t observed_size,
+        const std::uint8_t *password, std::size_t password_size,
+        std::string_view client_name, std::string_view client_email,
+        std::string_view device, std::uint64_t timestamp_ms);
+    /* Records the host result after an attempt was published. */
+    TransitionResult complete_activity(std::uint64_t attempt_operation_id,
+        bool succeeded);
+    /* Restores a journaled outcome only when the published attempt is head. */
+    TransitionResult restore_activity_outcome(
+        std::uint64_t attempt_operation_id,
+        const std::array<std::uint8_t, 32> &attempt_head,
+        bool backup, bool succeeded,
+        const std::uint8_t *observed_target, std::size_t observed_size);
+    /* Prepares the pending result event against the exact observed target. */
+    TransitionResult prepare_activity_outcome(std::uint64_t operation_id,
+        const std::uint8_t *observed_target, std::size_t observed_size,
+        const std::uint8_t *password, std::size_t password_size,
+        std::string_view client_name, std::string_view client_email,
+        std::string_view device, std::uint64_t timestamp_ms);
+    /* Borrows the pending host action or outcome for app-private journaling. */
+    const PendingActivity *pending_activity() const
+        { return pending_activity_ ? &*pending_activity_ : nullptr; }
     /* Prepares a lease-only candidate after authenticating the current slot. */
     TransitionResult prepare_lease_change(std::uint64_t operation_id,
         const LeaseChange &change, const std::uint8_t *password,
@@ -161,6 +195,7 @@ private:
     std::optional<std::string> content_clear_;
     std::uint64_t content_generation_{};
     std::optional<ContainerCandidate> candidate_;
+    std::optional<PendingActivity> pending_activity_;
     ContainerState state_{};
     std::vector<ContainerStateObserver *> observers_;
     bool transitioning_{};

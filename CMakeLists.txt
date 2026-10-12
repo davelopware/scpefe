@@ -257,6 +257,8 @@ if(BUILD_TESTING)
         add_executable(scpefe_revised_compaction_abi_test
             tests/revised_compaction_abi_test.c)
         target_link_libraries(scpefe_revised_compaction_abi_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_activity_abi_test tests/activity_abi_test.c)
+        target_link_libraries(scpefe_activity_abi_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_lifecycle_open_limit_test tests/lifecycle_open_limit_test.c)
         target_link_libraries(scpefe_lifecycle_open_limit_test PRIVATE SCPEFE::scpefe)
@@ -387,6 +389,7 @@ if(BUILD_TESTING)
             COMMAND scpefe_revised_v3_history_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.revised-compaction-abi
             COMMAND scpefe_revised_compaction_abi_test)
+        add_test(NAME scpefe.activity-abi COMMAND scpefe_activity_abi_test)
         add_test(NAME scpefe.lifecycle-open-limit COMMAND scpefe_lifecycle_open_limit_test)
         add_test(NAME scpefe.container-state COMMAND scpefe_container_state_test
             "${CMAKE_CURRENT_SOURCE_DIR}")

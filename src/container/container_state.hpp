@@ -99,6 +99,11 @@ struct BeginPublication { std::uint64_t operation_id; PublicationKind kind; };
 struct AcknowledgePublication { std::uint64_t operation_id; PublicationOutcome outcome; };
 /* Reports completion of a backup or export following its published attempt. */
 struct CompleteHostAction { std::uint64_t operation_id; bool succeeded; };
+/* Restores a host-journaled outcome after reopening its published attempt. */
+struct RestorePendingActivity {
+    std::uint64_t attempt_operation_id;
+    PublicationKind attempt_kind;
+};
 /* Resumes a journaled ambiguous publication after host reconciliation. */
 struct ResolveAmbiguity { std::uint64_t operation_id; bool published; };
 
@@ -106,7 +111,8 @@ struct ResolveAmbiguity { std::uint64_t operation_id; bool published; };
 using StateTransition = std::variant<Open, Unlock, Lock, AuthenticatedSlotPermissions,
     Close, AcquireEdit,
     ReleaseEdit, PublishedLease, ApplyTargetPermissions, RaiseAttention, ClearAttention,
-    BeginPublication, AcknowledgePublication, CompleteHostAction, ResolveAmbiguity>;
+    BeginPublication, AcknowledgePublication, CompleteHostAction,
+    RestorePendingActivity, ResolveAmbiguity>;
 
 /* Names an action that the host must perform outside the state manager. */
 enum class EffectKind {
@@ -114,7 +120,7 @@ enum class EffectKind {
     release_lease, reread_target, journal_candidate, publish_candidate,
     adopt_candidate, clear_journal, recover_candidate, perform_backup,
     perform_export, record_success_outcome, record_failure_outcome,
-    preserve_unsaved_work
+    journal_activity_outcome, preserve_unsaved_work
 };
 
 /* Associates a required external action with its operation when applicable. */

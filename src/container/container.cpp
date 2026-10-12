@@ -47,6 +47,18 @@ std::uint8_t permission_bits(const Permissions &permissions)
         | (permissions.can_remove_passwords ? 4u : 0u));
 }
 
+std::string revision_hex(const std::array<std::uint8_t, 32> &id)
+{
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(id.size() * 2);
+    for (const auto byte : id) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 15]);
+    }
+    return result;
+}
+
 } // namespace
 
 Container::Container(const ContainerStateManagerService &state_manager,
@@ -302,7 +314,8 @@ void Container::submit_content(std::string_view content)
 {
     if (transitioning_ || state_.access != Access::open
         || state_.screen != Screen::unlocked || state_.edit != EditMode::editing
-        || !state_.permissions.can_edit || state_.attention != Attention::none)
+        || !state_.permissions.can_edit || state_.attention != Attention::none
+        || pending_activity_ || (candidate_ && candidate_->activity_backup))
         throw StateError::invalid_transition;
     if (content.size() > format::RevisionLimits::defaults().max_text_bytes())
         throw ContainerFailure{ContainerError::limit_exceeded};
@@ -773,6 +786,177 @@ TransitionResult Container::prepare_slot_change(std::uint64_t operation_id,
     }
 }
 
+TransitionResult Container::prepare_activity_attempt(std::uint64_t operation_id,
+    bool backup, bool clean_state_confirmed,
+    const std::uint8_t *observed_target, std::size_t observed_size,
+    const std::uint8_t *password, std::size_t password_size,
+    std::string_view client_name, std::string_view client_email,
+    std::string_view device, std::uint64_t timestamp_ms)
+{
+    if (transitioning_ || candidate_ || pending_activity_ || !unlocked_
+        || !content_clear_ || !revised_v3_ || !unlocked_->revision_graph
+        || state_.access != Access::open || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle
+        || state_.attention != Attention::none || state_.target_access
+        || unlocked_->must_be_changed)
+        throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (!password || password_size == 0 || !observed_target || observed_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (observed_size != committed_bytes_.size()
+        || std::memcmp(observed_target, committed_bytes_.data(), observed_size) != 0)
+        throw StateError::invalid_transition;
+    const auto &graph = *unlocked_->revision_graph;
+    if (graph.records().back().provisional)
+        throw StateError::invalid_transition;
+    if (backup) {
+        const auto committed = graph.reconstruct(graph.content_head());
+        if (!clean_state_confirmed || !committed || *content_clear_ != *committed)
+            throw StateError::invalid_transition;
+    }
+    const auto authenticated = persistence_.unlock_revised_envelope(
+        committed_bytes_.data(), committed_bytes_.size(), password,
+        password_size, format::RevisionLimits::defaults());
+    if (authenticated.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
+        [&](const auto &slot) { return slot.id == unlocked_->slot_id; });
+    if (actor == graph.slots().end() || actor->must_be_changed)
+        throw StateError::invalid_transition;
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.source_head = graph.head();
+    proposed.submitted_generation = content_generation_;
+    proposed.activity_backup = backup;
+    const auto encoded = graph.append_activity_event(*actor,
+        backup ? "backup-attempted" : "export-attempted", {}, 0,
+        client_name, client_email, device, timestamp_ms);
+    proposed.bytes = persistence_.replace_revised_graph(committed_bytes_.data(),
+        committed_bytes_.size(), password, password_size,
+        encoded.data(), encoded.size());
+    proposed.adopted_data = persistence_.unlock_revised_envelope(
+        proposed.bytes.data(), proposed.bytes.size(), password, password_size,
+        format::RevisionLimits::defaults());
+    if (proposed.adopted_data.document_id != unlocked_->document_id
+        || proposed.adopted_data.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id,
+            backup ? PublicationKind::backup_attempt
+                : PublicationKind::export_attempt});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
+}
+
+TransitionResult Container::complete_activity(
+    std::uint64_t attempt_operation_id, bool succeeded)
+{
+    if (!pending_activity_ || pending_activity_->attempt_operation_id
+        != attempt_operation_id || pending_activity_->succeeded.has_value())
+        throw StateError::stale_operation;
+    const auto result = install_transition(CompleteHostAction{
+        attempt_operation_id, succeeded});
+    pending_activity_->succeeded = succeeded;
+    return result;
+}
+
+TransitionResult Container::restore_activity_outcome(
+    std::uint64_t attempt_operation_id,
+    const std::array<std::uint8_t, 32> &attempt_head,
+    bool backup, bool succeeded,
+    const std::uint8_t *observed_target, std::size_t observed_size)
+{
+    if (transitioning_ || candidate_ || pending_activity_ || !unlocked_
+        || !revised_v3_ || !unlocked_->revision_graph
+        || state_.access != Access::open || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle
+        || state_.attention != Attention::none || state_.target_access
+        || unlocked_->must_be_changed)
+        throw StateError::invalid_transition;
+    if (!observed_target || observed_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (observed_size != committed_bytes_.size()
+        || std::memcmp(observed_target, committed_bytes_.data(), observed_size) != 0)
+        throw StateError::invalid_transition;
+    const auto &graph = *unlocked_->revision_graph;
+    const auto &record = graph.records().back();
+    if (graph.head() != attempt_head || record.kind != 2
+        || record.actor_slot != unlocked_->slot_id
+        || record.event_type != (backup ? "backup-attempted" : "export-attempted"))
+        throw StateError::invalid_transition;
+    const auto result = install_transition(RestorePendingActivity{
+        attempt_operation_id, backup ? PublicationKind::backup_attempt
+            : PublicationKind::export_attempt});
+    pending_activity_ = PendingActivity{attempt_operation_id,
+        attempt_head, backup, succeeded};
+    return result;
+}
+
+TransitionResult Container::prepare_activity_outcome(std::uint64_t operation_id,
+    const std::uint8_t *observed_target, std::size_t observed_size,
+    const std::uint8_t *password, std::size_t password_size,
+    std::string_view client_name, std::string_view client_email,
+    std::string_view device, std::uint64_t timestamp_ms)
+{
+    if (transitioning_ || candidate_ || !pending_activity_
+        || !pending_activity_->succeeded.has_value() || !unlocked_
+        || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::outcome_pending
+        || state_.attention != Attention::none || state_.target_access)
+        throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (!password || password_size == 0 || !observed_target || observed_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (observed_size != committed_bytes_.size()
+        || std::memcmp(observed_target, committed_bytes_.data(), observed_size) != 0)
+        throw StateError::invalid_transition;
+    const auto &graph = *unlocked_->revision_graph;
+    if (graph.head() != pending_activity_->attempt_head)
+        throw StateError::invalid_transition;
+    const auto authenticated = persistence_.unlock_revised_envelope(
+        committed_bytes_.data(), committed_bytes_.size(), password,
+        password_size, format::RevisionLimits::defaults());
+    if (authenticated.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
+        [&](const auto &slot) { return slot.id == unlocked_->slot_id; });
+    if (actor == graph.slots().end() || actor->must_be_changed)
+        throw StateError::invalid_transition;
+    const bool backup = pending_activity_->backup;
+    const bool succeeded = *pending_activity_->succeeded;
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.source_head = graph.head();
+    proposed.submitted_generation = content_generation_;
+    const auto detail = "attempt=" + revision_hex(pending_activity_->attempt_head);
+    const auto encoded = graph.append_activity_event(*actor,
+        backup ? (succeeded ? "backup-succeeded" : "backup-failed")
+            : (succeeded ? "export-succeeded" : "export-failed"),
+        detail, succeeded ? 1 : 2, client_name, client_email, device, timestamp_ms);
+    proposed.bytes = persistence_.replace_revised_graph(committed_bytes_.data(),
+        committed_bytes_.size(), password, password_size,
+        encoded.data(), encoded.size());
+    proposed.adopted_data = persistence_.unlock_revised_envelope(
+        proposed.bytes.data(), proposed.bytes.size(), password,
+        password_size, format::RevisionLimits::defaults());
+    if (proposed.adopted_data.document_id != unlocked_->document_id
+        || proposed.adopted_data.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id,
+            PublicationKind::activity_outcome});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
+}
+
 TransitionResult Container::acknowledge_save(std::uint64_t operation_id,
     PublicationOutcome outcome)
 {
@@ -818,12 +1002,19 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
         const bool lease_change = candidate_->lease_change;
         const bool lease_held_after = candidate_->lease_held_after;
         const auto lease_session_after = candidate_->lease_session_after;
+        const auto activity_backup = candidate_->activity_backup;
         committed_bytes_.swap(candidate_->bytes);
         if (remove_active) unlocked_.reset();
         else unlocked_ = std::move(candidate_->adopted_data);
         if (candidate_->discard && content_generation_ == candidate_->submitted_generation)
             content_clear_ = std::move(candidate_->discarded_content);
         candidate_.reset();
+        if (activity_backup) {
+            pending_activity_ = PendingActivity{before.operation_id.value_or(0),
+                unlocked_->revision_graph->head(), *activity_backup, std::nullopt};
+        } else if (before.publication_kind == PublicationKind::activity_outcome) {
+            pending_activity_.reset();
+        }
         if (remove_active) {
             auto locked = state_manager_.apply(state_, Lock{});
             state_ = locked.state;
@@ -859,6 +1050,7 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
         unlocked_.reset();
         content_clear_.reset();
         candidate_.reset();
+        pending_activity_.reset();
         committed_bytes_.clear();
         target_bytes_.clear();
         document_id_.reset();

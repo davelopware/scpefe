@@ -127,10 +127,23 @@ public:
         std::string_view event_type, std::string_view event_detail,
         std::string_view client_name, std::string_view client_email,
         std::string_view device, std::uint64_t timestamp_ms) const;
+    /* Appends an attempt or observed outcome without changing content or slots. */
+    std::vector<std::uint8_t> append_activity_event(
+        const RevisionSlot &actor, std::string_view event_type,
+        std::string_view event_detail, std::uint8_t activity_status,
+        std::string_view client_name, std::string_view client_email,
+        std::string_view device, std::uint64_t timestamp_ms) const;
     /* Returns a redacted JSON summary unless clear text is explicitly requested. */
     std::string diagnostic_json(bool include_content) const;
 
 private:
+    /* Encodes the common immutable event and preserves its content head. */
+    std::vector<std::uint8_t> append_event(const std::vector<RevisionSlot> &slots,
+        const RevisionSlot &actor, const std::array<std::uint8_t, 16> &affected_slot,
+        std::string_view event_type, std::string_view event_detail,
+        std::optional<std::uint8_t> activity_status,
+        std::string_view client_name, std::string_view client_email,
+        std::string_view device, std::uint64_t timestamp_ms) const;
     std::vector<std::uint8_t> encoded_;
     std::array<std::pair<std::size_t, std::size_t>, 10> field_ranges_{};
     std::vector<RevisionRecord> records_;

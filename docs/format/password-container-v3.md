@@ -130,6 +130,13 @@ self-asserted, not verified identities. Passwords and key material never appear
 in event details. An event can identify an affected slot; a compaction event
 must identify its cutoff and retained-delta count.
 
+Backup and plaintext-export activity events use event-details key 4 for
+`attempted` (0), `succeeded` (1), or `failed` (2). The event type is respectively
+`backup-attempted`, `backup-succeeded`, `backup-failed`, `export-attempted`,
+`export-succeeded`, or `export-failed`. Outcome events put the attempt revision
+ID in key 5 as lowercase `attempt=<hex revision ID>` so the observed result
+remains linked to its published attempt after compaction.
+
 Let `H(x)` mean Libsodium `crypto_generichash` with 32-byte output, no key
 (BLAKE2b-256). Concatenation is `||`; quoted prefixes are exact ASCII bytes
 including the shown final NUL (`00`). Identity hashes are:
