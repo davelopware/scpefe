@@ -58,6 +58,7 @@ TransitionResult ContainerStateManagerService::apply(
         next.active_slot = unlock->slot_id;
         next.permissions = current.target_access
             ? current.target_access->permissions : unlock->permissions;
+        next.lease = unlock->authenticated_lease;
         if (current.attention == Attention::reauthenticate)
             next.attention = Attention::none;
         if (unlock->may_attempt_edit && next.permissions.can_edit)
@@ -115,6 +116,17 @@ TransitionResult ContainerStateManagerService::apply(
         next.lease = Lease::none;
         result.effects.push_back({EffectKind::stop_heartbeat});
         result.effects.push_back({EffectKind::release_lease});
+    } else if (const auto *published = std::get_if<PublishedLease>(&attempt)) {
+        require(current.access == Access::open
+            && current.publication == PublicationPhase::idle
+            && (current.screen == Screen::unlocked || !published->held));
+        next.lease = published->held ? Lease::held : Lease::none;
+        next.edit = published->held && current.screen == Screen::unlocked
+            && current.permissions.can_edit
+            ? EditMode::editing : EditMode::read_only;
+        if (current.edit != next.edit)
+            result.effects.push_back({next.edit == EditMode::editing
+                ? EffectKind::start_heartbeat : EffectKind::stop_heartbeat});
     } else if (const auto *target = std::get_if<ApplyTargetPermissions>(&attempt)) {
         require(current.access == Access::open && current.screen == Screen::unlocked
             && current.publication == PublicationPhase::idle);
@@ -146,7 +158,9 @@ TransitionResult ContainerStateManagerService::apply(
             && current.publication == PublicationPhase::idle);
         next.attention = Attention::none;
     } else if (const auto *begin = std::get_if<BeginPublication>(&attempt)) {
-        require(current.access == Access::open && current.screen == Screen::unlocked
+        require(current.access == Access::open
+            && (current.screen == Screen::unlocked
+                || begin->kind == PublicationKind::lease_change)
             && current.attention == Attention::none
             && begin->operation_id > current.last_operation_id);
         if (begin->kind == PublicationKind::activity_outcome) {
@@ -157,6 +171,8 @@ TransitionResult ContainerStateManagerService::apply(
             if (begin->kind == PublicationKind::save)
                 require(current.edit == EditMode::editing && current.permissions.can_edit
                     && current.lease == Lease::held);
+            if (begin->kind == PublicationKind::lease_change)
+                require(current.screen == Screen::locked || current.permissions.can_edit);
         }
         next.publication = PublicationPhase::publishing;
         next.operation_id = begin->operation_id;

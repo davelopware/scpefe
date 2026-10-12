@@ -21,7 +21,7 @@ enum class Attention { none, conflict, target_replaced, reauthenticate };
 /* Distinguishes the stages of one serialized publication or external action. */
 enum class PublicationPhase { idle, publishing, awaiting_host_action, outcome_pending, recovery_required };
 /* Identifies the candidate's authorized purpose. */
-enum class PublicationKind { save, slot_change, backup_attempt, export_attempt, activity_outcome };
+enum class PublicationKind { save, slot_change, lease_change, backup_attempt, export_attempt, activity_outcome };
 /* Distinguishes verified publication from definite and ambiguous failures. */
 enum class PublicationOutcome { verified, definite_failure, ambiguous };
 
@@ -72,6 +72,7 @@ struct Unlock {
     Permissions permissions;
     bool may_attempt_edit;
     bool authenticated_target_wrapper{};
+    Lease authenticated_lease{Lease::none};
 };
 /* Hides clear content and stops this session's lease heartbeat. */
 struct Lock {};
@@ -83,6 +84,8 @@ struct Close {};
 struct AcquireEdit { Lease lease; };
 /* Returns the document session to read-only mode. */
 struct ReleaseEdit {};
+/* Installs authenticated lease facts only after verified candidate publication. */
+struct PublishedLease { bool held; };
 /* Carries active-slot rights derived from an authenticated target. */
 struct ApplyTargetPermissions { Permissions permissions; bool wrapper_changed; };
 /* Requires a user decision before the next publication. */
@@ -101,7 +104,7 @@ struct ResolveAmbiguity { std::uint64_t operation_id; bool published; };
 /* Carries exactly one typed state transition request. */
 using StateTransition = std::variant<Open, Unlock, Lock, AuthenticatedSlotPermissions,
     Close, AcquireEdit,
-    ReleaseEdit, ApplyTargetPermissions, RaiseAttention, ClearAttention,
+    ReleaseEdit, PublishedLease, ApplyTargetPermissions, RaiseAttention, ClearAttention,
     BeginPublication, AcknowledgePublication, CompleteHostAction, ResolveAmbiguity>;
 
 /* Names an action that the host must perform outside the state manager. */

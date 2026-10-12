@@ -213,6 +213,30 @@ int main(int argc, char **argv)
     step(Close{});
 
     step(Open{});
+    step(Unlock{SlotId{7}, Permissions{true, false, false}, true,
+        false, Lease::other_holder});
+    assert(simulated.edit == EditMode::read_only);
+    assert(simulated.lease == Lease::other_holder);
+    assert(rejected(BeginPublication{12, PublicationKind::save}));
+    step(BeginPublication{12, PublicationKind::lease_change});
+    assert(rejected(AcknowledgePublication{11, PublicationOutcome::verified}));
+    assert(simulated.publication == PublicationPhase::publishing);
+    step(AcknowledgePublication{12, PublicationOutcome::verified});
+    auto acquired_lease = step(PublishedLease{true});
+    assert(simulated.edit == EditMode::editing && simulated.lease == Lease::held);
+    assert(acquired_lease.effects.size() == 1
+        && acquired_lease.effects[0].kind == EffectKind::start_heartbeat);
+    step(Lock{});
+    assert(simulated.lease == Lease::held && simulated.edit == EditMode::read_only);
+    step(Unlock{SlotId{7}, Permissions{true, false, false}, true,
+        false, Lease::held});
+    assert(simulated.edit == EditMode::read_only);
+    auto released_lease = step(PublishedLease{false});
+    assert(simulated.lease == Lease::none && simulated.edit == EditMode::read_only);
+    assert(released_lease.effects.empty());
+    step(Close{});
+
+    step(Open{});
     step(Unlock{SlotId{9}, Permissions{}, false});
     auto attempt = step(BeginPublication{21, PublicationKind::backup_attempt});
     assert(attempt.effects[0].kind == EffectKind::reread_target);

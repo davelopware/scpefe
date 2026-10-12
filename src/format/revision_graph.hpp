@@ -80,6 +80,8 @@ public:
     const std::vector<RevisionSlot> &slots() const { return slots_; }
     /* Returns the authenticated advisory lease fields. */
     const RevisionLease &lease() const { return lease_; }
+    /* Replaces only authenticated lease metadata while preserving every revision ID. */
+    std::vector<std::uint8_t> replace_lease(const RevisionLease &lease) const;
     /* Returns the final canonical revision ID. */
     const RevisionId &head() const { return head_; }
     /* Returns the final canonical content revision ID. */

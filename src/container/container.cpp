@@ -140,8 +140,11 @@ const UnlockedContainerData &Container::unlock_legacy_document(
         throw ContainerFailure{ContainerError::malformed_container};
     const Permissions rights{(decoded.permissions & 1u) != 0,
         (decoded.permissions & 2u) != 0, (decoded.permissions & 4u) != 0};
+    const auto authenticated_lease = !decoded.editing_lease.active ? Lease::none
+        : local_lease_session_ && decoded.editing_lease.session_id == *local_lease_session_
+            ? Lease::held : Lease::other_holder;
     const Unlock request{decoded.slot_id, rights, !decoded.must_be_changed,
-        authenticating_target};
+        authenticating_target, authenticated_lease};
     // Reauthentication of the same slot restores access without replacing
     // submitted clear text with the older confirmed image.
     const bool retain_local_data = unlocked_.has_value()
@@ -274,6 +277,137 @@ TransitionResult Container::confirm_edit_lease()
 {
     if (requires_password_change()) throw StateError::invalid_transition;
     return install_transition(AcquireEdit{Lease::held});
+}
+
+TransitionResult Container::prepare_lease_change(std::uint64_t operation_id,
+    const LeaseChange &change, const std::uint8_t *password,
+    std::size_t password_size)
+{
+    if (transitioning_ || candidate_ || !unlocked_
+        || state_.access != Access::open
+        || (state_.screen != Screen::unlocked
+            && !(state_.screen == Screen::locked
+                && change.action == LeaseAction::release))
+        || state_.publication != PublicationPhase::idle
+        || state_.attention != Attention::none || state_.target_access
+        || (state_.screen == Screen::unlocked && !state_.permissions.can_edit)
+        || !(unlocked_->permissions & 1u) || unlocked_->must_be_changed)
+        throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (!password || password_size == 0 || change.session_id == SlotId{}
+        || change.duration_ms == 0 || change.duration_ms > INT64_MAX)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    const auto authenticated = revised_v3_
+        ? persistence_.unlock_revised_envelope(committed_bytes_.data(),
+            committed_bytes_.size(), password, password_size,
+            format::RevisionLimits::defaults())
+        : persistence_.unlock_legacy_envelope(committed_bytes_.data(),
+            committed_bytes_.size(), password, password_size,
+            format::RevisionLimits::defaults());
+    if (authenticated.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    const auto &prior = authenticated.editing_lease;
+    if (prior.active != change.expected_active
+        || prior.session_id != change.expected_session_id
+        || prior.heartbeat_counter != change.expected_counter
+        || prior.holder_utc_ms != change.expected_holder_utc_ms
+        || prior.duration_ms != change.expected_duration_ms)
+        throw StateError::stale_operation;
+    const bool same = prior.active && prior.session_id == change.session_id;
+    const bool local = local_lease_session_ && *local_lease_session_ == change.session_id;
+    switch (change.action) {
+    case LeaseAction::acquire:
+        if (prior.active) throw StateError::invalid_transition;
+        break;
+    case LeaseAction::refresh:
+        if (!same || !local || state_.edit != EditMode::editing)
+            throw StateError::invalid_transition;
+        break;
+    case LeaseAction::resume:
+        if (!same || !local || state_.edit != EditMode::read_only)
+            throw StateError::invalid_transition;
+        break;
+    case LeaseAction::release:
+        if (!same || !local) throw StateError::invalid_transition;
+        break;
+    case LeaseAction::takeover: {
+        if (!prior.active || same || !change.explicit_takeover)
+            throw StateError::invalid_transition;
+        const bool expired = change.now_utc_ms >= prior.holder_utc_ms
+            && change.now_utc_ms - prior.holder_utc_ms >= prior.duration_ms;
+        const bool observed_stale = change.unchanged_monotonic_ms >= prior.duration_ms;
+        if (!expired && !observed_stale
+            && !(authenticated.owner_slot || authenticated.recovery_slot))
+            throw StateError::invalid_transition;
+        break;
+    }
+    }
+    if (change.now_utc_ms > INT64_MAX
+        || (change.action != LeaseAction::release
+            && (change.holder_name.empty() || change.holder_email.empty()
+                || change.device_name.empty())))
+        throw ContainerFailure{ContainerError::invalid_argument};
+    EditingLeaseData next;
+    next.active = change.action != LeaseAction::release;
+    next.session_id = next.active ? change.session_id : SlotId{};
+    if (prior.heartbeat_counter == UINT64_MAX)
+        throw ContainerFailure{ContainerError::limit_exceeded};
+    next.heartbeat_counter = same ? prior.heartbeat_counter + 1 : 1;
+    next.holder_utc_ms = change.now_utc_ms;
+    next.duration_ms = change.duration_ms;
+    if (next.active) {
+        next.holder_name = change.holder_name;
+        next.holder_email = change.holder_email;
+        next.device_name = change.device_name;
+    }
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.submitted_generation = content_generation_;
+    proposed.lease_change = true;
+    proposed.lease_held_after = next.active;
+    proposed.lease_session_after = change.session_id;
+    if (revised_v3_) {
+        const auto &graph = *authenticated.revision_graph;
+        proposed.source_head = graph.head();
+        format::RevisionLease lease;
+        lease.active = next.active;
+        lease.session_id = next.session_id;
+        lease.heartbeat_counter = next.heartbeat_counter;
+        lease.holder_utc_ms = next.holder_utc_ms;
+        lease.duration_ms = next.duration_ms;
+        lease.holder_name = next.holder_name;
+        lease.holder_email = next.holder_email;
+        lease.device = next.device_name;
+        const auto encoded = graph.replace_lease(lease);
+        proposed.bytes = persistence_.replace_revised_graph(committed_bytes_.data(),
+            committed_bytes_.size(), password, password_size,
+            encoded.data(), encoded.size());
+        proposed.adopted_data = persistence_.unlock_revised_envelope(
+            proposed.bytes.data(), proposed.bytes.size(), password, password_size,
+            format::RevisionLimits::defaults());
+        if (proposed.adopted_data.revision_graph->head() != graph.head())
+            throw ContainerFailure{ContainerError::crypto_error};
+    } else {
+        proposed.source_head = legacy_head(authenticated);
+        proposed.bytes = RecoverablePasswordContainer::replace_editing_lease(
+            committed_bytes_.data(), committed_bytes_.size(), password,
+            password_size, next);
+        proposed.adopted_data = persistence_.unlock_legacy_envelope(
+            proposed.bytes.data(), proposed.bytes.size(), password, password_size,
+            format::RevisionLimits::defaults());
+    }
+    if (proposed.adopted_data.document_id != unlocked_->document_id
+        || proposed.adopted_data.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id,
+            PublicationKind::lease_change});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
 }
 
 TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regular,
@@ -545,6 +679,9 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
     if (candidate_ && verified) {
         const bool remove_active = candidate_->removes_active_slot;
         const bool slot_change = candidate_->slot_change;
+        const bool lease_change = candidate_->lease_change;
+        const bool lease_held_after = candidate_->lease_held_after;
+        const auto lease_session_after = candidate_->lease_session_after;
         committed_bytes_.swap(candidate_->bytes);
         if (remove_active) unlocked_.reset();
         else unlocked_ = std::move(candidate_->adopted_data);
@@ -567,6 +704,14 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
             result.state = state_;
             result.effects.insert(result.effects.end(), refreshed.effects.begin(),
                 refreshed.effects.end());
+        } else if (lease_change) {
+            if (lease_held_after) local_lease_session_ = lease_session_after;
+            else local_lease_session_.reset();
+            auto refreshed = state_manager_.apply(state_, PublishedLease{lease_held_after});
+            state_ = refreshed.state;
+            result.state = state_;
+            result.effects.insert(result.effects.end(), refreshed.effects.begin(),
+                refreshed.effects.end());
         }
     } else if (candidate_ && rejected) {
         candidate_.reset();
@@ -582,6 +727,7 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
         target_bytes_.clear();
         document_id_.reset();
         revised_v3_ = false;
+        local_lease_session_.reset();
     }
     const auto operation_id = state_.operation_id.value_or(before.operation_id.value_or(0));
     for (auto *observer : observers_)

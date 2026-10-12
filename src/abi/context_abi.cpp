@@ -494,6 +494,93 @@ scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *handle)
     }
 }
 
+scpefe_status scpefe_container_lease_mode(const scpefe_container *handle,
+    scpefe_container_lease_mode_v1 *mode)
+{
+    if (!mode || mode->struct_size < sizeof(*mode))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (mode->abi_version != SCPEFE_ABI_VERSION) return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    const auto &state = handle->owner->implementation.make_container().state();
+    if (state.screen == scpefe::container::Screen::locked) return SCPEFE_STATUS_LOCKED;
+    *mode = {sizeof(*mode), SCPEFE_ABI_VERSION,
+        state.edit == scpefe::container::EditMode::editing,
+        static_cast<scpefe_lease_status>(state.lease)};
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_container_prepare_lease_change(scpefe_container *handle,
+    const scpefe_container_lease_change_v1 *change,
+    scpefe_candidate_info_v1 *info)
+{
+    using scpefe::format::span_is_valid;
+    using scpefe::format::valid_utf8;
+    if (!change || !info || change->struct_size < sizeof(*change)
+        || info->struct_size < sizeof(*info)
+        || change->action < SCPEFE_LEASE_ACQUIRE
+        || change->action > SCPEFE_LEASE_TAKEOVER
+        || !span_is_valid(change->password, change->password_size)
+        || change->password_size == 0
+        || change->session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
+        || !span_is_valid(change->session_id, change->session_id_size)
+        || change->expected_session_id_size != SCPEFE_LEASE_SESSION_ID_SIZE
+        || !span_is_valid(change->expected_session_id,
+            change->expected_session_id_size)
+        || (change->expected_active != 0 && change->expected_active != 1)
+        || (change->explicit_takeover != 0 && change->explicit_takeover != 1)
+        || !valid_utf8(change->holder_name, change->holder_name_size)
+        || !valid_utf8(change->holder_email, change->holder_email_size)
+        || !valid_utf8(change->device_name, change->device_name_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (change->abi_version != SCPEFE_ABI_VERSION
+        || info->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    const auto limit = scpefe::format::RevisionLimits::defaults().max_text_bytes();
+    if (change->password_size > 4096 || change->holder_name_size > limit
+        || change->holder_email_size > limit || change->device_name_size > limit)
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        scpefe::container::LeaseChange request{};
+        request.action = static_cast<scpefe::container::LeaseAction>(change->action - 1);
+        std::copy_n(change->session_id, SCPEFE_LEASE_SESSION_ID_SIZE,
+            request.session_id.begin());
+        std::copy_n(change->expected_session_id, SCPEFE_LEASE_SESSION_ID_SIZE,
+            request.expected_session_id.begin());
+        request.expected_active = change->expected_active != 0;
+        request.expected_counter = change->expected_heartbeat_counter;
+        request.expected_holder_utc_ms = change->expected_holder_utc_ms;
+        request.expected_duration_ms = change->expected_duration_ms;
+        request.now_utc_ms = change->now_utc_ms;
+        request.unchanged_monotonic_ms = change->unchanged_monotonic_ms;
+        request.duration_ms = change->duration_ms;
+        request.holder_name = {change->holder_name ? change->holder_name : "",
+            change->holder_name_size};
+        request.holder_email = {change->holder_email ? change->holder_email : "",
+            change->holder_email_size};
+        request.device_name = {change->device_name ? change->device_name : "",
+            change->device_name_size};
+        request.explicit_takeover = change->explicit_takeover != 0;
+        auto &container = handle->owner->implementation.make_container();
+        const auto result = container.prepare_lease_change(change->operation_id,
+            request, change->password, change->password_size);
+        const auto *candidate = container.candidate();
+        *info = {sizeof(*info), SCPEFE_ABI_VERSION, candidate->operation_id, {},
+            candidate->bytes.size(), effect_mask(result)};
+        std::memcpy(info->source_head, candidate->source_head.data(),
+            candidate->source_head.size());
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return map_error(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
 scpefe_status scpefe_container_submit_content(scpefe_container *handle,
     const char *content, size_t content_size)
 {

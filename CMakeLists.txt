@@ -250,6 +250,8 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
         add_executable(scpefe_candidate_save_test tests/candidate_save_test.c)
         target_link_libraries(scpefe_candidate_save_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_lease_candidate_abi_test tests/lease_candidate_abi_test.c)
+        target_link_libraries(scpefe_lease_candidate_abi_test PRIVATE SCPEFE::scpefe)
         add_executable(scpefe_slot_candidate_abi_test tests/slot_candidate_abi_test.c)
         target_link_libraries(scpefe_slot_candidate_abi_test PRIVATE SCPEFE::scpefe)
 
@@ -376,6 +378,8 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
         add_test(NAME scpefe.candidate-save COMMAND scpefe_candidate_save_test
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.lease-candidate-abi COMMAND scpefe_lease_candidate_abi_test
             "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.slot-candidate-abi COMMAND scpefe_slot_candidate_abi_test)
         add_test(NAME scpefe.revised-v3-history-abi
