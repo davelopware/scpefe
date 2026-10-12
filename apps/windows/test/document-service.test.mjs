@@ -988,7 +988,8 @@ test("view-only slots create exact backups without changing the active target", 
     now: () => Date.UTC(2026, 8, 20, 1, 2, 3),
     native: { openDocument: () => ({ content: "hello", readOnly: true,
       canEdit: false, documentId: "31".repeat(16),
-      baseRevision: "42".repeat(32), journalKey: Buffer.alloc(32, 5) }) } });
+      baseRevision: "42".repeat(32), journalKey: Buffer.alloc(32, 5),
+      containerFormatVersion: 2 }) } });
   await service.openDocument(target, "password words");
   const suggested = path.join(directory, "notes.backup-20260920T010203Z.scpefe");
   assert.equal(service.suggestedBackupTarget(), suggested);
@@ -2479,7 +2480,8 @@ test("plaintext export writes only current text with selected line endings", asy
     profilePath: path.join(directory, "profile.json"),
     native: withLease({ openDocument: () => ({ content: "original", readOnly: true,
       canEdit: false, documentId: "88".repeat(16),
-      baseRevision: "99".repeat(32), journalKey: Buffer.alloc(32, 13) }) }) });
+      baseRevision: "99".repeat(32), journalKey: Buffer.alloc(32, 13),
+      containerFormatVersion: 2 }) }) });
   await assert.rejects(service.exportPlaintext(lfExport, {
     content: "secret", lineEndings: "lf",
   }), /Open a document/);

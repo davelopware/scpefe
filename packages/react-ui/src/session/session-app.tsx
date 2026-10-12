@@ -230,9 +230,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
       const current = session.getSnapshot();
       if (!presentationMounted.current || (current.kind === "read-only"
         || current.kind === "edit" ? current.adoption : null) !== adoption) return;
-      if (outcome.status === "backup") setMessage(outcome.created
-        ? "Verified byte-identical backup replica created."
-        : "Backup canceled; the document and destination are unchanged.");
+      if (outcome.status === "backup") setMessage(outcome.outcomePending
+        ? (outcome.created ? "Verified backup created; activity outcome pending publication."
+          : "Backup failed; activity outcome pending publication.")
+        : outcome.created ? "Verified byte-identical backup replica created."
+          : outcome.canceled
+            ? "Backup canceled; the document and destination are unchanged."
+            : "Backup failed; check the destination.");
       else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
     }
     else if (command === "edit") {

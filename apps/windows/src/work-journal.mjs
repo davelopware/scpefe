@@ -5,7 +5,8 @@ const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
-const STATES = new Set(["unsaved", "pending-publication", "conflict"]);
+const STATES = new Set(["unsaved", "pending-publication", "conflict",
+  "activity-outcome"]);
 const TRANSACTION_STAGES = new Set([
   "prepared", "written", "flushed", "replaced", "verified", "cleanup",
 ]);
@@ -38,6 +39,24 @@ function validateRecord(value) {
   }
   let publication;
   let merge;
+  let activity;
+  if (value.activity !== undefined) {
+    const pending = value.activity;
+    if (!pending || typeof pending !== "object"
+        || !["backup", "export"].includes(pending.kind)
+        || !Number.isSafeInteger(pending.attemptOperationId)
+        || pending.attemptOperationId < 1
+        || !/^[0-9a-f]{64}$/.test(pending.attemptHead)
+        || typeof pending.succeeded !== "boolean"
+        || (value.state === "activity-outcome" && value.publication !== undefined)) {
+      throw new TypeError("invalid pending activity outcome");
+    }
+    activity = { kind: pending.kind,
+      attemptOperationId: pending.attemptOperationId,
+      attemptHead: pending.attemptHead, succeeded: pending.succeeded };
+  } else if (value.state === "activity-outcome") {
+    throw new TypeError("activity outcome state requires a pending outcome");
+  }
   if (value.merge !== undefined) {
     if (value.state !== "conflict" || !value.merge
         || typeof value.merge !== "object"
@@ -129,6 +148,7 @@ function validateRecord(value) {
     state: value.state,
     updateTime: value.updateTime,
     ...(publication ? { publication } : {}),
+    ...(activity ? { activity } : {}),
     ...(merge ? { merge } : {}),
   };
 }

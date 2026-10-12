@@ -262,8 +262,13 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
     setExportError("");
     const outcome = await session.exportPlaintext(lineEndings);
     if (outcome.status === "export") {
-      setMessage(outcome.exported ? "Unprotected plaintext exported."
-        : "Plaintext export canceled; the document and destination are unchanged.");
+      setMessage(outcome.outcomePending
+        ? (outcome.exported ? "Plaintext exported; activity outcome pending publication."
+          : "Plaintext export failed; activity outcome pending publication.")
+        : outcome.exported ? "Unprotected plaintext exported."
+          : outcome.canceled
+            ? "Plaintext export canceled; the document and destination are unchanged."
+            : "Plaintext export failed; check the destination.");
       onDialog(null);
     } else if (outcome.status === "failed") {
       const value = catalogText(outcome.code);

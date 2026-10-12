@@ -10,6 +10,7 @@ interface OpenedDocument {
   publicationState: "target-published" | "pending-publication" | "conflict";
   targetName: string;
   canEdit: boolean;
+  activityOutcomePending?: true;
   migrationRequired?: true;
   migrationCanEdit?: boolean;
   provisional?: true;
@@ -176,11 +177,13 @@ class Host implements DocumentSessionHost<OpenedDocument> {
   async discardRecoveredWork(): Promise<OpenedDocument> { return opened(); }
   async acceptHeadMismatch(): Promise<OpenedDocument> { return opened(); }
   async discardUnreadableJournal(): Promise<OpenedDocument> { return opened(); }
-  async backupDocument(): Promise<{ backedUp: true } | null> {
+  async backupDocument(): Promise<{ backedUp: boolean; outcomePending?: true } | null> {
     return { backedUp: true };
   }
   async exportPlaintext(_request: { content: string; lineEndings: "lf" | "native" }):
-    Promise<{ exported: true } | null> { return { exported: true }; }
+    Promise<{ exported: boolean; outcomePending?: true } | null> {
+    return { exported: true };
+  }
   async changePassword(_request: { currentPassword: string; newPassword: string;
     newPasswordConfirmation: string }): Promise<OpenedDocument> { return opened(); }
   async createInvitation(_request: { temporaryLabel: string; temporaryPassword?: string;
@@ -611,13 +614,14 @@ test("backup and plaintext export preserve eligibility, cancellation, and curren
     return null;
   };
   session.adopt(opened("sealed", false));
-  assert.deepEqual(await session.backup(), { status: "backup", created: false });
+  assert.deepEqual(await session.backup(),
+    { status: "backup", created: false, canceled: true });
   assert.equal(backupCalls, 1);
   session.edit("unsaved text");
   assert.deepEqual(await session.backup(), { status: "unavailable" });
   assert.equal(backupCalls, 1);
   assert.deepEqual(await session.exportPlaintext("native"),
-    { status: "export", exported: false });
+    { status: "export", exported: false, canceled: true });
   assert.deepEqual(exported, [{ content: "unsaved text", lineEndings: "native" }]);
   host.exportPlaintext = async () => { throw new Error("private target path"); };
   assert.deepEqual(await session.exportPlaintext("lf"),
@@ -626,6 +630,36 @@ test("backup and plaintext export preserve eligibility, cancellation, and curren
   session.lockStarted();
   assert.deepEqual(await session.exportPlaintext("lf"), { status: "unavailable" });
   session.dispose();
+});
+
+test("view-only activity remains eligible and a pending outcome is visible", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("sealed"), canEdit: false });
+  const initial = session.getSnapshot();
+  assert.equal(initial.kind, "read-only");
+  if (initial.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(initial.commands.backup, true);
+  assert.equal(initial.commands.export, true);
+  host.backupDocument = async () => ({ backedUp: true, outcomePending: true });
+  assert.deepEqual(await session.backup(),
+    { status: "backup", created: true, outcomePending: true });
+  const pending = session.getSnapshot();
+  if (pending.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(pending.document.activityOutcomePending, true);
+  assert.equal(pending.commands.backup, false);
+  assert.equal(pending.commands.export, false);
+  session.dispose();
+
+  const exportSession = new DocumentSession(host, new Journal());
+  exportSession.adopt({ ...opened("sealed"), canEdit: false });
+  host.exportPlaintext = async () => ({ exported: false, outcomePending: true });
+  assert.deepEqual(await exportSession.exportPlaintext("lf"),
+    { status: "export", exported: false, outcomePending: true });
+  const exportPending = exportSession.getSnapshot();
+  if (exportPending.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(exportPending.document.activityOutcomePending, true);
+  exportSession.dispose();
 });
 
 test("regular publication stays provisional and cannot overwrite a newer local edit", () => {

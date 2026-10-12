@@ -4,7 +4,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   validateBackupResult, validateCompactionResult, validatePublicationResult,
-  validateSaveResult,
+  validateSaveResult, validateRevisionActivityPage,
   validateWorkingCopy, validateClientSettings } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
@@ -377,10 +377,12 @@ export class DocumentService {
     let publicationState = "target-published";
     let unresolvedJournal = false;
     let unreadableJournal = false;
+    let pendingActivity = null;
     try {
       let journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       unresolvedJournal = journal !== null;
+      pendingActivity = journal?.activity ?? null;
       if (journal?.publication) {
         pendingPublication = true;
         pendingRecord = journal;
@@ -416,7 +418,7 @@ export class DocumentService {
         }
       }
       if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved"
-          && journal.baseRevision === nativeOpened.baseRevision) {
+          && this.#journalBaseMatches(journal.baseRevision, nativeOpened)) {
         recovery = journal;
       }
       if (!nativeOpened.opened.invitationRequired && !nativeOpened.manuallySealed
@@ -467,6 +469,7 @@ export class DocumentService {
         ...(headMismatch ? { headMismatch } : {}),
         ...(profileMismatch ? { profileMismatch } : {}),
         ...(unreadableJournal ? { unreadableJournal: true } : {}),
+        ...(pendingActivity ? { activityOutcomePending: true } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
@@ -481,12 +484,37 @@ export class DocumentService {
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
-      pendingPublication, pendingRecord, unresolvedJournal,
+      pendingPublication, pendingRecord, unresolvedJournal, pendingActivity,
       unreadableJournal,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
+    if (pendingActivity && this.container?.restoreActivity) {
+      try { await this.#reconcileActivityOutcome(this.active); }
+      catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+    }
     this.notifyActivity();
-    return opened;
+    return this.active.opened;
+  }
+
+  #journalBaseMatches(baseRevision, opened) {
+    if (baseRevision === opened.baseRevision) return true;
+    const graph = opened.revisionGraph;
+    if (!Array.isArray(graph)) return false;
+    const latestEvent = opened.historyEventType;
+    if (!["backup-attempted", "backup-succeeded", "backup-failed",
+      "export-attempted", "export-succeeded", "export-failed"]
+      .includes(latestEvent)) return false;
+    let cursor = opened.baseRevision;
+    const seen = new Set();
+    const maximumSteps = latestEvent.endsWith("-attempted") ? 1 : 2;
+    while (cursor !== baseRevision && !seen.has(cursor)
+        && seen.size < maximumSteps) {
+      seen.add(cursor);
+      const node = graph.find((record) => record.revisionId === cursor);
+      if (!node || node.parentRevisionIds?.length !== 1) return false;
+      cursor = node.parentRevisionIds[0];
+    }
+    return cursor === baseRevision;
   }
 
   #openActiveContainer(target, bytes, password, nativeOpened) {
@@ -2020,11 +2048,16 @@ export class DocumentService {
     const content = validated.lineEndings === "native"
       ? validated.content.replace(/\n/g, this.nativeLineEnding)
       : validated.content;
-    await this.publications.publishPlaintext({
+    const action = () => this.publications.publishPlaintext({
       target, protectedTarget: this.active.target,
-      content: Buffer.from(content, "utf8"),
-    });
-    return validatePlaintextExportResult({ exported: true });
+      content: Buffer.from(content, "utf8") });
+    if (!this.#activityAvailable(this.active)) {
+      await action();
+      return validatePlaintextExportResult({ exported: true });
+    }
+    const result = await this.#runActivity("export", action);
+    return validatePlaintextExportResult({ exported: result.succeeded,
+      ...(result.outcomePending ? { outcomePending: true } : {}) });
   }
 
   suggestedBackupTarget() {
@@ -2045,13 +2078,197 @@ export class DocumentService {
         || this.active.unresolvedJournal) {
       throw new Error("Save or discard changes before creating a backup");
     }
-    const activeTarget = this.active.target;
-    const candidate = await this.fs.readFile(activeTarget);
-    await this.publications.publishReplica({ target, candidate });
-    if (this.active.target !== activeTarget) {
-      throw new Error("Backup changed the active target");
+    const active = this.active;
+    const action = async () => {
+      const candidate = await this.fs.readFile(active.target);
+      if (!candidate.equals(active.baseContainer)) {
+        throw new Error("Backup source changed after its activity attempt");
+      }
+      const copy = await this.publications.publishReplica({ target, candidate,
+        returnVerifiedBytes: true });
+      if (!copy.verifiedBytes.equals(candidate)) {
+        throw new Error("Backup replica differs from the attempted source");
+      }
+    };
+    if (!this.#activityAvailable(active)) {
+      await action();
+      return validateBackupResult({ backedUp: true });
     }
-    return validateBackupResult({ backedUp: true });
+    const result = await this.#runActivity("backup", action);
+    return validateBackupResult({ backedUp: result.succeeded,
+      ...(result.outcomePending ? { outcomePending: true } : {}) });
+  }
+
+  #activityAvailable(active) {
+    if (active.migrationRequired) return false;
+    if (!this.container || typeof this.container.prepareActivity !== "function"
+        || typeof this.container.completeActivity !== "function"
+        || typeof this.container.restoreActivity !== "function"
+        || typeof this.container.activityStatus !== "function") {
+      throw new Error("Native activity interface is unavailable");
+    }
+    return true;
+  }
+
+  async #publishActivityCandidate(active, phase, kind, source, profile) {
+    if (this.pendingNativeCandidate !== null || !this.containerBytes?.equals(source)
+        || !active.baseContainer.equals(source)) {
+      throw new Error("Activity source changed before publication");
+    }
+    const candidate = this.container.prepareActivity(phase, active.password, {
+      operationId: this.nextCandidateOperation++, kind,
+      cleanStateConfirmed: kind === "backup" && !active.dirty
+        && !active.recovery && !active.pendingPublication && !active.unresolvedJournal,
+      observedTarget: source, clientName: profile.name,
+      clientEmail: profile.email, deviceName: profile.deviceName,
+      timestampMs: this.now() });
+    if (!Buffer.isBuffer(candidate.bytes) || candidate.bytes.length === 0) {
+      this.container.finishSave(candidate.operationId, "definite-failure");
+      throw new Error("Native activity candidate has no container bytes");
+    }
+    this.pendingNativeCandidate = candidate.operationId;
+    try {
+      await this.#atomicWrite(active.target, candidate.bytes, true,
+        () => this.active === active, source);
+      const observed = await this.fs.readFile(active.target);
+      if (!observed.equals(candidate.bytes)) {
+        throw new Error("Activity publication could not be verified");
+      }
+      this.container.finishSave(candidate.operationId, "verified");
+      this.pendingNativeCandidate = null;
+      this.containerBytes = Buffer.from(candidate.bytes);
+      await this.#adoptActivityImage(active, candidate.bytes);
+      return candidate;
+    } catch (error) {
+      if (this.pendingNativeCandidate === candidate.operationId) {
+        let observed;
+        try { observed = await this.fs.readFile(active.target); } catch {}
+        if (observed?.equals(candidate.bytes)) {
+          this.container.finishSave(candidate.operationId, "verified");
+          this.containerBytes = Buffer.from(candidate.bytes);
+          await this.#adoptActivityImage(active, candidate.bytes);
+        } else {
+          this.container.finishSave(candidate.operationId,
+            observed ? "definite-failure" : "ambiguous");
+        }
+        this.pendingNativeCandidate = observed ? null : candidate.operationId;
+      }
+      throw error;
+    }
+  }
+
+  async #adoptActivityImage(active, bytes) {
+    const reopened = this.#validateNativeOpened(
+      this.native.openDocument(bytes, active.password));
+    try {
+      if (reopened.documentId !== active.documentId
+          || reopened.opened.slotId !== active.opened.slotId
+          || reopened.opened.content !== active.targetContent) {
+        throw new Error("Published activity changed document identity or content");
+      }
+      active.baseContainer = Buffer.from(bytes);
+      active.baseRevision = reopened.baseRevision;
+      active.revisionGraph = reopened.revisionGraph;
+      active.observation = this.#observation(reopened);
+      active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+        ...active.opened, content: reopened.opened.content,
+        readOnly: !active.editMode,
+        ...(active.pendingActivity ? { activityOutcomePending: true } : {}) });
+      await this.witnesses.observe(active.target, active.observation);
+    } finally { reopened.journalKey.fill(0); }
+  }
+
+  async #runActivity(kind, action) {
+    const active = this.active;
+    if (active.pendingActivity || active.pendingPublication || active.headMismatch
+        || active.unreadableJournal || active.migrationRequired) {
+      throw new Error("Resolve pending document activity before starting another action");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    return this.#queuePublication(async () => {
+      const source = await this.fs.readFile(active.target);
+      if (this.active !== active || !source.equals(active.baseContainer)) {
+        throw new Error("Activity source changed before attempt publication");
+      }
+      const attempt = await this.#publishActivityCandidate(active, "attempt", kind,
+        source, profile);
+      const status = this.container.activityStatus();
+      if (!status.hasPending || status.kind !== kind
+          || status.attemptOperationId !== attempt.operationId) {
+        throw new Error("Native activity attempt was not adopted");
+      }
+      let succeeded = false;
+      try { await action(); succeeded = true; }
+      catch { /* A failed host action still needs a published failure event. */ }
+      this.container.completeActivity(attempt.operationId, succeeded);
+      const prior = await this.journals.read(active.documentId, active.journalKey);
+      const activity = { kind, attemptOperationId: attempt.operationId,
+        attemptHead: status.attemptHead, succeeded };
+      const record = prior ? { ...prior, activity,
+        baseRevision: active.baseRevision, updateTime: this.now() }
+        : { text: active.opened.content, baseRevision: active.baseRevision,
+          cursor: { start: 0, end: 0 }, target: active.target,
+          state: "activity-outcome", updateTime: this.now(), activity };
+      await this.journals.write(active.documentId, active.journalKey, record);
+      active.pendingActivity = activity;
+      active.unresolvedJournal = true;
+      active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+        ...active.opened, readOnly: !active.editMode,
+        activityOutcomePending: true });
+      let outcomePending = false;
+      try { await this.#reconcileActivityOutcome(active, profile); }
+      catch { outcomePending = true; this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+      return { succeeded, outcomePending };
+    });
+  }
+
+  async #reconcileActivityOutcome(active, suppliedProfile = null) {
+    const pending = active.pendingActivity;
+    if (!pending) return;
+    const source = await this.fs.readFile(active.target);
+    if (!source.equals(active.baseContainer)) {
+      throw new Error("Activity source changed before outcome publication");
+    }
+    const status = this.container.activityStatus();
+    if (!status.hasPending) {
+      const head = validateRevisionActivityPage(
+        this.container.historyPage(0, 1), 0, 1).items[0];
+      const expectedEvent = `${pending.kind}-${pending.succeeded
+        ? "succeeded" : "failed"}`;
+      if (head?.eventType === expectedEvent
+          && head.previousHead === pending.attemptHead
+          && head.details?.note === `attempt=${pending.attemptHead}`) {
+        await this.#clearActivityJournal(active, pending);
+        return;
+      }
+      this.container.restoreActivity({ ...pending, observedTarget: source });
+    }
+    this.nextCandidateOperation = Math.max(this.nextCandidateOperation,
+      pending.attemptOperationId + 1);
+    const profile = suppliedProfile ?? await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    await this.#publishActivityCandidate(active, "outcome", pending.kind,
+      source, profile);
+    await this.#clearActivityJournal(active, pending);
+  }
+
+  async #clearActivityJournal(active, pending) {
+    const record = await this.journals.read(active.documentId, active.journalKey);
+    if (record?.activity?.attemptHead === pending.attemptHead) {
+      if (record.state === "activity-outcome") {
+        await this.journals.clear(active.documentId);
+        active.unresolvedJournal = false;
+      } else {
+        const { activity: _activity, ...rest } = record;
+        await this.journals.write(active.documentId, active.journalKey,
+          { ...rest, baseRevision: active.baseRevision, updateTime: this.now() });
+      }
+    }
+    active.pendingActivity = null;
+    active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+      ...active.opened, readOnly: !active.editMode,
+      activityOutcomePending: false });
   }
 
   async compactDocument(confirmation, backupTarget) {
