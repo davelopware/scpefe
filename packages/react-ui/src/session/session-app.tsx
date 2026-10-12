@@ -6,7 +6,7 @@ import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
 import { createShellCommands, type ShellCommand } from "../shell/shell-commands.ts";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
-import { DialogSuspensionContext } from "../dialogs/focused-dialog.tsx";
+import { DialogSuspensionContext, FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
@@ -113,6 +113,12 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialogState] = useState<DialogName>(null);
+  const [activityDialog, setActivityDialog] = useState(false);
+  useEffect(() => {
+    if (!opened || !isDocumentOpened(opened) || !opened.activityOutcomePending) {
+      setActivityDialog(false);
+    }
+  }, [opened]);
   function setDialog(next: DialogName) {
     setDialogState(next);
   }
@@ -129,8 +135,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
     || (dialog !== null && dialog !== "compaction") });
   const selected = presentationView.selectedDecision;
   const protection = selected?.kind === "lifecycle-protection" ? selected : null;
-  const visibleOpenedDialog = dialog === null ? presentationView.openedDialog : null;
-  modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
+  const visibleOpenedDialog = dialog === null && !activityDialog
+    ? presentationView.openedDialog : null;
+  modalBusy.current = protection !== null || creating || dialog !== null
+    || activityDialog || visibleOpenedDialog !== null
     || presentationView.blocked;
   useSessionEvents({ session, presentation, events, shellHost,
     completion: rendererLifecycleCompletion,
@@ -265,6 +273,19 @@ export function SharedApp({ sessionHost, journalTransport, events,
     }
   }
 
+  async function resolveActivityOutcome(succeeded?: boolean) {
+    const outcome = await rendererLifecycleCompletion.track(
+      () => session.resolveActivityOutcome(succeeded));
+    if (!presentationMounted.current) return;
+    if (outcome.status === "activity-outcome") {
+      setActivityDialog(false);
+      setMessage(outcome.pending ? "Activity outcome remains pending; retry publication."
+        : "Activity outcome published and verified.");
+    } else if (outcome.status === "failed") {
+      setMessage(catalogText(outcome.code));
+    }
+  }
+
   async function lockDocument() {
     const outcome = await session.lock();
     if (!presentationMounted.current) return;
@@ -361,9 +382,31 @@ export function SharedApp({ sessionHost, journalTransport, events,
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
     <StatusBar session={session} active={activeDocument} commands={shellCommands}
-      message={presentation.statusMessage(message)} /></div>
+      message={presentation.statusMessage(message)}
+      activityActionAvailable={!modalBusy.current && !sessionSnapshot.pending}
+      onActivityOutcome={(returnFocus) => {
+        dialogReturnFocus.current = returnFocus; setActivityDialog(true);
+      }} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
+    {activityDialog && opened && isDocumentOpened(opened)
+      && opened.activityOutcomePending && <FocusedDialog
+        title={opened.activityConfirmationRequired
+          ? "Confirm interrupted activity" : "Retry activity outcome"}
+        close={() => setActivityDialog(false)} returnFocus={dialogReturnFocus.current}>
+        {opened.activityConfirmationRequired
+          ? <><p>The external action may have completed before the interruption.
+            Check its destination before choosing an outcome. A completed backup
+            must be selected for byte-for-byte verification.</p>
+            <button type="button" onClick={() => void resolveActivityOutcome(true)}>
+              It completed</button>
+            <button type="button" onClick={() => void resolveActivityOutcome(false)}>
+              It did not complete</button></>
+          : <><p>The result is recorded locally, but its history event is pending.</p>
+            <button type="button" onClick={() => void resolveActivityOutcome()}>
+              Retry outcome publication</button></>}
+        <button type="button" onClick={() => setActivityDialog(false)}>Cancel</button>
+      </FocusedDialog>}
     {dialog === "activity" && activeDocument && revisionActivityHost
       && <RevisionActivityDialog host={revisionActivityHost}
         returnFocus={dialogReturnFocus.current} close={() => setDialog(null)}

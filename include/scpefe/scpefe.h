@@ -250,8 +250,9 @@ typedef struct scpefe_container_merge_v1 {
 } scpefe_container_merge_v1;
 
 /* Compaction intent. The host sets backup_verified only after a durable backup
- * read-back and passes its exact bytes; the library compares them with the
- * committed source. clean_state_confirmed includes the host's work journal. */
+ * read-back and passes its exact bytes; the library accepts the committed source
+ * or its authenticated backup-attempt parent after a succeeded outcome.
+ * clean_state_confirmed includes the host's work journal. */
 typedef struct scpefe_container_compaction_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -704,7 +705,8 @@ SCPEFE_API scpefe_status scpefe_container_prepare_merge(scpefe_container *contai
 /* Classifies a merge against the authenticated target without retaining bytes. */
 SCPEFE_API scpefe_status scpefe_container_assess_merge(scpefe_container *container,
     const scpefe_container_merge_v1 *merge);
-/* Prepares an attributed compaction after the host verifies its exact backup. */
+/* Prepares attributed compaction after the host verifies an exact source or
+ * authenticated backup-attempt replica preceding a succeeded outcome. */
 SCPEFE_API scpefe_status scpefe_container_prepare_compaction(
     scpefe_container *container,
     const scpefe_container_compaction_v1 *compaction,

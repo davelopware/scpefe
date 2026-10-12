@@ -11,6 +11,7 @@ export interface SessionDocument {
   readonly canEdit?: boolean;
   readonly publicationState?: "target-published" | "pending-publication" | "conflict";
   readonly activityOutcomePending?: true;
+  readonly activityConfirmationRequired?: true;
   readonly recovery?: SessionRecoveryRecord;
   readonly headMismatch?: { readonly kind: "rollback" | "divergence"
     | "replacement" | "witness-error"; readonly title?: string;
@@ -267,6 +268,7 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   discardUnreadableJournal(): Promise<Doc>;
   backupDocument(): Promise<{ readonly backedUp: boolean;
     readonly outcomePending?: true } | null>;
+  resolvePendingActivityOutcome?(request?: { readonly succeeded?: boolean }): Promise<Doc>;
   exportPlaintext(request: { readonly content: string;
     readonly lineEndings: "lf" | "native" }): Promise<{ readonly exported: boolean;
       readonly outcomePending?: true } | null>;
@@ -371,6 +373,8 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
   | Readonly<{ status: "unsaved-work" }>
   | Readonly<{ status: "backup"; created: boolean; canceled?: true;
     outcomePending?: true }>
+  | Readonly<{ status: "activity-outcome"; pending: boolean;
+    confirmationRequired: boolean }>
   | Readonly<{ status: "export"; exported: boolean; canceled?: true;
     outcomePending?: true }>
   | Readonly<{ status: "recovery" | "recovery-discarded" }>
@@ -1370,6 +1374,36 @@ export class DocumentSession<Doc extends SessionDocument,
         this.publicationFailureCode = hostFailureCode(error);
         this.clearPending();
         return Object.freeze({ status: "failed", code: this.publicationFailureCode });
+      }
+    });
+  }
+
+  /** Resolves a durable activity result without guessing after an interrupted host call. */
+  resolveActivityOutcome(succeeded?: boolean): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!this.matchesAdoption(generation, adoption)
+          || (this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
+          || !this.snapshot.document.activityOutcomePending
+          || !this.host.resolvePendingActivityOutcome) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      try {
+        const opened = await this.host.resolvePendingActivityOutcome(
+          succeeded === undefined ? {} : { succeeded });
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.refreshDocument(opened);
+        return Object.freeze({ status: "activity-outcome",
+          pending: opened.activityOutcomePending === true,
+          confirmationRequired: opened.activityConfirmationRequired === true });
+      } catch (error) {
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
       }
     });
   }

@@ -208,11 +208,12 @@ export class PublicationService {
   async prepare({ documentId, journalKey, target, base, candidate, text, cursor,
     baseRevision, purpose, reopenPassword, mergeAncestor,
     preserveWork = false,
-    state = "pending-publication" }) {
+    state = "pending-publication", journalRecord = null }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
     const record = {
+      ...(journalRecord ?? {}),
       text,
       baseRevision,
       cursor: { ...cursor },
@@ -241,12 +242,13 @@ export class PublicationService {
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, purpose, reopenPassword, mergeAncestor, preserveWork, state }) {
+    baseRevision, purpose, reopenPassword, mergeAncestor, preserveWork, state,
+    journalRecord }) {
     let record;
     try {
       record = await this.prepare({ documentId, journalKey, target, base,
         candidate, text, cursor, baseRevision, purpose, reopenPassword,
-        mergeAncestor, preserveWork, state });
+        mergeAncestor, preserveWork, state, journalRecord });
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };
@@ -301,6 +303,8 @@ export class PublicationService {
 
   async discard(documentId, journalKey, record) {
     if (!record?.publication) throw new Error("No pending publication is available");
+    if (record.activity) throw new Error(
+      "Pending activity publication must be reconciled");
     let transaction;
     try {
       transaction = await readIfPresent(this.fs, record.publication.transactionFile);
@@ -414,7 +418,10 @@ export class PublicationService {
     if (transaction && hash(transaction) === record.publication.candidateHash) {
       await this.fs.unlink(record.publication.transactionFile);
     }
-    if (record.publication.preserveWork) {
+    if (record.activity) {
+      const { publication: _publication, ...pendingActivity } = record;
+      await this.journals.write(documentId, journalKey, pendingActivity);
+    } else if (record.publication.preserveWork) {
       await this.journals.write(documentId, journalKey, {
         text: record.text, baseRevision: record.baseRevision,
         cursor: record.cursor, target: record.target, state: "unsaved",

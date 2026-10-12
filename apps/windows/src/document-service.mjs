@@ -462,6 +462,8 @@ export class DocumentService {
         ...(profileMismatch ? { profileMismatch } : {}),
         ...(unreadableJournal ? { unreadableJournal: true } : {}),
         ...(pendingActivity ? { activityOutcomePending: true } : {}),
+        ...(pendingActivity?.actionState === "started"
+          ? { activityConfirmationRequired: true } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
@@ -1161,6 +1163,26 @@ export class DocumentService {
     const resumed = await this.publications.resume(
       active.documentId, active.journalKey, active.pendingRecord);
     if (resumed.completed) {
+      if (active.pendingRecord.activity) {
+        const pendingActivity = active.pendingRecord.activity;
+        this.#resolveSaveCandidate(true);
+        const published = await this.fs.readFile(active.target);
+        this.containerBytes = Buffer.from(published);
+        await this.#adoptActivityImage(active, published);
+        active.pendingPublication = false;
+        active.pendingRecord = null;
+        active.pendingActivity = pendingActivity;
+        active.unresolvedJournal = true;
+        active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+          ...active.opened, publicationState: "target-published",
+          activityOutcomePending: true,
+          ...(pendingActivity.actionState === "started"
+            ? { activityConfirmationRequired: true } : {}) });
+        try { await this.#reconcileActivityOutcome(active); }
+        catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+        return validatePublicationResult({ publicationState: "target-published",
+          content: active.opened.content });
+      }
       this.#resolveSaveCandidate(true);
       await this.#adoptPublishedCandidate(active);
       return validatePublicationResult({ publicationState: "target-published",
@@ -1408,6 +1430,9 @@ export class DocumentService {
     if (!active?.pendingPublication || !active.pendingRecord) {
       throw new Error("No pending publication is available");
     }
+    if (active.pendingRecord.activity) {
+      throw new Error("Pending activity publication must be reconciled");
+    }
     if (active.editMode) {
       this.#cancelRegularSave();
       await this.#stopHeartbeat();
@@ -1482,7 +1507,8 @@ export class DocumentService {
     if (this.active.compactionInProgress) {
       throw new Error("Compaction is in progress; editing is unavailable");
     }
-    if (this.active.pendingPublication && !this.active.pendingRecord?.merge) {
+    if (this.active.pendingPublication && !this.active.pendingRecord?.merge
+        && this.active.pendingRecord?.publication.purpose !== "activity-outcome") {
       throw new Error("Resolve the interrupted publication before editing");
     }
     const working = validateWorkingCopy(value);
@@ -2016,7 +2042,8 @@ export class DocumentService {
       await action();
       return validatePlaintextExportResult({ exported: true });
     }
-    const result = await this.#runActivity("export", action);
+    const result = await this.#runActivity("export", action, target,
+      Buffer.from(content, "utf8"));
     return validatePlaintextExportResult({ exported: result.succeeded,
       ...(result.outcomePending ? { outcomePending: true } : {}) });
   }
@@ -2039,6 +2066,12 @@ export class DocumentService {
         || this.active.unresolvedJournal) {
       throw new Error("Save or discard changes before creating a backup");
     }
+    const result = await this.#runBackupActivity(target);
+    return validateBackupResult({ backedUp: result.succeeded,
+      ...(result.outcomePending ? { outcomePending: true } : {}) });
+  }
+
+  async #runBackupActivity(target) {
     const active = this.active;
     const action = async () => {
       const candidate = await this.fs.readFile(active.target);
@@ -2050,14 +2083,10 @@ export class DocumentService {
       if (!copy.verifiedBytes.equals(candidate)) {
         throw new Error("Backup replica differs from the attempted source");
       }
+      return copy;
     };
-    if (!this.#activityAvailable(active)) {
-      await action();
-      return validateBackupResult({ backedUp: true });
-    }
-    const result = await this.#runActivity("backup", action);
-    return validateBackupResult({ backedUp: result.succeeded,
-      ...(result.outcomePending ? { outcomePending: true } : {}) });
+    this.#activityAvailable(active);
+    return this.#runActivity("backup", action, target);
   }
 
   #activityAvailable(active) {
@@ -2088,12 +2117,41 @@ export class DocumentService {
     }
     this.pendingNativeCandidate = candidate.operationId;
     try {
-      await this.#atomicWrite(active.target, candidate.bytes, true,
-        () => this.active === active, source);
-      const observed = await this.fs.readFile(active.target);
-      if (!observed.equals(candidate.bytes)) {
-        throw new Error("Activity publication could not be verified");
-      }
+      const candidateOpened = this.#validateNativeOpened(
+        this.native.inspectDocument(candidate.bytes, active.password));
+      let activity;
+      try {
+        const expected = `${kind}-${phase === "attempt" ? "attempted"
+          : active.pendingActivity?.succeeded ? "succeeded" : "failed"}`;
+        if (candidateOpened.documentId !== active.documentId
+            || candidateOpened.opened.content !== active.targetContent
+            || candidateOpened.historyEventType !== expected) {
+          throw new Error("Native activity candidate does not match its source");
+        }
+        activity = phase === "attempt"
+          ? { kind, attemptOperationId: candidate.operationId,
+            attemptHead: candidateOpened.baseRevision, succeeded: false,
+            actionState: "not-started" }
+          : active.pendingActivity;
+      } finally { candidateOpened.journalKey.fill(0); }
+      if (!activity) throw new Error("No pending activity outcome is available");
+      await this.#queueJournalOperation(async () => {
+        const prior = await this.journals.read(active.documentId, active.journalKey);
+        if (prior?.publication) throw new Error(
+          "Resolve the pending publication before recording activity");
+        const journalRecord = prior ? { ...prior, activity,
+          updateTime: this.now() } : {
+          text: active.opened.content, baseRevision: active.baseRevision,
+          cursor: { start: 0, end: 0 }, target: active.target,
+          state: "activity-outcome", updateTime: this.now(), activity };
+        await this.publications.publish({ documentId: active.documentId,
+          journalKey: active.journalKey, target: active.target,
+          base: source, candidate: candidate.bytes,
+          text: journalRecord.text, cursor: journalRecord.cursor,
+          baseRevision: journalRecord.baseRevision,
+          state: journalRecord.state,
+          purpose: `activity-${phase}`, journalRecord });
+      });
       this.container.finishSave(candidate.operationId, "verified");
       this.pendingNativeCandidate = null;
       this.containerBytes = Buffer.from(candidate.bytes);
@@ -2101,17 +2159,20 @@ export class DocumentService {
       return candidate;
     } catch (error) {
       if (this.pendingNativeCandidate === candidate.operationId) {
-        let observed;
-        try { observed = await this.fs.readFile(active.target); } catch {}
-        if (observed?.equals(candidate.bytes)) {
-          this.container.finishSave(candidate.operationId, "verified");
-          this.containerBytes = Buffer.from(candidate.bytes);
-          await this.#adoptActivityImage(active, candidate.bytes);
-        } else {
-          this.container.finishSave(candidate.operationId,
-            observed ? "definite-failure" : "ambiguous");
+        const prepared = Boolean(error.publicationPrepared);
+        this.container.finishSave(candidate.operationId,
+          prepared ? "ambiguous" : "definite-failure");
+        this.pendingNativeCandidate = prepared ? candidate.operationId : null;
+        if (prepared) {
+          active.pendingPublication = true;
+          active.pendingRecord = await this.journals.read(
+            active.documentId, active.journalKey);
+          active.pendingActivity = active.pendingRecord?.activity ?? null;
+          active.unresolvedJournal = true;
+          active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+            ...active.opened, publicationState: "pending-publication",
+            activityOutcomePending: true });
         }
-        this.pendingNativeCandidate = observed ? null : candidate.operationId;
       }
       throw error;
     }
@@ -2138,7 +2199,7 @@ export class DocumentService {
     } finally { reopened.journalKey.fill(0); }
   }
 
-  async #runActivity(kind, action) {
+  async #runActivity(kind, action, externalTarget, expectedPlaintext = null) {
     const active = this.active;
     if (active.pendingActivity || active.pendingPublication || active.headMismatch
         || active.unreadableJournal) {
@@ -2158,36 +2219,113 @@ export class DocumentService {
           || status.attemptOperationId !== attempt.operationId) {
         throw new Error("Native activity attempt was not adopted");
       }
-      let succeeded = false;
-      try { await action(); succeeded = true; }
-      catch { /* A failed host action still needs a published failure event. */ }
-      this.container.completeActivity(attempt.operationId, succeeded);
-      const activity = { kind, attemptOperationId: attempt.operationId,
-        attemptHead: status.attemptHead, succeeded };
-      await this.#queueJournalOperation(async () => {
-        const prior = await this.journals.read(active.documentId, active.journalKey);
-        const record = prior ? { ...prior, activity,
-          baseRevision: active.baseRevision, updateTime: this.now() }
-          : { text: active.opened.content, baseRevision: active.baseRevision,
-            cursor: { start: 0, end: 0 }, target: active.target,
-            state: "activity-outcome", updateTime: this.now(), activity };
-        await this.journals.write(active.documentId, active.journalKey, record);
-      });
-      active.pendingActivity = activity;
+      const started = { kind, attemptOperationId: attempt.operationId,
+        attemptHead: status.attemptHead, succeeded: false,
+        actionState: "started", externalTarget,
+        externalHash: createHash("sha256").update(
+          expectedPlaintext ?? active.baseContainer).digest("hex") };
+      active.pendingActivity = { ...started, actionState: "not-started" };
       active.unresolvedJournal = true;
       active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
         ...active.opened, readOnly: !active.editMode,
         activityOutcomePending: true });
+      await this.#writeActivityJournal(active, started);
+      active.pendingActivity = started;
+      let succeeded = false;
+      let actionResult;
+      let actionError;
+      try { actionResult = await action(); succeeded = true; }
+      catch (error) { actionError = error; }
+      this.container.completeActivity(attempt.operationId, succeeded);
+      const activity = { kind, attemptOperationId: attempt.operationId,
+        attemptHead: status.attemptHead, succeeded, actionState: "known",
+        externalTarget: started.externalTarget, externalHash: started.externalHash };
+      active.pendingActivity = activity;
+      try { await this.#writeActivityJournal(active, activity); }
+      catch {
+        this.onJournalWarning("ACTIVITY_OUTCOME_PENDING");
+        return { succeeded, outcomePending: true, actionResult, actionError };
+      }
       let outcomePending = false;
       try { await this.#reconcileActivityOutcome(active, profile); }
       catch { outcomePending = true; this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
-      return { succeeded, outcomePending };
+      return { succeeded, outcomePending, actionResult, actionError };
+    });
+  }
+
+  async #writeActivityJournal(active, activity) {
+    await this.#queueJournalOperation(async () => {
+      const prior = await this.journals.read(active.documentId, active.journalKey);
+      const record = prior ? { ...prior, activity,
+        baseRevision: active.baseRevision, updateTime: this.now() }
+        : { text: active.opened.content, baseRevision: active.baseRevision,
+          cursor: { start: 0, end: 0 }, target: active.target,
+          state: "activity-outcome", updateTime: this.now(), activity };
+      await this.journals.write(active.documentId, active.journalKey, record);
+    });
+  }
+
+  async resolvePendingActivityOutcome({ succeeded, replicaTarget } = {}) {
+    const active = this.active;
+    if (!active?.pendingActivity || active.pendingPublication) {
+      throw new Error("No reconcilable activity outcome is available");
+    }
+    return this.#queuePublication(async () => {
+      const pending = active.pendingActivity;
+      if (this.active !== active || !pending || active.pendingPublication) {
+        throw new Error("Activity outcome changed before reconciliation");
+      }
+      const journal = await this.journals.read(active.documentId, active.journalKey);
+      if (journal?.publication || journal?.activity?.attemptHead !== pending.attemptHead
+          || journal.activity.attemptOperationId !== pending.attemptOperationId) {
+        throw new Error("Activity journal changed before reconciliation");
+      }
+      if (pending.actionState === "started") {
+        if (typeof succeeded !== "boolean") {
+          throw new TypeError("Confirm whether the interrupted host action completed");
+        }
+        if (succeeded) {
+          const target = pending.kind === "backup" ? replicaTarget
+            : pending.externalTarget;
+          if (typeof target !== "string" || !target || target.includes("\0")
+              || path.resolve(target) === path.resolve(active.target)) {
+            throw new TypeError("Select the completed external result for verification");
+          }
+          const observed = await this.fs.readFile(target);
+          if (createHash("sha256").update(observed).digest("hex")
+              !== pending.externalHash) {
+            throw new Error("External result differs from the attempted action");
+          }
+        }
+        const known = { ...pending, succeeded, actionState: "known" };
+        await this.#writeActivityJournal(active, known);
+        active.pendingActivity = known;
+        active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+          ...active.opened, activityConfirmationRequired: undefined });
+      } else {
+        if (succeeded !== undefined || replicaTarget !== undefined) {
+          throw new TypeError("The activity outcome is already known; retry publication");
+        }
+        if (pending.actionState === "known"
+            && journal.activity.actionState !== "known") {
+          await this.#writeActivityJournal(active, pending);
+        }
+      }
+      try { await this.#reconcileActivityOutcome(active); }
+      catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+      return active.opened;
     });
   }
 
   async #reconcileActivityOutcome(active, suppliedProfile = null) {
     const pending = active.pendingActivity;
     if (!pending) return;
+    if (pending.actionState === "started") {
+      const error = new Error(
+        "The interrupted host action outcome requires confirmation");
+      error.code = "ACTIVITY_OUTCOME_CONFIRMATION_REQUIRED";
+      throw error;
+    }
     const source = await this.fs.readFile(active.target);
     if (!source.equals(active.baseContainer)) {
       throw new Error("Activity source changed before outcome publication");
@@ -2205,6 +2343,18 @@ export class DocumentService {
         return;
       }
       this.container.restoreActivity({ ...pending, observedTarget: source });
+    } else {
+      if (status.kind !== pending.kind
+          || status.attemptOperationId !== pending.attemptOperationId
+          || status.attemptHead !== pending.attemptHead
+          || (status.hostActionComplete
+            && status.succeeded !== pending.succeeded)) {
+        throw new Error("Native pending activity differs from its journal");
+      }
+      if (!status.hostActionComplete) {
+        this.container.completeActivity(pending.attemptOperationId,
+          pending.succeeded);
+      }
     }
     this.nextCandidateOperation = Math.max(this.nextCandidateOperation,
       pending.attemptOperationId + 1);
@@ -2232,7 +2382,7 @@ export class DocumentService {
     active.pendingActivity = null;
     active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
       ...active.opened, readOnly: !active.editMode,
-      activityOutcomePending: false });
+      activityOutcomePending: false, activityConfirmationRequired: undefined });
   }
 
   async compactDocument(confirmation, backupTarget) {
@@ -2274,8 +2424,44 @@ export class DocumentService {
   async #performCompaction(active, selectedBackupTarget) {
     let reopened;
     let published;
-    const previousHead = active.baseRevision;
+    let previousHead;
     try {
+      const before = await this.fs.readFile(active.target);
+      const beforeOpened = this.#validateNativeOpened(
+        this.native.inspectDocument(before, active.password));
+      try {
+        if (beforeOpened.documentId !== active.documentId
+            || !before.equals(active.baseContainer)
+            || beforeOpened.baseRevision !== active.baseRevision
+            || !beforeOpened.manuallySealed
+            || !beforeOpened.lease.active || !active.leaseSessionId
+            || !Buffer.from(beforeOpened.lease.sessionId, "hex")
+              .equals(active.leaseSessionId)
+            || beforeOpened.lease.heartbeatCounter !== active.leaseCounter
+            || this.pendingNativeCandidate !== null) {
+          throw new Error("The target or editing lease changed before compaction");
+        }
+      } finally { beforeOpened.journalKey.fill(0); }
+      const priorJournal = await this.journals.read(
+        active.documentId, active.journalKey);
+      if (priorJournal) throw new Error(
+        "Compaction requires a clean, manually sealed, conflict-free document");
+      const backupResult = await this.#runBackupActivity(selectedBackupTarget);
+      if (!backupResult.succeeded) {
+        const error = new Error(
+          "The required pre-compaction backup could not be created and verified");
+        error.code = "COMPACTION_BACKUP_FAILED";
+        error.cause = backupResult.actionError;
+        throw error;
+      }
+      if (backupResult.outcomePending) {
+        const error = new Error(
+          "Resolve the pending backup outcome before compacting");
+        error.code = "ACTIVITY_OUTCOME_PENDING";
+        throw error;
+      }
+      const backup = backupResult.actionResult;
+      previousHead = active.baseRevision;
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
         const inspected = this.#validateNativeOpened(
@@ -2299,24 +2485,8 @@ export class DocumentService {
             "Compaction requires a clean, manually sealed, conflict-free document");
           const profile = await this.loadProfile();
           if (!profile) throw new Error("Configure name, email, and device name first");
-          let backup;
-          try {
-            backup = await this.publications.publishReplica({
-              target: selectedBackupTarget, candidate: current,
-              returnVerifiedBytes: true });
-          } catch (cause) {
-            const error = new Error(
-              "The required pre-compaction backup could not be created and verified");
-            error.code = "COMPACTION_BACKUP_FAILED";
-            error.cause = cause;
-            throw error;
-          }
-          const revalidated = await this.fs.readFile(active.target);
-          if (!revalidated.equals(current)) {
-            throw new Error("The target changed after the pre-compaction backup");
-          }
           if (!Buffer.isBuffer(backup?.verifiedBytes)
-              || !backup.verifiedBytes.equals(current)) {
+              || !backup.verifiedBytes.length) {
             throw new Error("The pre-compaction backup read-back is unavailable");
           }
           this.#syncNativeLeaseSource(active, current);
@@ -2859,7 +3029,9 @@ export class DocumentService {
     try {
       const invitationClaim = record.publication.purpose === "invitation-claim";
       const leaseChange = record.publication.purpose === "lease-change";
-      if (leaseChange) {
+      const activityPublication = ["activity-attempt", "activity-outcome"]
+        .includes(record.publication.purpose);
+      if (leaseChange || activityPublication) {
         leaseBase = this.#validateNativeOpened(this.native.inspectDocument(
           Buffer.from(record.publication.base, "base64"), password));
       }
@@ -2869,7 +3041,12 @@ export class DocumentService {
           || (leaseChange && (opened.opened.content !== leaseBase.opened.content
             || opened.baseRevision !== leaseBase.baseRevision
             || !opened.journalKey.equals(leaseBase.journalKey)))
-          || (!invitationClaim && !leaseChange
+          || (activityPublication && (opened.opened.content !== leaseBase.opened.content
+            || !opened.journalKey.equals(leaseBase.journalKey)
+            || opened.historyEventType !== `${record.activity.kind}-${
+              record.publication.purpose === "activity-attempt" ? "attempted"
+                : record.activity.succeeded ? "succeeded" : "failed"}`))
+          || (!invitationClaim && !leaseChange && !activityPublication
             && opened.opened.content !== (record.merge?.localContent ?? record.text))) {
         throw new Error("Pending publication candidate does not match its document");
       }
@@ -2955,8 +3132,9 @@ export class DocumentService {
         targetOpened?.journalKey.fill(0);
         const regularSave = record.publication.purpose === "regular-save"
           && !reopened.manuallySealed;
-        const restoredWork = record.publication.preserveWork
-          ? await this.journals.read(reopened.documentId, reopened.journalKey) : null;
+        const restoredWork = await this.journals.read(
+          reopened.documentId, reopened.journalKey);
+        const pendingActivity = restoredWork?.activity ?? null;
         const recovery = restoredWork?.state === "unsaved"
           ? { content: restoredWork.text, cursor: restoredWork.cursor,
             state: "unsaved", updateTime: restoredWork.updateTime }
@@ -2971,6 +3149,9 @@ export class DocumentService {
           publicationState: "target-published",
           ...(reopened.lease.active ? { lease: reopened.lease } : {}),
           ...(recovery ? { recovery } : {}),
+          ...(pendingActivity ? { activityOutcomePending: true } : {}),
+          ...(pendingActivity?.actionState === "started"
+            ? { activityConfirmationRequired: true } : {}),
           ...(headMismatch ? { headMismatch } : {}) });
         this.#openActiveContainer(target, published, reopenPassword, reopened);
         this.active = { target, password: reopenPassword, opened, editMode: false,
@@ -2981,12 +3162,17 @@ export class DocumentService {
           baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
           working: null, dirty: false, manuallySealed: reopened.manuallySealed,
           pendingPublication: false, pendingRecord: null,
-          unresolvedJournal: recovery !== null,
+          unresolvedJournal: restoredWork !== null,
+          pendingActivity,
           continuousDue: null, journalWarning: null };
         reopened.journalKey.fill(0);
+        if (pendingActivity) {
+          try { await this.#reconcileActivityOutcome(this.active); }
+          catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+        }
         this.onJournalWarning("PUBLICATION_RECOVERED");
         this.notifyActivity();
-        return opened;
+        return this.active.opened;
       }
       if (resumed?.reason === "changed") {
         record = await this.publications.markDiverged(
@@ -3003,6 +3189,9 @@ export class DocumentService {
     const opened = validateOpenedDocument({ ...baseOpened.opened,
       content: record.text, canEdit: headMismatch ? false : slotCanEdit,
       publicationState,
+      ...(record.activity ? { activityOutcomePending: true } : {}),
+      ...(record.activity?.actionState === "started"
+        ? { activityConfirmationRequired: true } : {}),
       ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     const currentBytes = targetOpened && !invalidTarget ? targetBytes : bootstrap.base;
@@ -3017,6 +3206,7 @@ export class DocumentService {
       targetContent: currentOpened.opened.content,
       working: null, dirty: false, manuallySealed: currentOpened.manuallySealed,
       pendingPublication: true, pendingRecord: record, unresolvedJournal: true,
+      pendingActivity: record.activity ?? null,
       continuousDue: null, journalWarning: null };
     baseOpened.journalKey.fill(0);
     targetOpened?.journalKey.fill(0);
@@ -3251,10 +3441,18 @@ export class DocumentService {
 
   async #flushActive(active) {
     if (!active?.dirty || !active.working
-        || (active.pendingPublication && !active.pendingRecord?.merge)) return;
+        || (active.pendingPublication && !active.pendingRecord?.merge
+          && !["activity-attempt", "activity-outcome"].includes(
+            active.pendingRecord?.publication.purpose))) return;
     const operation = this.#queueJournalOperation(async () => {
       const prior = await this.journals.read(active.documentId, active.journalKey);
-      const record = active.pendingRecord?.merge
+      const record = prior?.publication
+        && ["activity-attempt", "activity-outcome"].includes(
+          prior.publication.purpose)
+        ? { ...prior, text: active.working.content,
+          cursor: { ...active.working.cursor }, state: "unsaved",
+          updateTime: this.now() }
+        : active.pendingRecord?.merge
         ? { ...active.pendingRecord, text: active.working.content,
           cursor: { ...active.working.cursor }, updateTime: this.now() }
         : { text: active.working.content, baseRevision: active.baseRevision,

@@ -35,6 +35,7 @@ export type DocumentOpened = { content: string; readOnly: boolean; canEdit: bool
   managedSlots?: ManagedSlot[]; provisional?: true;
   unreadableJournal?: true;
   activityOutcomePending?: true;
+  activityConfirmationRequired?: true;
 };
 export type Opened = DocumentOpened | { readOnly: true; invitationRequired: true;
   targetName?: string };
