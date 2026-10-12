@@ -331,11 +331,18 @@ scpefe_status scpefe_container_read(const scpefe_container *handle,
         auto snapshot = std::make_unique<scpefe_owned_snapshot>();
         snapshot->document_id = unlocked->document_id;
         snapshot->slot_id = unlocked->slot_id;
-        snapshot->encoded_revision = unlocked->encoded_snapshot_revision;
-        auto decoded = scpefe::format::SnapshotRevision::decode(
-            snapshot->encoded_revision.data(), snapshot->encoded_revision.size(),
-            scpefe::format::RevisionLimits::defaults());
-        snapshot->content = decoded.data().content;
+        if (unlocked->revision_graph) {
+            const auto content = unlocked->revision_graph->reconstruct(
+                unlocked->revision_graph->content_head());
+            if (!content) return SCPEFE_STATUS_BODY_UNAVAILABLE;
+            snapshot->content = *content;
+        } else {
+            snapshot->encoded_revision = unlocked->encoded_snapshot_revision;
+            auto decoded = scpefe::format::SnapshotRevision::decode(
+                snapshot->encoded_revision.data(), snapshot->encoded_revision.size(),
+                scpefe::format::RevisionLimits::defaults());
+            snapshot->content = decoded.data().content;
+        }
         *output = snapshot.release();
         return SCPEFE_STATUS_OK;
     } catch (const scpefe::format::RevisionFailure &failure) {
@@ -343,6 +350,23 @@ scpefe_status scpefe_container_read(const scpefe_container *handle,
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
+}
+
+scpefe_status scpefe_container_revision_graph(const scpefe_container *handle,
+    scpefe_revision_graph **graph)
+{
+    if (!graph) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *graph = nullptr;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    const auto *unlocked = handle->owner->implementation.make_container().read_unlocked();
+    if (!unlocked) return SCPEFE_STATUS_LOCKED;
+    if (!unlocked->revision_graph) return SCPEFE_STATUS_UNSUPPORTED_FORMAT;
+    const auto &payload = unlocked->revision_graph->encode();
+    scpefe_revision_limits_v1 limits{};
+    limits.struct_size = sizeof(limits);
+    const auto status = scpefe_revision_limits_default(&limits);
+    if (status != SCPEFE_STATUS_OK) return status;
+    return scpefe_revision_graph_decode(payload.data(), payload.size(), &limits, graph);
 }
 
 scpefe_status scpefe_owned_snapshot_view(const scpefe_owned_snapshot *snapshot,

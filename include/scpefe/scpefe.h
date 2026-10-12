@@ -365,7 +365,7 @@ typedef struct scpefe_container_status_v1 {
     int must_change_password;
 } scpefe_container_status_v1;
 
-/* View of a separately owned authenticated snapshot; no secret keys appear. */
+/* View of owned authenticated text; encoded_revision is empty for revised-v3 history. */
 typedef struct scpefe_owned_snapshot_view_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -524,6 +524,9 @@ SCPEFE_API scpefe_status scpefe_container_status(
 /* Copies authenticated content into an owner independent of future state. */
 SCPEFE_API scpefe_status scpefe_container_read(
     const scpefe_container *container, scpefe_owned_snapshot **snapshot);
+/* Copies authenticated revised-v3 history into an independent owned graph. */
+SCPEFE_API scpefe_status scpefe_container_revision_graph(
+    const scpefe_container *container, scpefe_revision_graph **graph);
 /* Borrows immutable spans from the owned snapshot until its destruction. */
 SCPEFE_API scpefe_status scpefe_owned_snapshot_view(
     const scpefe_owned_snapshot *snapshot, scpefe_owned_snapshot_view_v1 *view);

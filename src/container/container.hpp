@@ -28,7 +28,7 @@ public:
         std::string_view content, std::uint64_t timestamp_ms,
         const std::uint8_t *owner_password, std::size_t owner_password_size,
         const std::uint8_t *recovery_password, std::size_t recovery_password_size) const;
-    /* Opens only the current version-3 envelope for a stateful handle. */
+    /* Opens a revised-v3 history or transitional v3 snapshot envelope. */
     void open_document(const std::uint8_t *bytes, std::size_t size);
     /* Validates and stores a transitional 160-byte-header envelope without a password. */
     void open_legacy_document(const std::uint8_t *bytes, std::size_t size);
@@ -76,6 +76,7 @@ private:
     ContainerState state_{};
     std::vector<ContainerStateObserver *> observers_;
     bool transitioning_{};
+    bool revised_v3_{};
 };
 
 } // namespace scpefe::container

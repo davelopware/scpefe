@@ -13,6 +13,22 @@ namespace scpefe::format {
 
 using RevisionId = std::array<std::uint8_t, 32>;
 
+/* Authenticated encrypted metadata for one ordered v3 password slot. */
+struct RevisionSlot {
+    std::array<std::uint8_t, 16> id{}, management_id{};
+    std::uint8_t permissions{}, role{};
+    bool must_be_changed{};
+    std::string name, email;
+};
+
+/* Authenticated encrypted advisory editing lease metadata. */
+struct RevisionLease {
+    std::array<std::uint8_t, 16> session_id{};
+    std::uint64_t heartbeat_counter{}, holder_utc_ms{}, duration_ms{};
+    std::string holder_name, holder_email, device;
+    bool active{};
+};
+
 /* One authenticated v3 record, including immutable attribution and current storage. */
 struct RevisionRecord {
     /* A byte-copy or insertion segment of an original delta. */
@@ -54,6 +70,10 @@ public:
     const std::vector<std::uint8_t> &encode() const { return encoded_; }
     /* Returns all records in stored causal order. */
     const std::vector<RevisionRecord> &records() const { return records_; }
+    /* Returns ordered semantic slot metadata after graph validation. */
+    const std::vector<RevisionSlot> &slots() const { return slots_; }
+    /* Returns the authenticated advisory lease fields. */
+    const RevisionLease &lease() const { return lease_; }
     /* Returns the final canonical revision ID. */
     const RevisionId &head() const { return head_; }
     /* Returns the final canonical content revision ID. */
@@ -71,6 +91,8 @@ public:
 private:
     std::vector<std::uint8_t> encoded_;
     std::vector<RevisionRecord> records_;
+    std::vector<RevisionSlot> slots_;
+    RevisionLease lease_;
     RevisionId head_{}, content_head_{};
     std::size_t max_text_bytes_{};
 };

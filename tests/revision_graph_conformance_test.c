@@ -116,7 +116,7 @@ int main(int argc, char **argv)
 {
     static const char *valid[] = {
         "valid/baseline-payload", "valid/delta-event", "valid/pruned-checkpoint",
-        "valid/foreign-merge"
+        "valid/foreign-merge", "valid/repeated-compaction"
     };
     static const struct { const char *name; scpefe_status status; } invalid[] = {
         {"invalid/nonminimal-key", SCPEFE_STATUS_MALFORMED_CBOR},

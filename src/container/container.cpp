@@ -55,7 +55,22 @@ void Container::open_document(const std::uint8_t *bytes, std::size_t size)
     if (bytes && size >= sizeof(obsolete_v2_magic)
         && std::memcmp(bytes, obsolete_v2_magic, sizeof(obsolete_v2_magic)) == 0)
         throw ContainerFailure{ContainerError::unsupported_format};
-    open_legacy_document(bytes, size);
+    if (!persistence_.recognizes_revised_envelope(bytes, size)) {
+        open_legacy_document(bytes, size);
+        return;
+    }
+    if (state_.access != Access::closed) throw StateError::invalid_transition;
+    persistence_.validate_revised_envelope(bytes, size);
+    std::vector<std::uint8_t> incoming(bytes, bytes + size);
+    committed_bytes_.swap(incoming);
+    revised_v3_ = true;
+    try {
+        install_transition(Open{});
+    } catch (...) {
+        committed_bytes_.swap(incoming);
+        revised_v3_ = false;
+        throw;
+    }
 }
 
 void Container::open_legacy_document(const std::uint8_t *bytes, std::size_t size)
@@ -83,9 +98,11 @@ const UnlockedContainerData &Container::unlock_legacy_document(
         throw ContainerFailure{ContainerError::invalid_argument};
     const bool authenticating_target = !target_bytes_.empty();
     const auto &source = authenticating_target ? target_bytes_ : committed_bytes_;
-    auto decoded = persistence_.unlock_legacy_envelope(source.data(),
-        source.size(), password, password_size,
-        format::RevisionLimits::defaults());
+    auto decoded = revised_v3_
+        ? persistence_.unlock_revised_envelope(source.data(), source.size(),
+            password, password_size, format::RevisionLimits::defaults())
+        : persistence_.unlock_legacy_envelope(source.data(), source.size(),
+            password, password_size, format::RevisionLimits::defaults());
     if (document_id_ && decoded.document_id != *document_id_)
         throw ContainerFailure{ContainerError::malformed_container};
     if (authenticating_target && state_.target_access
@@ -207,6 +224,7 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
         committed_bytes_.clear();
         target_bytes_.clear();
         document_id_.reset();
+        revised_v3_ = false;
     }
     const auto operation_id = state_.operation_id.value_or(before.operation_id.value_or(0));
     for (auto *observer : observers_)

@@ -13,8 +13,7 @@ slot ID is `000102030405060708090a0b0c0d0e0f`. The generator uses Python stdlib
 and the system Libsodium; `python3 generate.py` regenerates all rows. The
 `manifest.json` lists represented byte lengths, SHA-256 fingerprints, and
 expected results. The portable payload conformance target executes the payload
-rows; encrypted envelope vectors remain specification fixtures for the v3
-persistence reader.
+rows; the native stateful C ABI test authenticates the saved checkpoint envelope.
 
 | Vector | Expected check |
 | --- | --- |
@@ -22,6 +21,8 @@ persistence reader.
 | `valid/baseline-container.hex` | Authenticate envelope and decrypt to the baseline payload. |
 | `valid/delta-event.hex` | Apply byte-copy/insert delta; event advances head without changing content head. |
 | `valid/pruned-checkpoint.hex` | Baseline body unavailable; original IDs unchanged; checkpoint at existing delta ID reconstructs `alpha\nbeta\n`. |
+| `valid/pruned-checkpoint-container.hex` | Authenticated saved history with unavailable baseline body and reconstructable checkpoint. |
+| `valid/repeated-compaction.hex` | A later compaction prunes the first cutoff's checkpoint while retaining the first compaction event and its immutable details. |
 | `valid/foreign-merge.hex` | Imported foreign body is unavailable; its original ID and attribution survive; merge delta reconstructs from the canonical local parent. |
 | `invalid/nonminimal-key.hex` | Reject longer-than-necessary CBOR map-key encoding. |
 | `invalid/duplicate-key.hex` | Reject duplicate top-level key. |
@@ -43,8 +44,8 @@ persistence reader.
 
 Payload rows begin at `container-v3`, excluding the preceding 16-byte document
 ID. Structural envelope errors are intentionally tested without decrypting.
-The portable revision graph reader now checks decrypted payload rows; encrypted
-envelope authentication belongs to the subsequent persistence work. A reader
+The portable revision graph reader checks decrypted payload rows, and the
+stateful container reader authenticates the saved checkpoint vector. A reader
 should verify all valid records' IDs, original body digests, content
 hashes, graph links, and reconstruction, and should reject every invalid row
 for the stated reason after the appropriate structural/authentication phase.

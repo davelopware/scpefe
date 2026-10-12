@@ -160,6 +160,21 @@ def main():
     compact = record(metadata(2, new_text, event[1], event=("compaction", {2: change[1], 3: 0})), 0)
     compact_payload = payload([prune_base, checkpoint, event, compact], compact[1], change[1])
     rows.append({**write("valid/pruned-checkpoint", cbor(compact_payload)), "expect": "accept; baseline text unavailable, reconstruct alpha\\nbeta\\n from checkpoint; IDs unchanged"})
+    rows.append({**write("valid/pruned-checkpoint-container", container(cbor(compact_payload))),
+        "expect": "authenticate saved pruned history with the test password"})
+
+    later_text = b"alpha\nbeta\ngamma\n"
+    later_delta = [0, len(later_text), [[0, 0, len(new_text)], [1, b"gamma\n"]]]
+    later = record(metadata(1, later_text, compact[1], change[1], later_delta), 2, later_delta)
+    later_checkpoint = {**later, 3: 3, 4: [0, len(later_text), later_text]}
+    older_checkpoint_pruned = {**change, 3: 4}
+    older_checkpoint_pruned.pop(4)
+    second_compact = record(metadata(2, later_text, later[1],
+        event=("compaction", {2: later[1], 3: 0})), 0)
+    repeated_compaction = payload([prune_base, older_checkpoint_pruned, event,
+        compact, later_checkpoint, second_compact], second_compact[1], later[1])
+    rows.append({**write("valid/repeated-compaction", cbor(repeated_compaction)),
+        "expect": "accept; earlier compaction cutoff body was pruned by a later compaction"})
 
     remote_text = b"alpha\nremote\n"
     remote_delta = [0, len(remote_text), [[0, 0, 6], [1, b"remote\n"]]]

@@ -127,6 +127,7 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     move_lease_without_allocation(editing_lease, other.editing_lease);
     managed_slots = std::move(other.managed_slots);
     encoded_snapshot_revision = std::move(other.encoded_snapshot_revision);
+    revision_graph = std::move(other.revision_graph);
     other.clear();
     return *this;
 }
@@ -161,6 +162,7 @@ void UnlockedContainerData::clear() noexcept
             encoded_snapshot_revision.size());
     }
     encoded_snapshot_revision.clear();
+    revision_graph.reset();
 }
 
 } // namespace scpefe::container

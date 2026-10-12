@@ -39,6 +39,7 @@ else()
         src/container/container_state.cpp
         src/container/password_slot_lifecycle.cpp
         src/container/recoverable_password_container.cpp
+        src/container/revised_v3_container.cpp
         src/container/unlocked_container_data.cpp
         src/core/context.cpp
         src/core/service_registry.cpp
@@ -247,6 +248,10 @@ if(BUILD_TESTING)
         add_executable(scpefe_lifecycle_abi_test tests/lifecycle_abi_test.c)
         target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_revised_v3_history_abi_test
+            tests/revised_v3_history_abi_test.c)
+        target_link_libraries(scpefe_revised_v3_history_abi_test PRIVATE SCPEFE::scpefe)
+
         add_executable(scpefe_lifecycle_open_limit_test tests/lifecycle_open_limit_test.c)
         target_link_libraries(scpefe_lifecycle_open_limit_test PRIVATE SCPEFE::scpefe)
 
@@ -255,6 +260,7 @@ if(BUILD_TESTING)
             src/container/container.cpp
             src/container/container_state.cpp
             src/container/recoverable_password_container.cpp
+            src/container/revised_v3_container.cpp
             src/container/password_slot_lifecycle.cpp
             src/container/unlocked_container_data.cpp
             src/core/context.cpp
@@ -268,10 +274,12 @@ if(BUILD_TESTING)
             src/document/new_document.cpp
             src/document/compaction.cpp
             src/document/revision_transition.cpp
+            src/format/blake2b.cpp
             src/format/cbor_reader.cpp
             src/format/cbor_writer.cpp
             src/format/diagnostic_json_writer.cpp
             src/format/revision_limits.cpp
+            src/format/revision_graph.cpp
             src/format/snapshot_revision.cpp
             src/format/text_validation.cpp
             src/security/password_strength.cpp
@@ -340,6 +348,8 @@ if(BUILD_TESTING)
 
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
+        add_test(NAME scpefe.revised-v3-history-abi
+            COMMAND scpefe_revised_v3_history_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.lifecycle-open-limit COMMAND scpefe_lifecycle_open_limit_test)
         add_test(NAME scpefe.container-state COMMAND scpefe_container_state_test
             "${CMAKE_CURRENT_SOURCE_DIR}")

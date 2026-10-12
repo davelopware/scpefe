@@ -63,7 +63,7 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 
 [`SnapshotRevisionData` and `RevisionGraphNodeData`](../src/format/snapshot_revision_data.hpp) hold the semantic revision fields and ancestor graph nodes. A revision contains the current snapshot text, content hash, author and device attribution, parent IDs, and optional provisional or event fields. The ancestor graph stores IDs and parent links used for related-head checks; it does not store every ancestor's text. [`text_validation.hpp`](../src/format/text_validation.hpp) checks UTF-8 and canonical document text. [`RevisionFailure`](../src/format/revision_error.hpp) carries errors to the ABI layer, where they become C status codes. The matching bridge is [`revision_abi.cpp`](../src/abi/revision_abi.cpp).
 
-The revised-v3 [`history_abi.cpp`](../src/abi/history_abi.cpp) accepts an already authenticated decrypted payload and returns owned graph, metadata-page, body, reconstruction, and comparison results. It reports unavailable pruned or foreign bodies separately from unknown IDs. The current stateful container still opens the transitional snapshot envelope; a later persistence checkpoint connects revised-v3 payload authentication and publication to that handle.
+The revised-v3 [`history_abi.cpp`](../src/abi/history_abi.cpp) accepts an already authenticated decrypted payload and returns owned graph, metadata-page, body, reconstruction, and comparison results. It reports unavailable pruned or foreign bodies separately from unknown IDs. The stateful container also authenticates a saved revised-v3 image before exposing an owned graph through `scpefe_container_revision_graph`; revised-v3 publication remains a later workflow checkpoint.
 
 ### Encrypted containers (`src/container/`)
 
@@ -71,15 +71,17 @@ The revised-v3 [`history_abi.cpp`](../src/abi/history_abi.cpp) accepts an alread
 | --- | --- |
 | [`PasswordContainer`](../src/container/password_container.hpp) | Creates the draft version-1, single-owner envelope. On unlock it recognizes and delegates version-2/3 containers to `RecoverablePasswordContainer`, otherwise authenticates a version-1 container. |
 | [`RecoverablePasswordContainer`](../src/container/recoverable_password_container.hpp) | Creates current version-3 containers, unlocks version-2/3 envelopes, and produces replacement bytes for snapshot, lease, password-slot, identity, and migration changes. It implements the envelope parsing, key derivation, authenticated encryption, and password-slot checks. |
+| [`RevisedV3Container`](../src/container/revised_v3_container.hpp) | Validates the revised 72-byte v3 envelope, authenticates a password wrapper and the complete payload, then validates the revision graph before exposing history through the stateful handle. |
 | [`PasswordSlotLifecycle`](../src/container/password_slot_lifecycle.hpp) | Applies invitation, claiming, identity, permission-update, and removal policy; constructs known or legacy-unknown managed-slot state; and preserves immutable slot IDs and identity binding while the container class performs authenticated rewrites. |
 
-[`UnlockedContainerData`](../src/container/unlocked_container_data.hpp) is the move-only authenticated result of unlocking. It contains the document ID, selected slot and permissions, derived work-journal key, lease and managed-slot metadata, and the encoded snapshot revision. Its destructor clears owned sensitive values. The same header defines `EditingLeaseData` and `ManagedSlotData`; [`ContainerFailure`](../src/container/container_error.hpp) carries container errors to the ABI. The larger version-3 implementation also uses private layout and invitation-record structs to parse its envelope. The C bridge is [`container_abi.cpp`](../src/abi/container_abi.cpp).
+[`UnlockedContainerData`](../src/container/unlocked_container_data.hpp) is the move-only authenticated result of unlocking. It contains the document ID, selected slot and permissions, derived work-journal key, lease and managed-slot metadata, and either an encoded transitional snapshot or a validated revised-v3 graph. Its destructor clears owned sensitive values. The same header defines `EditingLeaseData` and `ManagedSlotData`; [`ContainerFailure`](../src/container/container_error.hpp) carries container errors to the ABI. The larger version-3 implementation also uses private layout and invitation-record structs to parse its envelope. The C bridge is [`container_abi.cpp`](../src/abi/container_abi.cpp).
 
 The existing byte ABI's recoverable v3 envelope has a transitional 160-byte
 header. The revised pre-release v3 contract in
 [`password-container-v3.md`](format/password-container-v3.md) has a 72-byte
-header; `PersistenceService::has_valid_v3_framing` screens that revised framing.
-The stateful `Container::open_legacy_document` currently validates and retains
+header. The stateful `Container::open_document` distinguishes these layouts;
+`PersistenceService` validates their framing and dispatches authentication to
+the matching reader. The existing byte-oriented document operations still use
 the transitional envelope.
 
 ### Document operations (`src/document/`)

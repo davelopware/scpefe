@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <string_view>
+#include <utility>
 
 namespace scpefe::format {
 namespace {
@@ -76,33 +77,48 @@ struct OwnerIdentity {
     std::string name, email;
 };
 
-OwnerIdentity parse_slots(CborReader &reader)
+struct ParsedSlots {
+    OwnerIdentity owner;
+    std::vector<RevisionSlot> slots;
+};
+
+ParsedSlots parse_slots(CborReader &reader)
 {
     const auto count = reader.array(2);
     if (count < 1 || count > 9) malformed();
     std::set<std::array<std::uint8_t, 16>> ids, management_ids;
     bool recovery = false;
-    OwnerIdentity owner;
+    ParsedSlots parsed;
+    parsed.slots.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         if (reader.map(3) != 7) malformed();
         std::uint64_t k = 0;
         key(reader, k, 1); auto slot = read_slot(reader);
-        if (i == 0) owner.id = slot;
+        if (i == 0) parsed.owner.id = slot;
         key(reader, k, 2); auto permissions = reader.unsigned_integer();
         key(reader, k, 3); auto claim = reader.boolean();
         key(reader, k, 4); auto role = reader.unsigned_integer();
         key(reader, k, 5); auto management = read_slot(reader);
         key(reader, k, 6); auto name = reader.text();
         key(reader, k, 7); auto email = reader.text();
-        if (i == 0) { owner.name = name; owner.email = email; }
+        if (i == 0) { parsed.owner.name = name; parsed.owner.email = email; }
         if (!ids.insert(slot).second || !management_ids.insert(management).second
             || permissions > 7 || role > 2 || (i == 0) != (role == 0)
             || (role == 2 && (recovery || i + 1 != count))
             || (role == 1 && recovery) || (role != 1 && permissions != 7)
             || (role != 1 && claim) || (role != 2 && (name.empty() || email.empty()))) malformed();
         recovery |= role == 2;
+        RevisionSlot semantic;
+        semantic.id = slot;
+        semantic.management_id = management;
+        semantic.permissions = static_cast<std::uint8_t>(permissions);
+        semantic.must_be_changed = claim;
+        semantic.role = static_cast<std::uint8_t>(role);
+        semantic.name = std::move(name);
+        semantic.email = std::move(email);
+        parsed.slots.push_back(std::move(semantic));
     }
-    return owner;
+    return parsed;
 }
 
 OwnerIdentity parse_owner(CborReader &reader)
@@ -117,23 +133,27 @@ OwnerIdentity parse_owner(CborReader &reader)
     return owner;
 }
 
-void parse_lease(CborReader &reader)
+RevisionLease parse_lease(CborReader &reader)
 {
     if (reader.map(2) != 8) malformed();
     std::uint64_t k = 0;
-    key(reader, k, 1); const auto active = reader.boolean();
-    key(reader, k, 2); const auto session = read_slot(reader);
-    key(reader, k, 3); (void)reader.unsigned_integer();
-    key(reader, k, 4); (void)read_time(reader);
-    key(reader, k, 5); const auto duration = reader.unsigned_integer();
-    key(reader, k, 6); const auto name = reader.text();
-    key(reader, k, 7); const auto email = reader.text();
-    key(reader, k, 8); const auto device = reader.text();
-    if (duration == 0 || duration > std::numeric_limits<std::int64_t>::max()
-        || (!active && (session != std::array<std::uint8_t, 16>{}
-            || !name.empty() || !email.empty() || !device.empty()))
-        || (active && (session == std::array<std::uint8_t, 16>{}
-            || name.empty() || email.empty() || device.empty()))) malformed();
+    RevisionLease lease;
+    key(reader, k, 1); lease.active = reader.boolean();
+    key(reader, k, 2); lease.session_id = read_slot(reader);
+    key(reader, k, 3); lease.heartbeat_counter = reader.unsigned_integer();
+    key(reader, k, 4); lease.holder_utc_ms = read_time(reader);
+    key(reader, k, 5); lease.duration_ms = reader.unsigned_integer();
+    key(reader, k, 6); lease.holder_name = reader.text();
+    key(reader, k, 7); lease.holder_email = reader.text();
+    key(reader, k, 8); lease.device = reader.text();
+    if (lease.duration_ms == 0 || lease.duration_ms > std::numeric_limits<std::int64_t>::max()
+        || (!lease.active && (lease.session_id != std::array<std::uint8_t, 16>{}
+            || !lease.holder_name.empty() || !lease.holder_email.empty()
+            || !lease.device.empty()))
+        || (lease.active && (lease.session_id == std::array<std::uint8_t, 16>{}
+            || lease.holder_name.empty() || lease.holder_email.empty()
+            || lease.device.empty()))) malformed();
+    return lease;
 }
 
 struct EventFacts {
@@ -454,20 +474,30 @@ void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head
         r.text_available = true;
     }
     if (!current) malformed();
-    for (const auto &r : records) {
+    std::size_t latest_compaction = records.size();
+    std::size_t prior_cutoff = 0;
+    for (std::size_t event_index = 0; event_index < records.size(); ++event_index) {
+        const auto &r = records[event_index];
         if (r.foreign || r.event_type != "compaction") continue;
         if (!r.compaction_cutoff || !r.retained_deltas) malformed();
         const auto cutoff = seen.find(*r.compaction_cutoff);
-        if (cutoff == seen.end() || cutoff->second >= seen.at(r.id)
-            || records[cutoff->second].foreign || records[cutoff->second].storage != 3)
+        if (cutoff == seen.end() || cutoff->second >= event_index
+            || cutoff->second < prior_cutoff || records[cutoff->second].foreign
+            || records[cutoff->second].kind == 2)
             malformed();
-        for (std::size_t i = 0; i < cutoff->second; ++i)
-            if (!records[i].foreign && records[i].kind != 2
-                && records[i].storage != 4) malformed();
         std::size_t deltas = 0;
-        for (std::size_t i = cutoff->second + 1; i < seen.at(r.id); ++i)
+        for (std::size_t i = cutoff->second + 1; i < event_index; ++i)
             if (!records[i].foreign && records[i].kind == 1) ++deltas;
         if (deltas != *r.retained_deltas) malformed();
+        latest_compaction = event_index;
+        prior_cutoff = cutoff->second;
+    }
+    if (latest_compaction != records.size()) {
+        const auto cutoff = seen.at(*records[latest_compaction].compaction_cutoff);
+        if (records[cutoff].storage != 3) malformed();
+        for (std::size_t i = 0; i < cutoff; ++i)
+            if (!records[i].foreign && records[i].kind != 2
+                && records[i].storage != 4) malformed();
     }
 }
 
@@ -483,12 +513,12 @@ RevisionGraph RevisionGraph::decode(const std::uint8_t *bytes, std::size_t size,
     if (fields != 8 && fields != 9) malformed();
     std::uint64_t k = 0;
     key(reader, k, 1); if (reader.unsigned_integer() != 1) unsupported();
-    key(reader, k, 2); const auto owner_slot = parse_slots(reader);
+    key(reader, k, 2); auto parsed_slots = parse_slots(reader);
     key(reader, k, 3);
     const auto owner = parse_owner(reader);
-    if (owner.id != owner_slot.id || owner.name != owner_slot.name
-        || owner.email != owner_slot.email) malformed();
-    key(reader, k, 4); parse_lease(reader);
+    if (owner.id != parsed_slots.owner.id || owner.name != parsed_slots.owner.name
+        || owner.email != parsed_slots.owner.email) malformed();
+    key(reader, k, 4); auto lease = parse_lease(reader);
     key(reader, k, 5);
     const auto count = reader.array(2);
     if (count == 0) malformed();
@@ -514,6 +544,8 @@ RevisionGraph RevisionGraph::decode(const std::uint8_t *bytes, std::size_t size,
     }
     if (!reader.finished()) malformed();
     validate_graph(graph.records_, graph.head_, graph.content_head_, limits);
+    graph.slots_ = std::move(parsed_slots.slots);
+    graph.lease_ = std::move(lease);
     graph.max_text_bytes_ = limits.max_text_bytes();
     graph.encoded_.assign(bytes, bytes + size);
     return graph;

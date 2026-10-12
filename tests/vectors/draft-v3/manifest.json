@@ -24,6 +24,18 @@
     "expect": "accept; baseline text unavailable, reconstruct alpha\\nbeta\\n from checkpoint; IDs unchanged"
   },
   {
+    "path": "valid/pruned-checkpoint-container.hex",
+    "bytes": 1443,
+    "sha256": "f91fdfe1256096c83011a5f1c19b5cc5f8e4f9f75e5bbec1522e974705759eef",
+    "expect": "authenticate saved pruned history with the test password"
+  },
+  {
+    "path": "valid/repeated-compaction.hex",
+    "bytes": 1774,
+    "sha256": "8cea789741255b2fabe88b0a9e755c7618241ca32f7474507e9bd2b5620c61cc",
+    "expect": "accept; earlier compaction cutoff body was pruned by a later compaction"
+  },
+  {
     "path": "valid/foreign-merge.hex",
     "bytes": 1398,
     "sha256": "6640226832f26faa2f874134d26e640cf5362aae29774e4a2bdd1b57c8d4e486",
