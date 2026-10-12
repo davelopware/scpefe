@@ -2202,15 +2202,17 @@ export class DocumentService {
       try { await action(); succeeded = true; }
       catch { /* A failed host action still needs a published failure event. */ }
       this.container.completeActivity(attempt.operationId, succeeded);
-      const prior = await this.journals.read(active.documentId, active.journalKey);
       const activity = { kind, attemptOperationId: attempt.operationId,
         attemptHead: status.attemptHead, succeeded };
-      const record = prior ? { ...prior, activity,
-        baseRevision: active.baseRevision, updateTime: this.now() }
-        : { text: active.opened.content, baseRevision: active.baseRevision,
-          cursor: { start: 0, end: 0 }, target: active.target,
-          state: "activity-outcome", updateTime: this.now(), activity };
-      await this.journals.write(active.documentId, active.journalKey, record);
+      await this.#queueJournalOperation(async () => {
+        const prior = await this.journals.read(active.documentId, active.journalKey);
+        const record = prior ? { ...prior, activity,
+          baseRevision: active.baseRevision, updateTime: this.now() }
+          : { text: active.opened.content, baseRevision: active.baseRevision,
+            cursor: { start: 0, end: 0 }, target: active.target,
+            state: "activity-outcome", updateTime: this.now(), activity };
+        await this.journals.write(active.documentId, active.journalKey, record);
+      });
       active.pendingActivity = activity;
       active.unresolvedJournal = true;
       active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
@@ -2254,17 +2256,19 @@ export class DocumentService {
   }
 
   async #clearActivityJournal(active, pending) {
-    const record = await this.journals.read(active.documentId, active.journalKey);
-    if (record?.activity?.attemptHead === pending.attemptHead) {
-      if (record.state === "activity-outcome") {
-        await this.journals.clear(active.documentId);
-        active.unresolvedJournal = false;
-      } else {
-        const { activity: _activity, ...rest } = record;
-        await this.journals.write(active.documentId, active.journalKey,
-          { ...rest, baseRevision: active.baseRevision, updateTime: this.now() });
+    await this.#queueJournalOperation(async () => {
+      const record = await this.journals.read(active.documentId, active.journalKey);
+      if (record?.activity?.attemptHead === pending.attemptHead) {
+        if (record.state === "activity-outcome") {
+          await this.journals.clear(active.documentId);
+          active.unresolvedJournal = false;
+        } else {
+          const { activity: _activity, ...rest } = record;
+          await this.journals.write(active.documentId, active.journalKey,
+            { ...rest, baseRevision: active.baseRevision, updateTime: this.now() });
+        }
       }
-    }
+    });
     active.pendingActivity = null;
     active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
       ...active.opened, readOnly: !active.editMode,
@@ -3446,19 +3450,27 @@ export class DocumentService {
   async #flushActive(active) {
     if (!active?.dirty || !active.working
         || (active.pendingPublication && !active.pendingRecord?.merge)) return;
-    const record = active.pendingRecord?.merge
-      ? { ...active.pendingRecord, text: active.working.content,
-        cursor: { ...active.working.cursor }, updateTime: this.now() }
-      : { text: active.working.content, baseRevision: active.baseRevision,
-        cursor: { ...active.working.cursor }, target: active.target,
-        state: "unsaved", updateTime: this.now() };
-    const operation = this.flushChain.catch(() => {}).then(() =>
-      this.journals.write(active.documentId, active.journalKey, record));
-    this.flushChain = operation;
+    const operation = this.#queueJournalOperation(async () => {
+      const prior = await this.journals.read(active.documentId, active.journalKey);
+      const record = active.pendingRecord?.merge
+        ? { ...active.pendingRecord, text: active.working.content,
+          cursor: { ...active.working.cursor }, updateTime: this.now() }
+        : { text: active.working.content, baseRevision: active.baseRevision,
+          cursor: { ...active.working.cursor }, target: active.target,
+          state: "unsaved", updateTime: this.now() };
+      await this.journals.write(active.documentId, active.journalKey,
+        { ...record, ...(prior?.activity ? { activity: prior.activity } : {}) });
+    });
     await operation;
     active.unresolvedJournal = true;
     active.continuousDue = null;
     active.journalWarning = null;
+  }
+
+  #queueJournalOperation(operation) {
+    const queued = this.flushChain.catch(() => {}).then(operation);
+    this.flushChain = queued;
+    return queued;
   }
 
   #cancelHeartbeat() {

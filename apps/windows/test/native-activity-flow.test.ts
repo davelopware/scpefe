@@ -154,6 +154,76 @@ test("successful copy reports and recovers an unpublished activity outcome", {
     restarted.active.journalKey), null);
 });
 
+async function pendingDirtyExport(t: import("node:test").TestContext) {
+  let target = "";
+  let sourceReplacements = 0;
+  let failOn = Infinity;
+  const failingFs = { ...fs, async rename(from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    if (to === target && ++sourceReplacements === failOn) {
+      throw Object.assign(new Error("outcome unavailable"), { code: "EIO" });
+    }
+    return fs.rename(from, to);
+  } };
+  const fixtureResult = await fixture(t, failingFs);
+  target = fixtureResult.target;
+  const { directory, service, options } = fixtureResult;
+  await service.enterEditMode();
+  const draft = "unsaved local draft";
+  const working = { content: draft, cursor: { start: draft.length, end: draft.length } };
+  service.updateWorkingCopy(working);
+  failOn = sourceReplacements + 2;
+  const exported = path.join(directory, "draft.txt");
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: draft, lineEndings: "lf" }),
+  { exported: true, outcomePending: true });
+  assert.equal(await fs.readFile(exported, "utf8"), draft);
+  assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+    "export-attempted");
+  return { target, service, options, draft, working,
+    documentId: service.active.documentId,
+    journalKey: Buffer.from(service.active.journalKey) };
+}
+
+for (const checkpoint of ["lock", "timer"] as const) {
+  test(`dirty ${checkpoint} checkpoint retains a pending export outcome across restart`, {
+    skip: !native && "native addon path was not supplied",
+  }, async (t) => {
+    const { target, service, options, draft, working, documentId, journalKey } =
+      await pendingDirtyExport(t);
+    if (checkpoint === "timer") {
+      service.checkpointIdleMs = 0;
+      service.checkpointContinuousMs = 0;
+      service.updateWorkingCopy(working);
+      const deadline = Date.now() + 2_000;
+      while (service.checkpointTimer !== null && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.equal(service.checkpointTimer, null, "checkpoint timer did not run");
+      await service.flushChain;
+      const timed = await service.journals.read(documentId, journalKey);
+      assert.equal(timed.state, "unsaved");
+      assert.equal(timed.text, draft);
+      assert.equal(timed.activity.succeeded, true);
+    }
+    assert.equal((await service.lock("test-lock")).journalSaved, true);
+    const locked = await service.journals.read(documentId, journalKey);
+    assert.equal(locked.state, "unsaved");
+    assert.equal(locked.text, draft);
+    assert.equal(locked.activity.kind, "export");
+    assert.equal(locked.activity.succeeded, true);
+    const restarted = new DocumentService({ ...options, fs });
+    const reopened = await restarted.openDocument(target, password);
+    assert.equal(reopened.activityOutcomePending, undefined);
+    assert.equal(reopened.recovery.content, draft);
+    assert.equal(native?.openDocument(await fs.readFile(target), password).historyEventType,
+      "export-succeeded");
+    const resolved = await restarted.journals.read(documentId, journalKey);
+    assert.equal(resolved.activity, undefined);
+    assert.equal(resolved.text, draft);
+  });
+}
+
 test("restart clears a journal after the source already published its outcome", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {
