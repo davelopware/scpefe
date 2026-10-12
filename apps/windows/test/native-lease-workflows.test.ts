@@ -40,6 +40,15 @@ async function setup(t: import("node:test").TestContext) {
     advance: (milliseconds: number) => { utc += milliseconds; } };
 }
 
+function restartWithSameStore(directory: string, profilePath: string,
+  bridge: Record<string, unknown>) {
+  return new DocumentService({ native: bridge, fs, profilePath,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    publicationCapabilities: { sameFilesystemTransaction: true,
+      replacementGuarantee: "atomic-replace" } });
+}
+
 test("native lease candidates drive Edit mode, heartbeat, Lock/Unlock and release", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {
@@ -103,6 +112,61 @@ test("successful release preserves unsaved work while clearing only the lease tr
   assert.equal(service.container.authenticatedLease().active, false);
   assert.deepEqual(service.container.bytes(), await fs.readFile(target));
   await service.lock("document-close");
+});
+
+test("restoring work keeps its journal through acquisition and immediate restart", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { service, target, directory, profilePath, bridge } = await setup(t);
+  await service.enterEditMode();
+  service.updateWorkingCopy({ content: "unsaved recovery words",
+    cursor: { start: 22, end: 22 } });
+  await service.exitEditMode();
+  await service.lock("restart");
+
+  const restoring = restartWithSameStore(directory, profilePath, bridge);
+  assert.equal((await restoring.openDocument(target, password)).recovery?.content,
+    "unsaved recovery words");
+  const restored = await restoring.restoreRecoveredWork();
+  assert.equal(restored.content, "unsaved recovery words");
+  assert.equal((await restoring.unresolvedJournalSummary()).total, 1);
+
+  const restarted = restartWithSameStore(directory, profilePath, bridge);
+  const reopened = await restarted.openDocument(target, password);
+  assert.equal(reopened.recovery?.content, "unsaved recovery words");
+  assert.deepEqual(reopened.recovery?.cursor, { start: 22, end: 22 });
+});
+
+test("interrupted recovery acquisition retains the work through publication resume", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { service, target, directory, profilePath, bridge } = await setup(t);
+  await service.enterEditMode();
+  service.updateWorkingCopy({ content: "recovery under interruption",
+    cursor: { start: 27, end: 27 } });
+  await service.exitEditMode();
+  await service.lock("restart");
+
+  const restoring = restartWithSameStore(directory, profilePath, bridge);
+  await restoring.openDocument(target, password);
+  let interrupted = false;
+  const guardedFs = Object.create(fs);
+  guardedFs.rename = async (source: string, destination: string) => {
+    if (!interrupted && destination === target) {
+      interrupted = true;
+      throw new Error("injected acquisition interruption");
+    }
+    return fs.rename(source, destination);
+  };
+  restoring.publications.fs = guardedFs;
+  await assert.rejects(restoring.restoreRecoveredWork(),
+    /acquisition interruption/);
+  assert.equal((await restoring.unresolvedJournalSummary()).pendingPublications, 1);
+
+  const restarted = restartWithSameStore(directory, profilePath, bridge);
+  const reopened = await restarted.openDocument(target, password);
+  assert.equal(reopened.recovery?.content, "recovery under interruption");
+  assert.equal((await restarted.unresolvedJournalSummary()).total, 1);
 });
 
 test("Lock releases its suspended native lease before a document switch", {

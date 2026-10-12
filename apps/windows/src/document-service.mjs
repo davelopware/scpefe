@@ -1586,6 +1586,7 @@ export class DocumentService {
           && this.containerTarget === active.target
           && this.containerBytes?.equals(base)
           && this.pendingNativeCandidate === null) {
+        const pendingWork = this.#leasePendingWork(active);
         const lease = opened.lease;
         const candidate = this.container.prepareLeaseChange("release", active.password, {
           operationId: this.nextCandidateOperation++,
@@ -1607,9 +1608,9 @@ export class DocumentService {
         return { base, candidate: Buffer.from(candidate.bytes),
           operationId: candidate.operationId,
           journalKey: Buffer.from(active.journalKey),
-          text: active.working?.content ?? active.opened.content ?? "",
-          cursor: active.working?.cursor ?? { start: 0, end: 0 },
-          baseRevision: active.baseRevision, preserveWork: active.dirty };
+          text: pendingWork?.text ?? active.opened.content ?? "",
+          cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
+          baseRevision: active.baseRevision, preserveWork: pendingWork !== null };
       }
       const candidate = this.native.updateLease(base, active.password,
         { ...opened.lease, active: false });
@@ -2466,6 +2467,17 @@ export class DocumentService {
       && typeof this.container.prepareLeaseChange === "function";
   }
 
+  #leasePendingWork(active) {
+    if (active.dirty) {
+      if (!active.working) throw new Error("Dirty lease work has no working copy");
+      return { text: active.working.content, cursor: active.working.cursor };
+    }
+    if (active.recovery) {
+      return { text: active.recovery.text, cursor: active.recovery.cursor };
+    }
+    return null;
+  }
+
   #syncNativeLeaseSource(active, bytes, { allowReplacement = false } = {}) {
     if (this.containerTarget === active.target && this.containerBytes?.equals(bytes)) {
       if (this.container.status().locked) this.container.unlock(active.password);
@@ -2519,13 +2531,14 @@ export class DocumentService {
         stale.code = "STALE_HEARTBEAT";
         throw stale;
       }
+      const pendingWork = this.#leasePendingWork(active);
       await this.publications.publish({ documentId: active.documentId,
         journalKey: active.journalKey, target: active.target, base: source,
         candidate: candidate.bytes,
-        text: active.working?.content ?? active.opened.content ?? "",
-        cursor: active.working?.cursor ?? { start: 0, end: 0 },
+        text: pendingWork?.text ?? active.opened.content ?? "",
+        cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
         baseRevision: active.baseRevision, purpose: "lease-change",
-        preserveWork: active.dirty });
+        preserveWork: pendingWork !== null });
       const adopted = this.container.finishSave(candidate.operationId, "verified");
       this.pendingNativeCandidate = null;
       if ((adopted & LEASE_ADOPT_EFFECT) === 0) {
