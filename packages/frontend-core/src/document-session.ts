@@ -10,6 +10,7 @@ export interface SessionDocument {
   readonly invitationRequired?: false;
   readonly canEdit?: boolean;
   readonly publicationState?: "target-published" | "pending-publication" | "conflict";
+  readonly activityOutcomePending?: true;
   readonly migrationRequired?: true;
   readonly migrationCanEdit?: boolean;
   readonly recovery?: SessionRecoveryRecord;
@@ -278,9 +279,11 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   discardRecoveredWork(): Promise<Doc>;
   acceptHeadMismatch(): Promise<Doc>;
   discardUnreadableJournal(): Promise<Doc>;
-  backupDocument(): Promise<{ readonly backedUp: true } | null>;
+  backupDocument(): Promise<{ readonly backedUp: boolean;
+    readonly outcomePending?: true } | null>;
   exportPlaintext(request: { readonly content: string;
-    readonly lineEndings: "lf" | "native" }): Promise<{ readonly exported: true } | null>;
+    readonly lineEndings: "lf" | "native" }): Promise<{ readonly exported: boolean;
+      readonly outcomePending?: true } | null>;
   changePassword?(request: { readonly currentPassword: string; readonly newPassword: string;
     readonly newPasswordConfirmation: string }): Promise<Doc>;
   createInvitation?(request: SessionInvitationRequest): Promise<{
@@ -380,8 +383,10 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
     | "pending-publication" | "conflict" }>
   | Readonly<{ status: "publication-discarded" | "divergence-required" }>
   | Readonly<{ status: "unsaved-work" }>
-  | Readonly<{ status: "backup"; created: boolean }>
-  | Readonly<{ status: "export"; exported: boolean }>
+  | Readonly<{ status: "backup"; created: boolean; canceled?: true;
+    outcomePending?: true }>
+  | Readonly<{ status: "export"; exported: boolean; canceled?: true;
+    outcomePending?: true }>
   | Readonly<{ status: "recovery" | "recovery-discarded" }>
   | Readonly<{ status: "head-accepted" }>
   | Readonly<{ status: "unreadable-discarded" }>
@@ -1447,8 +1452,15 @@ export class DocumentSession<Doc extends SessionDocument,
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
+        if (result?.outcomePending && (this.snapshot.kind === "read-only"
+            || this.snapshot.kind === "edit")) {
+          this.refreshDocument({ ...this.snapshot.document,
+            activityOutcomePending: true } as Doc);
+        }
         this.clearPending();
-        return Object.freeze({ status: "backup", created: result !== null });
+        return Object.freeze({ status: "backup", created: result?.backedUp === true,
+          ...(result === null ? { canceled: true as const } : {}),
+          ...(result?.outcomePending ? { outcomePending: true as const } : {}) });
       } catch (error) {
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
@@ -1476,8 +1488,15 @@ export class DocumentSession<Doc extends SessionDocument,
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
+        if (result?.outcomePending && (this.snapshot.kind === "read-only"
+            || this.snapshot.kind === "edit")) {
+          this.refreshDocument({ ...this.snapshot.document,
+            activityOutcomePending: true } as Doc);
+        }
         this.clearPending();
-        return Object.freeze({ status: "export", exported: result !== null });
+        return Object.freeze({ status: "export", exported: result?.exported === true,
+          ...(result === null ? { canceled: true as const } : {}),
+          ...(result?.outcomePending ? { outcomePending: true as const } : {}) });
       } catch (error) {
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
@@ -2128,9 +2147,10 @@ export class DocumentSession<Doc extends SessionDocument,
         && !document.unreadableJournal && working.dirty && pending === undefined,
       backup: !working.dirty && this.publicationState === "target-published"
         && !document.provisional && !document.recovery && !document.headMismatch
+        && !document.activityOutcomePending
         && !document.profileMismatch && !document.migrationRequired
         && !document.unreadableJournal && pending === undefined,
-      export: pending === undefined,
+      export: !document.activityOutcomePending && pending === undefined,
       publicationRetry: (this.publicationState === "pending-publication"
         || this.publicationState === "conflict") && !this.resolvingDivergence
         && !document.recovery && !document.headMismatch && !document.unreadableJournal

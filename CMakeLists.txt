@@ -169,7 +169,7 @@ if(SCPEFE_BUILD_NODE_ADDON)
         )
         foreach(lifecycle_test IN ITEMS native-container-lifecycle
                 native-document-service-lifecycle native-lease-workflows
-                native-divergence-abi native-compaction-flow)
+                native-divergence-abi native-compaction-flow native-activity-flow)
             add_test(
                 NAME scpefe.${lifecycle_test}
                 COMMAND ${NODE_EXECUTABLE}

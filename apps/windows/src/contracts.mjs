@@ -603,6 +603,10 @@ export function validateOpenedDocument(value) {
   if (value.unreadableJournal !== undefined && value.unreadableJournal !== true) {
     throw new TypeError("host returned invalid unreadable journal decision");
   }
+  if (value.activityOutcomePending !== undefined
+      && typeof value.activityOutcomePending !== "boolean") {
+    throw new TypeError("host returned invalid activity outcome status");
+  }
   return Object.freeze({ content, readOnly: true,
     canEdit: migrationRequired ? false : value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
@@ -628,6 +632,8 @@ export function validateOpenedDocument(value) {
     ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
     ...(value.unreadableJournal === true ? { unreadableJournal: true } : {}),
+    ...(value.activityOutcomePending === true
+      ? { activityOutcomePending: true } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
 
@@ -794,19 +800,23 @@ export function validatePlaintextExportRequest(value) {
 }
 
 export function validatePlaintextExportResult(value) {
-  if (!value || typeof value !== "object" || value.exported !== true
-      || Object.keys(value).length !== 1) {
+  if (!value || typeof value !== "object" || typeof value.exported !== "boolean"
+      || (value.outcomePending !== undefined && value.outcomePending !== true)
+      || Object.keys(value).some((key) => !["exported", "outcomePending"].includes(key))) {
     throw new TypeError("host returned an invalid plaintext export result");
   }
-  return Object.freeze({ exported: true });
+  return Object.freeze({ exported: value.exported,
+    ...(value.outcomePending ? { outcomePending: true } : {}) });
 }
 
 export function validateBackupResult(value) {
-  if (!value || typeof value !== "object" || value.backedUp !== true
-      || Object.keys(value).length !== 1) {
+  if (!value || typeof value !== "object" || typeof value.backedUp !== "boolean"
+      || (value.outcomePending !== undefined && value.outcomePending !== true)
+      || Object.keys(value).some((key) => !["backedUp", "outcomePending"].includes(key))) {
     throw new TypeError("host returned an invalid backup result");
   }
-  return Object.freeze({ backedUp: true });
+  return Object.freeze({ backedUp: value.backedUp,
+    ...(value.outcomePending ? { outcomePending: true } : {}) });
 }
 
 export function validateCompactionResult(value) {

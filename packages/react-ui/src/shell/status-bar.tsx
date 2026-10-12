@@ -49,7 +49,8 @@ export function StatusBar<Doc extends SessionDocument>({ session, active, messag
       {working?.journal.failed ? "Checkpoint needs attention"
         : working?.journal.pending ? "Checkpoint pending" : "Checkpoint ready"}
     </span>}
-    <span aria-label="Publication state">{publication}</span>
+    <span aria-label="Publication state">{opened?.activityOutcomePending
+      ? "Activity outcome pending publication" : publication}</span>
     <span>{total > 0 ? `${total} recovery item${total === 1 ? "" : "s"} need attention. ` : ""}{message}</span>
   </footer>;
 }

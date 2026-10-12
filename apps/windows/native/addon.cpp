@@ -1102,6 +1102,150 @@ napi_value container_prepare_compaction(napi_env env, napi_callback_info info)
     }
 }
 
+napi_value container_prepare_activity(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 3;
+        napi_value args[3];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 3) throw std::runtime_error(
+            "prepareActivity expects phase, password, and input");
+        const auto phase = string_value(env, args[0]);
+        if (phase != "attempt" && phase != "outcome")
+            throw std::runtime_error("unknown activity phase");
+        const SecretBytes password{env, args[1]};
+        const auto input = args[2];
+        const auto kind = string_value(env, property(env, input, "kind"));
+        if (kind != "backup" && kind != "export")
+            throw std::runtime_error("unknown activity kind");
+        const auto [observed, observed_size] = buffer_value(env,
+            property(env, input, "observedTarget"));
+        const auto name = string_value(env, property(env, input, "clientName"));
+        const auto email = string_value(env, property(env, input, "clientEmail"));
+        const auto device = string_value(env, property(env, input, "deviceName"));
+        const scpefe_container_activity_v1 request{
+            sizeof(request), SCPEFE_ABI_VERSION,
+            number_value(env, property(env, input, "operationId")),
+            kind == "backup" ? SCPEFE_ACTIVITY_BACKUP : SCPEFE_ACTIVITY_EXPORT,
+            boolean_value(env, property(env, input, "cleanStateConfirmed")),
+            observed, observed_size, password.data(), password.size(),
+            name.data(), name.size(), email.data(), email.size(),
+            device.data(), device.size(),
+            number_value(env, property(env, input, "timestampMs"))};
+        scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+        const auto status = phase == "attempt"
+            ? scpefe_container_prepare_activity_attempt(owner->active,
+                &request, &candidate)
+            : scpefe_container_prepare_activity_outcome(owner->active,
+                &request, &candidate);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value bytes = output_buffer(env,
+            [&](std::uint8_t *output, std::size_t capacity, std::size_t *size) {
+                return scpefe_container_copy_candidate(owner->active,
+                    candidate.operation_id, output, capacity, size);
+            });
+        if (!bytes) return nullptr;
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        check(env, napi_set_named_property(env, result, "bytes", bytes));
+        set_number(env, result, "operationId", candidate.operation_id);
+        set_number(env, result, "effects", candidate.effect_mask);
+        const auto source_head = hexadecimal(candidate.source_head,
+            SCPEFE_REVISION_ID_SIZE);
+        set_string(env, result, "sourceHead",
+            source_head.data(), source_head.size());
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_complete_activity(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 2;
+        napi_value args[2];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 2) throw std::runtime_error(
+            "completeActivity expects attempt ID and success");
+        std::uint32_t effects = 0;
+        const auto status = scpefe_container_complete_activity(owner->active,
+            number_value(env, args[0]), boolean_value(env, args[1]), &effects);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_create_uint32(env, effects, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_restore_activity(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 1;
+        napi_value args[1];
+        auto *owner = container_context(env, info, argc, args);
+        if (argc != 1) throw std::runtime_error("restoreActivity expects an outcome");
+        const auto input = args[0];
+        const auto kind = string_value(env, property(env, input, "kind"));
+        if (kind != "backup" && kind != "export")
+            throw std::runtime_error("unknown activity kind");
+        const auto head = revision_id(env, property(env, input, "attemptHead"));
+        const auto [observed, size] = buffer_value(env,
+            property(env, input, "observedTarget"));
+        scpefe_activity_recovery_v1 request{};
+        request.struct_size = sizeof(request);
+        request.abi_version = SCPEFE_ABI_VERSION;
+        request.attempt_operation_id = number_value(env,
+            property(env, input, "attemptOperationId"));
+        request.kind = kind == "backup" ? SCPEFE_ACTIVITY_BACKUP : SCPEFE_ACTIVITY_EXPORT;
+        std::copy(head.begin(), head.end(), request.attempt_head);
+        request.succeeded = boolean_value(env, property(env, input, "succeeded"));
+        request.observed_target = observed;
+        request.observed_target_size = size;
+        const auto status = scpefe_container_restore_activity_outcome(
+            owner->active, &request);
+        if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+        napi_value result;
+        check(env, napi_get_boolean(env, true, &result));
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
+napi_value container_activity_status(napi_env env, napi_callback_info info)
+{
+    try {
+        size_t argc = 0;
+        auto *owner = container_context(env, info, argc, nullptr);
+        scpefe_activity_status_v1 status{sizeof(status), SCPEFE_ABI_VERSION};
+        const auto result_status = scpefe_container_activity_status(owner->active, &status);
+        if (result_status != SCPEFE_STATUS_OK) {
+            throw_status(env, result_status); return nullptr;
+        }
+        napi_value result;
+        check(env, napi_create_object(env, &result));
+        set_boolean(env, result, "hasPending", status.has_pending != 0);
+        if (status.has_pending) {
+            const auto *kind = status.kind == SCPEFE_ACTIVITY_BACKUP
+                ? "backup" : "export";
+            set_string(env, result, "kind", kind, std::strlen(kind));
+            set_number(env, result, "attemptOperationId", status.attempt_operation_id);
+            const auto head = hexadecimal(status.attempt_head,
+                SCPEFE_REVISION_ID_SIZE);
+            set_string(env, result, "attemptHead", head.data(), head.size());
+            set_boolean(env, result, "hostActionComplete", status.host_action_complete != 0);
+            set_boolean(env, result, "succeeded", status.succeeded != 0);
+            set_boolean(env, result, "outcomePending", status.outcome_pending != 0);
+        }
+        return result;
+    } catch (const std::exception &error) {
+        napi_throw_type_error(env, "SCPEFE_INPUT", error.what()); return nullptr;
+    }
+}
+
 napi_value container_finish_save(napi_env env, napi_callback_info info)
 {
     try {
@@ -1314,6 +1458,10 @@ napi_value create_container_context(napi_env env, napi_callback_info info)
             {"prepareLeaseChange", nullptr, container_prepare_lease_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSave", nullptr, container_prepare_save, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareCompaction", nullptr, container_prepare_compaction, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"prepareActivity", nullptr, container_prepare_activity, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"completeActivity", nullptr, container_complete_activity, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"restoreActivity", nullptr, container_restore_activity, nullptr, nullptr, nullptr, napi_default, nullptr},
+            {"activityStatus", nullptr, container_activity_status, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"prepareSlotChange", nullptr, container_prepare_slot_change, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"slots", nullptr, container_slots, nullptr, nullptr, nullptr, napi_default, nullptr},
             {"finishSave", nullptr, container_finish_save, nullptr, nullptr, nullptr, napi_default, nullptr},
