@@ -1308,10 +1308,14 @@ export class DocumentSession<Doc extends SessionDocument,
         }
         const resumedVersion = this.pendingPublicationVersion
           ?? (current.working.dirty ? null : this.workingCopy?.journalVersion() ?? null);
+        const currentVersion = this.workingCopy?.journalVersion();
+        const atSubmittedRevision = resumedVersion !== null
+          && resumedVersion.journalScope === currentVersion?.journalScope
+          && resumedVersion.revision === currentVersion.revision;
         this.workingCopy?.sealPublication(result.content, resumedVersion);
-        if (result.publicationState === "target-published") {
-          this.pendingPublicationVersion = null;
-        }
+        this.pendingPublicationVersion = result.publicationState === "target-published"
+          ? null : atSubmittedRevision
+            ? this.workingCopy?.journalVersion() ?? null : resumedVersion;
         this.refreshDocument({ ...current.document, content: result.content,
           readOnly: true,
           publicationState: result.publicationState } as Doc);
