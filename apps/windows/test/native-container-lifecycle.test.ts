@@ -11,6 +11,12 @@ interface ContainerContext {
   read(): { content: string; documentId: string; slotId: string };
   bytes(): Buffer;
   status(): { locked: boolean };
+  confirmEditLease(): true;
+  prepareSave(kind: "manual" | "regular" | "discard", password: string,
+    input: object): { bytes: Buffer; operationId: number; effects: number };
+  finishSave(operationId: number, outcome: "verified" | "definite-failure" | "ambiguous"):
+    number;
+  resolveSave(operationId: number, published: boolean): number;
 }
 
 interface NativeAddon {
@@ -56,4 +62,36 @@ test("one context retains its handle through Lock and authenticated Unlock", {
   assert.equal(context.open(bytes), bytes);
   assert.equal(context.close(), true);
   assert.equal(other.close(), true);
+});
+
+test("exact native save candidates remain pending until verified or resolved", {
+  skip: !native && "native addon path was not supplied",
+}, () => {
+  assert.ok(native);
+  const password = "owner passphrase with independent words";
+  const context = native.createContainerContext();
+  context.create({ name: "Ada", email: "ada@example.test",
+    deviceName: "Ada PC", content: "base", ownerPassword: password,
+    timestampMs: 1 });
+  context.confirmEditLease();
+  const input = { name: "Ada", email: "ada@example.test",
+    deviceName: "Ada PC", content: "submitted", timestampMs: 2,
+    operationId: 1 };
+  const candidate = context.prepareSave("manual", password, input);
+  assert.equal(native.openDocument(candidate.bytes, password).content, "submitted");
+  assert.equal(context.read().content, "submitted");
+  assert.notDeepEqual(context.bytes(), candidate.bytes);
+  assert.throws(() => context.prepareSave("manual", password,
+    { ...input, operationId: 2 }), /status 14/);
+  context.finishSave(candidate.operationId, "ambiguous");
+  assert.throws(() => context.prepareSave("manual", password,
+    { ...input, operationId: 2 }), /status 14/);
+  context.resolveSave(candidate.operationId, true);
+  assert.deepEqual(context.bytes(), candidate.bytes);
+  const next = context.prepareSave("manual", password,
+    { ...input, content: "newer", operationId: 2, timestampMs: 3 });
+  context.finishSave(next.operationId, "definite-failure");
+  assert.deepEqual(context.bytes(), candidate.bytes);
+  assert.equal(context.read().content, "newer");
+  context.close();
 });

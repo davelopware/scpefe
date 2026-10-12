@@ -509,6 +509,28 @@ test("a save acknowledgement cannot replace edits made while the host was busy",
   session.dispose();
 });
 
+test("a later edit revision stays dirty even when it repeats submitted text", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("draft");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  host.saveDocument = () => new Promise((resolve) => { finish = resolve; });
+  const saving = session.save();
+  await Promise.resolve();
+  session.edit("another draft");
+  session.edit("draft");
+  finish({ saved: true, content: "draft", publicationState: "target-published" });
+  assert.deepEqual(await saving, { status: "saved", publicationState: "target-published" });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.working.text, "draft");
+  assert.equal(snapshot.working.dirty, true);
+  assert.equal(snapshot.commands.save, true);
+  session.dispose();
+});
+
 test("pending manual save becomes semantic attention with retry and discard commands", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());

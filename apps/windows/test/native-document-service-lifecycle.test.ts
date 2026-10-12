@@ -127,3 +127,112 @@ for (const recovery of ["published", "unavailable", "changed-target", "replaced-
     unavailable = false;
   });
 }
+
+test("manual save publishes and adopts the native candidate without legacy save", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  assert.ok(native);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-native-save-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const profilePath = path.join(directory, "profile.json");
+  const target = path.join(directory, "document.scpefe");
+  const password = "owner passphrase with independent words";
+  await fs.writeFile(profilePath, JSON.stringify({ name: "Ada",
+    email: "ada@example.test", deviceName: "Ada PC" }));
+  const bridge = Object.fromEntries(Object.getOwnPropertyNames(native)
+    .map((name) => [name, native[name]]));
+  bridge.saveDocument = () => { throw new Error("legacy save must not run"); };
+  bridge.regularSaveDocument = () => { throw new Error("legacy regular save must not run"); };
+  bridge.discardProvisional = () => { throw new Error("legacy discard must not run"); };
+  const service = new DocumentService({ native: bridge, fs, profilePath,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    publicationCapabilities: { sameFilesystemTransaction: true,
+      replacementGuarantee: "atomic-replace" } });
+  await service.createDocument(target, { ownerPassword: password,
+    content: "base", understandsIrrecoverable: true });
+  await service.openDocument(target, password);
+  await service.enterEditMode();
+  const submittedVersion = { journalScope: "native-save", revision: 1 };
+  service.updateWorkingCopy({ content: "submitted", cursor: { start: 9, end: 9 },
+    ...submittedVersion });
+  const result = await service.saveDocument("submitted", submittedVersion);
+  assert.deepEqual(result, { saved: true, content: "submitted",
+    publicationState: "target-published", ...submittedVersion });
+  assert.equal(native.openDocument(await fs.readFile(target), password).content,
+    "submitted");
+  assert.equal(service.container.read().content, "submitted");
+  service.updateWorkingCopy({ content: "submitted", cursor: { start: 9, end: 9 },
+    journalScope: "native-save", revision: 2 });
+  assert.equal(service.active.dirty, true,
+    "a later edit revision remains dirty even with identical text");
+  await service.saveClientSettings({ regularSaveEnabled: true });
+  const regular = await service.regularSaveDocument();
+  assert.deepEqual(regular, { published: true, provisional: true,
+    content: "submitted" });
+  assert.deepEqual(service.container.bytes(), await fs.readFile(target));
+  assert.equal(service.active.dirty, true);
+  await service.discardUnsavedForClose();
+  assert.equal(native.openDocument(await fs.readFile(target), password).content,
+    "submitted");
+  assert.equal(service.active.manuallySealed, true);
+  await service.lock("document-close");
+});
+
+test("offline native candidate resumes exact journal bytes before another save", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  assert.ok(native);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-native-offline-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const profilePath = path.join(directory, "profile.json");
+  const target = path.join(directory, "document.scpefe");
+  const password = "owner passphrase with independent words";
+  await fs.writeFile(profilePath, JSON.stringify({ name: "Ada",
+    email: "ada@example.test", deviceName: "Ada PC" }));
+  let offline = false;
+  const guardedFs = Object.create(fs);
+  guardedFs.readFile = async (file: string, ...args: unknown[]) => {
+    if (offline && file === target) {
+      const error = new Error("provider disconnected") as NodeJS.ErrnoException;
+      error.code = "ENODEV";
+      throw error;
+    }
+    return fs.readFile(file, ...args as []);
+  };
+  const service = new DocumentService({ native, fs: guardedFs, profilePath,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    publicationCapabilities: { sameFilesystemTransaction: true,
+      replacementGuarantee: "atomic-replace" } });
+  await service.createDocument(target, { ownerPassword: password,
+    content: "base", understandsIrrecoverable: true });
+  await service.openDocument(target, password);
+  await service.enterEditMode();
+  offline = true;
+  const result = await service.saveDocument("offline draft");
+  assert.equal(result.publicationState, "pending-publication");
+  const record = service.active.pendingRecord;
+  const candidate = Buffer.from(record.publication.candidate, "base64");
+  assert.notDeepEqual(service.container.bytes(), candidate);
+  await assert.rejects(service.saveDocument("replacement"), /interrupted publication/);
+  offline = false;
+  const resumed = await service.reconnectPendingPublication();
+  assert.equal(resumed.publicationState, "target-published");
+  assert.deepEqual(await fs.readFile(target), candidate);
+  assert.deepEqual(service.container.bytes(), candidate);
+  offline = true;
+  const second = await service.saveDocument("another offline draft");
+  assert.equal(second.publicationState, "pending-publication");
+  const remote = native.saveDocument(candidate, password, { name: "Ada",
+    email: "ada@example.test", deviceName: "Ada PC", content: "remote work",
+    timestampMs: Date.now() });
+  await fs.writeFile(target, remote);
+  offline = false;
+  const conflict = await service.reconnectPendingPublication();
+  assert.equal(conflict.publicationState, "conflict");
+  assert.equal(service.pendingNativeCandidate, null,
+    "a changed target resolves the ambiguous native operation");
+  assert.deepEqual(await fs.readFile(target), remote);
+  await service.lock("document-close");
+});

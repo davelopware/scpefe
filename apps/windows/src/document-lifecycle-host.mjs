@@ -14,7 +14,7 @@ import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
   validatePassword, validateProfile, validateTakeoverCancellation,
   validateTakeoverRequest, validateWorkingCopy, validateRevisionActivityRequest,
-  validateRevisionActivityId } from "./contracts.mjs";
+  validateRevisionActivityId, validateSaveSubmission } from "./contracts.mjs";
 import { safeEventCode } from "./error-boundary.mjs";
 import { DISCARD_UNREADABLE_JOURNAL_CONFIRMATION } from "./document-service.mjs";
 
@@ -337,14 +337,15 @@ export class DocumentLifecycleHost {
       this.service.revisionActivityComparison(
         validateRevisionActivityId(request?.beforeId),
         validateRevisionActivityId(request?.afterId)));
-    this.#register("document:save", async (content) => {
+    this.#register("document:save", async (request) => {
       let result;
-      const canonical = canonicalizeDocumentText(content);
-      try { result = await this.service.saveDocument(canonical); }
+      const { content: canonical, submittedVersion } = validateSaveSubmission(request);
+      try { result = await this.service.saveDocument(canonical, submittedVersion); }
       catch (error) {
         if (!error?.publicationPrepared || !this.service.active?.opened) throw error;
         result = { saved: true, content: canonical,
-          publicationState: this.service.active.opened.publicationState };
+          publicationState: this.service.active.opened.publicationState,
+          ...(submittedVersion ?? {}) };
       }
       await this.sendJournalSummary(); return result;
     });
@@ -359,9 +360,10 @@ export class DocumentLifecycleHost {
         service: current, authorization: validated.authorization,
         perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken }) });
     });
-    this.#register("document:save-divergence-resolution", async (content) => {
+    this.#register("document:save-divergence-resolution", async (request) => {
+      const { content, submittedVersion } = validateSaveSubmission(request);
       const result = await this.service.saveDivergenceResolution(
-        canonicalizeDocumentText(content));
+        content, submittedVersion);
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:discard-publication", async () => {

@@ -3,7 +3,7 @@ import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
   validateOpenTargetResult,
   validateProfile, validateOpenedDocument, validateActiveDocument,
-  validateEditMode, validateSaveResult,
+  validateEditMode, validateSaveResult, validateSaveSubmission,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
   validateCompactionResult,
   validateMigrationResult,
@@ -98,8 +98,14 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateEditMode(value);
   },
-  saveDocument: async (content) => validateSaveResult(
-    await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
+  saveDocument: async (content, submittedVersion = null) => {
+    const request = submittedVersion ? { content, ...submittedVersion } : content;
+    const validated = validateSaveSubmission(request);
+    return validateSaveResult(await ipcRenderer.invoke("document:save",
+      validated.submittedVersion
+        ? { content: validated.content, ...validated.submittedVersion }
+        : validated.content));
+  },
   reconnectPendingPublication: async () => validatePublicationResult(
     await ipcRenderer.invoke("document:reconnect-publication")),
   beginDivergenceResolution: async (request = {}) => {
@@ -108,9 +114,14 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateMergeDraft(value);
   },
-  saveDivergenceResolution: async (content) => validateSaveResult(
-    await ipcRenderer.invoke("document:save-divergence-resolution",
-      canonicalizeDocumentText(content))),
+  saveDivergenceResolution: async (content, submittedVersion = null) => {
+    const request = submittedVersion ? { content, ...submittedVersion } : content;
+    const validated = validateSaveSubmission(request);
+    return validateSaveResult(await ipcRenderer.invoke(
+      "document:save-divergence-resolution", validated.submittedVersion
+        ? { content: validated.content, ...validated.submittedVersion }
+        : validated.content));
+  },
   discardPendingPublication: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:discard-publication")),
   backupDocument: async () => {
