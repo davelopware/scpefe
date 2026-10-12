@@ -112,6 +112,13 @@ recovery have no claim requirement. Owner identity names slot 0. Lease fields ar
 holder time, duration, name, email, and device. Inactive lease uses zero session
 ID and empty holder strings. Lease updates create no revision.
 
+An unclaimed ordinary invitation stores its temporary label as the slot name
+and an empty email. Claiming replaces both fields with the claimant's identity
+and clears the claim flag by replacing that slot's wrapper. Credential and slot
+metadata changes append event-only revisions. Their details identify the affected
+slot and may state permission bits; they never contain a password, document key,
+wrapping key, or derived secret.
+
 A record is `[id, immutable, storage-kind, ?body, ?provisional, ?resolved-by,
 ?foreign]` represented by the numbered map in the CDDL. `immutable` contains
 all identity-bearing metadata: original kind (`0` baseline, `1` delta,

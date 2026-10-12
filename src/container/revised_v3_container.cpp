@@ -384,4 +384,120 @@ std::vector<std::uint8_t> RevisedV3Container::replace_graph(
     return result;
 }
 
+std::vector<std::uint8_t> RevisedV3Container::replace_slots(
+    const std::uint8_t *bytes, std::size_t size,
+    const std::uint8_t *actor_password, std::size_t actor_password_size,
+    const std::uint8_t *graph_bytes, std::size_t graph_size,
+    unsigned mode, std::size_t index, const std::uint8_t *new_password,
+    std::size_t new_password_size,
+    const std::array<std::uint8_t, 16> &new_slot_id,
+    std::uint8_t permissions, bool must_change)
+{
+    const auto authenticated = unlock(bytes, size, actor_password,
+        actor_password_size, format::RevisionLimits::defaults());
+    const auto graph = format::RevisionGraph::decode(graph_bytes, graph_size,
+        format::RevisionLimits::defaults());
+    const auto old_count = static_cast<std::size_t>(read_le(bytes + 32, 4));
+    if (mode > 3 || index > old_count || (mode != 1 && index == old_count)
+        || ((mode == 1 || mode == 2) != (new_password && new_password_size))
+        || (mode == 3 && old_count == 1))
+        throw ContainerFailure{ContainerError::invalid_argument};
+    const auto count = old_count + (mode == 1 ? 1 : 0) - (mode == 3 ? 1 : 0);
+    if (count > 9 || graph.slots().size() != count)
+        throw ContainerFailure{ContainerError::limit_exceeded};
+    Secrets secrets;
+    bool matched = false;
+    for (std::size_t i = 0; i < old_count; ++i) {
+        const auto *record = bytes + header_size + record_size * i;
+        if (crypto_pwhash(secrets.wrapping.data(), secrets.wrapping.size(),
+            reinterpret_cast<const char *>(actor_password), actor_password_size,
+            record, 2, 67108864, 2) != 0)
+            throw ContainerFailure{ContainerError::out_of_memory};
+        std::array<std::uint8_t, sizeof(slot_aad_prefix) - 1 + 32 + 4 + 40> aad{};
+        std::size_t offset = 0;
+        std::memcpy(aad.data() + offset, slot_aad_prefix, sizeof(slot_aad_prefix) - 1);
+        offset += sizeof(slot_aad_prefix) - 1;
+        std::memcpy(aad.data() + offset, bytes, 32); offset += 32;
+        std::memcpy(aad.data() + offset, bytes + 36, 4); offset += 4;
+        std::memcpy(aad.data() + offset, record, 40);
+        unsigned long long written = 0;
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(secrets.slot.data(),
+            &written, nullptr, record + 44, 66, aad.data(), aad.size(),
+            record + 16, secrets.wrapping.data()) == 0) {
+            if (written != wrapper_plain_size
+                || !std::equal(authenticated.slot_id.begin(),
+                    authenticated.slot_id.end(), secrets.slot.begin() + 32))
+                throw ContainerFailure{ContainerError::malformed_container};
+            std::copy_n(secrets.slot.data(), secrets.document.size(),
+                secrets.document.begin());
+            matched = true;
+            break;
+        }
+    }
+    if (!matched) throw ContainerFailure{ContainerError::authentication_failed};
+    const std::size_t aad_size = header_size + count * record_size;
+    const std::size_t encrypted_size = 16 + graph_size + tag_size;
+    if (aad_size + encrypted_size > 33u * 1024u * 1024u)
+        throw ContainerFailure{ContainerError::limit_exceeded};
+    std::vector<std::uint8_t> result(aad_size + encrypted_size);
+    std::copy_n(bytes, header_size, result.begin());
+    write_le(result.data() + 32, count, 4);
+    write_le(result.data() + 64, encrypted_size, 8);
+    randombytes_buf(result.data() + 40, 24);
+    for (std::size_t i = 0; i < count; ++i) {
+        auto *record = result.data() + header_size + i * record_size;
+        const bool fresh = (mode == 1 || mode == 2) && i == index;
+        if (!fresh) {
+            const auto source = mode == 1 && i > index ? i - 1
+                : mode == 3 && i >= index ? i + 1 : i;
+            std::copy_n(bytes + header_size + source * record_size,
+                record_size, record);
+            continue;
+        }
+        bool duplicate;
+        do {
+            randombytes_buf(record, 40);
+            duplicate = false;
+            for (std::size_t prior = 0; prior < old_count; ++prior)
+                duplicate |= std::memcmp(record,
+                    bytes + header_size + prior * record_size, 40) == 0;
+        } while (duplicate);
+        write_le(record + 40, 66, 4);
+        std::copy(secrets.document.begin(), secrets.document.end(), secrets.slot.begin());
+        std::copy(new_slot_id.begin(), new_slot_id.end(), secrets.slot.begin() + 32);
+        secrets.slot[48] = permissions;
+        secrets.slot[49] = must_change ? 1 : 0;
+        if (crypto_pwhash(secrets.wrapping.data(), secrets.wrapping.size(),
+            reinterpret_cast<const char *>(new_password), new_password_size,
+            record, 2, 67108864, 2) != 0)
+            throw ContainerFailure{ContainerError::out_of_memory};
+        std::array<std::uint8_t, sizeof(slot_aad_prefix) - 1 + 32 + 4 + 40> aad{};
+        std::size_t offset = 0;
+        std::memcpy(aad.data() + offset, slot_aad_prefix, sizeof(slot_aad_prefix) - 1);
+        offset += sizeof(slot_aad_prefix) - 1;
+        std::memcpy(aad.data() + offset, result.data(), 32); offset += 32;
+        std::memcpy(aad.data() + offset, result.data() + 36, 4); offset += 4;
+        std::memcpy(aad.data() + offset, record, 40);
+        unsigned long long written = 0;
+        if (crypto_aead_xchacha20poly1305_ietf_encrypt(record + 44, &written,
+            secrets.slot.data(), secrets.slot.size(), aad.data(), aad.size(),
+            nullptr, record + 16, secrets.wrapping.data()) != 0 || written != 66)
+            throw ContainerFailure{ContainerError::crypto_error};
+    }
+    if (crypto_kdf_derive_from_key(secrets.payload.data(), secrets.payload.size(),
+        1, payload_context.data(), secrets.document.data()) != 0)
+        throw ContainerFailure{ContainerError::crypto_error};
+    secrets.plaintext.resize(16 + graph_size);
+    std::copy(authenticated.document_id.begin(), authenticated.document_id.end(),
+        secrets.plaintext.begin());
+    std::copy_n(graph_bytes, graph_size, secrets.plaintext.begin() + 16);
+    unsigned long long written = 0;
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(result.data() + aad_size,
+        &written, secrets.plaintext.data(), secrets.plaintext.size(),
+        result.data(), aad_size, nullptr, result.data() + 40,
+        secrets.payload.data()) != 0 || written != encrypted_size)
+        throw ContainerFailure{ContainerError::crypto_error};
+    return result;
+}
+
 } // namespace scpefe::container

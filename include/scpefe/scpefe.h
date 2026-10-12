@@ -93,6 +93,8 @@ typedef struct scpefe_context scpefe_context;
 typedef struct scpefe_container scpefe_container;
 /* Independent copy of authenticated values, valid across Lock and Close. */
 typedef struct scpefe_owned_snapshot scpefe_owned_snapshot;
+/* Independent copy of authenticated slot metadata. */
+typedef struct scpefe_owned_slots scpefe_owned_slots;
 /* Opaque owner of one decoded snapshot revision. */
 typedef struct scpefe_decoded_snapshot_revision scpefe_decoded_snapshot_revision;
 /* Opaque owner of one validated decrypted v3 revision graph. */
@@ -423,6 +425,56 @@ typedef struct scpefe_candidate_info_v1 {
     uint32_t effect_mask;
 } scpefe_candidate_info_v1;
 
+/* Credential or authenticated slot metadata operation for one candidate. */
+typedef enum scpefe_slot_change_kind {
+    SCPEFE_SLOT_CHANGE_PASSWORD = 1,
+    SCPEFE_SLOT_ADD_INVITATION = 2,
+    SCPEFE_SLOT_CLAIM_INVITATION = 3,
+    SCPEFE_SLOT_RECONCILE_IDENTITY = 4,
+    SCPEFE_SLOT_UPDATE_PERMISSIONS = 5,
+    SCPEFE_SLOT_REMOVE = 6
+} scpefe_slot_change_kind;
+
+/* Versioned transient input; name is the temporary label for invitations. */
+typedef struct scpefe_container_slot_change_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t operation_id;
+    scpefe_slot_change_kind kind;
+    const uint8_t *actor_password;
+    size_t actor_password_size;
+    const uint8_t *new_password;
+    size_t new_password_size;
+    const uint8_t *target_slot_id;
+    size_t target_slot_id_size;
+    int can_edit, can_add_passwords, can_remove_passwords;
+    const char *name;
+    size_t name_size;
+    const char *email;
+    size_t email_size;
+    const char *client_name;
+    size_t client_name_size;
+    const char *client_email;
+    size_t client_email_size;
+    const char *device;
+    size_t device_size;
+    uint64_t timestamp_ms;
+} scpefe_container_slot_change_v1;
+
+/* Borrowed fields from one independent owned slot collection. */
+typedef struct scpefe_owned_slot_view_v1 {
+    uint32_t struct_size;
+    uint8_t slot_id[SCPEFE_SLOT_ID_SIZE];
+    uint8_t management_id[SCPEFE_SLOT_ID_SIZE];
+    int can_edit, can_add_passwords, can_remove_passwords;
+    int must_change_password;
+    int role;
+    const char *name;
+    size_t name_size;
+    const char *email;
+    size_t email_size;
+} scpefe_owned_slot_view_v1;
+
 /* Reports a verified, definite-failure, or ambiguous host result. */
 typedef enum scpefe_publication_outcome {
     SCPEFE_PUBLICATION_VERIFIED = 1,
@@ -555,6 +607,10 @@ SCPEFE_API scpefe_status scpefe_context_health(
     scpefe_context *context,
     scpefe_health_info_v1 *health_info
 );
+/* Assesses a proposed password through this context's injected policy service. */
+SCPEFE_API scpefe_status scpefe_context_assess_password(
+    scpefe_context *context, const uint8_t *password, size_t password_size,
+    scpefe_password_policy_assessment *assessment);
 
 /* Creates the sole active context-owned container and returns it unlocked. */
 SCPEFE_API scpefe_status scpefe_container_create(
@@ -597,6 +653,21 @@ SCPEFE_API scpefe_status scpefe_container_submit_content(scpefe_container *conta
 /* Prepares and retains one exact candidate for host publication. */
 SCPEFE_API scpefe_status scpefe_container_prepare_save(scpefe_container *container,
     const scpefe_container_save_v1 *save, scpefe_candidate_info_v1 *candidate);
+/* Prepares one authenticated slot operation as an event-only candidate. */
+SCPEFE_API scpefe_status scpefe_container_prepare_slot_change(
+    scpefe_container *container, const scpefe_container_slot_change_v1 *change,
+    scpefe_candidate_info_v1 *candidate);
+/* Copies permitted slot metadata into an independent owned collection. */
+SCPEFE_API scpefe_status scpefe_container_slots(
+    const scpefe_container *container, scpefe_owned_slots **slots);
+/* Reports the count of slots in one owned collection. */
+SCPEFE_API scpefe_status scpefe_owned_slots_count(
+    const scpefe_owned_slots *slots, size_t *count);
+/* Borrows one slot's fields until the collection is destroyed. */
+SCPEFE_API scpefe_status scpefe_owned_slots_view(
+    const scpefe_owned_slots *slots, size_t index, scpefe_owned_slot_view_v1 *view);
+/* Releases independently copied slot metadata. */
+SCPEFE_API void scpefe_owned_slots_destroy(scpefe_owned_slots *slots);
 /* Copies the retained candidate bytes without preparing or encrypting again. */
 SCPEFE_API scpefe_status scpefe_container_copy_candidate(const scpefe_container *container,
     uint64_t operation_id, uint8_t *output, size_t capacity, size_t *output_size);

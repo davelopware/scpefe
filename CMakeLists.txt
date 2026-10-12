@@ -38,6 +38,7 @@ else()
         src/container/container.cpp
         src/container/container_state.cpp
         src/container/password_slot_lifecycle.cpp
+        src/container/password_slots.cpp
         src/container/recoverable_password_container.cpp
         src/container/revised_v3_container.cpp
         src/container/unlocked_container_data.cpp
@@ -249,6 +250,8 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
         add_executable(scpefe_candidate_save_test tests/candidate_save_test.c)
         target_link_libraries(scpefe_candidate_save_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_slot_candidate_abi_test tests/slot_candidate_abi_test.c)
+        target_link_libraries(scpefe_slot_candidate_abi_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_revised_v3_history_abi_test
             tests/revised_v3_history_abi_test.c)
@@ -264,6 +267,7 @@ if(BUILD_TESTING)
             src/container/recoverable_password_container.cpp
             src/container/revised_v3_container.cpp
             src/container/password_slot_lifecycle.cpp
+            src/container/password_slots.cpp
             src/container/unlocked_container_data.cpp
             src/core/context.cpp
             src/core/host_services.cpp
@@ -361,6 +365,7 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
         add_test(NAME scpefe.candidate-save COMMAND scpefe_candidate_save_test
             "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.slot-candidate-abi COMMAND scpefe_slot_candidate_abi_test)
         add_test(NAME scpefe.revised-v3-history-abi
             COMMAND scpefe_revised_v3_history_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.lifecycle-open-limit COMMAND scpefe_lifecycle_open_limit_test)

@@ -10,6 +10,7 @@
 #include "format/snapshot_revision.hpp"
 #include "format/text_validation.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -99,6 +100,10 @@ struct scpefe_owned_snapshot {
     std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> slot_id{};
     std::vector<std::uint8_t> encoded_revision;
     std::string content;
+};
+
+struct scpefe_owned_slots {
+    std::vector<scpefe::format::RevisionSlot> values;
 };
 
 struct scpefe_context {
@@ -205,6 +210,29 @@ scpefe_status scpefe_context_health(
         SCPEFE_VERSION_PATCH,
         internal_health.host_monotonic_time_ms,
     };
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_context_assess_password(scpefe_context *context,
+    const uint8_t *password, size_t password_size,
+    scpefe_password_policy_assessment *assessment)
+{
+    if (!context || !assessment
+        || !scpefe::format::span_is_valid(password, password_size))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    const auto result = context->implementation.services().password().assess(
+        password, password_size);
+    using scpefe::security::PasswordPolicyAssessment;
+    switch (result) {
+    case PasswordPolicyAssessment::accepted:
+        *assessment = SCPEFE_PASSWORD_POLICY_ACCEPTED; break;
+    case PasswordPolicyAssessment::minimum_length:
+        *assessment = SCPEFE_PASSWORD_POLICY_MINIMUM_LENGTH; break;
+    case PasswordPolicyAssessment::predictable:
+        *assessment = SCPEFE_PASSWORD_POLICY_PREDICTABLE; break;
+    case PasswordPolicyAssessment::invalid:
+        *assessment = SCPEFE_PASSWORD_POLICY_INVALID; break;
+    }
     return SCPEFE_STATUS_OK;
 }
 
@@ -567,3 +595,140 @@ scpefe_status scpefe_container_resolve_save(scpefe_container *handle,
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
 }
+
+scpefe_status scpefe_container_prepare_slot_change(scpefe_container *handle,
+    const scpefe_container_slot_change_v1 *request,
+    scpefe_candidate_info_v1 *candidate)
+{
+    using scpefe::format::span_is_valid;
+    using scpefe::format::valid_utf8;
+    if (!request || !candidate || request->struct_size < sizeof(*request)
+        || candidate->struct_size < sizeof(*candidate)
+        || request->kind < SCPEFE_SLOT_CHANGE_PASSWORD
+        || request->kind > SCPEFE_SLOT_REMOVE
+        || !span_is_valid(request->actor_password, request->actor_password_size)
+        || request->actor_password_size == 0 || request->actor_password_size > 4096
+        || !span_is_valid(request->new_password, request->new_password_size)
+        || !span_is_valid(request->target_slot_id, request->target_slot_id_size)
+        || !valid_utf8(request->name, request->name_size)
+        || !valid_utf8(request->email, request->email_size)
+        || !valid_utf8(request->client_name, request->client_name_size)
+        || !valid_utf8(request->client_email, request->client_email_size)
+        || !valid_utf8(request->device, request->device_size)
+        || request->client_name_size == 0 || request->client_email_size == 0
+        || request->device_size == 0)
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (request->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    if ((request->kind == SCPEFE_SLOT_UPDATE_PERMISSIONS
+            || request->kind == SCPEFE_SLOT_REMOVE)
+            ? request->target_slot_id_size != SCPEFE_SLOT_ID_SIZE
+            : request->target_slot_id_size != 0)
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if ((request->can_edit != 0 && request->can_edit != 1)
+        || (request->can_add_passwords != 0 && request->can_add_passwords != 1)
+        || (request->can_remove_passwords != 0 && request->can_remove_passwords != 1))
+        return SCPEFE_STATUS_INVALID_ARGUMENT;
+    try {
+        const auto kind = static_cast<scpefe::container::SlotChangeKind>(
+            request->kind - SCPEFE_SLOT_CHANGE_PASSWORD);
+        scpefe::container::SlotChange change{};
+        change.kind = kind;
+        if (request->target_slot_id_size)
+            std::copy_n(request->target_slot_id, SCPEFE_SLOT_ID_SIZE,
+                change.target_id.begin());
+        change.new_password = request->new_password;
+        change.new_password_size = request->new_password_size;
+        change.permissions = static_cast<std::uint8_t>(
+            (request->can_edit ? 1u : 0u)
+            | (request->can_add_passwords ? 2u : 0u)
+            | (request->can_remove_passwords ? 4u : 0u));
+        change.name = {request->name, request->name_size};
+        change.email = {request->email, request->email_size};
+        auto &container = handle->owner->implementation.make_container();
+        const auto result = container.prepare_slot_change(request->operation_id,
+            change, request->actor_password, request->actor_password_size,
+            {request->client_name, request->client_name_size},
+            {request->client_email, request->client_email_size},
+            {request->device, request->device_size}, request->timestamp_ms);
+        const auto *prepared = container.candidate();
+        *candidate = scpefe_candidate_info_v1{};
+        candidate->struct_size = sizeof(*candidate);
+        candidate->abi_version = SCPEFE_ABI_VERSION;
+        candidate->operation_id = prepared->operation_id;
+        std::copy(prepared->source_head.begin(), prepared->source_head.end(),
+            candidate->source_head);
+        candidate->byte_size = prepared->bytes.size();
+        candidate->effect_mask = effect_mask(result);
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const scpefe::format::RevisionFailure &failure) {
+        return map_error(failure.error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_container_slots(const scpefe_container *handle,
+    scpefe_owned_slots **slots)
+{
+    if (!slots) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *slots = nullptr;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    const auto &container = handle->owner->implementation.make_container();
+    if (!container.can_read_clear()) return SCPEFE_STATUS_LOCKED;
+    const auto *data = container.read_unlocked();
+    if (!data || !data->revision_graph) return SCPEFE_STATUS_UNSUPPORTED_FORMAT;
+    try {
+        auto result = std::make_unique<scpefe_owned_slots>();
+        const auto &all = data->revision_graph->slots();
+        if ((data->permissions & 4u) && !data->must_be_changed)
+            result->values = all;
+        else {
+            const auto own = std::find_if(all.begin(), all.end(),
+                [&](const auto &slot) { return slot.id == data->slot_id; });
+            if (own == all.end()) return SCPEFE_STATUS_MALFORMED_CONTAINER;
+            result->values.push_back(*own);
+        }
+        *slots = result.release();
+        return SCPEFE_STATUS_OK;
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+}
+
+scpefe_status scpefe_owned_slots_count(const scpefe_owned_slots *slots,
+    size_t *count)
+{
+    if (!slots || !count) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    *count = slots->values.size();
+    return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_owned_slots_view(const scpefe_owned_slots *slots,
+    size_t index, scpefe_owned_slot_view_v1 *view)
+{
+    if (!slots || !view || view->struct_size < sizeof(*view)
+        || index >= slots->values.size()) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    const auto &slot = slots->values[index];
+    *view = scpefe_owned_slot_view_v1{};
+    view->struct_size = sizeof(*view);
+    std::copy(slot.id.begin(), slot.id.end(), view->slot_id);
+    std::copy(slot.management_id.begin(), slot.management_id.end(), view->management_id);
+    view->can_edit = (slot.permissions & 1u) != 0;
+    view->can_add_passwords = (slot.permissions & 2u) != 0;
+    view->can_remove_passwords = (slot.permissions & 4u) != 0;
+    view->must_change_password = slot.must_be_changed;
+    view->role = slot.role;
+    view->name = slot.name.data();
+    view->name_size = slot.name.size();
+    view->email = slot.email.data();
+    view->email_size = slot.email.size();
+    return SCPEFE_STATUS_OK;
+}
+
+void scpefe_owned_slots_destroy(scpefe_owned_slots *slots) { delete slots; }

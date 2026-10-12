@@ -1,5 +1,6 @@
 #include "container/container.hpp"
 #include "container/container_error.hpp"
+#include "container/revised_v3_container.hpp"
 #include "document/manual_save.hpp"
 #include "document/provisional_save.hpp"
 #include "format/revision_limits.hpp"
@@ -334,6 +335,87 @@ TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regula
     }
 }
 
+TransitionResult Container::prepare_slot_change(std::uint64_t operation_id,
+    const SlotChange &change, const std::uint8_t *actor_password,
+    std::size_t actor_password_size, std::string_view client_name,
+    std::string_view client_email, std::string_view device,
+    std::uint64_t timestamp_ms)
+{
+    if (transitioning_ || candidate_ || !revised_v3_ || !unlocked_
+        || state_.access != Access::open || state_.screen != Screen::unlocked
+        || state_.publication != PublicationPhase::idle
+        || state_.attention != Attention::none || state_.target_access)
+        throw StateError::invalid_transition;
+    if (operation_id <= state_.last_operation_id)
+        throw StateError::stale_operation;
+    if (!actor_password || actor_password_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    const auto authenticated = persistence_.unlock_revised_envelope(
+        committed_bytes_.data(), committed_bytes_.size(), actor_password,
+        actor_password_size, format::RevisionLimits::defaults());
+    if (authenticated.slot_id != unlocked_->slot_id)
+        throw ContainerFailure{ContainerError::authentication_failed};
+    const auto &graph = *unlocked_->revision_graph;
+    if (graph.records().back().provisional)
+        throw StateError::invalid_transition;
+    PasswordSlots slots(graph, *unlocked_, password_, encryption_,
+        committed_bytes_.data(), committed_bytes_.size());
+    const auto mutation = slots.apply(change);
+    if (mutation.remove_active && content_clear_) {
+        const auto committed_content = graph.reconstruct(graph.content_head());
+        if (!committed_content || *content_clear_ != *committed_content)
+            throw StateError::invalid_transition;
+    }
+    const auto actor = std::find_if(graph.slots().begin(), graph.slots().end(),
+        [&](const auto &slot) { return slot.id == unlocked_->slot_id; });
+    if (actor == graph.slots().end())
+        throw ContainerFailure{ContainerError::malformed_container};
+    auto event_actor = *actor;
+    if (change.kind == SlotChangeKind::claim_invitation
+        || change.kind == SlotChangeKind::reconcile_identity) {
+        event_actor.name = change.name;
+        event_actor.email = change.email;
+    }
+    ContainerCandidate proposed;
+    proposed.operation_id = operation_id;
+    proposed.source_head = graph.head();
+    proposed.submitted_generation = content_generation_;
+    proposed.removes_active_slot = mutation.remove_active;
+    proposed.slot_change = true;
+    const auto encoded = graph.append_slot_event(mutation.slots, event_actor,
+        mutation.affected_id, mutation.event_type, mutation.event_detail,
+        client_name, client_email, device, timestamp_ms);
+    const auto &wrapper_slot = mutation.wrapper_mode == 3
+        ? *actor : mutation.slots[mutation.wrapper_index];
+    proposed.bytes = RevisedV3Container::replace_slots(
+        committed_bytes_.data(), committed_bytes_.size(), actor_password,
+        actor_password_size, encoded.data(), encoded.size(),
+        mutation.wrapper_mode, mutation.wrapper_index, change.new_password,
+        change.new_password_size, wrapper_slot.id, wrapper_slot.permissions,
+        wrapper_slot.must_be_changed);
+    if (!mutation.remove_active) {
+        const bool changed_password = mutation.wrapper_mode == 2;
+        const auto *candidate_password = changed_password
+            ? change.new_password : actor_password;
+        const auto candidate_password_size = changed_password
+            ? change.new_password_size : actor_password_size;
+        proposed.adopted_data = persistence_.unlock_revised_envelope(
+            proposed.bytes.data(), proposed.bytes.size(), candidate_password,
+            candidate_password_size, format::RevisionLimits::defaults());
+        if (proposed.adopted_data.document_id != unlocked_->document_id
+            || proposed.adopted_data.slot_id != unlocked_->slot_id)
+            throw ContainerFailure{ContainerError::crypto_error};
+    }
+    candidate_.emplace(std::move(proposed));
+    try {
+        return install_transition(BeginPublication{operation_id,
+            PublicationKind::slot_change});
+    } catch (...) {
+        candidate_.reset();
+        throw;
+    }
+}
+
 TransitionResult Container::acknowledge_save(std::uint64_t operation_id,
     PublicationOutcome outcome)
 {
@@ -374,11 +456,31 @@ TransitionResult Container::install_transition(const StateTransition &attempt)
     const bool rejected = (ack && ack->outcome == PublicationOutcome::definite_failure)
         || (resolution && !resolution->published);
     if (candidate_ && verified) {
+        const bool remove_active = candidate_->removes_active_slot;
+        const bool slot_change = candidate_->slot_change;
         committed_bytes_.swap(candidate_->bytes);
-        unlocked_ = std::move(candidate_->adopted_data);
+        if (remove_active) unlocked_.reset();
+        else unlocked_ = std::move(candidate_->adopted_data);
         if (candidate_->discard && content_generation_ == candidate_->submitted_generation)
             content_clear_ = std::move(candidate_->discarded_content);
         candidate_.reset();
+        if (remove_active) {
+            auto locked = state_manager_.apply(state_, Lock{});
+            state_ = locked.state;
+            result.state = state_;
+            result.effects.insert(result.effects.end(), locked.effects.begin(),
+                locked.effects.end());
+        } else if (slot_change) {
+            const Permissions rights{(unlocked_->permissions & 1u) != 0,
+                (unlocked_->permissions & 2u) != 0,
+                (unlocked_->permissions & 4u) != 0};
+            auto refreshed = state_manager_.apply(state_,
+                AuthenticatedSlotPermissions{rights, !unlocked_->must_be_changed});
+            state_ = refreshed.state;
+            result.state = state_;
+            result.effects.insert(result.effects.end(), refreshed.effects.begin(),
+                refreshed.effects.end());
+        }
     } else if (candidate_ && rejected) {
         candidate_.reset();
     }

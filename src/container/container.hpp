@@ -3,6 +3,7 @@
 #include "container/container_state.hpp"
 #include "container/container_state_observer.hpp"
 #include "container/unlocked_container_data.hpp"
+#include "container/password_slots.hpp"
 #include "core/password_service.hpp"
 #include "core/encryption_service.hpp"
 #include "core/persistence_service.hpp"
@@ -24,6 +25,8 @@ struct ContainerCandidate {
     UnlockedContainerData adopted_data;
     std::uint64_t submitted_generation{};
     bool discard{};
+    bool removes_active_slot{};
+    bool slot_change{};
     std::string discarded_content;
 };
 
@@ -73,6 +76,12 @@ public:
         bool discard, const std::uint8_t *password, std::size_t password_size,
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device_name, std::uint64_t timestamp_ms);
+    /* Prepares one authenticated slot event and exact encrypted candidate. */
+    TransitionResult prepare_slot_change(std::uint64_t operation_id,
+        const SlotChange &change, const std::uint8_t *actor_password,
+        std::size_t actor_password_size, std::string_view client_name,
+        std::string_view client_email, std::string_view device,
+        std::uint64_t timestamp_ms);
     /* Returns the unresolved proposal for immediate caller copies. */
     const ContainerCandidate *candidate() const { return candidate_ ? &*candidate_ : nullptr; }
     /* Applies a host result for the matching proposal; only verified success adopts it. */
