@@ -161,6 +161,31 @@ def main():
     compact_payload = payload([prune_base, checkpoint, event, compact], compact[1], change[1])
     rows.append({**write("valid/pruned-checkpoint", cbor(compact_payload)), "expect": "accept; baseline text unavailable, reconstruct alpha\\nbeta\\n from checkpoint; IDs unchanged"})
 
+    remote_text = b"alpha\nremote\n"
+    remote_delta = [0, len(remote_text), [[0, 0, 6], [1, b"remote\n"]]]
+    remote_meta = metadata(1, remote_text, base[1], base[1], remote_delta)
+    remote_id = hash32("id", cbor(remote_meta))
+    merged_text = b"alpha\nbeta\nremote\n"
+    merge_delta = [0, len(merged_text), [[0, 0, len(new_text)], [1, b"remote\n"]]]
+    merge_meta = metadata(1, merged_text, change[1], change[1], merge_delta)
+    merge_meta[4] = [remote_id]
+    merge = record(merge_meta, 2, merge_delta)
+    imported = record(remote_meta, 5, resolved_by=merge[1], foreign=True)
+    foreign_payload = payload([base, change, imported, merge], merge[1], merge[1])
+    rows.append({**write("valid/foreign-merge", cbor(foreign_payload)), "expect": "accept; foreign metadata only with original ID and resolved-by merge; canonical merge text reconstructs"})
+
+    orphan_merge_meta = {**merge_meta, 4: []}
+    orphan_merge = record(orphan_merge_meta, 2, merge_delta)
+    orphan_import = record(remote_meta, 5, resolved_by=orphan_merge[1], foreign=True)
+    rows.append({**write("invalid/orphan-foreign", cbor(payload(
+        [base, change, orphan_import, orphan_merge], orphan_merge[1], orphan_merge[1]))),
+        "expect": "reject imported metadata not linked to merge source"})
+    wrong_compact = record(metadata(2, new_text, event[1],
+        event=("compaction", {2: change[1], 3: 1})), 0)
+    rows.append({**write("invalid/compaction-count", cbor(payload(
+        [prune_base, checkpoint, event, wrong_compact], wrong_compact[1], change[1]))),
+        "expect": "reject compaction retained-delta count mismatch"})
+
     nonminimal = cbor(base_payload).replace(b"\xa8\x01\x01", b"\xa8\x18\x01\x01", 1)
     rows.append({**write("invalid/nonminimal-key", nonminimal), "expect": "reject noncanonical CBOR"})
     duplicate = cbor(base_payload)

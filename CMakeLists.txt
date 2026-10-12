@@ -13,10 +13,13 @@ option(SCPEFE_BUILD_NODE_ADDON "Build the Electron Node-API bridge" OFF)
 
 set(SCPEFE_PORTABLE_FORMAT_SOURCES
     src/abi/revision_abi.cpp
+    src/abi/history_abi.cpp
+    src/format/blake2b.cpp
     src/format/cbor_reader.cpp
     src/format/cbor_writer.cpp
     src/format/diagnostic_json_writer.cpp
     src/format/revision_limits.cpp
+    src/format/revision_graph.cpp
     src/format/snapshot_revision.cpp
     src/format/text_validation.cpp
 )
@@ -217,6 +220,9 @@ if(BUILD_TESTING)
         tests/snapshot_conformance_test.c
     )
     target_link_libraries(${SCPEFE_CONFORMANCE_TARGET} PRIVATE SCPEFE::scpefe)
+    add_executable(scpefe_revision_graph_conformance
+        tests/revision_graph_conformance_test.c)
+    target_link_libraries(scpefe_revision_graph_conformance PRIVATE SCPEFE::scpefe)
 
     if(EMSCRIPTEN)
         target_link_options(${SCPEFE_CONFORMANCE_TARGET} PRIVATE
@@ -224,10 +230,16 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors/draft-v1@/tests/vectors/draft-v1"
             "-sNO_DISABLE_EXCEPTION_CATCHING"
         )
+        target_link_options(scpefe_revision_graph_conformance PRIVATE
+            "--embed-file"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors/draft-v3@/tests/vectors/draft-v3"
+            "-sNO_DISABLE_EXCEPTION_CATCHING")
         add_test(
             NAME scpefe.wasm-format-conformance
             COMMAND ${SCPEFE_CONFORMANCE_TARGET} "${SCPEFE_CONFORMANCE_ROOT}"
         )
+        add_test(NAME scpefe.wasm-revision-graph-conformance
+            COMMAND scpefe_revision_graph_conformance "${SCPEFE_CONFORMANCE_ROOT}")
     else()
         add_executable(scpefe_context_test tests/context_test.c)
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
@@ -276,6 +288,7 @@ if(BUILD_TESTING)
 
         set(SCPEFE_REVISION_OWNERSHIP_SOURCES ${SCPEFE_PORTABLE_FORMAT_SOURCES})
         list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/revision_abi.cpp)
+        list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/history_abi.cpp)
         add_executable(scpefe_revision_ownership_test
             tests/revision_ownership_test.cpp
             ${SCPEFE_REVISION_OWNERSHIP_SOURCES})
@@ -354,6 +367,8 @@ if(BUILD_TESTING)
             NAME scpefe.native-format-conformance
             COMMAND ${SCPEFE_CONFORMANCE_TARGET} "${SCPEFE_CONFORMANCE_ROOT}"
         )
+        add_test(NAME scpefe.native-revision-graph-conformance
+            COMMAND scpefe_revision_graph_conformance "${SCPEFE_CONFORMANCE_ROOT}")
         add_test(
             NAME scpefe.revision-round-trip
             COMMAND scpefe_revision_test

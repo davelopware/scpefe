@@ -46,7 +46,7 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 | [`Context`](../src/core/context.hpp) | Owns one `HostServices` adapter, one independently constructed service registry, and at most one active internal container. The container is destroyed before its injected services. The public context ABI currently serves health only. |
 | [`HostServices`](../src/core/host_services.hpp) | Wraps the host-provided instance pointer and monotonic-clock callback, returning failure if the callback fails. |
 | [`ServiceFactory`](../src/core/service_factory.hpp) and [`ServiceRegistry`](../src/core/service_registry.hpp) | Compose and own per-context password, encryption, persistence, history, and state-manager services; tests can inject deterministic replacements. |
-| [`Container`](../src/container/container.hpp) and [`ContainerState`](../src/container/container_state.hpp) | Install typed access, permission, edit, attention, and publication transitions; return required host effects and notify observers only after installation. Internal document entry points use injected password policy and encryption for creation, persistence for prerefactor envelope recognition and authentication, and history for prerefactor compaction. The new lifecycle ABI is still pending. |
+| [`Container`](../src/container/container.hpp) and [`ContainerState`](../src/container/container_state.hpp) | Install typed access, permission, edit, attention, and publication transitions; return required host effects and notify observers only after installation. Internal document entry points use injected password policy and encryption for creation, persistence for prerefactor envelope recognition and authentication, and history for prerefactor compaction. The stateful lifecycle ABI keeps one active handle per context. |
 
 [`HealthInfo`](../src/core/health_info.hpp) is the internal result value converted into the C health structure. The matching C ABI code is [`context_abi.cpp`](../src/abi/context_abi.cpp).
 
@@ -55,12 +55,15 @@ Arrows show calls or dependencies, not ownership. `SnapshotRevision` works with 
 | Class | Responsibility |
 | --- | --- |
 | [`SnapshotRevision`](../src/format/snapshot_revision.hpp) | Owns one validated version-1 snapshot revision. It validates semantic fields, encodes deterministic CBOR, decodes CBOR, and renders diagnostic JSON. This is a *revision-record* version, separate from the container-envelope version. |
+| [`RevisionGraph`](../src/format/revision_graph.hpp) | Owns one validated, decrypted revised-v3 payload and its canonical content line. It verifies immutable IDs, body and content hashes, predecessor and merge links, checkpoint/pruning state, and reconstructs available text. The portable [`blake2b_256`](../src/format/blake2b.hpp) implementation keeps identity verification available in WebAssembly. |
 | [`CborReader`](../src/format/cbor_reader.hpp) | Parses the strict deterministic-CBOR subset and enforces bounds, canonical encoding, and nesting limits. |
 | [`CborWriter`](../src/format/cbor_writer.hpp) | Writes deterministic CBOR primitives used to serialize a revision. |
 | [`RevisionLimits`](../src/format/revision_limits.hpp) | Carries maximum input, text, byte-string, collection, nesting, and parent counts for revision processing. |
 | [`DiagnosticJsonWriter`](../src/format/diagnostic_json_writer.hpp) | Escapes strings and formats bytes for the developer-facing JSON view. Content is included only when requested. |
 
 [`SnapshotRevisionData` and `RevisionGraphNodeData`](../src/format/snapshot_revision_data.hpp) hold the semantic revision fields and ancestor graph nodes. A revision contains the current snapshot text, content hash, author and device attribution, parent IDs, and optional provisional or event fields. The ancestor graph stores IDs and parent links used for related-head checks; it does not store every ancestor's text. [`text_validation.hpp`](../src/format/text_validation.hpp) checks UTF-8 and canonical document text. [`RevisionFailure`](../src/format/revision_error.hpp) carries errors to the ABI layer, where they become C status codes. The matching bridge is [`revision_abi.cpp`](../src/abi/revision_abi.cpp).
+
+The revised-v3 [`history_abi.cpp`](../src/abi/history_abi.cpp) accepts an already authenticated decrypted payload and returns owned graph, metadata-page, body, reconstruction, and comparison results. It reports unavailable pruned or foreign bodies separately from unknown IDs. The current stateful container still opens the transitional snapshot envelope; a later persistence checkpoint connects revised-v3 payload authentication and publication to that handle.
 
 ### Encrypted containers (`src/container/`)
 

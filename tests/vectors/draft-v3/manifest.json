@@ -24,6 +24,24 @@
     "expect": "accept; baseline text unavailable, reconstruct alpha\\nbeta\\n from checkpoint; IDs unchanged"
   },
   {
+    "path": "valid/foreign-merge.hex",
+    "bytes": 1398,
+    "sha256": "6640226832f26faa2f874134d26e640cf5362aae29774e4a2bdd1b57c8d4e486",
+    "expect": "accept; foreign metadata only with original ID and resolved-by merge; canonical merge text reconstructs"
+  },
+  {
+    "path": "invalid/orphan-foreign.hex",
+    "bytes": 1364,
+    "sha256": "87e644586f545f2685c69d963427c0b14d8fdf99012a3e4d176c8076c6d81736",
+    "expect": "reject imported metadata not linked to merge source"
+  },
+  {
+    "path": "invalid/compaction-count.hex",
+    "bytes": 1229,
+    "sha256": "c27e793231827bea5300b34631a9573bcbe68f2592e08c6317d75a8debcd28de",
+    "expect": "reject compaction retained-delta count mismatch"
+  },
+  {
     "path": "invalid/nonminimal-key.hex",
     "bytes": 455,
     "sha256": "73cd02115f906722cf3b306bec581577dd77742be7b351f940c4a4f783d8df5e",

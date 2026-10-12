@@ -36,7 +36,9 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_WEAK_PASSWORD = 12,
     SCPEFE_STATUS_PASSWORD_ALREADY_IN_USE = 13,
     SCPEFE_STATUS_INVALID_STATE = 14,
-    SCPEFE_STATUS_LOCKED = 15
+    SCPEFE_STATUS_LOCKED = 15,
+    SCPEFE_STATUS_BODY_UNAVAILABLE = 16,
+    SCPEFE_STATUS_REVISION_NOT_FOUND = 17
 } scpefe_status;
 
 /* Stable reasons returned when assessing a newly proposed password. */
@@ -92,6 +94,12 @@ typedef struct scpefe_container scpefe_container;
 typedef struct scpefe_owned_snapshot scpefe_owned_snapshot;
 /* Opaque owner of one decoded snapshot revision. */
 typedef struct scpefe_decoded_snapshot_revision scpefe_decoded_snapshot_revision;
+/* Opaque owner of one validated decrypted v3 revision graph. */
+typedef struct scpefe_revision_graph scpefe_revision_graph;
+/* Opaque owner of a page of immutable revision metadata. */
+typedef struct scpefe_revision_page scpefe_revision_page;
+/* Opaque owner of a copied revision body or reconstructed text. */
+typedef struct scpefe_revision_result scpefe_revision_result;
 /* Opaque owner of one authenticated, unlocked container. */
 typedef struct scpefe_unlocked_container scpefe_unlocked_container;
 
@@ -380,6 +388,56 @@ typedef struct scpefe_revision_limits_v1 {
     size_t max_parent_count;
 } scpefe_revision_limits_v1;
 
+/* Borrowed metadata spans remain valid until their owning page is destroyed. */
+typedef struct scpefe_revision_metadata_v1 {
+    uint32_t struct_size;
+    uint8_t id[SCPEFE_REVISION_ID_SIZE];
+    uint8_t previous_head[SCPEFE_REVISION_ID_SIZE];
+    uint8_t content_parent[SCPEFE_REVISION_ID_SIZE];
+    uint8_t resolved_by[SCPEFE_REVISION_ID_SIZE];
+    const uint8_t *merge_source_ids;
+    size_t merge_source_count;
+    uint64_t timestamp_ms;
+    uint8_t actor_slot_id[SCPEFE_SLOT_ID_SIZE];
+    const char *actor_name;
+    size_t actor_name_size;
+    const char *actor_email;
+    size_t actor_email_size;
+    const char *client_name;
+    size_t client_name_size;
+    const char *client_email;
+    size_t client_email_size;
+    const char *device;
+    size_t device_size;
+    const char *event_type;
+    size_t event_type_size;
+    const uint8_t *immutable_cbor;
+    size_t immutable_cbor_size;
+    const uint8_t *event_details_cbor;
+    size_t event_details_cbor_size;
+    uint8_t content_hash[SCPEFE_CONTENT_HASH_SIZE];
+    uint8_t original_body_digest[SCPEFE_CONTENT_HASH_SIZE];
+    uint8_t original_kind;
+    uint8_t storage_kind;
+    int has_previous_head;
+    int has_content_parent;
+    int has_original_body_digest;
+    int has_resolved_by;
+    int foreign;
+    int provisional;
+    int body_available;
+    int text_available;
+} scpefe_revision_metadata_v1;
+
+/* Borrowed bytes remain valid until their owning result is destroyed. */
+typedef struct scpefe_revision_result_view_v1 {
+    uint32_t struct_size;
+    const uint8_t *body_cbor;
+    size_t body_cbor_size;
+    const char *text;
+    size_t text_size;
+} scpefe_revision_result_view_v1;
+
 /* Borrowed view of one authenticated ancestor and its direct parent IDs. */
 typedef struct scpefe_revision_graph_node_v1 {
     const uint8_t *revision_id;
@@ -480,6 +538,54 @@ SCPEFE_API scpefe_status scpefe_container_copy_bytes(
 SCPEFE_API scpefe_status scpefe_revision_limits_default(
     scpefe_revision_limits_v1 *limits
 );
+
+/* Validates a decrypted and already authenticated v3 payload into an owned graph. */
+SCPEFE_API scpefe_status scpefe_revision_graph_decode(
+    const uint8_t *payload, size_t payload_size,
+    const scpefe_revision_limits_v1 *limits, scpefe_revision_graph **graph);
+/* Copies deterministic payload bytes from a validated graph. */
+SCPEFE_API scpefe_status scpefe_revision_graph_encode(
+    const scpefe_revision_graph *graph, uint8_t *output,
+    size_t output_capacity, size_t *output_size);
+/* Releases an owned revision graph. */
+SCPEFE_API void scpefe_revision_graph_destroy(scpefe_revision_graph *graph);
+/* Copies the canonical head IDs, each into a 32-byte caller buffer. */
+SCPEFE_API scpefe_status scpefe_revision_graph_heads(
+    const scpefe_revision_graph *graph, uint8_t *head, uint8_t *content_head);
+/* Creates an independent newest-first page; offset and count are record counts. */
+SCPEFE_API scpefe_status scpefe_revision_graph_list(
+    const scpefe_revision_graph *graph, size_t offset, size_t count,
+    scpefe_revision_page **page);
+/* Reports the number of records in an owned page. */
+SCPEFE_API scpefe_status scpefe_revision_page_count(
+    const scpefe_revision_page *page, size_t *count);
+/* Borrows copied metadata from one owned page entry. */
+SCPEFE_API scpefe_status scpefe_revision_page_metadata(
+    const scpefe_revision_page *page, size_t index,
+    scpefe_revision_metadata_v1 *metadata);
+/* Releases an owned metadata page. */
+SCPEFE_API void scpefe_revision_page_destroy(scpefe_revision_page *page);
+/* Copies an available original body; pruned, foreign, and event bodies are unavailable. */
+SCPEFE_API scpefe_status scpefe_revision_graph_body(
+    const scpefe_revision_graph *graph, const uint8_t *revision_id,
+    scpefe_revision_result **result);
+/* Reconstructs available canonical text, including text at an event head. */
+SCPEFE_API scpefe_status scpefe_revision_graph_reconstruct(
+    const scpefe_revision_graph *graph, const uint8_t *revision_id,
+    scpefe_revision_result **result);
+/* Computes a bounded readable comparison of two available canonical texts. */
+SCPEFE_API scpefe_status scpefe_revision_graph_compare(
+    const scpefe_revision_graph *graph, const uint8_t *before_id,
+    const uint8_t *after_id, scpefe_revision_result **result);
+/* Borrows bytes from an independently owned result. */
+SCPEFE_API scpefe_status scpefe_revision_result_view(
+    const scpefe_revision_result *result, scpefe_revision_result_view_v1 *view);
+/* Releases a copied body, reconstructed text, or comparison. */
+SCPEFE_API void scpefe_revision_result_destroy(scpefe_revision_result *result);
+/* Writes redacted JSON by default; content requires an explicit nonzero flag. */
+SCPEFE_API scpefe_status scpefe_revision_graph_diagnostic_json(
+    const scpefe_revision_graph *graph, int include_content,
+    char *output, size_t output_capacity, size_t *output_size);
 
 /* Encodes one snapshot revision using deterministic CBOR. */
 SCPEFE_API scpefe_status scpefe_snapshot_revision_encode(

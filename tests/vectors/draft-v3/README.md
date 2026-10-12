@@ -12,8 +12,9 @@ The fixed document ID is `101112131415161718191a1b1c1d1e1f` and the owner
 slot ID is `000102030405060708090a0b0c0d0e0f`. The generator uses Python stdlib
 and the system Libsodium; `python3 generate.py` regenerates all rows. The
 `manifest.json` lists represented byte lengths, SHA-256 fingerprints, and
-expected results. No v3 reader exists yet, so these are specification vectors,
-not an executable product conformance claim.
+expected results. The portable payload conformance target executes the payload
+rows; encrypted envelope vectors remain specification fixtures for the v3
+persistence reader.
 
 | Vector | Expected check |
 | --- | --- |
@@ -21,6 +22,7 @@ not an executable product conformance claim.
 | `valid/baseline-container.hex` | Authenticate envelope and decrypt to the baseline payload. |
 | `valid/delta-event.hex` | Apply byte-copy/insert delta; event advances head without changing content head. |
 | `valid/pruned-checkpoint.hex` | Baseline body unavailable; original IDs unchanged; checkpoint at existing delta ID reconstructs `alpha\nbeta\n`. |
+| `valid/foreign-merge.hex` | Imported foreign body is unavailable; its original ID and attribution survive; merge delta reconstructs from the canonical local parent. |
 | `invalid/nonminimal-key.hex` | Reject longer-than-necessary CBOR map-key encoding. |
 | `invalid/duplicate-key.hex` | Reject duplicate top-level key. |
 | `invalid/timestamp-bound.hex` | Reject timestamp `2^63`. |
@@ -32,6 +34,8 @@ not an executable product conformance claim.
 | `invalid/checkpoint-content-hash.hex` | Reject a replacement checkpoint with the wrong text. |
 | `invalid/incorrect-revision-id.hex` | Reject revision ID that differs from the immutable preimage hash. |
 | `invalid/pruned-without-anchor.hex` | Reject a head with no available reconstruction base. |
+| `invalid/orphan-foreign.hex` | Reject imported metadata omitted from the resolving merge's source links. |
+| `invalid/compaction-count.hex` | Reject a compaction event whose retained-delta count disagrees with the canonical line. |
 | `invalid/unknown-required-feature.hex` | Reject unknown mandatory feature 999. |
 | `invalid/envelope-slot-count-zero.hex` | Reject slot count 0 before KDF. |
 | `invalid/envelope-payload-length-overflow.hex` | Reject impossible total length before KDF. |
@@ -39,6 +43,8 @@ not an executable product conformance claim.
 
 Payload rows begin at `container-v3`, excluding the preceding 16-byte document
 ID. Structural envelope errors are intentionally tested without decrypting.
-A reader should verify all valid records' IDs, original body digests, content
+The portable revision graph reader now checks decrypted payload rows; encrypted
+envelope authentication belongs to the subsequent persistence work. A reader
+should verify all valid records' IDs, original body digests, content
 hashes, graph links, and reconstruction, and should reject every invalid row
 for the stated reason after the appropriate structural/authentication phase.

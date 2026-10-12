@@ -67,6 +67,46 @@ std::string CborReader::text()
 
 bool CborReader::finished() const { return position_ == size_; }
 
+std::uint8_t CborReader::peek_major() const
+{
+    if (position_ == size_) fail(RevisionError::malformed_cbor);
+    return data_[position_] >> 5u;
+}
+
+void CborReader::skip_extension(std::size_t depth)
+{
+    if (depth > limits_.max_nesting_depth()) fail(RevisionError::limit_exceeded);
+    switch (peek_major()) {
+    case 0: (void)head(0); return;
+    case 1: (void)head(1); return;
+    case 2: (void)bytes(); return;
+    case 3: (void)text(); return;
+    case 4: {
+        const auto count = array(depth);
+        for (std::size_t i = 0; i < count; ++i) skip_extension(depth + 1);
+        return;
+    }
+    case 5: {
+        const auto count = map(depth);
+        std::uint64_t prior = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto key = unsigned_integer();
+            if (i && key <= prior) fail(RevisionError::malformed_cbor);
+            prior = key;
+            skip_extension(depth + 1);
+        }
+        return;
+    }
+    case 7:
+        if (data_[position_] == 0xf4u || data_[position_] == 0xf5u) {
+            (void)boolean(); return;
+        }
+        if (data_[position_] == 0xf6u) { ++position_; return; }
+        [[fallthrough]];
+    default: fail(RevisionError::malformed_cbor);
+    }
+}
+
 [[noreturn]] void CborReader::fail(RevisionError error)
 {
     throw RevisionFailure{error};
