@@ -126,15 +126,18 @@ if(SCPEFE_BUILD_NODE_ADDON)
                 native-document-service-lifecycle native-lease-workflows
                 native-divergence-abi native-compaction-flow native-activity-flow
                 native-v3-inspection native-merge-candidate)
+            # Node's Windows ESM test runner treats a raw C: test path as a URL
+            # scheme. Resolve the relative entry point from the source root.
             add_test(
                 NAME scpefe.${lifecycle_test}
                 COMMAND ${NODE_EXECUTABLE}
-                    --import ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/scripts/register-frontend-typescript.mjs
+                    --import ./apps/windows/scripts/register-frontend-typescript.mjs
                     --test --test-concurrency=1
-                    ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/${lifecycle_test}.test.ts
+                    ./apps/windows/test/${lifecycle_test}.test.ts
             )
             set_tests_properties(scpefe.${lifecycle_test} PROPERTIES
-                ENVIRONMENT "SCPEFE_NATIVE_ADDON_PATH=$<TARGET_FILE:scpefe_electron_native>")
+                ENVIRONMENT "SCPEFE_NATIVE_ADDON_PATH=$<TARGET_FILE:scpefe_electron_native>"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         endforeach()
     endif()
 endif()

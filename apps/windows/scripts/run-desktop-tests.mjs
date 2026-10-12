@@ -232,7 +232,13 @@ export async function runDesktopTestGate({
     nodeCommand,
     ["--import", pathToFileURL(path.join(DEFAULT_WINDOWS_ROOT,
       "scripts/register-frontend-typescript.mjs")).href,
-    "--test", "--test-concurrency=1", ...testFiles],
+    "--test", "--test-concurrency=1", ...testFiles.map((file) => {
+      const relative = path.relative(windowsRoot, file).split(path.sep).join("/");
+      if (path.isAbsolute(relative)) {
+        throw new Error("Desktop tests must be on the same volume as their working directory.");
+      }
+      return relative.startsWith(".") ? relative : `./${relative}`;
+    })],
     windowsRoot,
   );
 }
