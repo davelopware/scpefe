@@ -39,7 +39,8 @@ typedef enum scpefe_status {
     SCPEFE_STATUS_LOCKED = 15,
     SCPEFE_STATUS_BODY_UNAVAILABLE = 16,
     SCPEFE_STATUS_REVISION_NOT_FOUND = 17,
-    SCPEFE_STATUS_STALE_OPERATION = 18
+    SCPEFE_STATUS_STALE_OPERATION = 18,
+    SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED = 19
 } scpefe_status;
 
 /* Stable reasons returned when assessing a newly proposed password. */

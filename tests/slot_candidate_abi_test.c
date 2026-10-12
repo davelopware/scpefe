@@ -153,6 +153,21 @@ int main(void)
     CHECK(scpefe_owned_slots_view(retained, 1, &view) == SCPEFE_STATUS_OK);
     CHECK(view.name_size == 5 && memcmp(view.name, "Guest", 5) == 0);
     CHECK(unlock(container, temporary, sizeof(temporary) - 1) == 0);
+    {
+        scpefe_container_status_v1 status = {sizeof(status), SCPEFE_ABI_VERSION};
+        scpefe_owned_snapshot *content = NULL;
+        scpefe_revision_graph *history = NULL;
+        CHECK(scpefe_container_status(container, &status) == SCPEFE_STATUS_OK);
+        CHECK(!status.is_locked && status.must_change_password);
+        CHECK(scpefe_container_read(container, &content)
+            == SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED && content == NULL);
+        CHECK(scpefe_container_revision_graph(container, &history)
+            == SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED && history == NULL);
+        CHECK(scpefe_container_slots(container, &slots)
+            == SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED && slots == NULL);
+        CHECK(scpefe_container_confirm_edit_lease(container)
+            == SCPEFE_STATUS_INVALID_STATE);
+    }
 
     request_defaults(&change, 3, SCPEFE_SLOT_CLAIM_INVITATION,
         temporary, sizeof(temporary) - 1);
@@ -163,6 +178,11 @@ int main(void)
     change.email = "guest@example.org";
     change.email_size = 17;
     CHECK(publish(container, &change) == 0);
+    {
+        scpefe_owned_snapshot *content = NULL;
+        CHECK(scpefe_container_read(container, &content) == SCPEFE_STATUS_OK);
+        scpefe_owned_snapshot_destroy(content);
+    }
     CHECK(scpefe_container_slots(container, &slots) == SCPEFE_STATUS_OK);
     CHECK(scpefe_owned_slots_count(slots, &count) == SCPEFE_STATUS_OK && count == 1);
     CHECK(scpefe_owned_slots_view(slots, 0, &view) == SCPEFE_STATUS_OK);

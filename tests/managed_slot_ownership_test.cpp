@@ -1,171 +1,115 @@
-#include "container/unlocked_container_data.hpp"
+#include "scpefe/scpefe.h"
 
-#include <algorithm>
 #include <array>
-#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <type_traits>
-#include <utility>
 
-using scpefe::container::ManagedSlotData;
+#define CHECK(condition) do { if (!(condition)) { \
+    std::fprintf(stderr, "owned slot snapshot failed at %d: %s\n", \
+        __LINE__, #condition); std::abort(); \
+} } while (false)
 
-#define CHECK(condition) do { \
-    if (!(condition)) { \
-        std::fprintf(stderr, "managed-slot ownership check failed at line %d: %s\n", \
-            __LINE__, #condition); \
-        std::abort(); \
-    } \
-} while (false)
-
-static_assert(!std::is_copy_constructible_v<ManagedSlotData>);
-static_assert(!std::is_copy_assignable_v<ManagedSlotData>);
-static_assert(std::is_nothrow_move_constructible_v<ManagedSlotData>);
-static_assert(std::is_nothrow_move_assignable_v<ManagedSlotData>);
-
-struct WipeWatch {
-    const void *address{};
-    std::size_t size{};
-    char expected{};
-    bool wiped{};
-};
-
-static std::array<WipeWatch, 15> watches;
-
-extern "C" void sodium_memzero(void *buffer, std::size_t size)
+static scpefe_status clock_read(void *opaque, std::uint64_t *value)
 {
-    for (std::size_t index = 0; index < watches.size(); ++index) {
-        auto &watch = watches[index];
-        if (watch.address == buffer && size >= watch.size) {
-            const auto *bytes = static_cast<const char *>(buffer);
-            CHECK(watch.size == 5 && watch.expected == 'S'
-                ? std::memcmp(bytes, "Short", watch.size) == 0
-                : std::all_of(bytes, bytes + watch.size,
-                    [&](char value) { return value == watch.expected; }));
-            watch.wiped = true;
-        }
-    }
-    std::memset(buffer, 0, size);
-}
-
-static ManagedSlotData populated(const std::string &identity, char id)
-{
-    ManagedSlotData slot;
-    slot.slot_id.fill(static_cast<unsigned char>(id));
-    slot.actual_slot_id.fill(static_cast<unsigned char>(id));
-    slot.permissions = 3;
-    slot.must_be_changed = true;
-    slot.identity_name = identity;
-    slot.identity_email = identity;
-    return slot;
-}
-
-static void expect_cleared(const ManagedSlotData &slot)
-{
-    CHECK(std::all_of(slot.slot_id.begin(), slot.slot_id.end(),
-        [](auto value) { return value == 0; }));
-    CHECK(std::all_of(slot.actual_slot_id.begin(), slot.actual_slot_id.end(),
-        [](auto value) { return value == 0; }));
-    CHECK(slot.permissions == 0 && !slot.must_be_changed);
-    CHECK(!slot.slot_id_known && !slot.permissions_known
-        && !slot.must_be_changed_known && !slot.identity_known);
-    CHECK(slot.identity_name.empty() && slot.identity_email.empty());
-}
-
-static void expect_owned(const ManagedSlotData &slot,
-    const std::string &identity, char id)
-{
-    CHECK(slot.slot_id[0] == static_cast<unsigned char>(id));
-    CHECK(slot.actual_slot_id[0] == static_cast<unsigned char>(id));
-    CHECK(slot.permissions == 3 && slot.must_be_changed);
-    CHECK(slot.slot_id_known && slot.permissions_known
-        && slot.must_be_changed_known && slot.identity_known);
-    CHECK(slot.identity_name == identity && slot.identity_email == identity);
+    *value = *static_cast<std::uint64_t *>(opaque);
+    return SCPEFE_STATUS_OK;
 }
 
 int main()
 {
-    const std::string short_identity = "Short";
-    const std::string long_identity(256, 'L');
+    constexpr char owner[] = "c347416f-e467-4c0f-b56a-554ed7ba20b0";
+    constexpr char temporary[] = "7291c2a9-9de9-441e-b0bf-f4736150aeec";
+    std::uint64_t time = 42;
+    scpefe_host_services_v1 host{sizeof(host), SCPEFE_ABI_VERSION,
+        &time, clock_read};
+    scpefe_container_create_v1 create{};
+    create.struct_size = sizeof(create);
+    create.abi_version = SCPEFE_ABI_VERSION;
+    create.document.struct_size = sizeof(create.document);
+    create.document.profile_name = "Ada";
+    create.document.profile_name_size = 3;
+    create.document.profile_email = "ada@example.test";
+    create.document.profile_email_size = 16;
+    create.document.device_name = "test";
+    create.document.device_name_size = 4;
+    create.document.content = "content\n";
+    create.document.content_size = 8;
+    create.document.timestamp_ms = 1;
+    create.document.owner_password = reinterpret_cast<const std::uint8_t *>(owner);
+    create.document.owner_password_size = sizeof(owner) - 1;
+    scpefe_context *context = nullptr;
+    scpefe_container *container = nullptr;
+    scpefe_owned_slots *before = nullptr, *after = nullptr;
+    CHECK(scpefe_context_create(&host, &context) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_container_create(context, &create, &container) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_container_slots(container, &before) == SCPEFE_STATUS_OK);
+    std::size_t count = 0;
+    CHECK(scpefe_owned_slots_count(before, &count) == SCPEFE_STATUS_OK && count == 1);
+    scpefe_owned_slot_view_v1 owner_view{};
+    owner_view.struct_size = sizeof(owner_view);
+    CHECK(scpefe_owned_slots_view(before, 0, &owner_view) == SCPEFE_STATUS_OK);
+    CHECK(owner_view.role == 0 && owner_view.can_edit
+        && owner_view.can_add_passwords && owner_view.can_remove_passwords);
+    const std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> owner_id = [&] {
+        std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> id{};
+        std::memcpy(id.data(), owner_view.slot_id, id.size());
+        return id;
+    }();
 
-    auto short_source = populated(short_identity, 'S');
-    watches[0] = {short_source.identity_name.data(), short_identity.size(), 'S'};
-    watches[1] = {short_source.identity_email.data(), short_identity.size(), 'S'};
-    auto short_owner = std::move(short_source);
-    expect_cleared(short_source);
-    expect_owned(short_owner, short_identity, 'S');
-    CHECK(watches[0].wiped && watches[1].wiped);
-    watches[0] = {};
-    watches[1] = {};
-
-    auto long_source = populated(long_identity, 'L');
-    const char *long_name = long_source.identity_name.data();
-    const char *long_email = long_source.identity_email.data();
-    auto long_owner = std::move(long_source);
-    expect_cleared(long_source);
-    expect_owned(long_owner, long_identity, 'L');
-    CHECK(long_owner.identity_name.data() == long_name);
-    CHECK(long_owner.identity_email.data() == long_email);
-
-    auto replacement = populated(short_identity, 'S');
-    watches[2] = {long_owner.identity_name.data(), long_identity.size(), 'L'};
-    watches[3] = {long_owner.identity_email.data(), long_identity.size(), 'L'};
-    watches[4] = {long_owner.slot_id.data(), long_owner.slot_id.size(), 'L'};
-    long_owner = std::move(replacement);
-    expect_cleared(replacement);
-    expect_owned(long_owner, short_identity, 'S');
-    CHECK(watches[2].wiped && watches[3].wiped && watches[4].wiped);
-    watches[2] = {};
-    watches[3] = {};
-    watches[4] = {};
-
-    auto long_replacement = populated(long_identity, 'L');
-    short_owner = std::move(long_replacement);
-    expect_cleared(long_replacement);
-    expect_owned(short_owner, long_identity, 'L');
-    short_owner = std::move(short_owner);
-    expect_owned(short_owner, long_identity, 'L');
-
-    auto long_destination = populated(std::string(256, 'D'), 'D');
-    auto long_assignment_source = populated(long_identity, 'L');
-    const char *assigned_name = long_assignment_source.identity_name.data();
-    const char *assigned_email = long_assignment_source.identity_email.data();
-    watches[11] = {long_destination.identity_name.data(), 256, 'D'};
-    watches[12] = {long_destination.identity_email.data(), 256, 'D'};
-    watches[13] = {long_destination.slot_id.data(),
-        long_destination.slot_id.size(), 'D'};
-    watches[14] = {long_destination.actual_slot_id.data(),
-        long_destination.actual_slot_id.size(), 'D'};
-    long_destination = std::move(long_assignment_source);
-    expect_cleared(long_assignment_source);
-    expect_owned(long_destination, long_identity, 'L');
-    CHECK(long_destination.identity_name.data() == assigned_name);
-    CHECK(long_destination.identity_email.data() == assigned_email);
-    CHECK(watches[11].wiped && watches[12].wiped
-        && watches[13].wiped && watches[14].wiped);
-    watches[11] = {};
-    watches[12] = {};
-    watches[13] = {};
-    watches[14] = {};
-
-    {
-        auto short_lifetime = populated(short_identity, 'S');
-        watches[5] = {short_lifetime.identity_name.data(), short_identity.size(), 'S'};
-        watches[6] = {short_lifetime.identity_email.data(), short_identity.size(), 'S'};
-        watches[7] = {short_lifetime.actual_slot_id.data(),
-            short_lifetime.actual_slot_id.size(), 'S'};
-    }
-    CHECK(watches[5].wiped && watches[6].wiped && watches[7].wiped);
-    watches[5] = {};
-    watches[6] = {};
-    watches[7] = {};
-    {
-        auto long_lifetime = populated(long_identity, 'L');
-        watches[8] = {long_lifetime.identity_name.data(), long_identity.size(), 'L'};
-        watches[9] = {long_lifetime.identity_email.data(), long_identity.size(), 'L'};
-        watches[10] = {long_lifetime.slot_id.data(), long_lifetime.slot_id.size(), 'L'};
-    }
-    CHECK(watches[8].wiped && watches[9].wiped && watches[10].wiped);
+    scpefe_container_slot_change_v1 change{};
+    change.struct_size = sizeof(change);
+    change.abi_version = SCPEFE_ABI_VERSION;
+    change.operation_id = 1;
+    change.kind = SCPEFE_SLOT_ADD_INVITATION;
+    change.actor_password = reinterpret_cast<const std::uint8_t *>(owner);
+    change.actor_password_size = sizeof(owner) - 1;
+    change.new_password = reinterpret_cast<const std::uint8_t *>(temporary);
+    change.new_password_size = sizeof(temporary) - 1;
+    change.name = "New colleague";
+    change.name_size = std::strlen(change.name);
+    change.client_name = "Ada";
+    change.client_name_size = 3;
+    change.client_email = "ada@example.test";
+    change.client_email_size = 16;
+    change.device = "test";
+    change.device_size = 4;
+    change.timestamp_ms = 2;
+    scpefe_candidate_info_v1 candidate{sizeof(candidate), SCPEFE_ABI_VERSION};
+    CHECK(scpefe_container_prepare_slot_change(container, &change, &candidate)
+        == SCPEFE_STATUS_OK);
+    std::uint32_t effects = 0;
+    CHECK(scpefe_container_acknowledge_save(container, 1,
+        SCPEFE_PUBLICATION_VERIFIED, &effects) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_container_slots(container, &after) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_owned_slots_count(after, &count) == SCPEFE_STATUS_OK && count == 2);
+    CHECK(scpefe_owned_slots_count(before, &count) == SCPEFE_STATUS_OK && count == 1);
+    scpefe_owned_slot_view_v1 invitation{};
+    invitation.struct_size = sizeof(invitation);
+    CHECK(scpefe_owned_slots_view(after, 1, &invitation) == SCPEFE_STATUS_OK);
+    CHECK(invitation.role == 1 && invitation.must_change_password
+        && invitation.name_size == std::strlen("New colleague")
+        && std::memcmp(invitation.name, "New colleague", invitation.name_size) == 0);
+    CHECK(std::memcmp(invitation.slot_id, owner_id.data(), owner_id.size()) != 0);
+    CHECK(std::memcmp(invitation.management_id, owner_view.management_id,
+        owner_id.size()) != 0);
+    CHECK(scpefe_owned_slots_view(after, 2, &invitation)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
+    CHECK(scpefe_container_lock(container) == SCPEFE_STATUS_OK);
+    scpefe_owned_slots *locked = nullptr;
+    CHECK(scpefe_container_slots(container, &locked) == SCPEFE_STATUS_LOCKED);
+    CHECK(locked == nullptr);
+    CHECK(scpefe_container_close(container) == SCPEFE_STATUS_OK);
+    scpefe_context_destroy(context);
+    CHECK(scpefe_owned_slots_count(after, &count) == SCPEFE_STATUS_OK && count == 2);
+    invitation.struct_size = sizeof(invitation);
+    CHECK(scpefe_owned_slots_view(after, 1, &invitation) == SCPEFE_STATUS_OK);
+    CHECK(std::memcmp(invitation.name, "New colleague", invitation.name_size) == 0);
+    owner_view.struct_size = sizeof(owner_view);
+    CHECK(scpefe_owned_slots_view(before, 0, &owner_view) == SCPEFE_STATUS_OK);
+    CHECK(std::memcmp(owner_view.slot_id, owner_id.data(), owner_id.size()) == 0);
+    scpefe_owned_slots_destroy(after);
+    scpefe_owned_slots_destroy(before);
+    return 0;
 }

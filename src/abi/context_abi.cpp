@@ -363,12 +363,11 @@ scpefe_status scpefe_container_status(const scpefe_container *handle,
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     const auto &container = handle->owner->implementation.make_container();
     const auto &state = container.state();
-    const auto *unlocked = container.read_unlocked();
     *status = {sizeof(*status), SCPEFE_ABI_VERSION,
         state.screen == scpefe::container::Screen::locked,
         state.permissions.can_edit, state.permissions.can_add_passwords,
         state.permissions.can_remove_passwords,
-        unlocked && unlocked->must_be_changed};
+        container.requires_password_change()};
     return SCPEFE_STATUS_OK;
 }
 
@@ -379,6 +378,8 @@ scpefe_status scpefe_container_read(const scpefe_container *handle,
     *output = nullptr;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     const auto &container = handle->owner->implementation.make_container();
+    if (container.requires_password_change())
+        return SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED;
     const auto *unlocked = container.read_unlocked();
     if (!unlocked) return SCPEFE_STATUS_LOCKED;
     try {
@@ -416,7 +417,10 @@ scpefe_status scpefe_container_revision_graph(const scpefe_container *handle,
     if (!graph) return SCPEFE_STATUS_INVALID_ARGUMENT;
     *graph = nullptr;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
-    const auto *unlocked = handle->owner->implementation.make_container().read_unlocked();
+    const auto &container = handle->owner->implementation.make_container();
+    if (container.requires_password_change())
+        return SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED;
+    const auto *unlocked = container.read_unlocked();
     if (!unlocked) return SCPEFE_STATUS_LOCKED;
     if (!unlocked->revision_graph) return SCPEFE_STATUS_UNSUPPORTED_FORMAT;
     const auto &payload = unlocked->revision_graph->encode();
@@ -680,6 +684,8 @@ scpefe_status scpefe_container_slots(const scpefe_container *handle,
     *slots = nullptr;
     if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
     const auto &container = handle->owner->implementation.make_container();
+    if (container.requires_password_change())
+        return SCPEFE_STATUS_PASSWORD_CHANGE_REQUIRED;
     if (!container.can_read_clear()) return SCPEFE_STATUS_LOCKED;
     const auto *data = container.read_unlocked();
     if (!data || !data->revision_graph) return SCPEFE_STATUS_UNSUPPORTED_FORMAT;

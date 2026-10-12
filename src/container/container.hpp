@@ -63,6 +63,8 @@ public:
     const ContainerState &state() const { return state_; }
     /* Reports whether this session may expose currently available clear data. */
     bool can_read_clear() const;
+    /* Reports an authenticated temporary invitation still awaiting a committed claim. */
+    bool requires_password_change() const;
     /* Borrows authenticated values only while clear reads are permitted. */
     const UnlockedContainerData *read_unlocked() const;
     /* Returns submitted clear text, which may be newer than the confirmed image. */

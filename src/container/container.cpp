@@ -229,7 +229,14 @@ std::vector<std::uint8_t> Container::compact_legacy_document(
 
 bool Container::can_read_clear() const
 {
-    return state_.access == Access::open && state_.screen == Screen::unlocked;
+    return state_.access == Access::open && state_.screen == Screen::unlocked
+        && !requires_password_change();
+}
+
+bool Container::requires_password_change() const
+{
+    return state_.access == Access::open && state_.screen == Screen::unlocked
+        && unlocked_ && unlocked_->must_be_changed;
 }
 
 const UnlockedContainerData *Container::read_unlocked() const
@@ -258,6 +265,7 @@ void Container::submit_content(std::string_view content)
 
 TransitionResult Container::confirm_edit_lease()
 {
+    if (requires_password_change()) throw StateError::invalid_transition;
     return install_transition(AcquireEdit{Lease::held});
 }
 
