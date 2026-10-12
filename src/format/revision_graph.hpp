@@ -65,6 +65,10 @@ struct RevisionRecord {
 /* Validates and owns one deterministic v3 payload and its canonical history. */
 class RevisionGraph {
 public:
+    /* Encodes one attributed baseline and ordered initial slot metadata. */
+    static std::vector<std::uint8_t> create_baseline(const RevisionSlot &owner,
+        const std::optional<RevisionSlot> &recovery, std::string_view device,
+        std::string_view content, std::uint64_t timestamp_ms);
     /* Decodes a decrypted authenticated payload; the caller authenticates its envelope. */
     static RevisionGraph decode(const std::uint8_t *bytes, std::size_t size,
         const RevisionLimits &limits);

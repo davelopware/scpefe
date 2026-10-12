@@ -98,7 +98,16 @@ int main(void)
     view.abi_version = SCPEFE_ABI_VERSION;
     CHECK(scpefe_owned_snapshot_view(snapshot, &view) == SCPEFE_STATUS_OK);
     CHECK(view.content_size == 10 && memcmp(view.content, "first line", 10) == 0);
-    CHECK(view.encoded_revision_size > 0);
+    CHECK(view.encoded_revision_size == 0);
+    scpefe_revision_graph *initial_graph = NULL;
+    CHECK(scpefe_container_revision_graph(container, &initial_graph) == SCPEFE_STATUS_OK);
+    size_t initial_count = 0;
+    scpefe_revision_page *initial_page = NULL;
+    CHECK(scpefe_revision_graph_list(initial_graph, 0, 10, &initial_page) == SCPEFE_STATUS_OK);
+    CHECK(scpefe_revision_page_count(initial_page, &initial_count) == SCPEFE_STATUS_OK);
+    CHECK(initial_count == 1);
+    scpefe_revision_page_destroy(initial_page);
+    scpefe_revision_graph_destroy(initial_graph);
     view.abi_version = 999;
     CHECK(scpefe_owned_snapshot_view(snapshot, &view) == SCPEFE_STATUS_UNSUPPORTED_ABI);
     view.abi_version = SCPEFE_ABI_VERSION;

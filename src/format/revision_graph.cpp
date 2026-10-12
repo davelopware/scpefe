@@ -506,6 +506,82 @@ void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head
 
 } // namespace
 
+std::vector<std::uint8_t> RevisionGraph::create_baseline(const RevisionSlot &owner,
+    const std::optional<RevisionSlot> &recovery, std::string_view device,
+    std::string_view content, std::uint64_t timestamp_ms)
+{
+    const auto limits = RevisionLimits::defaults();
+    if (timestamp_ms > std::numeric_limits<std::int64_t>::max()
+        || content.size() > limits.max_text_bytes()
+        || !valid_canonical_document_text(content.data(), content.size()))
+        throw RevisionFailure{RevisionError::invalid_argument};
+    CborWriter body;
+    body.array(3); body.unsigned_integer(0);
+    body.unsigned_integer(content.size());
+    body.bytes(reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
+    const auto body_bytes = body.take_output();
+    const auto content_hash = digest(content_prefix,
+        reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
+    const auto body_digest = digest(body_prefix, body_bytes.data(), body_bytes.size());
+    CborWriter immutable;
+    immutable.map(11);
+    immutable.unsigned_integer(1); immutable.unsigned_integer(0);
+    immutable.unsigned_integer(4); immutable.array(0);
+    immutable.unsigned_integer(5); immutable.unsigned_integer(timestamp_ms);
+    immutable.unsigned_integer(6); immutable.bytes(owner.id.data(), owner.id.size());
+    immutable.unsigned_integer(7); immutable.text(owner.name.data(), owner.name.size());
+    immutable.unsigned_integer(8); immutable.text(owner.email.data(), owner.email.size());
+    immutable.unsigned_integer(9); immutable.text(owner.name.data(), owner.name.size());
+    immutable.unsigned_integer(10); immutable.text(owner.email.data(), owner.email.size());
+    immutable.unsigned_integer(11); immutable.text(device.data(), device.size());
+    immutable.unsigned_integer(12); immutable.bytes(content_hash.data(), content_hash.size());
+    immutable.unsigned_integer(13); immutable.bytes(body_digest.data(), body_digest.size());
+    const auto immutable_bytes = immutable.take_output();
+    const auto head = digest(id_prefix, immutable_bytes.data(), immutable_bytes.size());
+    const std::array<std::uint8_t, 16> zero{};
+    CborWriter writer;
+    writer.map(8);
+    writer.unsigned_integer(1); writer.unsigned_integer(1);
+    writer.unsigned_integer(2); writer.array(recovery ? 2 : 1);
+    const auto slot = [&](const RevisionSlot &entry) {
+        writer.map(7);
+        writer.unsigned_integer(1); writer.bytes(entry.id.data(), entry.id.size());
+        writer.unsigned_integer(2); writer.unsigned_integer(entry.permissions);
+        writer.unsigned_integer(3); writer.boolean(entry.must_be_changed);
+        writer.unsigned_integer(4); writer.unsigned_integer(entry.role);
+        writer.unsigned_integer(5);
+        writer.bytes(entry.management_id.data(), entry.management_id.size());
+        writer.unsigned_integer(6); writer.text(entry.name.data(), entry.name.size());
+        writer.unsigned_integer(7); writer.text(entry.email.data(), entry.email.size());
+    };
+    slot(owner);
+    if (recovery) slot(*recovery);
+    writer.unsigned_integer(3); writer.map(3);
+    writer.unsigned_integer(1); writer.bytes(owner.id.data(), owner.id.size());
+    writer.unsigned_integer(2); writer.text(owner.name.data(), owner.name.size());
+    writer.unsigned_integer(3); writer.text(owner.email.data(), owner.email.size());
+    writer.unsigned_integer(4); writer.map(8);
+    writer.unsigned_integer(1); writer.boolean(false);
+    writer.unsigned_integer(2); writer.bytes(zero.data(), zero.size());
+    writer.unsigned_integer(3); writer.unsigned_integer(0);
+    writer.unsigned_integer(4); writer.unsigned_integer(0);
+    writer.unsigned_integer(5); writer.unsigned_integer(600000);
+    writer.unsigned_integer(6); writer.text("", 0);
+    writer.unsigned_integer(7); writer.text("", 0);
+    writer.unsigned_integer(8); writer.text("", 0);
+    writer.unsigned_integer(5); writer.array(1); writer.map(4);
+    writer.unsigned_integer(1); writer.bytes(head.data(), head.size());
+    writer.unsigned_integer(2); writer.raw(immutable_bytes.data(), immutable_bytes.size());
+    writer.unsigned_integer(3); writer.unsigned_integer(1);
+    writer.unsigned_integer(4); writer.raw(body_bytes.data(), body_bytes.size());
+    writer.unsigned_integer(6); writer.bytes(head.data(), head.size());
+    writer.unsigned_integer(7); writer.bytes(head.data(), head.size());
+    writer.unsigned_integer(8); writer.array(0);
+    auto encoded = writer.take_output();
+    (void)RevisionGraph::decode(encoded.data(), encoded.size(), limits);
+    return encoded;
+}
+
 RevisionGraph RevisionGraph::decode(const std::uint8_t *bytes, std::size_t size,
     const RevisionLimits &limits)
 {

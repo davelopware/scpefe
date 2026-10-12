@@ -468,6 +468,9 @@ scpefe_status scpefe_container_prepare_save(scpefe_container *handle,
     if (!save || !info || save->struct_size < sizeof(*save)
         || info->struct_size < sizeof(*info)
         || !save->password || save->password_size == 0
+        || !scpefe::format::span_is_valid(save->profile_name, save->profile_name_size)
+        || !scpefe::format::span_is_valid(save->profile_email, save->profile_email_size)
+        || !scpefe::format::span_is_valid(save->device_name, save->device_name_size)
         || save->kind < SCPEFE_SAVE_MANUAL || save->kind > SCPEFE_SAVE_DISCARD)
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     if (save->abi_version != SCPEFE_ABI_VERSION

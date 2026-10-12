@@ -2,17 +2,28 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 #include "container/unlocked_container_data.hpp"
 #include "format/revision_limits.hpp"
 
 namespace scpefe::core {
 
+class EncryptionService;
+
 /* Screens revised-v3 framing and adapts the transitional 160-byte-header reader. */
 class PersistenceService {
 public:
     /* Permits bounded parsing substitution in context tests. */
     virtual ~PersistenceService() = default;
+    /* Serializes a revised-v3 New baseline and encrypts its initial envelope. */
+    virtual std::vector<std::uint8_t> create_revised_document(
+        std::string_view profile_name, std::string_view profile_email,
+        std::string_view device_name, std::string_view content,
+        std::uint64_t timestamp_ms, const std::uint8_t *owner_password,
+        std::size_t owner_password_size, const std::uint8_t *recovery_password,
+        std::size_t recovery_password_size,
+        const EncryptionService &encryption) const;
     /* Checks exact envelope framing under the caller's byte limit. */
     virtual bool has_valid_v3_framing(const std::uint8_t *bytes,
         std::size_t size, std::size_t max_bytes) const;

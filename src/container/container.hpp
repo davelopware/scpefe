@@ -34,7 +34,7 @@ public:
     Container(const ContainerStateManagerService &state_manager,
         const core::PasswordService &password, const core::EncryptionService &encryption,
         const core::PersistenceService &persistence, const core::HistoryService &history);
-    /* Prepares an encrypted initial candidate using this context's services. */
+    /* Prepares an encrypted revised-v3 baseline using this context's services. */
     std::vector<std::uint8_t> create_document(std::string_view profile_name,
         std::string_view profile_email, std::string_view device_name,
         std::string_view content, std::uint64_t timestamp_ms,

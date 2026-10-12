@@ -1,6 +1,5 @@
 #include "container/container.hpp"
 #include "container/container_error.hpp"
-#include "document/new_document.hpp"
 #include "document/manual_save.hpp"
 #include "document/provisional_save.hpp"
 #include "format/revision_limits.hpp"
@@ -72,9 +71,9 @@ std::vector<std::uint8_t> Container::create_document(std::string_view profile_na
         || (recovery_password && password_.assess(recovery_password,
             recovery_password_size) != security::PasswordPolicyAssessment::accepted))
         throw ContainerFailure{ContainerError::weak_password};
-    return document::NewDocument::create(profile_name, profile_email,
+    return persistence_.create_revised_document(profile_name, profile_email,
         device_name, content, timestamp_ms, owner_password, owner_password_size,
-        recovery_password, recovery_password_size, &encryption_);
+        recovery_password, recovery_password_size, encryption_);
 }
 
 void Container::open_document(const std::uint8_t *bytes, std::size_t size)

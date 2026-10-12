@@ -3,6 +3,8 @@
 #include "container/container.hpp"
 #include "container/container_error.hpp"
 #include "container/recoverable_password_container.hpp"
+#include "container/revised_v3_container.hpp"
+#include "document/new_document.hpp"
 #include "scpefe/scpefe.h"
 #include "format/snapshot_revision.hpp"
 
@@ -247,17 +249,19 @@ int main(int argc, char **argv)
     const auto &fake_encryption = static_cast<const FakeEncryption &>(first.services().encryption());
     const auto &fake_persistence = static_cast<const FakePersistence &>(first.services().persistence());
     assert(fake_password.assess_calls == 1);
-    assert(fake_encryption.random_calls >= 6 && fake_encryption.hash_calls == 1);
+    assert(fake_encryption.random_calls >= 7 && fake_encryption.hash_calls == 0);
     assert(!candidate.empty());
-    auto fake_generated = core::PersistenceService{}.unlock_legacy_envelope(
+    auto fake_generated = core::PersistenceService{}.unlock_revised_envelope(
         candidate.data(), candidate.size(), weak_password, sizeof(weak_password),
         format::RevisionLimits::defaults());
-    const auto fake_revision = format::SnapshotRevision::decode(
-        fake_generated.encoded_snapshot_revision.data(),
-        fake_generated.encoded_snapshot_revision.size(), format::RevisionLimits::defaults());
     assert(fake_generated.slot_id[0] == 42);
-    assert(fake_revision.data().content_hash[0] == 17);
-    active.open_legacy_document(candidate.data(), candidate.size());
+    assert(fake_generated.revision_graph->records().size() == 1);
+    assert(fake_generated.revision_graph->reconstruct(
+        fake_generated.revision_graph->content_head()) == "first line");
+    auto legacy_candidate = document::NewDocument::create("Ada", "ada@example.org",
+        "test", "first line", 123, weak_password, sizeof(weak_password),
+        nullptr, 0, &first.services().encryption());
+    active.open_legacy_document(legacy_candidate.data(), legacy_candidate.size());
     assert(fake_persistence.open_calls == 1);
     assert(!active.try_transition(Unlock{SlotId{7}, Permissions{true, true, true}, true}));
     assert(!active.try_transition(Open{}));
@@ -284,7 +288,10 @@ int main(int argc, char **argv)
     auto &production_container = production.make_container();
     const std::string strong_password = "0b4e79c5-7cfe-4b7c-b4f3-d89129cb7b5e";
     const auto *password_bytes = reinterpret_cast<const std::uint8_t *>(strong_password.data());
-    auto real_candidate = production_container.create_document("Ada", "ada@example.org",
+    auto revised_created = production_container.create_document("Ada", "ada@example.org",
+        "test", "first line", 123, password_bytes, strong_password.size(), nullptr, 0);
+    assert(RevisedV3Container::recognizes(revised_created.data(), revised_created.size()));
+    auto real_candidate = document::NewDocument::create("Ada", "ada@example.org",
         "test", "first line", 123, password_bytes, strong_password.size(), nullptr, 0);
     auto bad_structure = real_candidate;
     bad_structure[32] = 3; // Unsupported base-slot count in the transitional header.
@@ -332,8 +339,7 @@ int main(int argc, char **argv)
     assert(!production_container.try_transition(ApplyTargetPermissions{Permissions{}, true}));
     assert(!production_container.try_transition(AcquireEdit{Lease::held}));
     assert(!production_container.try_transition(BeginPublication{1, PublicationKind::save}));
-    core::Context unrelated_context(core::HostServices(&production_time, clock));
-    auto unrelated_target = unrelated_context.make_container().create_document(
+    auto unrelated_target = document::NewDocument::create(
         "Other", "other@example.org",
         "test", "unrelated", 124, password_bytes, strong_password.size(), nullptr, 0);
     try {

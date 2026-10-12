@@ -235,6 +235,7 @@ int main(int argc, char **argv)
     CHECK(argc == 2);
     uint64_t time = 42;
     const uint8_t password[] = "0b4e79c5-7cfe-4b7c-b4f3-d89129cb7b5e";
+    const uint8_t recovery[] = "f5ee6791-97ad-44bc-8a72-b79b7b26316a";
     scpefe_host_services_v1 host = {sizeof(host), SCPEFE_ABI_VERSION, &time, clock_read};
     scpefe_context *context = NULL;
     scpefe_container *container = NULL;
@@ -253,6 +254,8 @@ int main(int argc, char **argv)
     create.document.timestamp_ms = 1;
     create.document.owner_password = password;
     create.document.owner_password_size = sizeof(password) - 1;
+    create.document.recovery_password = recovery;
+    create.document.recovery_password_size = sizeof(recovery) - 1;
     CHECK(scpefe_context_create(&host, &context) == SCPEFE_STATUS_OK);
     CHECK(scpefe_container_create(context, &create, &container) == SCPEFE_STATUS_OK);
     CHECK(scpefe_container_submit_content(container, "first", 5) == SCPEFE_STATUS_INVALID_STATE);
@@ -352,17 +355,51 @@ int main(int argc, char **argv)
     CHECK(effects == (SCPEFE_EFFECT_ADOPT_CANDIDATE | SCPEFE_EFFECT_CLEAR_JOURNAL));
     save.operation_id = 4;
     save.kind = SCPEFE_SAVE_DISCARD;
+    scpefe_container_save_v1 invalid_discard = save;
+    invalid_discard.profile_name = NULL;
+    CHECK(scpefe_container_prepare_save(container, &invalid_discard, &info)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
+    invalid_discard = save;
+    invalid_discard.profile_email = NULL;
+    CHECK(scpefe_container_prepare_save(container, &invalid_discard, &info)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
+    invalid_discard = save;
+    invalid_discard.device_name = NULL;
+    CHECK(scpefe_container_prepare_save(container, &invalid_discard, &info)
+        == SCPEFE_STATUS_INVALID_ARGUMENT);
     CHECK(scpefe_container_prepare_save(container, &save, &info) == SCPEFE_STATUS_OK);
     CHECK(scpefe_container_acknowledge_save(container, 4,
         SCPEFE_PUBLICATION_VERIFIED, &effects) == SCPEFE_STATUS_OK);
     CHECK(read_text(container, "first") == 0);
     CHECK(scpefe_container_prepare_save(container, &save, &info)
         == SCPEFE_STATUS_STALE_OPERATION);
+    uint8_t *final_bytes = NULL;
+    size_t final_size = 0;
+    CHECK(copy_bytes(container, &final_bytes, &final_size) == 0);
     free(candidate);
     free(again);
     free(base);
     CHECK(scpefe_container_close(container) == SCPEFE_STATUS_OK);
+    scpefe_container_open_v1 open = {sizeof(open), SCPEFE_ABI_VERSION,
+        final_bytes, final_size};
+    CHECK(scpefe_container_open(context, &open, &container) == SCPEFE_STATUS_OK);
+    scpefe_password_input_v1 recovery_auth = {sizeof(recovery_auth),
+        SCPEFE_ABI_VERSION, recovery, sizeof(recovery) - 1};
+    CHECK(scpefe_container_unlock(container, &recovery_auth) == SCPEFE_STATUS_OK);
+    CHECK(read_text(container, "first") == 0);
+    scpefe_revision_graph *recovered_graph = NULL;
+    CHECK(scpefe_container_revision_graph(container, &recovered_graph) == SCPEFE_STATUS_OK);
+    scpefe_revision_page *recovered_page = NULL;
+    size_t recovered_count = 0;
+    CHECK(scpefe_revision_graph_list(recovered_graph, 0, 10, &recovered_page)
+        == SCPEFE_STATUS_OK);
+    CHECK(scpefe_revision_page_count(recovered_page, &recovered_count) == SCPEFE_STATUS_OK);
+    CHECK(recovered_count == 2);
+    scpefe_revision_page_destroy(recovered_page);
+    scpefe_revision_graph_destroy(recovered_graph);
+    CHECK(scpefe_container_close(container) == SCPEFE_STATUS_OK);
     scpefe_context_destroy(context);
+    free(final_bytes);
     CHECK(revised_save_cycle(argv[1]) == 0);
     return revised_checkpoint_save(argv[1]);
 }
