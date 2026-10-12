@@ -2057,6 +2057,9 @@ export class DocumentService {
         || !active.opened.canRemovePasswords) {
       throw new Error("Enter edit mode with a full administrative slot first");
     }
+    if (!this.container?.prepareCompaction || active.migrationRequired) {
+      throw new Error("The stateful compaction interface is unavailable");
+    }
     if (confirmation !== COMPACTION_CONFIRMATION) {
       throw new Error("Confirm irreversible local history removal before compacting");
     }
@@ -2091,9 +2094,20 @@ export class DocumentService {
               || inspected.lease.heartbeatCounter !== active.leaseCounter) {
             throw new Error("The target or editing lease changed before compaction");
           }
+          if (this.pendingNativeCandidate !== null) {
+            throw new Error("Resolve the pending candidate before compacting");
+          }
+          const journal = await this.journals.read(
+            active.documentId, active.journalKey);
+          if (journal) throw new Error(
+            "Compaction requires a clean, manually sealed, conflict-free document");
+          const profile = await this.loadProfile();
+          if (!profile) throw new Error("Configure name, email, and device name first");
+          let backup;
           try {
-            await this.publications.publishReplica({
-              target: selectedBackupTarget, candidate: current });
+            backup = await this.publications.publishReplica({
+              target: selectedBackupTarget, candidate: current,
+              returnVerifiedBytes: true });
           } catch (cause) {
             const error = new Error(
               "The required pre-compaction backup could not be created and verified");
@@ -2105,10 +2119,30 @@ export class DocumentService {
           if (!revalidated.equals(current)) {
             throw new Error("The target changed after the pre-compaction backup");
           }
-          const candidate = this.native.compactDocument(current, active.password, {
+          if (!Buffer.isBuffer(backup?.verifiedBytes)
+              || !backup.verifiedBytes.equals(current)) {
+            throw new Error("The pre-compaction backup read-back is unavailable");
+          }
+          this.#syncNativeLeaseSource(active, current);
+          const mode = this.container.leaseMode();
+          if (!mode.editing || mode.leaseStatus !== "held") {
+            throw new Error("Editing lease is no longer held by this session");
+          }
+          const prepared = this.container.prepareCompaction(active.password, {
+            operationId: this.nextCandidateOperation++,
             sessionId: active.leaseSessionId.toString("hex"),
             heartbeatCounter: active.leaseCounter,
+            explicitDecision: true, cleanStateConfirmed: true,
+            backupVerified: true, verifiedBackupBytes: backup.verifiedBytes,
+            clientName: profile.name, clientEmail: profile.email,
+            deviceName: profile.deviceName, timestampMs: this.now(),
           });
+          if (!Buffer.isBuffer(prepared?.bytes) || prepared.bytes.length === 0
+              || !Number.isSafeInteger(prepared.operationId)) {
+            throw new Error("Native bridge did not return an exact candidate");
+          }
+          this.pendingNativeCandidate = prepared.operationId;
+          const candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a compacted container");
           }
@@ -2124,6 +2158,7 @@ export class DocumentService {
             base: current, candidate, text: active.opened.content,
             cursor: { start: 0, end: 0 }, baseRevision: previousHead,
             purpose: "compaction" });
+          this.#finishSaveCandidate(this.pendingNativeCandidate, "verified");
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
             this.native.openDocument(published, active.password));
@@ -2133,6 +2168,10 @@ export class DocumentService {
         }
       });
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error.publicationPrepared) {
         active.pendingPublication = true;
         active.unresolvedJournal = true;
@@ -2278,11 +2317,18 @@ export class DocumentService {
   #verifyCompaction(active, before, after, previousHead) {
     const baseline = after.revisionGraph.find(
       (node) => node.revisionId === after.baseRevision);
+    const oldIds = new Set(before.revisionGraph.map((node) => node.revisionId));
+    const historyValid = after.revisionGraph.length === before.revisionGraph.length + 1
+      && oldIds.size === before.revisionGraph.length
+      && !oldIds.has(after.baseRevision)
+      && [...oldIds].every((id) => after.revisionGraph.some(
+        (node) => node.revisionId === id));
     if (after.documentId !== before.documentId
         || !after.journalKey.equals(before.journalKey)
         || after.opened.content !== before.opened.content
+        || after.historyEventType !== "compaction"
         || !after.manuallySealed
-        || after.revisionGraph.length !== 1
+        || !historyValid
         || !baseline || baseline.parentRevisionIds.length !== 1
         || baseline.parentRevisionIds[0] !== previousHead
         || after.lease.sessionId !== before.lease.sessionId

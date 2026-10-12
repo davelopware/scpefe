@@ -75,13 +75,36 @@ async function lockDuringNextLeaseAcquisition({ service, native, target, operati
   assert.equal(suspended.counter, acquired.heartbeatCounter);
 }
 
+function installCompactionContext(service, current, candidate, onPrepare = () => {}) {
+  let committed = current;
+  service.container = {
+    status: () => ({ locked: false }),
+    leaseMode: () => ({ editing: true, leaseStatus: "held" }),
+    prepareCompaction(_password, request) {
+      onPrepare(request);
+      assert.equal(request.explicitDecision, true);
+      assert.equal(request.cleanStateConfirmed, true);
+      assert.equal(request.backupVerified, true);
+      assert.deepEqual(request.verifiedBackupBytes, current);
+      return { bytes: candidate, operationId: request.operationId };
+    },
+    finishSave(_operationId, outcome) {
+      if (outcome === "verified") committed = candidate;
+      return 0;
+    },
+    bytes: () => committed,
+  };
+  service.containerTarget = service.active.target;
+  service.containerBytes = Buffer.from(current);
+}
+
 async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
   const profilePath = await writeProfile(directory, "Ada", "Desk");
   const current = Buffer.from("history-rich-container");
-  const candidate = Buffer.from("shallow-container");
+  const candidate = Buffer.from("compacted-container");
   const leaseChanged = Buffer.from("lease-changed-container");
   await fs.writeFile(target, current);
   const sessionId = "8d".repeat(16);
@@ -105,8 +128,10 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
           parentRevisionIds: ["d5".repeat(32)] }] };
       if (bytes.equals(candidate)) return { ...common,
         journalKey: Buffer.from(journalKey), baseRevision: compactedHead,
+        historyEventType: "compaction",
         revisionGraph: [{ revisionId: compactedHead,
-          parentRevisionIds: [previousHead] }] };
+          parentRevisionIds: [previousHead] },
+        { revisionId: previousHead, parentRevisionIds: ["d5".repeat(32)] }] };
       if (bytes.equals(leaseChanged)) return { ...common,
         journalKey: Buffer.from(journalKey),
         baseRevision: previousHead,
@@ -115,7 +140,7 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
           parentRevisionIds: ["d5".repeat(32)] }] };
       throw new Error("unexpected compaction fixture container");
     },
-    compactDocument() { native.compactHook?.(); return candidate; } };
+  };
   const options = { native, fs, profilePath, publicationCapabilities,
     journalDirectory: path.join(directory, "journals"),
     witnessDirectory: path.join(directory, "witnesses"),
@@ -126,6 +151,8 @@ async function compactionFixture(t, prefix = "scpefe-compaction-fixture-") {
   service.active.leaseSessionId = Buffer.from(sessionId, "hex");
   service.active.leaseCounter = 9;
   service.active.working = { content: common.content, cursor: { start: 0, end: 0 } };
+  installCompactionContext(service, current, candidate,
+    () => native.compactHook?.());
   return { directory, target, current, candidate, leaseChanged, previousHead,
     compactedHead, documentId, journalKey, native, options, service };
 }
@@ -1025,7 +1052,7 @@ test("reopened authenticated journal states block backup", async (t) => {
   }
 });
 
-test("compaction creates an exact backup then publishes a verified shallow baseline",
+test("compaction creates an exact backup then publishes retained revision metadata",
   async (t) => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-compact-"));
     t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -1059,14 +1086,12 @@ test("compaction creates an exact backup then publishes a verified shallow basel
           ] };
         if (bytes.equals(candidate)) return { ...common,
           journalKey: Buffer.from(journalKey), baseRevision: compactedHead,
+          historyEventType: "compaction",
           revisionGraph: [{ revisionId: compactedHead,
-            parentRevisionIds: [previousHead] }] };
+            parentRevisionIds: [previousHead] },
+          { revisionId: previousHead, parentRevisionIds: ["78".repeat(32)] },
+          { revisionId: "78".repeat(32), parentRevisionIds: [] }] };
         throw new Error("unexpected container");
-      },
-      compactDocument(bytes, _password, heldLease) {
-        assert.deepEqual(bytes, current);
-        assert.deepEqual(heldLease, { sessionId, heartbeatCounter: 7 });
-        return candidate;
       },
     };
     const service = new DocumentService({ native, fs, profilePath,
@@ -1076,6 +1101,10 @@ test("compaction creates an exact backup then publishes a verified shallow basel
     service.active.leaseSessionId = Buffer.from(sessionId, "hex");
     service.active.leaseCounter = 7;
     service.active.working = { content: "current text", cursor: { start: 0, end: 0 } };
+    installCompactionContext(service, current, candidate, (request) => {
+      assert.equal(request.sessionId, sessionId);
+      assert.equal(request.heartbeatCounter, 7);
+    });
 
     const result = await service.compactDocument(COMPACTION_CONFIRMATION);
 
@@ -1112,6 +1141,8 @@ test("compaction rejects missing confirmation, unclean state, and lost lease",
     service.active.editMode = true;
     service.active.leaseSessionId = Buffer.from(sessionId, "hex");
     service.active.leaseCounter = 3;
+    installCompactionContext(service, Buffer.from("current"),
+      Buffer.from("unused candidate"));
     await assert.rejects(service.compactDocument("not confirmed"), /Confirm/);
     await assert.rejects(service.compactDocument(
       COMPACTION_CONFIRMATION, target), /distinct pre-compaction backup/);
@@ -1131,6 +1162,7 @@ test("compaction stops without rewriting when its mandatory backup fails", async
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-compact-backup-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "notes.scpefe");
+  const profilePath = await writeProfile(directory, "Ada", "Desk");
   const current = Buffer.from("current");
   await fs.writeFile(target, current);
   const sessionId = "7c".repeat(16);
@@ -1143,15 +1175,17 @@ test("compaction stops without rewriting when its mandatory backup fails", async
     lease: { active: true, sessionId, heartbeatCounter: 6, holderUtcMs: 1,
       durationMs: 600_000, holderName: "Ada", holderEmail: "ada@example.test",
       deviceName: "Desk" } }),
-  compactDocument() { compactCalled = true; return Buffer.from("must-not-publish"); } };
+  };
   const failingFs = Object.create(fs);
   failingFs.link = async () => { throw new Error("backup destination failed"); };
   const service = new DocumentService({ native, fs: failingFs,
-    profilePath: path.join(directory, "profile.json"), publicationCapabilities });
+    profilePath, publicationCapabilities });
   await service.openDocument(target, "owner password words");
   service.active.editMode = true;
   service.active.leaseSessionId = Buffer.from(sessionId, "hex");
   service.active.leaseCounter = 6;
+  installCompactionContext(service, current, Buffer.from("must-not-publish"),
+    () => { compactCalled = true; });
 
   await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION),
     (error) => error.code === "COMPACTION_BACKUP_FAILED"
@@ -1164,7 +1198,7 @@ test("compaction stops without rewriting when its mandatory backup fails", async
 test("failed pre-compaction backup verification removes no history", async (t) => {
   const fixture = await compactionFixture(t, "scpefe-compact-verify-backup-");
   let compactCalled = false;
-  fixture.native.compactDocument = () => { compactCalled = true; return fixture.candidate; };
+  fixture.native.compactHook = () => { compactCalled = true; };
   const tamperedFs = Object.create(fs);
   let tampered = false;
   tamperedFs.readFile = async (file, ...args) => {
@@ -1214,7 +1248,7 @@ test("default backup failure followed by alternate selection completes compactio
 test("target race after the verified backup aborts before candidate creation", async (t) => {
   const fixture = await compactionFixture(t, "scpefe-compact-target-race-");
   let compactCalled = false;
-  fixture.native.compactDocument = () => { compactCalled = true; return fixture.candidate; };
+  fixture.native.compactHook = () => { compactCalled = true; };
   const normalRead = fs.readFile.bind(fs);
   let targetReads = 0;
   fixture.service.fs = Object.create(fs);
@@ -1257,7 +1291,7 @@ test("lease race after backup preserves the compacted candidate for conflict rec
       "pending-publication");
   });
 
-test("interrupted compaction publication resumes with shallow witness continuity",
+test("interrupted compaction publication resumes with retained witness continuity",
   async (t) => {
     for (const fault of ["replace", "cleanup"]) {
       await t.test(fault, async (t) => {
@@ -1303,7 +1337,8 @@ test("interrupted compaction publication resumes with shallow witness continuity
         assert.deepEqual(restarted.active.revisionGraph, [{
           revisionId: fixture.compactedHead,
           parentRevisionIds: [fixture.previousHead],
-        }]);
+        }, { revisionId: fixture.previousHead,
+          parentRevisionIds: ["d5".repeat(32)] }]);
         assert.equal(await restarted.journals.read(
           fixture.documentId, fixture.journalKey), null);
         assert.deepEqual(await fs.readFile(fixture.target), fixture.candidate);
