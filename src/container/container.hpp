@@ -72,7 +72,11 @@ public:
     /* Verifies the current envelope password before restoring clear access. */
     const UnlockedContainerData &unlock_legacy_document(
         const std::uint8_t *password, std::size_t password_size);
-    /* Verifies one same-document target, pins its bytes, and applies active-slot rights. */
+    /* Authenticates an observed target, checks lineage, and overlays its current rights. */
+    TransitionResult apply_target_document(const std::uint8_t *target_bytes,
+        std::size_t target_size, const std::uint8_t *password,
+        std::size_t password_size);
+    /* Preserves the older C++ spelling for transitional callers. */
     TransitionResult apply_target_legacy_document(const std::uint8_t *target_bytes,
         std::size_t target_size, const std::uint8_t *password,
         std::size_t password_size);

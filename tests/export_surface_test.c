@@ -53,6 +53,8 @@ int main(int argc, char **argv)
         "scpefe_manual_save",
         "scpefe_compact_document",
         "scpefe_merge_save",
+        "scpefe_revised_merge_save",
+        "scpefe_container_apply_target",
         "scpefe_new_document_create",
         "scpefe_assess_password_policy",
         "scpefe_provisional_save_discard",

@@ -352,6 +352,8 @@ if(BUILD_TESTING)
 
         add_executable(scpefe_merge_save_test tests/merge_save_test.c)
         target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
+        add_executable(scpefe_revised_merge_abi_test tests/revised_merge_abi_test.c)
+        target_link_libraries(scpefe_revised_merge_abi_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_compaction_test tests/compaction_test.c)
         target_link_libraries(scpefe_compaction_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
@@ -393,6 +395,8 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.manual-save-round-trip COMMAND scpefe_manual_save_test)
         add_test(NAME scpefe.provisional-save-lifecycle COMMAND scpefe_provisional_save_test)
         add_test(NAME scpefe.merge-save-round-trip COMMAND scpefe_merge_save_test)
+        add_test(NAME scpefe.revised-merge-abi COMMAND scpefe_revised_merge_abi_test
+            "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.compaction-round-trip COMMAND scpefe_compaction_test)
         add_test(NAME scpefe.password-change COMMAND scpefe_password_change_test)
         add_test(NAME scpefe.legacy-password-change

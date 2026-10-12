@@ -153,6 +153,10 @@ uint32_t effect_mask(const scpefe::container::TransitionResult &result)
         case EffectKind::adopt_candidate: mask |= SCPEFE_EFFECT_ADOPT_CANDIDATE; break;
         case EffectKind::clear_journal: mask |= SCPEFE_EFFECT_CLEAR_JOURNAL; break;
         case EffectKind::recover_candidate: mask |= SCPEFE_EFFECT_RECOVER_CANDIDATE; break;
+        case EffectKind::preserve_unsaved_work:
+            mask |= SCPEFE_EFFECT_PRESERVE_UNSAVED_WORK; break;
+        case EffectKind::clear_display: mask |= SCPEFE_EFFECT_CLEAR_DISPLAY; break;
+        case EffectKind::stop_heartbeat: mask |= SCPEFE_EFFECT_STOP_HEARTBEAT; break;
         default: break;
         }
     }
@@ -479,6 +483,50 @@ scpefe_status scpefe_container_copy_bytes(const scpefe_container *handle,
     if (!output || capacity < bytes.size()) return SCPEFE_STATUS_BUFFER_TOO_SMALL;
     std::memcpy(output, bytes.data(), bytes.size());
     return SCPEFE_STATUS_OK;
+}
+
+scpefe_status scpefe_container_apply_target(scpefe_container *handle,
+    const scpefe_container_target_v1 *target, uint32_t *effects)
+{
+    if (!target || target->struct_size < sizeof(*target) || !effects
+        || !target->bytes || !target->bytes_size || !target->password
+        || !target->password_size) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (target->abi_version != SCPEFE_ABI_VERSION)
+        return SCPEFE_STATUS_UNSUPPORTED_ABI;
+    if (target->password_size > 4096
+        || target->bytes_size
+            > scpefe::container::RecoverablePasswordContainer::max_container_bytes())
+        return SCPEFE_STATUS_LIMIT_EXCEEDED;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    try {
+        const auto result = handle->owner->implementation.make_container()
+            .apply_target_document(target->bytes, target->bytes_size,
+                target->password, target->password_size);
+        *effects = effect_mask(result);
+        if (result.state.target_access && result.state.target_access->wrapper_changed)
+            *effects |= SCPEFE_EFFECT_REAUTHENTICATE_TARGET;
+        return SCPEFE_STATUS_OK;
+    } catch (const scpefe::format::MergeFailure &failure) {
+        switch (failure.problem) {
+        case scpefe::format::MergeProblem::unrelated_target:
+            return SCPEFE_STATUS_UNRELATED_TARGET;
+        case scpefe::format::MergeProblem::rollback:
+            return SCPEFE_STATUS_TARGET_ROLLBACK;
+        case scpefe::format::MergeProblem::unavailable_base:
+            return SCPEFE_STATUS_MERGE_BASE_UNAVAILABLE;
+        case scpefe::format::MergeProblem::revoked_access:
+            return SCPEFE_STATUS_TARGET_ACCESS_REVOKED;
+        case scpefe::format::MergeProblem::permission_denied:
+            return SCPEFE_STATUS_TARGET_PERMISSION_DENIED;
+        }
+    } catch (const scpefe::container::ContainerFailure &failure) {
+        return map_error(failure.error);
+    } catch (scpefe::container::StateError error) {
+        return map_state_error(error);
+    } catch (const std::bad_alloc &) {
+        return SCPEFE_STATUS_OUT_OF_MEMORY;
+    }
+    return SCPEFE_STATUS_INVALID_ARGUMENT;
 }
 
 scpefe_status scpefe_container_confirm_edit_lease(scpefe_container *handle)

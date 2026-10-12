@@ -170,7 +170,7 @@ const UnlockedContainerData &Container::unlock_legacy_document(
     return *unlocked_;
 }
 
-TransitionResult Container::apply_target_legacy_document(
+TransitionResult Container::apply_target_document(
     const std::uint8_t *target_bytes, std::size_t target_size,
     const std::uint8_t *password, std::size_t password_size)
 {
@@ -181,23 +181,55 @@ TransitionResult Container::apply_target_legacy_document(
         throw StateError::invalid_transition;
     if (password == nullptr || password_size == 0)
         throw ContainerFailure{ContainerError::invalid_argument};
-    persistence_.validate_legacy_envelope(target_bytes, target_size);
-    auto decoded = persistence_.unlock_legacy_envelope(target_bytes, target_size,
-        password, password_size, format::RevisionLimits::defaults());
-    if (decoded.document_id != *document_id_)
+    if (revised_v3_)
+        persistence_.validate_revised_envelope(target_bytes, target_size);
+    else persistence_.validate_legacy_envelope(target_bytes, target_size);
+    auto decoded = revised_v3_
+        ? persistence_.unlock_revised_envelope(target_bytes, target_size,
+            password, password_size, format::RevisionLimits::defaults())
+        : persistence_.unlock_legacy_envelope(target_bytes, target_size,
+            password, password_size, format::RevisionLimits::defaults());
+    if (decoded.document_id != *document_id_) {
+        if (revised_v3_)
+            throw format::MergeFailure{format::MergeProblem::unrelated_target};
         throw ContainerFailure{ContainerError::malformed_container};
+    }
+    if (unlocked_ && decoded.work_journal_key != unlocked_->work_journal_key)
+        throw format::MergeFailure{format::MergeProblem::unrelated_target};
+    if (revised_v3_ && unlocked_)
+        (void)unlocked_->revision_graph->assess_target(*decoded.revision_graph);
     const bool active_slot_matched = decoded.slot_id == *state_.active_slot;
     bool wrapper_changed = !active_slot_matched;
     if (active_slot_matched) {
         try {
-            const auto current = persistence_.unlock_legacy_envelope(committed_bytes_.data(),
-                committed_bytes_.size(), password, password_size,
-                format::RevisionLimits::defaults());
+            const auto current = revised_v3_
+                ? persistence_.unlock_revised_envelope(committed_bytes_.data(),
+                    committed_bytes_.size(), password, password_size,
+                    format::RevisionLimits::defaults())
+                : persistence_.unlock_legacy_envelope(committed_bytes_.data(),
+                    committed_bytes_.size(), password, password_size,
+                    format::RevisionLimits::defaults());
             wrapper_changed = current.slot_id != decoded.slot_id;
         } catch (const ContainerFailure &failure) {
             if (failure.error != ContainerError::authentication_failed) throw;
             wrapper_changed = true;
         }
+    }
+    if (revised_v3_ && active_slot_matched && unlocked_) {
+        const auto slot_index = [&](const format::RevisionGraph &graph) {
+            const auto &slots = graph.slots();
+            const auto found = std::find_if(slots.begin(), slots.end(),
+                [&](const auto &slot) { return slot.id == *state_.active_slot; });
+            return static_cast<std::size_t>(found - slots.begin());
+        };
+        const auto local_index = slot_index(*unlocked_->revision_graph);
+        const auto target_index = slot_index(*decoded.revision_graph);
+        if (local_index >= unlocked_->revision_graph->slots().size()
+            || target_index >= decoded.revision_graph->slots().size())
+            wrapper_changed = true;
+        else if (std::memcmp(committed_bytes_.data() + 72 + 110 * local_index,
+            target_bytes + 72 + 110 * target_index, 110) != 0)
+            wrapper_changed = true;
     }
     const Permissions rights{active_slot_matched && (decoded.permissions & 1u) != 0,
         active_slot_matched && (decoded.permissions & 2u) != 0,
@@ -210,6 +242,13 @@ TransitionResult Container::apply_target_legacy_document(
         target_bytes_.swap(incoming);
         throw;
     }
+}
+
+TransitionResult Container::apply_target_legacy_document(
+    const std::uint8_t *target_bytes, std::size_t target_size,
+    const std::uint8_t *password, std::size_t password_size)
+{
+    return apply_target_document(target_bytes, target_size, password, password_size);
 }
 
 std::vector<std::uint8_t> Container::compact_legacy_document(
