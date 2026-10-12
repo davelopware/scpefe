@@ -562,6 +562,42 @@ test("pending manual save becomes semantic attention with retry and discard comm
   session.dispose();
 });
 
+test("repeated pending retries retain the saved revision through conflict and discard", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("saved candidate");
+  host.saveDocument = async (content) => ({ saved: true, content,
+    publicationState: "pending-publication" });
+  assert.deepEqual(await session.save(),
+    { status: "saved", publicationState: "pending-publication" });
+  let retries = 0;
+  host.reconnectPendingPublication = async () => ({ content: "saved candidate",
+    publicationState: ++retries < 3 ? "pending-publication" : "conflict" });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.deepEqual(await session.retryPublication(),
+      { status: "publication", publicationState: "pending-publication" });
+    const pending = session.getSnapshot();
+    if (pending.kind !== "read-only") throw new Error("expected read-only");
+    assert.equal(pending.working.dirty, false);
+    assert.equal(pending.commands.publicationDiscard, true);
+  }
+  assert.deepEqual(await session.retryPublication(),
+    { status: "publication", publicationState: "conflict" });
+  const conflict = session.getSnapshot();
+  if (conflict.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(conflict.working.dirty, false);
+  assert.equal(conflict.commands.publicationDiscard, true);
+  host.discardPendingPublication = async () => opened("verified target");
+  assert.deepEqual(await session.discardPublication(),
+    { status: "publication-discarded" });
+  const restored = session.getSnapshot();
+  if (restored.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(restored.publication.state, "target-published");
+  assert.equal(restored.working.text, "verified target");
+  session.dispose();
+});
+
 test("backup and plaintext export preserve eligibility, cancellation, and current text", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
