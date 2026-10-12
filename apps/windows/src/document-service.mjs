@@ -2236,6 +2236,7 @@ export class DocumentService {
 
     let targetBytes = null;
     let targetOpened = null;
+    let targetPassword = password;
     let invalidTarget = false;
     let unavailable = false;
     try {
@@ -2247,6 +2248,7 @@ export class DocumentService {
         if (reopenPassword === password) throw passwordError;
         targetOpened = this.#validateNativeOpened(
           this.native.openDocument(targetBytes, reopenPassword));
+        targetPassword = reopenPassword;
       }
       if (targetOpened.documentId !== baseOpened.documentId) invalidTarget = true;
     } catch (error) {
@@ -2292,6 +2294,7 @@ export class DocumentService {
           ...(reopened.lease.active ? { lease: reopened.lease } : {}),
           ...(recovery ? { recovery } : {}),
           ...(headMismatch ? { headMismatch } : {}) });
+        this.#openActiveContainer(target, published, reopenPassword, reopened);
         this.active = { target, password: reopenPassword, opened, editMode: false,
           documentId: reopened.documentId, baseRevision: reopened.baseRevision,
           revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
@@ -2327,13 +2330,16 @@ export class DocumentService {
         migrationCanEdit: slotCanEdit } : {}),
       ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
-    this.active = { target, password, opened, editMode: false,
+    const currentBytes = targetOpened && !invalidTarget ? targetBytes : bootstrap.base;
+    const currentPassword = targetOpened && !invalidTarget ? targetPassword : password;
+    this.#openActiveContainer(target, currentBytes, currentPassword, currentOpened);
+    this.active = { target, password: currentPassword, opened, editMode: false,
       documentId: baseOpened.documentId, baseRevision: currentOpened.baseRevision,
       revisionGraph: currentOpened.revisionGraph,
       observation: this.#observation(currentOpened), slotCanEdit, headMismatch,
       migrationRequired,
       journalKey: Buffer.from(baseOpened.journalKey), recovery: null,
-      baseContainer: Buffer.from(targetBytes && !invalidTarget ? targetBytes : bootstrap.base),
+      baseContainer: Buffer.from(currentBytes),
       targetContent: currentOpened.opened.content,
       working: null, dirty: false, manuallySealed: currentOpened.manuallySealed,
       pendingPublication: true, pendingRecord: record, unresolvedJournal: true,
