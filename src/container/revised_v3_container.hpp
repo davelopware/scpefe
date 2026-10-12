@@ -12,7 +12,7 @@ namespace scpefe::core { class EncryptionService; }
 
 namespace scpefe::container {
 
-/* Authenticates the revised 72-byte-header v3 envelope and its revision graph. */
+/* Authenticates and rewrites revised-v3 envelopes and their slot wrappers. */
 class RevisedV3Container {
 public:
     /* Creates one encrypted revised-v3 baseline with owner and optional recovery. */
@@ -34,6 +34,14 @@ public:
     static std::vector<std::uint8_t> replace_graph(const std::uint8_t *bytes,
         std::size_t size, const std::uint8_t *password, std::size_t password_size,
         const std::uint8_t *graph, std::size_t graph_size);
+    /* Rewrites semantic slots and an optional wrapper while preserving unknown passwords. */
+    static std::vector<std::uint8_t> replace_slots(const std::uint8_t *bytes,
+        std::size_t size, const std::uint8_t *actor_password,
+        std::size_t actor_password_size, const std::uint8_t *graph,
+        std::size_t graph_size, unsigned mode, std::size_t index,
+        const std::uint8_t *new_password, std::size_t new_password_size,
+        const std::array<std::uint8_t, 16> &new_slot_id,
+        std::uint8_t permissions, bool must_change);
 };
 
 } // namespace scpefe::container

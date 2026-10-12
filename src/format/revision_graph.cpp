@@ -107,7 +107,8 @@ ParsedSlots parse_slots(CborReader &reader)
             || permissions > 7 || role > 2 || (i == 0) != (role == 0)
             || (role == 2 && (recovery || i + 1 != count))
             || (role == 1 && recovery) || (role != 1 && permissions != 7)
-            || (role != 1 && claim) || (role != 2 && (name.empty() || email.empty()))) malformed();
+            || (role != 1 && claim)
+            || (role != 2 && (name.empty() || (!claim && email.empty())))) malformed();
         recovery |= role == 2;
         RevisionSlot semantic;
         semantic.id = slot;
@@ -797,6 +798,84 @@ std::vector<std::uint8_t> RevisionGraph::save_content(std::string_view content,
     if (field_ranges_[9].second) field(9);
     auto encoded = writer.take_output();
     (void)RevisionGraph::decode(encoded.data(), encoded.size(), limits);
+    return encoded;
+}
+
+std::vector<std::uint8_t> RevisionGraph::append_slot_event(
+    const std::vector<RevisionSlot> &slots, const RevisionSlot &actor,
+    const std::array<std::uint8_t, 16> &affected_slot,
+    std::string_view event_type, std::string_view event_detail,
+    std::string_view client_name, std::string_view client_email,
+    std::string_view device, std::uint64_t timestamp_ms) const
+{
+    if (records_.back().provisional || slots.empty() || slots.size() > 9
+        || event_type.empty() || timestamp_ms > std::numeric_limits<std::int64_t>::max())
+        throw RevisionFailure{RevisionError::invalid_argument};
+    CborWriter details;
+    details.map(event_detail.empty() ? 1 : 2);
+    details.unsigned_integer(1); details.bytes(affected_slot.data(), affected_slot.size());
+    if (!event_detail.empty()) {
+        details.unsigned_integer(5); details.text(event_detail.data(), event_detail.size());
+    }
+    const auto detail_bytes = details.take_output();
+    CborWriter immutable;
+    immutable.map(13);
+    immutable.unsigned_integer(1); immutable.unsigned_integer(2);
+    immutable.unsigned_integer(2); immutable.bytes(head_.data(), head_.size());
+    immutable.unsigned_integer(4); immutable.array(0);
+    immutable.unsigned_integer(5); immutable.unsigned_integer(timestamp_ms);
+    immutable.unsigned_integer(6); immutable.bytes(actor.id.data(), actor.id.size());
+    const auto actor_name = actor.name.empty() ? client_name : std::string_view(actor.name);
+    const auto actor_email = actor.email.empty() ? client_email : std::string_view(actor.email);
+    immutable.unsigned_integer(7); immutable.text(actor_name.data(), actor_name.size());
+    immutable.unsigned_integer(8); immutable.text(actor_email.data(), actor_email.size());
+    immutable.unsigned_integer(9); immutable.text(client_name.data(), client_name.size());
+    immutable.unsigned_integer(10); immutable.text(client_email.data(), client_email.size());
+    immutable.unsigned_integer(11); immutable.text(device.data(), device.size());
+    immutable.unsigned_integer(12); immutable.bytes(records_.back().content_hash.data(), 32);
+    immutable.unsigned_integer(14); immutable.text(event_type.data(), event_type.size());
+    immutable.unsigned_integer(15); immutable.raw(detail_bytes.data(), detail_bytes.size());
+    const auto immutable_bytes = immutable.take_output();
+    const auto id = digest(id_prefix, immutable_bytes.data(), immutable_bytes.size());
+    CborWriter record;
+    record.map(3);
+    record.unsigned_integer(1); record.bytes(id.data(), id.size());
+    record.unsigned_integer(2); record.raw(immutable_bytes.data(), immutable_bytes.size());
+    record.unsigned_integer(3); record.unsigned_integer(0);
+    const auto record_bytes = record.take_output();
+    CborWriter writer;
+    writer.map(field_ranges_[9].second ? 9 : 8);
+    writer.unsigned_integer(1); writer.unsigned_integer(1);
+    writer.unsigned_integer(2); writer.array(slots.size());
+    for (const auto &slot : slots) {
+        writer.map(7);
+        writer.unsigned_integer(1); writer.bytes(slot.id.data(), slot.id.size());
+        writer.unsigned_integer(2); writer.unsigned_integer(slot.permissions);
+        writer.unsigned_integer(3); writer.boolean(slot.must_be_changed);
+        writer.unsigned_integer(4); writer.unsigned_integer(slot.role);
+        writer.unsigned_integer(5); writer.bytes(slot.management_id.data(), slot.management_id.size());
+        writer.unsigned_integer(6); writer.text(slot.name.data(), slot.name.size());
+        writer.unsigned_integer(7); writer.text(slot.email.data(), slot.email.size());
+    }
+    writer.unsigned_integer(3); writer.map(3);
+    writer.unsigned_integer(1); writer.bytes(slots.front().id.data(), 16);
+    writer.unsigned_integer(2); writer.text(slots.front().name.data(), slots.front().name.size());
+    writer.unsigned_integer(3); writer.text(slots.front().email.data(), slots.front().email.size());
+    const auto field = [&](unsigned key) {
+        const auto [offset, length] = field_ranges_[key];
+        writer.unsigned_integer(key); writer.raw(encoded_.data() + offset, length);
+    };
+    field(4);
+    writer.unsigned_integer(5); writer.array(records_.size() + 1);
+    for (const auto &old : records_)
+        writer.raw(old.record_cbor.data(), old.record_cbor.size());
+    writer.raw(record_bytes.data(), record_bytes.size());
+    writer.unsigned_integer(6); writer.bytes(id.data(), id.size());
+    writer.unsigned_integer(7); writer.bytes(content_head_.data(), content_head_.size());
+    field(8);
+    if (field_ranges_[9].second) field(9);
+    auto encoded = writer.take_output();
+    (void)RevisionGraph::decode(encoded.data(), encoded.size(), RevisionLimits::defaults());
     return encoded;
 }
 

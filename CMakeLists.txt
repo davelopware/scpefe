@@ -38,6 +38,7 @@ else()
         src/container/container.cpp
         src/container/container_state.cpp
         src/container/password_slot_lifecycle.cpp
+        src/container/password_slots.cpp
         src/container/recoverable_password_container.cpp
         src/container/revised_v3_container.cpp
         src/container/unlocked_container_data.cpp
@@ -249,6 +250,8 @@ if(BUILD_TESTING)
         target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
         add_executable(scpefe_candidate_save_test tests/candidate_save_test.c)
         target_link_libraries(scpefe_candidate_save_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_slot_candidate_abi_test tests/slot_candidate_abi_test.c)
+        target_link_libraries(scpefe_slot_candidate_abi_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_revised_v3_history_abi_test
             tests/revised_v3_history_abi_test.c)
@@ -264,6 +267,7 @@ if(BUILD_TESTING)
             src/container/recoverable_password_container.cpp
             src/container/revised_v3_container.cpp
             src/container/password_slot_lifecycle.cpp
+            src/container/password_slots.cpp
             src/container/unlocked_container_data.cpp
             src/core/context.cpp
             src/core/host_services.cpp
@@ -316,10 +320,17 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
         add_executable(scpefe_managed_slot_ownership_test
-            tests/managed_slot_ownership_test.cpp
-            src/container/unlocked_container_data.cpp)
+            tests/managed_slot_ownership_test.cpp)
         target_compile_features(scpefe_managed_slot_ownership_test PRIVATE cxx_std_20)
-        target_include_directories(scpefe_managed_slot_ownership_test PRIVATE
+        target_link_libraries(scpefe_managed_slot_ownership_test PRIVATE SCPEFE::scpefe)
+
+        # Keep the old decrypted-struct wipe contract while the v2 byte ABI
+        # remains in use by the Windows host; the primary test covers owned v3 snapshots.
+        add_executable(scpefe_legacy_managed_slot_ownership_test
+            tests/legacy_managed_slot_ownership_test.cpp
+            src/container/unlocked_container_data.cpp)
+        target_compile_features(scpefe_legacy_managed_slot_ownership_test PRIVATE cxx_std_20)
+        target_include_directories(scpefe_legacy_managed_slot_ownership_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
         add_executable(scpefe_container_test tests/container_test.c)
@@ -344,6 +355,9 @@ if(BUILD_TESTING)
 
         add_executable(scpefe_password_change_test tests/password_change_test.c)
         target_link_libraries(scpefe_password_change_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_legacy_password_change_test
+            tests/legacy_password_change_test.c)
+        target_link_libraries(scpefe_legacy_password_change_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_export_surface_test tests/export_surface_test.c)
         target_link_libraries(scpefe_export_surface_test PRIVATE ${CMAKE_DL_LIBS})
@@ -356,11 +370,14 @@ if(BUILD_TESTING)
 
         add_executable(scpefe_invitation_test tests/invitation_test.c)
         target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_legacy_invitation_test tests/legacy_invitation_test.c)
+        target_link_libraries(scpefe_legacy_invitation_test PRIVATE SCPEFE::scpefe)
 
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
         add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
         add_test(NAME scpefe.candidate-save COMMAND scpefe_candidate_save_test
             "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.slot-candidate-abi COMMAND scpefe_slot_candidate_abi_test)
         add_test(NAME scpefe.revised-v3-history-abi
             COMMAND scpefe_revised_v3_history_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.lifecycle-open-limit COMMAND scpefe_lifecycle_open_limit_test)
@@ -373,6 +390,8 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.merge-save-round-trip COMMAND scpefe_merge_save_test)
         add_test(NAME scpefe.compaction-round-trip COMMAND scpefe_compaction_test)
         add_test(NAME scpefe.password-change COMMAND scpefe_password_change_test)
+        add_test(NAME scpefe.legacy-password-change
+            COMMAND scpefe_legacy_password_change_test)
         add_test(
             NAME scpefe.export-surface
             COMMAND scpefe_export_surface_test $<TARGET_FILE:scpefe>
@@ -381,7 +400,9 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.migration-abi-validation
             COMMAND scpefe_migration_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME scpefe.invitation-claim
-            COMMAND scpefe_invitation_test "${CMAKE_CURRENT_SOURCE_DIR}")
+            COMMAND scpefe_invitation_test)
+        add_test(NAME scpefe.legacy-invitation-claim
+            COMMAND scpefe_legacy_invitation_test "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(
             NAME scpefe.format-contract
             COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -403,6 +424,8 @@ if(BUILD_TESTING)
             COMMAND scpefe_diagnostic_json_writer_test)
         add_test(NAME scpefe.managed-slot-ownership
             COMMAND scpefe_managed_slot_ownership_test)
+        add_test(NAME scpefe.legacy-managed-slot-ownership
+            COMMAND scpefe_legacy_managed_slot_ownership_test)
         add_test(
             NAME scpefe.diagnostic-revision
             COMMAND scpefe_diagnostic revision

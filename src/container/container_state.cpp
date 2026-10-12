@@ -72,6 +72,18 @@ TransitionResult ContainerStateManagerService::apply(
         next.active_slot.reset();
         next.permissions = {};
         result.effects.push_back({EffectKind::clear_display});
+    } else if (const auto *slots = std::get_if<AuthenticatedSlotPermissions>(&attempt)) {
+        require(current.access == Access::open && current.screen == Screen::unlocked
+            && current.publication == PublicationPhase::idle);
+        require(!slots->permissions.can_add_passwords || slots->permissions.can_edit);
+        require(!slots->permissions.can_remove_passwords || slots->permissions.can_edit);
+        next.permissions = slots->permissions;
+        if ((!next.permissions.can_edit || !slots->may_attempt_edit)
+            && current.edit == EditMode::editing) {
+            next.edit = EditMode::read_only;
+            result.effects.push_back({EffectKind::stop_heartbeat});
+            result.effects.push_back({EffectKind::preserve_unsaved_work});
+        }
     } else if (std::holds_alternative<Close>(attempt)) {
         require(current.access == Access::open
             && current.publication != PublicationPhase::publishing

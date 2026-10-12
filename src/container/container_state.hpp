@@ -21,7 +21,7 @@ enum class Attention { none, conflict, target_replaced, reauthenticate };
 /* Distinguishes the stages of one serialized publication or external action. */
 enum class PublicationPhase { idle, publishing, awaiting_host_action, outcome_pending, recovery_required };
 /* Identifies the candidate's authorized purpose. */
-enum class PublicationKind { save, backup_attempt, export_attempt, activity_outcome };
+enum class PublicationKind { save, slot_change, backup_attempt, export_attempt, activity_outcome };
 /* Distinguishes verified publication from definite and ambiguous failures. */
 enum class PublicationOutcome { verified, definite_failure, ambiguous };
 
@@ -75,6 +75,8 @@ struct Unlock {
 };
 /* Hides clear content and stops this session's lease heartbeat. */
 struct Lock {};
+/* Refreshes effective rights after an authenticated slot candidate is adopted. */
+struct AuthenticatedSlotPermissions { Permissions permissions; bool may_attempt_edit; };
 /* Releases the open container and any retained lease. */
 struct Close {};
 /* Records a confirmed lease acquisition for an eligible editor. */
@@ -97,7 +99,8 @@ struct CompleteHostAction { std::uint64_t operation_id; bool succeeded; };
 struct ResolveAmbiguity { std::uint64_t operation_id; bool published; };
 
 /* Carries exactly one typed state transition request. */
-using StateTransition = std::variant<Open, Unlock, Lock, Close, AcquireEdit,
+using StateTransition = std::variant<Open, Unlock, Lock, AuthenticatedSlotPermissions,
+    Close, AcquireEdit,
     ReleaseEdit, ApplyTargetPermissions, RaiseAttention, ClearAttention,
     BeginPublication, AcknowledgePublication, CompleteHostAction, ResolveAmbiguity>;
 
