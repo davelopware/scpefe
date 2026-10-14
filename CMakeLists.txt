@@ -13,10 +13,13 @@ option(SCPEFE_BUILD_NODE_ADDON "Build the Electron Node-API bridge" OFF)
 
 set(SCPEFE_PORTABLE_FORMAT_SOURCES
     src/abi/revision_abi.cpp
+    src/abi/history_abi.cpp
+    src/format/blake2b.cpp
     src/format/cbor_reader.cpp
     src/format/cbor_writer.cpp
     src/format/diagnostic_json_writer.cpp
     src/format/revision_limits.cpp
+    src/format/revision_graph.cpp
     src/format/snapshot_revision.cpp
     src/format/text_validation.cpp
 )
@@ -29,21 +32,22 @@ else()
     find_library(SODIUM_LIBRARY NAMES sodium libsodium.so.23 REQUIRED)
     add_library(scpefe SHARED
         ${SCPEFE_PORTABLE_FORMAT_SOURCES}
-        src/abi/container_abi.cpp
+        src/abi/password_policy_abi.cpp
         src/abi/context_abi.cpp
-        src/container/password_container.cpp
-        src/container/password_slot_lifecycle.cpp
-        src/container/recoverable_password_container.cpp
+        src/container/container.cpp
+        src/container/container_state.cpp
+        src/container/password_slots.cpp
+        src/container/revised_v3_container.cpp
         src/container/unlocked_container_data.cpp
         src/core/context.cpp
+        src/core/service_registry.cpp
+        src/core/service_factory.cpp
+        src/core/password_service.cpp
+        src/core/encryption_service.cpp
+        src/core/persistence_service.cpp
+        src/core/history_service.cpp
         src/core/host_services.cpp
-        src/document/new_document.cpp
-        src/document/compaction.cpp
-        src/document/manual_save.cpp
-        src/document/provisional_save.cpp
-        src/document/revision_transition.cpp
         src/document/merge_save.cpp
-        src/document/migration.cpp
         src/security/password_strength.cpp
         third_party/zxcvbn-c/zxcvbn.c
     )
@@ -118,48 +122,23 @@ if(SCPEFE_BUILD_NODE_ADDON)
     )
     if(BUILD_TESTING)
         find_program(NODE_EXECUTABLE node REQUIRED)
-        add_test(
-            NAME scpefe.native-addon-head-witness
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-head-witness-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
-            NAME scpefe.native-addon-invitation
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-invitation-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
-            NAME scpefe.native-addon-merge
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-merge-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
-            NAME scpefe.native-addon-provisional
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-provisional-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
-            NAME scpefe.native-addon-compaction
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-compaction-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
-            NAME scpefe.native-addon-migration
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-migration-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
-        add_test(
-            NAME scpefe.native-addon-password-policy
-            COMMAND ${NODE_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/apps/windows/test/native-password-policy-addon.integration.mjs
-                $<TARGET_FILE:scpefe_electron_native>
-        )
+        foreach(lifecycle_test IN ITEMS native-container-lifecycle
+                native-document-service-lifecycle native-lease-workflows
+                native-divergence-abi native-compaction-flow native-activity-flow
+                native-v3-inspection native-merge-candidate)
+            # Node's Windows ESM test runner treats a raw C: test path as a URL
+            # scheme. Resolve the relative entry point from the source root.
+            add_test(
+                NAME scpefe.${lifecycle_test}
+                COMMAND ${NODE_EXECUTABLE}
+                    --import ./apps/windows/scripts/register-frontend-typescript.mjs
+                    --test --test-concurrency=1
+                    ./apps/windows/test/${lifecycle_test}.test.ts
+            )
+            set_tests_properties(scpefe.${lifecycle_test} PROPERTIES
+                ENVIRONMENT "SCPEFE_NATIVE_ADDON_PATH=$<TARGET_FILE:scpefe_electron_native>"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        endforeach()
     endif()
 endif()
 
@@ -198,6 +177,9 @@ if(BUILD_TESTING)
         tests/snapshot_conformance_test.c
     )
     target_link_libraries(${SCPEFE_CONFORMANCE_TARGET} PRIVATE SCPEFE::scpefe)
+    add_executable(scpefe_revision_graph_conformance
+        tests/revision_graph_conformance_test.c)
+    target_link_libraries(scpefe_revision_graph_conformance PRIVATE SCPEFE::scpefe)
 
     if(EMSCRIPTEN)
         target_link_options(${SCPEFE_CONFORMANCE_TARGET} PRIVATE
@@ -205,19 +187,51 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors/draft-v1@/tests/vectors/draft-v1"
             "-sNO_DISABLE_EXCEPTION_CATCHING"
         )
+        target_link_options(scpefe_revision_graph_conformance PRIVATE
+            "--embed-file"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors/draft-v3@/tests/vectors/draft-v3"
+            "-sNO_DISABLE_EXCEPTION_CATCHING")
         add_test(
             NAME scpefe.wasm-format-conformance
             COMMAND ${SCPEFE_CONFORMANCE_TARGET} "${SCPEFE_CONFORMANCE_ROOT}"
         )
+        add_test(NAME scpefe.wasm-revision-graph-conformance
+            COMMAND scpefe_revision_graph_conformance "${SCPEFE_CONFORMANCE_ROOT}")
     else()
         add_executable(scpefe_context_test tests/context_test.c)
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_lifecycle_abi_test tests/lifecycle_abi_test.c)
+        target_link_libraries(scpefe_lifecycle_abi_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_candidate_save_test tests/candidate_save_test.c)
+        target_link_libraries(scpefe_candidate_save_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_lease_candidate_abi_test tests/lease_candidate_abi_test.c)
+        target_link_libraries(scpefe_lease_candidate_abi_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_slot_candidate_abi_test tests/slot_candidate_abi_test.c)
+        target_link_libraries(scpefe_slot_candidate_abi_test PRIVATE SCPEFE::scpefe)
+
+        add_executable(scpefe_revised_v3_history_abi_test
+            tests/revised_v3_history_abi_test.c)
+        target_link_libraries(scpefe_revised_v3_history_abi_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_revised_compaction_abi_test
+            tests/revised_compaction_abi_test.c)
+        target_link_libraries(scpefe_revised_compaction_abi_test PRIVATE SCPEFE::scpefe)
+        add_executable(scpefe_activity_abi_test tests/activity_abi_test.c)
+        target_link_libraries(scpefe_activity_abi_test PRIVATE SCPEFE::scpefe)
+
         add_executable(scpefe_revision_test tests/revision_test.c)
         target_link_libraries(scpefe_revision_test PRIVATE SCPEFE::scpefe)
 
+        add_executable(scpefe_diagnostic_json_writer_test
+            tests/diagnostic_json_writer_test.cpp
+            src/format/diagnostic_json_writer.cpp)
+        target_compile_features(scpefe_diagnostic_json_writer_test PRIVATE cxx_std_20)
+        target_include_directories(scpefe_diagnostic_json_writer_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
         set(SCPEFE_REVISION_OWNERSHIP_SOURCES ${SCPEFE_PORTABLE_FORMAT_SOURCES})
         list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/revision_abi.cpp)
+        list(REMOVE_ITEM SCPEFE_REVISION_OWNERSHIP_SOURCES src/abi/history_abi.cpp)
         add_executable(scpefe_revision_ownership_test
             tests/revision_ownership_test.cpp
             ${SCPEFE_REVISION_OWNERSHIP_SOURCES})
@@ -226,72 +240,35 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
         add_executable(scpefe_managed_slot_ownership_test
-            tests/managed_slot_ownership_test.cpp
-            src/container/unlocked_container_data.cpp)
+            tests/managed_slot_ownership_test.cpp)
         target_compile_features(scpefe_managed_slot_ownership_test PRIVATE cxx_std_20)
-        target_include_directories(scpefe_managed_slot_ownership_test PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-        add_executable(scpefe_container_test tests/container_test.c)
-        target_link_libraries(scpefe_container_test PRIVATE SCPEFE::scpefe)
-
-        add_executable(scpefe_format_contract_test tests/format_contract_test.c)
-        target_link_libraries(scpefe_format_contract_test PRIVATE SCPEFE::scpefe)
-
-        add_executable(scpefe_new_document_test tests/new_document_test.c)
-        target_link_libraries(scpefe_new_document_test PRIVATE SCPEFE::scpefe)
-
-        add_executable(scpefe_manual_save_test tests/manual_save_test.c)
-        target_link_libraries(scpefe_manual_save_test PRIVATE SCPEFE::scpefe)
-        add_executable(scpefe_provisional_save_test tests/provisional_save_test.c)
-        target_link_libraries(scpefe_provisional_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
-
-        add_executable(scpefe_merge_save_test tests/merge_save_test.c)
-        target_link_libraries(scpefe_merge_save_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
-
-        add_executable(scpefe_compaction_test tests/compaction_test.c)
-        target_link_libraries(scpefe_compaction_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
-
-        add_executable(scpefe_password_change_test tests/password_change_test.c)
-        target_link_libraries(scpefe_password_change_test PRIVATE SCPEFE::scpefe)
+        target_link_libraries(scpefe_managed_slot_ownership_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_export_surface_test tests/export_surface_test.c)
         target_link_libraries(scpefe_export_surface_test PRIVATE ${CMAKE_DL_LIBS})
 
-        add_executable(scpefe_editing_lease_test tests/editing_lease_test.c)
-        target_link_libraries(scpefe_editing_lease_test PRIVATE SCPEFE::scpefe)
-
-        add_executable(scpefe_migration_abi_test tests/migration_abi_test.c)
-        target_link_libraries(scpefe_migration_abi_test PRIVATE SCPEFE::scpefe ${SODIUM_LIBRARY})
-
-        add_executable(scpefe_invitation_test tests/invitation_test.c)
-        target_link_libraries(scpefe_invitation_test PRIVATE SCPEFE::scpefe)
-
         add_test(NAME scpefe.context-isolation COMMAND scpefe_context_test)
-        add_test(NAME scpefe.container-password-round-trip COMMAND scpefe_container_test)
-        add_test(NAME scpefe.new-document-round-trip COMMAND scpefe_new_document_test)
-        add_test(NAME scpefe.manual-save-round-trip COMMAND scpefe_manual_save_test)
-        add_test(NAME scpefe.provisional-save-lifecycle COMMAND scpefe_provisional_save_test)
-        add_test(NAME scpefe.merge-save-round-trip COMMAND scpefe_merge_save_test)
-        add_test(NAME scpefe.compaction-round-trip COMMAND scpefe_compaction_test)
-        add_test(NAME scpefe.password-change COMMAND scpefe_password_change_test)
+        add_test(NAME scpefe.lifecycle-abi COMMAND scpefe_lifecycle_abi_test)
+        add_test(NAME scpefe.candidate-save COMMAND scpefe_candidate_save_test
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.lease-candidate-abi COMMAND scpefe_lease_candidate_abi_test
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.slot-candidate-abi COMMAND scpefe_slot_candidate_abi_test)
+        add_test(NAME scpefe.revised-v3-history-abi
+            COMMAND scpefe_revised_v3_history_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME scpefe.revised-compaction-abi
+            COMMAND scpefe_revised_compaction_abi_test)
+        add_test(NAME scpefe.activity-abi COMMAND scpefe_activity_abi_test)
         add_test(
             NAME scpefe.export-surface
             COMMAND scpefe_export_surface_test $<TARGET_FILE:scpefe>
-        )
-        add_test(NAME scpefe.editing-lease-round-trip COMMAND scpefe_editing_lease_test)
-        add_test(NAME scpefe.migration-abi-validation
-            COMMAND scpefe_migration_abi_test "${CMAKE_CURRENT_SOURCE_DIR}")
-        add_test(NAME scpefe.invitation-claim
-            COMMAND scpefe_invitation_test "${CMAKE_CURRENT_SOURCE_DIR}")
-        add_test(
-            NAME scpefe.format-contract
-            COMMAND scpefe_format_contract_test "${CMAKE_CURRENT_SOURCE_DIR}"
         )
         add_test(
             NAME scpefe.native-format-conformance
             COMMAND ${SCPEFE_CONFORMANCE_TARGET} "${SCPEFE_CONFORMANCE_ROOT}"
         )
+        add_test(NAME scpefe.native-revision-graph-conformance
+            COMMAND scpefe_revision_graph_conformance "${SCPEFE_CONFORMANCE_ROOT}")
         add_test(
             NAME scpefe.revision-round-trip
             COMMAND scpefe_revision_test
@@ -299,6 +276,8 @@ if(BUILD_TESTING)
         )
         add_test(NAME scpefe.revision-ownership
             COMMAND scpefe_revision_ownership_test)
+        add_test(NAME scpefe.diagnostic-json-writer
+            COMMAND scpefe_diagnostic_json_writer_test)
         add_test(NAME scpefe.managed-slot-ownership
             COMMAND scpefe_managed_slot_ownership_test)
         add_test(
@@ -315,7 +294,7 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.diagnostic-health COMMAND scpefe_diagnostic health)
         set_tests_properties(scpefe.diagnostic-health PROPERTIES
             PASS_REGULAR_EXPRESSION
-                "\"status\":\"ok\".*\"abi_version\":1.*\"host_monotonic_time_ms\":424242"
+                "\"status\":\"ok\".*\"abi_version\":2.*\"host_monotonic_time_ms\":424242"
         )
         set_tests_properties(scpefe.diagnostic-revision PROPERTIES
             DEPENDS scpefe.revision-round-trip

@@ -467,23 +467,6 @@ test("lease takeover uses one decision and cancellation consumes its authorizati
   session.dispose();
 });
 
-test("migration failure stays actionable with a safe message and retry focus", async () => {
-  const host = { migrateDocument: async () => { throw new Error("private path"); } } as
-    unknown as DocumentSessionHost<DocumentOpened>;
-  const session = new DocumentSession(host, {
-    createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
-    onJournalWarning: () => () => {},
-  } as WorkingCopyJournalHost);
-  session.adopt({ ...opened, migrationRequired: true, migrationCanEdit: true });
-  const presentation = new SessionPresentation(session, () => "safe failure");
-  assert.equal(presentation.view().selectedDecision?.kind, "migration-decision");
-  await presentation.act("migrate");
-  assert.equal(presentation.view().safeMessage, "safe failure");
-  assert.equal(presentation.view().focusIntent, "migration-retry");
-  assert.equal(JSON.stringify(presentation.view()).includes("private path"), false);
-  session.dispose();
-});
-
 test("changed takeover evidence presents the current holder and cannot replay authorization", async () => {
   const used: string[] = [];
   const host = { enterEditMode: async ({ authorization }: { authorization?: string } = {}) => {
@@ -583,23 +566,10 @@ test("confirmed lease enters edit mode through one-shot session authority", asyn
   session.dispose();
 });
 
-test("migration and compaction success return to the current document presentation", async () => {
-  const migrationHost = { migrateDocument: async () => ({
-    opened: { ...opened, migrationRequired: undefined }, compatibilityCode: "MIGRATED",
-  }) } as unknown as DocumentSessionHost<DocumentOpened>;
+test("compaction success returns to the current document presentation", async () => {
   const journal = { createJournalScope: () => "scope", updateWorkingCopy: async () => ({}),
     onJournalWarning: () => () => {},
   } as WorkingCopyJournalHost;
-  const migrationSession = new DocumentSession(migrationHost, journal);
-  migrationSession.adopt({ ...opened, migrationRequired: true, migrationCanEdit: true });
-  const migration = new SessionPresentation(migrationSession, (code) =>
-    code === "MIGRATED" ? "Migration complete." : "safe failure");
-  assert.equal(await migration.act("migrate"), undefined);
-  assert.equal(migration.view().selectedDecision, null);
-  assert.equal(migration.view().safeMessage, "Migration complete.");
-  assert.equal(migrationSession.getSnapshot().kind, "read-only");
-  migrationSession.dispose();
-
   const compactHost = { compactDocument: async ({ confirmed }: { confirmed: true }) => {
     assert.equal(confirmed, true);
     return { opened: { ...opened, readOnly: false, canAddPasswords: true,
@@ -692,6 +662,7 @@ test("pending publication distinguishes unavailable, conflict, and published out
     const presentation = new SessionPresentation(session, () => "safe failure");
     assert.deepEqual(presentation.view().selectedDecision, {
       kind: "publication-decision", state: "pending-publication", failureMessage: null,
+      failureCode: null,
     });
     await presentation.act("reconnect-publication");
     assert.equal(presentation.view().safeMessage, state === "pending-publication"
@@ -717,12 +688,43 @@ test("discard failure keeps a locally saved candidate and retry focus", async ()
   await presentation.act("discard-publication");
   assert.deepEqual(presentation.view().selectedDecision, {
     kind: "publication-decision", state: "pending-publication",
-    failureMessage: "safe failure",
+    failureMessage: "safe failure", failureCode: "OPERATION_FAILED",
   });
   assert.equal(presentation.view().safeMessage,
     "Publication discard needs attention: safe failure");
   assert.equal(presentation.view().focusIntent, "decision-action");
   assert.equal(JSON.stringify(presentation.view()).includes("private"), false);
+  session.dispose();
+});
+
+test("target reauthentication action supplies a new credential without displaying it", async () => {
+  const requests: Array<{ targetPassword?: string }> = [];
+  const host = { beginDivergenceResolution: async (request?: { targetPassword?: string }) => {
+    requests.push(request ?? {});
+    if (!request?.targetPassword) {
+      throw Object.assign(new Error("private target path"), {
+        name: "SafeBoundaryError", code: "MERGE_TARGET_REAUTHENTICATION",
+      });
+    }
+    return { content: "merge draft", hasConflicts: false, ancestorRevision: "a",
+      localRevision: "l", currentRevision: "c" };
+  } } as unknown as DocumentSessionHost<DocumentOpened>;
+  const session = new DocumentSession(host, { createJournalScope: () => "scope",
+    updateWorkingCopy: async () => ({}), onJournalWarning: () => () => {},
+  } as WorkingCopyJournalHost);
+  session.adopt({ ...opened, publicationState: "conflict" });
+  const presentation = new SessionPresentation(session, () => "Enter the current target password.");
+  await presentation.act("reconnect-publication");
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "publication-decision", state: "conflict",
+    failureMessage: "Enter the current target password.",
+    failureCode: "MERGE_TARGET_REAUTHENTICATION",
+  });
+  await presentation.act("authenticate-target", "new secret");
+  assert.deepEqual(requests, [{}, { targetPassword: "new secret" }]);
+  assert.equal(presentation.view().selectedDecision, null);
+  assert.equal(JSON.stringify(presentation.view()).includes("new secret"), false);
+  assert.equal(session.getSnapshot().kind, "edit");
   session.dispose();
 });
 

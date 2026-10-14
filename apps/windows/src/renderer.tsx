@@ -2,7 +2,7 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { SharedApp, type SessionHost, type JournalTransportHost,
   type SessionEventsHost, type ShellHost, type CreationTargetHost,
-  type SecurityClipboardHost } from "@scpefe/react-ui";
+  type SecurityClipboardHost, type RevisionActivityHost } from "@scpefe/react-ui";
 import { CreationSecurityDialog } from "./creation-security-dialog.tsx";
 import { assessProposedPassword, PasswordPolicyStatus,
   proposedPasswordRejectionMessage, type PasswordPolicyHost } from "./password-policy.ts";
@@ -15,6 +15,7 @@ declare const __SCPEFE_SOURCE_COMMIT__: string;
 
 type WindowsFrontendHost = SessionHost & JournalTransportHost & SessionEventsHost
   & ShellHost & CreationTargetHost & SecurityClipboardHost
+  & RevisionActivityHost
   & PasswordPolicyHost & Required<Pick<SessionHost, "createDocument">>;
 
 declare global { interface Window { scpefe: WindowsFrontendHost } }
@@ -26,6 +27,7 @@ export function mountApp(host: HTMLElement): Root {
   const root = createRoot(host);
   root.render(<SharedApp sessionHost={window.scpefe} journalTransport={window.scpefe}
     events={window.scpefe} shellHost={window.scpefe}
+    revisionActivityHost={window.scpefe}
     creationTargetHost={window.scpefe} securityClipboard={window.scpefe}
     completion={completion}
     catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}

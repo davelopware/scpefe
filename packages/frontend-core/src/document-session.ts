@@ -10,8 +10,8 @@ export interface SessionDocument {
   readonly invitationRequired?: false;
   readonly canEdit?: boolean;
   readonly publicationState?: "target-published" | "pending-publication" | "conflict";
-  readonly migrationRequired?: true;
-  readonly migrationCanEdit?: boolean;
+  readonly activityOutcomePending?: true;
+  readonly activityConfirmationRequired?: true;
   readonly recovery?: SessionRecoveryRecord;
   readonly headMismatch?: { readonly kind: "rollback" | "divergence"
     | "replacement" | "witness-error"; readonly title?: string;
@@ -54,7 +54,6 @@ export interface SessionCommands {
   readonly reconcileIdentity: boolean;
   readonly updateSlotPermissions: boolean;
   readonly removeSlot: boolean;
-  readonly migrate: boolean;
   readonly compact: boolean;
 }
 
@@ -133,7 +132,7 @@ export interface SessionProtectionAttention {
 /** Host-issued one-shot lease challenge; authorization stays inside the session. */
 export interface SessionLeaseDecision {
   readonly decisionRequired: "lease-takeover";
-  readonly operation: "edit" | "recovery" | "divergence" | "migration";
+  readonly operation: "edit" | "recovery" | "divergence";
   readonly holderName: string;
   readonly authorization: string;
   readonly reason?: "master";
@@ -189,14 +188,6 @@ export interface SessionUnreadableJournalAttention {
   readonly failureCode?: SessionFailureCode;
 }
 
-/** Migration needs a verified backup and may require a fresh lease decision. */
-export interface SessionMigrationAttention {
-  readonly kind: "migration-decision";
-  readonly canMigrate: boolean;
-  readonly canceled?: true;
-  readonly failureCode?: SessionFailureCode;
-}
-
 /** A full administrator's one-time acknowledgement of irreversible compaction. */
 export interface SessionCompactionAttention {
   readonly kind: "compaction-decision";
@@ -220,7 +211,7 @@ export interface SessionRecoveryDiscovery {
 export type SessionAttention = SessionLeaseAttention | SessionEditAttention
   | SessionPublicationAttention | SessionSaveAttention | SessionRecoveryAttention
   | SessionHeadAttention | SessionUnreadableJournalAttention
-  | SessionRecoveryDiscoveryAttention | SessionMigrationAttention
+  | SessionRecoveryDiscoveryAttention
   | SessionCompactionAttention | SessionProtectionAttention;
 
 /** A host-produced merge draft for the lease-gated divergence workflow. */
@@ -256,17 +247,18 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   restoreRecoveredWork(request?: { readonly authorization?: string }): Promise<
     (Doc & { readonly recoveredUnsaved: true; readonly cursor: WorkingCopySelection })
     | SessionLeaseDecision>;
-  beginDivergenceResolution(request?: { readonly authorization?: string }):
-    Promise<SessionMergeDraft | SessionLeaseDecision>;
-  migrateDocument(request?: { readonly authorization?: string }): Promise<
-    { readonly opened: Doc; readonly compatibilityCode: string }
-    | SessionLeaseDecision | null>;
+  beginDivergenceResolution(request?: { readonly authorization?: string;
+    readonly targetPassword?: string }): Promise<SessionMergeDraft | SessionLeaseDecision>;
   compactDocument?(request: { readonly confirmed: true }): Promise<{
     readonly opened: Doc; readonly previousHead: string; readonly head: string } | null>;
-  saveDocument(content: string): Promise<{ readonly saved: true; readonly content: string;
+  saveDocument(content: string, submittedVersion?: Readonly<{
+    journalScope: string; revision: number }> | null): Promise<{ readonly saved: true;
+    readonly content: string; readonly journalScope?: string; readonly revision?: number;
     readonly publicationState: "target-published" | "pending-publication" | "conflict" }>;
-  saveDivergenceResolution(content: string): Promise<{ readonly saved: true;
+  saveDivergenceResolution(content: string, submittedVersion?: Readonly<{
+    journalScope: string; revision: number }> | null): Promise<{ readonly saved: true;
     readonly content: string;
+    readonly journalScope?: string; readonly revision?: number;
     readonly publicationState: "target-published" | "pending-publication" | "conflict" }>;
   reconnectPendingPublication(): Promise<{ readonly content: string;
     readonly publicationState: "target-published" | "pending-publication" | "conflict" }>;
@@ -274,9 +266,12 @@ export interface DocumentSessionHost<Doc extends SessionDocument,
   discardRecoveredWork(): Promise<Doc>;
   acceptHeadMismatch(): Promise<Doc>;
   discardUnreadableJournal(): Promise<Doc>;
-  backupDocument(): Promise<{ readonly backedUp: true } | null>;
+  backupDocument(): Promise<{ readonly backedUp: boolean;
+    readonly outcomePending?: true } | null>;
+  resolvePendingActivityOutcome?(request?: { readonly succeeded?: boolean }): Promise<Doc>;
   exportPlaintext(request: { readonly content: string;
-    readonly lineEndings: "lf" | "native" }): Promise<{ readonly exported: true } | null>;
+    readonly lineEndings: "lf" | "native" }): Promise<{ readonly exported: boolean;
+      readonly outcomePending?: true } | null>;
   changePassword?(request: { readonly currentPassword: string; readonly newPassword: string;
     readonly newPasswordConfirmation: string }): Promise<Doc>;
   createInvitation?(request: SessionInvitationRequest): Promise<{
@@ -302,7 +297,7 @@ export type SessionPendingOperation = "open" | "unlock" | "lock" | "close"
   | "divergence"
   | "password-change" | "invitation-create" | "invitation-claim"
   | "invitation-cancel" | "identity-reconcile" | "permissions-update"
-  | "slot-remove" | "migration" | "compaction";
+  | "slot-remove" | "compaction";
 
 /** A secret-free closed application state. */
 export interface ClosedSessionSnapshot {
@@ -376,14 +371,17 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
     | "pending-publication" | "conflict" }>
   | Readonly<{ status: "publication-discarded" | "divergence-required" }>
   | Readonly<{ status: "unsaved-work" }>
-  | Readonly<{ status: "backup"; created: boolean }>
-  | Readonly<{ status: "export"; exported: boolean }>
+  | Readonly<{ status: "backup"; created: boolean; canceled?: true;
+    outcomePending?: true }>
+  | Readonly<{ status: "activity-outcome"; pending: boolean;
+    confirmationRequired: boolean }>
+  | Readonly<{ status: "export"; exported: boolean; canceled?: true;
+    outcomePending?: true }>
   | Readonly<{ status: "recovery" | "recovery-discarded" }>
   | Readonly<{ status: "head-accepted" }>
   | Readonly<{ status: "unreadable-discarded" }>
   | Readonly<{ status: "divergence"; hasConflicts: boolean }>
-  | Readonly<{ status: "migration"; compatibilityCode: string }>
-  | Readonly<{ status: "migration-canceled" | "compaction-canceled" }>
+  | Readonly<{ status: "compaction-canceled" }>
   | Readonly<{ status: "external-canceled" }>
   | Readonly<{ status: "protection-canceled" | "protection-resolved" }>
   | Readonly<{ status: "compaction"; previousHead: string; head: string }>
@@ -398,7 +396,10 @@ export type DocumentSessionOutcome<Doc extends SessionDocument = SessionDocument
 export type SessionFailureCode = "OPERATION_FAILED" | "OPEN_FAILED"
   | "UNLOCK_FAILED" | "LOCK_CHECKPOINT_FAILED" | "LIFECYCLE_FAILED"
   | "WEAK_PASSWORD" | "PASSWORD_ALREADY_IN_USE"
-  | "MIGRATION_FAILED" | "COMPACTION_FAILED";
+  | "COMPACTION_FAILED"
+  | "MERGE_TARGET_REAUTHENTICATION" | "MERGE_ACCESS_REVOKED"
+  | "MERGE_PERMISSION_DENIED" | "MERGE_BASE_UNAVAILABLE"
+  | "MERGE_UNRELATED_TARGET" | "MERGE_TARGET_ROLLBACK";
 
 /** Lock warnings with an intentionally bounded presentation vocabulary. */
 export type SessionLockWarningCode = "LOCK_CHECKPOINT_FAILED" | "OPERATION_FAILED";
@@ -407,7 +408,10 @@ const CLOSED: ClosedSessionSnapshot = Object.freeze({ kind: "closed" });
 const SAFE_HOST_CODES = new Set<SessionFailureCode>([
   "OPERATION_FAILED", "OPEN_FAILED", "UNLOCK_FAILED", "LOCK_CHECKPOINT_FAILED",
   "LIFECYCLE_FAILED", "WEAK_PASSWORD", "PASSWORD_ALREADY_IN_USE",
-  "MIGRATION_FAILED", "COMPACTION_FAILED",
+  "COMPACTION_FAILED",
+  "MERGE_TARGET_REAUTHENTICATION", "MERGE_ACCESS_REVOKED",
+  "MERGE_PERMISSION_DENIED", "MERGE_BASE_UNAVAILABLE",
+  "MERGE_UNRELATED_TARGET", "MERGE_TARGET_ROLLBACK",
 ]);
 
 function hostFailureCode(error: unknown): SessionFailureCode {
@@ -441,6 +445,7 @@ export class DocumentSession<Doc extends SessionDocument,
   private workingCopy: WorkingCopy | null = null;
   private stopWorkingCopy: (() => void) | null = null;
   private leaseDecision: SessionLeaseDecision | null = null;
+  private mergeTargetPassword: string | null = null;
   private queuedLeaseOperation: "lease-confirm" | "lease-cancel" | null = null;
   private editFailureCode: SessionFailureCode | null = null;
   private publicationState: SessionPublicationState = "target-published";
@@ -449,8 +454,6 @@ export class DocumentSession<Doc extends SessionDocument,
   private recoveryFailureCode: SessionFailureCode | null = null;
   private headFailureCode: SessionFailureCode | null = null;
   private unreadableFailureCode: SessionFailureCode | null = null;
-  private migrationFailureCode: SessionFailureCode | null = null;
-  private migrationCanceled = false;
   private compactionFailureCode: SessionFailureCode | null = null;
   private compactionConfirmation = false;
   private resolvingDivergence = false;
@@ -458,6 +461,8 @@ export class DocumentSession<Doc extends SessionDocument,
     pendingPublications: 0 });
   private sealedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
   private acceptedRegularVersion: Readonly<{ journalScope: string; revision: number }> | null = null;
+  private pendingPublicationVersion: Readonly<{
+    journalScope: string; revision: number }> | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly workListeners = new Set<() => void>();
   private readonly queuedCommands: QueuedCommand<Doc>[] = [];
@@ -544,6 +549,7 @@ export class DocumentSession<Doc extends SessionDocument,
       ? null : this.snapshot.targetName);
     this.clearWorkingCopy();
     this.leaseDecision = null;
+    this.mergeTargetPassword = null;
     this.queuedLeaseOperation = null;
     this.editFailureCode = null;
     this.publicationFailureCode = null;
@@ -551,13 +557,12 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationState = document.provisional ? "provisional"
       : document.publicationState ?? "target-published";
     this.workingCopy = new WorkingCopy(this.journalHost);
@@ -603,10 +608,6 @@ export class DocumentSession<Doc extends SessionDocument,
     }
     if (safeDocument.unreadableJournal !== current.document.unreadableJournal) {
       this.unreadableFailureCode = null;
-    }
-    if (safeDocument.migrationRequired !== current.document.migrationRequired) {
-      this.migrationFailureCode = null;
-      this.migrationCanceled = false;
     }
     this.snapshot = this.openSnapshot(safeDocument, current.adoption,
       safeDocument.targetName ?? current.targetName, current.pending);
@@ -993,53 +994,18 @@ export class DocumentSession<Doc extends SessionDocument,
     const generation = this.generation;
     const adoption = this.currentAdoption();
     const operation = decision.operation;
+    let targetPassword = this.mergeTargetPassword;
+    this.mergeTargetPassword = null;
     let authorization = decision.authorization;
     return this.enqueue(() => {
       const used = authorization;
       authorization = "";
+      const credential = targetPassword;
+      targetPassword = null;
       return operation === "edit"
         ? this.runEditOperation(generation, used, "lease-confirm", adoption)
-        : this.runOtherLeaseOperation(generation, operation, used, adoption);
+        : this.runOtherLeaseOperation(generation, operation, used, adoption, credential);
     });
-  }
-
-  /** Begins migration only for the current, host-authorized legacy document. */
-  migrate(): Promise<DocumentSessionOutcome<Doc>> {
-    const generation = this.generation;
-    const adoption = this.currentAdoption();
-    return this.enqueue(() => this.runMigration(generation, adoption));
-  }
-
-  private async runMigration(generation: number, adoption: number | null,
-    authorization?: string): Promise<DocumentSessionOutcome<Doc>> {
-    if (!this.matchesAdoption(generation, adoption)
-      || (this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
-      || !this.snapshot.commands.migrate) return Object.freeze({ status: "unavailable" });
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
-    this.publishPending(authorization ? "lease-confirm" : "migration");
-    try {
-      const result = await this.host.migrateDocument(authorization ? { authorization } : {});
-      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
-      if (result !== null && "decisionRequired" in result) {
-        this.clearPending();
-        this.stageLeaseDecision(result, adoption!);
-        return Object.freeze({ status: "attention" });
-      }
-      if (result === null) {
-        this.migrationCanceled = true;
-        this.clearPending();
-        return Object.freeze({ status: "migration-canceled" });
-      }
-      this.replaceWorkingDocument(result.opened, "open");
-      return Object.freeze({ status: "migration",
-        compatibilityCode: result.compatibilityCode });
-    } catch (error) {
-      if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
-      this.migrationFailureCode = hostFailureCode(error);
-      this.clearPending();
-      return Object.freeze({ status: "failed", code: this.migrationFailureCode });
-    }
   }
 
   /** Stages a per-adoption irreversible compaction decision. */
@@ -1100,7 +1066,8 @@ export class DocumentSession<Doc extends SessionDocument,
 
   private async runOtherLeaseOperation(generation: number,
     operation: Exclude<SessionLeaseDecision["operation"], "edit">,
-    authorization: string, adoption: number | null): Promise<DocumentSessionOutcome<Doc>> {
+    authorization: string, adoption: number | null,
+    targetPassword: string | null = null): Promise<DocumentSessionOutcome<Doc>> {
     if (!this.matchesAdoption(generation, adoption)) {
       return Object.freeze({ status: "superseded" });
     }
@@ -1118,10 +1085,12 @@ export class DocumentSession<Doc extends SessionDocument,
         return Object.freeze({ status: "recovery" });
       }
       if (operation === "divergence") {
-        const result = await this.host.beginDivergenceResolution({ authorization });
+        const result = await this.host.beginDivergenceResolution({ authorization,
+          ...(targetPassword ? { targetPassword } : {}) });
         if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
         if ("decisionRequired" in result) {
           this.clearPending();
+          this.mergeTargetPassword = targetPassword;
           this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
@@ -1129,7 +1098,7 @@ export class DocumentSession<Doc extends SessionDocument,
         return Object.freeze({ status: "divergence", hasConflicts: result.hasConflicts });
       }
       this.clearPending();
-      return this.runMigration(generation, adoption, authorization);
+      return Object.freeze({ status: "unavailable" });
     } catch (error) {
       if (!this.matchesAdoption(generation, adoption)) return Object.freeze({ status: "superseded" });
       if (operation === "recovery") this.recoveryFailureCode = hostFailureCode(error);
@@ -1145,6 +1114,7 @@ export class DocumentSession<Doc extends SessionDocument,
     const decision = this.leaseDecision;
     if (!decision) return Promise.resolve(Object.freeze({ status: "unavailable" }));
     this.leaseDecision = null;
+    this.mergeTargetPassword = null;
     this.queuedLeaseOperation = "lease-cancel";
     this.publishWorkingCopy();
     const generation = this.generation;
@@ -1232,16 +1202,27 @@ export class DocumentSession<Doc extends SessionDocument,
       this.publishPending("save");
       try {
         const result = await (divergence
-          ? this.host.saveDivergenceResolution(content)
-          : this.host.saveDocument(content));
+          ? this.host.saveDivergenceResolution(content, submittedVersion)
+          : this.host.saveDocument(content, submittedVersion));
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
+        }
+        if (result.journalScope !== undefined && (result.journalScope
+            !== submittedVersion?.journalScope
+          || result.revision !== submittedVersion?.revision)) {
+          throw new Error("Host save result does not identify the submitted edit revision");
         }
         this.publicationState = result.publicationState;
         if (result.publicationState !== "conflict") this.resolvingDivergence = false;
         this.publicationFailureCode = null;
         this.sealedRegularVersion = submittedVersion;
-        this.workingCopy.sealPublication(result.content, content);
+        const atSubmittedRevision = submittedVersion?.journalScope
+          === this.workingCopy.journalVersion()?.journalScope
+          && submittedVersion?.revision === this.workingCopy.journalVersion()?.revision;
+        this.workingCopy.sealPublication(result.content, submittedVersion);
+        this.pendingPublicationVersion = result.publicationState === "target-published"
+          ? null : atSubmittedRevision
+            ? this.workingCopy.journalVersion() : submittedVersion;
         const current: DocumentSessionSnapshot<Doc> = this.getSnapshot();
         if (current.kind !== "read-only" && current.kind !== "edit") {
           return Object.freeze({ status: "superseded" });
@@ -1288,7 +1269,16 @@ export class DocumentSession<Doc extends SessionDocument,
         if (current.kind !== "read-only" && current.kind !== "edit") {
           return Object.freeze({ status: "superseded" });
         }
-        this.workingCopy?.sealPublication(result.content, current.document.content);
+        const resumedVersion = this.pendingPublicationVersion
+          ?? (current.working.dirty ? null : this.workingCopy?.journalVersion() ?? null);
+        const currentVersion = this.workingCopy?.journalVersion();
+        const atSubmittedRevision = resumedVersion !== null
+          && resumedVersion.journalScope === currentVersion?.journalScope
+          && resumedVersion.revision === currentVersion.revision;
+        this.workingCopy?.sealPublication(result.content, resumedVersion);
+        this.pendingPublicationVersion = result.publicationState === "target-published"
+          ? null : atSubmittedRevision
+            ? this.workingCopy?.journalVersion() ?? null : resumedVersion;
         this.refreshDocument({ ...current.document, content: result.content,
           readOnly: true,
           publicationState: result.publicationState } as Doc);
@@ -1307,7 +1297,8 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   /** Starts conflict resolution under the same adoption and command ordering as publication. */
-  beginDivergenceResolution(options: { readonly discardUnsaved?: boolean } = {}):
+  beginDivergenceResolution(options: { readonly discardUnsaved?: boolean;
+    readonly targetPassword?: string } = {}):
     Promise<DocumentSessionOutcome<Doc>> {
     const generation = this.generation;
     const adoption = this.currentAdoption();
@@ -1326,12 +1317,14 @@ export class DocumentSession<Doc extends SessionDocument,
       this.publicationFailureCode = null;
       this.publishPending("divergence");
       try {
-        const result = await this.host.beginDivergenceResolution();
+        const result = await this.host.beginDivergenceResolution(
+          options.targetPassword ? { targetPassword: options.targetPassword } : undefined);
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
         if ("decisionRequired" in result) {
           this.clearPending();
+          this.mergeTargetPassword = options.targetPassword ?? null;
           this.stageLeaseDecision(result, adoption!);
           return Object.freeze({ status: "attention" });
         }
@@ -1367,6 +1360,7 @@ export class DocumentSession<Doc extends SessionDocument,
         }
         this.publicationState = document.provisional ? "provisional"
           : document.publicationState ?? "target-published";
+        this.pendingPublicationVersion = null;
         this.resolvingDivergence = false;
         if (document.provisional) this.workingCopy?.adoptOpen(document.content, true);
         else this.workingCopy?.adoptPublication(document.content);
@@ -1380,6 +1374,36 @@ export class DocumentSession<Doc extends SessionDocument,
         this.publicationFailureCode = hostFailureCode(error);
         this.clearPending();
         return Object.freeze({ status: "failed", code: this.publicationFailureCode });
+      }
+    });
+  }
+
+  /** Resolves a durable activity result without guessing after an interrupted host call. */
+  resolveActivityOutcome(succeeded?: boolean): Promise<DocumentSessionOutcome<Doc>> {
+    const generation = this.generation;
+    const adoption = this.currentAdoption();
+    return this.enqueue(async () => {
+      if (!this.matchesAdoption(generation, adoption)
+          || (this.snapshot.kind !== "read-only" && this.snapshot.kind !== "edit")
+          || !this.snapshot.document.activityOutcomePending
+          || !this.host.resolvePendingActivityOutcome) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      try {
+        const opened = await this.host.resolvePendingActivityOutcome(
+          succeeded === undefined ? {} : { succeeded });
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        this.refreshDocument(opened);
+        return Object.freeze({ status: "activity-outcome",
+          pending: opened.activityOutcomePending === true,
+          confirmationRequired: opened.activityConfirmationRequired === true });
+      } catch (error) {
+        if (!this.matchesAdoption(generation, adoption)) {
+          return Object.freeze({ status: "superseded" });
+        }
+        return Object.freeze({ status: "failed", code: hostFailureCode(error) });
       }
     });
   }
@@ -1400,8 +1424,15 @@ export class DocumentSession<Doc extends SessionDocument,
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
+        if (result?.outcomePending && (this.snapshot.kind === "read-only"
+            || this.snapshot.kind === "edit")) {
+          this.refreshDocument({ ...this.snapshot.document,
+            activityOutcomePending: true } as Doc);
+        }
         this.clearPending();
-        return Object.freeze({ status: "backup", created: result !== null });
+        return Object.freeze({ status: "backup", created: result?.backedUp === true,
+          ...(result === null ? { canceled: true as const } : {}),
+          ...(result?.outcomePending ? { outcomePending: true as const } : {}) });
       } catch (error) {
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
@@ -1429,8 +1460,15 @@ export class DocumentSession<Doc extends SessionDocument,
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
         }
+        if (result?.outcomePending && (this.snapshot.kind === "read-only"
+            || this.snapshot.kind === "edit")) {
+          this.refreshDocument({ ...this.snapshot.document,
+            activityOutcomePending: true } as Doc);
+        }
         this.clearPending();
-        return Object.freeze({ status: "export", exported: result !== null });
+        return Object.freeze({ status: "export", exported: result?.exported === true,
+          ...(result === null ? { canceled: true as const } : {}),
+          ...(result?.outcomePending ? { outcomePending: true as const } : {}) });
       } catch (error) {
         if (!this.matchesAdoption(generation, adoption)) {
           return Object.freeze({ status: "superseded" });
@@ -1499,7 +1537,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.acceptedRegularVersion = Object.freeze({ journalScope: result.journalScope,
       revision: result.revision });
     this.publicationState = "provisional";
-    if (current.working.text === result.content) {
+    if (version.revision === result.revision && current.working.text === result.content) {
       this.workingCopy.markProvisional(result.content);
     } else {
       this.workingCopy.markProvisional();
@@ -1515,6 +1553,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationFailureCode = null;
     this.saveFailureCode = null;
     this.workingCopy.adoptPublication(text);
@@ -1814,13 +1853,12 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.cancelQueuedCommands();
     if (this.snapshot.kind === "closed") {
       const { invitationStaged: _staged, externalOpen: _external, ...current } = this.snapshot;
@@ -1856,13 +1894,12 @@ export class DocumentSession<Doc extends SessionDocument,
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.resolvingDivergence = false;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.cancelQueuedCommands();
     this.snapshot = this.discovery.total > 0
       ? Object.freeze({ kind: "closed", discovery: this.discovery,
@@ -1996,6 +2033,7 @@ export class DocumentSession<Doc extends SessionDocument,
     this.saveFailureCode = null;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationState = "conflict";
     this.resolvingDivergence = true;
     this.snapshot = this.openSnapshot(nextDocument, current.adoption,
@@ -2030,14 +2068,13 @@ export class DocumentSession<Doc extends SessionDocument,
     this.saveFailureCode = null;
     this.sealedRegularVersion = null;
     this.acceptedRegularVersion = null;
+    this.pendingPublicationVersion = null;
     this.publicationState = nextDocument.provisional ? "provisional"
       : nextDocument.publicationState ?? "target-published";
     this.resolvingDivergence = false;
     this.recoveryFailureCode = null;
     this.headFailureCode = null;
     this.unreadableFailureCode = null;
-    this.migrationFailureCode = null;
-    this.migrationCanceled = false;
     this.compactionFailureCode = null;
     this.compactionConfirmation = false;
     this.snapshot = this.openSnapshot(nextDocument, current.adoption,
@@ -2054,7 +2091,7 @@ export class DocumentSession<Doc extends SessionDocument,
     }
     const securityReady = !this.invitationStaged && !working.dirty
       && !document.recovery && !document.headMismatch
-      && !document.unreadableJournal && !document.migrationRequired
+      && !document.unreadableJournal
       && this.publicationState === "target-published" && pending === undefined;
     const administrationReady = securityReady && !document.readOnly
       && !document.profileMismatch;
@@ -2065,7 +2102,7 @@ export class DocumentSession<Doc extends SessionDocument,
           || document.publicationState === "target-published")
         && !document.recovery && !document.headMismatch && !document.profileMismatch
         && !document.unreadableJournal
-        && !document.migrationRequired,
+       ,
       write: !document.readOnly && !document.recovery && !document.headMismatch
         && !document.unreadableJournal && pending !== "compaction",
       undo: !document.readOnly && !document.recovery && !document.headMismatch
@@ -2076,9 +2113,10 @@ export class DocumentSession<Doc extends SessionDocument,
         && !document.unreadableJournal && working.dirty && pending === undefined,
       backup: !working.dirty && this.publicationState === "target-published"
         && !document.provisional && !document.recovery && !document.headMismatch
-        && !document.profileMismatch && !document.migrationRequired
+        && !document.activityOutcomePending
+        && !document.profileMismatch
         && !document.unreadableJournal && pending === undefined,
-      export: pending === undefined,
+      export: !document.activityOutcomePending && pending === undefined,
       publicationRetry: (this.publicationState === "pending-publication"
         || this.publicationState === "conflict") && !this.resolvingDivergence
         && !document.recovery && !document.headMismatch && !document.unreadableJournal
@@ -2090,7 +2128,7 @@ export class DocumentSession<Doc extends SessionDocument,
         && pending === undefined,
       recoveryRestore: Boolean(document.recovery) && document.canEdit === true
         && !document.headMismatch && !document.profileMismatch
-        && !document.unreadableJournal && !document.migrationRequired
+        && !document.unreadableJournal
         && this.publicationState === "target-published" && pending === undefined,
       recoveryDiscard: Boolean(document.recovery) && !document.headMismatch
         && !document.unreadableJournal && pending === undefined,
@@ -2104,11 +2142,6 @@ export class DocumentSession<Doc extends SessionDocument,
       updateSlotPermissions: administrationReady && document.canAddPasswords === true
         && document.canRemovePasswords === true,
       removeSlot: administrationReady && document.canRemovePasswords === true,
-      migrate: document.readOnly && document.migrationRequired === true
-        && document.migrationCanEdit === true && !working.dirty
-        && !document.recovery && !document.headMismatch && !document.profileMismatch
-        && !document.unreadableJournal && this.publicationState === "target-published"
-        && pending === undefined,
       compact: administrationReady && document.canAddPasswords === true
         && document.canRemovePasswords === true && this.host.compactDocument !== undefined,
     });
@@ -2137,10 +2170,6 @@ export class DocumentSession<Doc extends SessionDocument,
         canRestore: commands.recoveryRestore,
         ...(this.recoveryFailureCode
           ? { failureCode: this.recoveryFailureCode } : {}) })
-      : document.migrationRequired ? Object.freeze({ kind: "migration-decision",
-        canMigrate: commands.migrate,
-        ...(this.migrationCanceled ? { canceled: true } : {}),
-        ...(this.migrationFailureCode ? { failureCode: this.migrationFailureCode } : {}) })
       : this.compactionConfirmation ? Object.freeze({ kind: "compaction-decision",
         ...(this.compactionFailureCode ? { failureCode: this.compactionFailureCode } : {}) })
       : (this.publicationState === "pending-publication"
@@ -2277,6 +2306,7 @@ export class DocumentSession<Doc extends SessionDocument,
   }
 
   private clearWorkingCopy(): void {
+    this.mergeTargetPassword = null;
     this.stopWorkingCopy?.();
     this.stopWorkingCopy = null;
     this.workingCopy?.dispose();

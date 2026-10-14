@@ -4,7 +4,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateOpenedDocument, validatePassword, validateProfile,
   validatePlaintextExportRequest, validatePlaintextExportResult,
   validateBackupResult, validateCompactionResult, validatePublicationResult,
-  validateSaveResult,
+  validateSaveResult, validateRevisionActivityPage,
   validateWorkingCopy, validateClientSettings } from "./contracts.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
@@ -16,6 +16,8 @@ const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
+const LEASE_PUBLISH_EFFECTS = 0b111;
+const LEASE_ADOPT_EFFECT = 0b1000;
 export const COMPACTION_CONFIRMATION = "I understand that compaction irreversibly removes older history from this container and cannot delete copies held by backups, sync tools, caches, or storage providers.";
 export const DISCARD_UNREADABLE_JOURNAL_CONFIRMATION = "Permanently discard the unreadable recovery journal for this authenticated document.";
 const UNAVAILABLE_CODES = new Set([
@@ -27,9 +29,37 @@ function targetUnavailable(error) {
   return UNAVAILABLE_CODES.has(error?.code);
 }
 
+function newerWorkingCopy(working, submittedVersion, content) {
+  if (!working) return false;
+  if (submittedVersion && working.journalScope) {
+    return working.journalScope !== submittedVersion.journalScope
+      || working.revision !== submittedVersion.revision;
+  }
+  return working.content !== content;
+}
+
 function proposedPasswordAccepted(native, password) {
   const assess = native.assessPasswordPolicy;
   return typeof assess === "function" && assess.call(native, password) === "accepted";
+}
+
+const MERGE_STATUS_CODES = Object.freeze({
+  20: "MERGE_UNRELATED_TARGET",
+  21: "MERGE_TARGET_ROLLBACK",
+  22: "MERGE_BASE_UNAVAILABLE",
+  23: "MERGE_ACCESS_REVOKED",
+  24: "MERGE_PERMISSION_DENIED",
+});
+
+function mergeDecisionError(error) {
+  const status = error?.status;
+  const code = MERGE_STATUS_CODES[status]
+    ?? (status === 10 ? "MERGE_TARGET_REAUTHENTICATION" : null);
+  if (!code) return error;
+  const decision = new Error(code);
+  decision.code = code;
+  decision.cause = error;
+  return decision;
 }
 
 export class DocumentService {
@@ -44,6 +74,11 @@ export class DocumentService {
     onLockStart = () => {}, onLocked = () => {}, onJournalWarning = () => {},
     onRegularSave = () => {} }) {
     this.native = native;
+    this.container = native.createContainerContext?.() ?? null;
+    this.containerTarget = null;
+    this.containerBytes = null;
+    this.nextCandidateOperation = 1;
+    this.pendingNativeCandidate = null;
     this.fs = fs;
     this.profilePath = profilePath;
     this.settingsPath = settingsPath ?? path.join(path.dirname(profilePath), "settings.json");
@@ -138,7 +173,7 @@ export class DocumentService {
     active.profileMismatch = mismatch;
     const refreshed = { ...active.opened,
       readOnly: mismatch ? true : !active.editMode,
-      canEdit: mismatch || active.headMismatch || active.migrationRequired
+      canEdit: mismatch || active.headMismatch
         ? false : active.slotCanEdit,
       ...(mismatch ? { profileMismatch: mismatch } : { profileMismatch: undefined }) };
     active.opened = active.editMode && !mismatch
@@ -171,7 +206,7 @@ export class DocumentService {
     return this.journals.discoverUnresolved();
   }
 
-  /* Reports whether a publication, migration, compaction, or lease write is queued. */
+  /* Reports whether a publication, compaction, or lease write is queued. */
   hasActivePublication() {
     return this.lifecycle.hasMaintenance;
   }
@@ -194,25 +229,30 @@ export class DocumentService {
       const error = new TypeError("Recovery password does not meet policy");
       error.code = "RECOVERY_PASSWORD_WEAK"; throw error;
     }
-    const candidate = this.native.createDocument({
-      ...profile,
-      ...input,
-      timestampMs: Date.now(),
-    });
+    const createInput = { ...profile, ...input, timestampMs: Date.now() };
+    const candidate = this.container.create(createInput);
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
+      this.closeContainer();
       throw new Error("Native bridge did not produce a container");
     }
-    await this.#queuePublication(async () => {
-      await this.#atomicWrite(target, candidate, false);
-      const published = await this.fs.readFile(target);
-      if (!published.equals(candidate)) throw new Error("Published container verification failed");
-      this.createdTarget = target;
-      this.createdBytes = Buffer.from(published);
-      const opened = this.#validateNativeOpened(
-        this.native.openDocument(published, input.ownerPassword));
-      await this.witnesses.observe(target, this.#observation(opened));
-      opened.journalKey.fill(0);
-    });
+    this.containerTarget = target;
+    this.containerBytes = Buffer.from(candidate);
+    try {
+      await this.#queuePublication(async () => {
+        await this.#atomicWrite(target, candidate, false);
+        const published = await this.fs.readFile(target);
+        if (!published.equals(candidate)) throw new Error("Published container verification failed");
+        this.createdTarget = target;
+        this.createdBytes = Buffer.from(published);
+        const opened = this.#validateNativeOpened(
+          this.native.inspectDocument(published, input.ownerPassword));
+        await this.witnesses.observe(target, this.#observation(opened));
+        opened.journalKey.fill(0);
+      });
+    } catch (error) {
+      this.closeContainer();
+      throw error;
+    }
     return { created: true };
   }
 
@@ -226,7 +266,7 @@ export class DocumentService {
       throw error;
     }
     const verified = this.#validateNativeOpened(
-      this.native.openDocument(current, active.password));
+      this.native.inspectDocument(current, active.password));
     try {
       if (verified.documentId !== active.documentId
           || verified.baseRevision !== active.baseRevision) {
@@ -289,7 +329,7 @@ export class DocumentService {
         try {
           bytes = await this.fs.readFile(target);
           nativeOpened = this.#validateNativeOpened(
-            this.native.openDocument(bytes, validatedPassword));
+            this.native.inspectDocument(bytes, validatedPassword));
         } catch {
           throw bootstrapError;
         }
@@ -300,14 +340,14 @@ export class DocumentService {
     let recoveredPublication = false;
     try {
       nativeOpened ??= this.#validateNativeOpened(
-        this.native.openDocument(bytes, activePassword));
+        this.native.inspectDocument(bytes, activePassword));
     } catch (targetError) {
       const recoveryBase = await this.publications.readRecoveryBase(target);
       if (!recoveryBase) throw targetError;
       let baseOpened;
       try {
         baseOpened = this.#validateNativeOpened(
-          this.native.openDocument(recoveryBase, validatedPassword));
+          this.native.inspectDocument(recoveryBase, validatedPassword));
         const journal = await this.journals.read(
           baseOpened.documentId, baseOpened.journalKey);
         if (!journal?.publication) throw targetError;
@@ -317,7 +357,7 @@ export class DocumentService {
           throw new Error("Interrupted publication could not be reconciled safely");
         }
         activePassword = journal.publication.reopenPassword ?? validatedPassword;
-        nativeOpened = this.#validateNativeOpened(this.native.openDocument(
+        nativeOpened = this.#validateNativeOpened(this.native.inspectDocument(
           await this.fs.readFile(target), activePassword));
         recoveredPublication = true;
         this.onJournalWarning("PUBLICATION_RECOVERED");
@@ -332,10 +372,12 @@ export class DocumentService {
     let publicationState = "target-published";
     let unresolvedJournal = false;
     let unreadableJournal = false;
+    let pendingActivity = null;
     try {
-      const journal = recoveredPublication ? null : await this.journals.read(
+      let journal = await this.journals.read(
         nativeOpened.documentId, nativeOpened.journalKey);
       unresolvedJournal = journal !== null;
+      pendingActivity = journal?.activity ?? null;
       if (journal?.publication) {
         pendingPublication = true;
         pendingRecord = journal;
@@ -355,7 +397,10 @@ export class DocumentService {
           bytes = published;
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
-            this.native.openDocument(published, reopenPassword));
+            this.native.inspectDocument(published, reopenPassword));
+          journal = await this.journals.read(
+            nativeOpened.documentId, nativeOpened.journalKey);
+          unresolvedJournal = journal !== null;
           activePassword = reopenPassword;
           this.onJournalWarning("PUBLICATION_RECOVERED");
         } else if (resumed.reason === "changed") {
@@ -368,7 +413,7 @@ export class DocumentService {
         }
       }
       if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved"
-          && journal.baseRevision === nativeOpened.baseRevision) {
+          && this.#journalBaseMatches(journal.baseRevision, nativeOpened)) {
         recovery = journal;
       }
       if (!nativeOpened.opened.invitationRequired && !nativeOpened.manuallySealed
@@ -404,40 +449,272 @@ export class DocumentService {
         profileEmail: profile.email, editingBlocked: true }) : null;
     const slotCanEdit = nativeOpened.opened.invitationRequired
       ? false : nativeOpened.opened.canEdit;
-    const migrationRequired = nativeOpened.containerFormatVersion < 3;
     const opened = nativeOpened.opened.invitationRequired
       ? nativeOpened.opened
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-        canEdit: headMismatch || profileMismatch || migrationRequired || unreadableJournal
+        canEdit: headMismatch || profileMismatch || unreadableJournal
           ? false : slotCanEdit,
-        ...(migrationRequired ? { migrationRequired: true,
-          migrationCanEdit: slotCanEdit } : {}),
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
         ...(headMismatch ? { headMismatch } : {}),
         ...(profileMismatch ? { profileMismatch } : {}),
         ...(unreadableJournal ? { unreadableJournal: true } : {}),
+        ...(pendingActivity ? { activityOutcomePending: true } : {}),
+        ...(pendingActivity?.actionState === "started"
+          ? { activityConfirmationRequired: true } : {}),
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
           ...(recovery.authorName ? { authorName: recovery.authorName } : {}),
           ...(recovery.deviceName ? { deviceName: recovery.deviceName } : {}) } } : {}) });
+    this.#openActiveContainer(target, bytes, activePassword, nativeOpened);
     this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
       slotCanEdit, headMismatch, profileMismatch,
-      migrationRequired,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
-      pendingPublication, pendingRecord, unresolvedJournal,
+      pendingPublication, pendingRecord, unresolvedJournal, pendingActivity,
       unreadableJournal,
       continuousDue: null, journalWarning: null };
     nativeOpened.journalKey.fill(0);
+    if (pendingActivity && this.container?.restoreActivity) {
+      try { await this.#reconcileActivityOutcome(this.active); }
+      catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+    }
     this.notifyActivity();
-    return opened;
+    return this.active.opened;
+  }
+
+  #journalBaseMatches(baseRevision, opened) {
+    if (baseRevision === opened.baseRevision) return true;
+    const graph = opened.revisionGraph;
+    if (!Array.isArray(graph)) return false;
+    const latestEvent = opened.historyEventType;
+    if (!["backup-attempted", "backup-succeeded", "backup-failed",
+      "export-attempted", "export-succeeded", "export-failed"]
+      .includes(latestEvent)) return false;
+    let cursor = opened.baseRevision;
+    const seen = new Set();
+    const maximumSteps = latestEvent.endsWith("-attempted") ? 1 : 2;
+    while (cursor !== baseRevision && !seen.has(cursor)
+        && seen.size < maximumSteps) {
+      seen.add(cursor);
+      const node = graph.find((record) => record.revisionId === cursor);
+      if (!node || node.parentRevisionIds?.length !== 1) return false;
+      cursor = node.parentRevisionIds[0];
+    }
+    return cursor === baseRevision;
+  }
+
+  #openActiveContainer(target, bytes, password, nativeOpened) {
+    if (!this.container) throw new Error("Stateful native container is unavailable");
+    if (this.active) throw new Error("Close the active document before opening another");
+    const sameImage = this.containerTarget === target
+      && this.containerBytes?.equals(bytes);
+    if (this.containerTarget && !sameImage) this.closeContainer();
+    let openedHere = false;
+    try {
+      if (sameImage && this.pendingNativeCandidate !== null) {
+        this.container.finishSave(this.pendingNativeCandidate, "definite-failure");
+        this.pendingNativeCandidate = null;
+        const suspended = this.suspendedLeases.get(nativeOpened.documentId);
+        if (suspended?.release) {
+          suspended.release.journalKey?.fill(0);
+          suspended.release = null;
+        }
+      }
+      if (!sameImage) {
+        this.container.open(bytes);
+        this.containerTarget = target;
+        this.containerBytes = Buffer.from(bytes);
+        openedHere = true;
+      }
+      if (!sameImage || this.container.status().locked) this.container.unlock(password);
+      if (!nativeOpened.opened.invitationRequired) {
+        const snapshot = this.container.read();
+        if (snapshot.documentId !== nativeOpened.documentId
+            || snapshot.slotId !== nativeOpened.opened.slotId
+            || snapshot.content !== nativeOpened.opened.content) {
+          throw new Error("Native container handle disagrees with authenticated document");
+        }
+      }
+    } catch (error) {
+      try {
+        if (openedHere) this.closeContainer();
+        else if (sameImage && !this.container.status().locked) this.container.lock();
+      } catch {
+        this.#discardContainerContext();
+        this.onJournalWarning("NATIVE_LOCK_FAILED");
+      }
+      throw error;
+    }
+  }
+
+  closeContainer() {
+    if (!this.containerTarget) return;
+    for (const suspended of this.suspendedLeases.values()) {
+      if (suspended.release?.operationId === this.pendingNativeCandidate) {
+        suspended.release.journalKey.fill(0);
+        suspended.release = null;
+      }
+    }
+    this.container.close();
+    this.containerTarget = null;
+    this.containerBytes = null;
+    this.pendingNativeCandidate = null;
+  }
+
+  #prepareSaveCandidate(active, current, kind, profile, content) {
+    if (this.pendingNativeCandidate) {
+      throw new Error("Resolve the pending candidate before preparing another save");
+    }
+    if (this.#nativeLeaseAvailable(active)) {
+      this.#syncNativeLeaseSource(active, current);
+      const mode = this.container.leaseMode();
+      if (!mode.editing || mode.leaseStatus !== "held") {
+        throw new Error("Editing lease is no longer held by this session");
+      }
+    } else if (this.containerTarget !== active.target
+        || !this.containerBytes?.equals(current)) {
+      if (this.containerTarget) this.closeContainer();
+      this.container.open(current);
+      this.container.unlock(active.password);
+      this.containerTarget = active.target;
+      this.containerBytes = Buffer.from(current);
+    }
+    if (!this.#nativeLeaseAvailable(active)) this.container.confirmEditLease();
+    const result = this.container.prepareSave(kind, active.password, {
+      ...profile, content, timestampMs: Date.now(),
+      operationId: this.nextCandidateOperation++,
+    });
+    if (!Buffer.isBuffer(result?.bytes) || result.bytes.length === 0
+        || !Number.isSafeInteger(result.operationId)) {
+      throw new Error("Native bridge did not return an exact candidate");
+    }
+    this.pendingNativeCandidate = result.operationId;
+    return result;
+  }
+
+  async #prepareSlotCandidate(active, current, kind, actorPassword, input) {
+    if (this.pendingNativeCandidate !== null) {
+      throw new Error("Resolve the pending candidate before changing a password slot");
+    }
+    if (this.containerTarget !== active.target || !this.containerBytes?.equals(current)) {
+      if (this.containerTarget) this.closeContainer();
+      this.container.open(current);
+      this.container.unlock(actorPassword);
+      this.containerTarget = active.target;
+      this.containerBytes = Buffer.from(current);
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    const prepared = this.container.prepareSlotChange(kind, actorPassword, {
+      ...input, clientName: profile.name, clientEmail: profile.email,
+      deviceName: profile.deviceName, timestampMs: this.now(),
+      operationId: this.nextCandidateOperation++,
+    });
+    if (!Buffer.isBuffer(prepared?.bytes) || prepared.bytes.length === 0
+        || !Number.isSafeInteger(prepared.operationId)) {
+      throw new Error("Native bridge did not return an exact slot candidate");
+    }
+    this.pendingNativeCandidate = prepared.operationId;
+    return prepared;
+  }
+
+  async #publishSlotCandidate(active, current, kind, actorPassword, input,
+    purpose, reopenPassword) {
+    const prepared = await this.#prepareSlotCandidate(
+      active, current, kind, actorPassword, input);
+    try {
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: current,
+        candidate: prepared.bytes, text: active.opened.content ?? "",
+        cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
+        purpose, ...(reopenPassword ? { reopenPassword } : {}) });
+      this.#finishSaveCandidate(prepared.operationId, "verified");
+    } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(prepared.operationId,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
+      if (!error.publicationPrepared || purpose === "invitation-claim") {
+        throw error;
+      }
+      try {
+        const record = await this.journals.read(active.documentId, active.journalKey);
+        if (record?.publication?.purpose !== purpose) throw error;
+        const resumed = await this.publications.resume(
+          active.documentId, active.journalKey, record);
+        if (!resumed.completed) throw error;
+        this.#resolveSaveCandidate(true);
+      } catch {
+        throw error;
+      }
+    }
+    return this.fs.readFile(active.target);
+  }
+
+  #finishSaveCandidate(operationId, outcome) {
+    if (operationId === null) return;
+    this.container.finishSave(operationId, outcome);
+    if (outcome !== "ambiguous") {
+      this.pendingNativeCandidate = null;
+      if (outcome === "verified") this.containerBytes = this.container.bytes();
+    }
+  }
+
+  #resolveSaveCandidate(published) {
+    if (this.pendingNativeCandidate === null) return;
+    this.container.resolveSave(this.pendingNativeCandidate, published);
+    this.pendingNativeCandidate = null;
+    if (published) this.containerBytes = this.container.bytes();
+  }
+
+  #withRevisionHistory(read) {
+    const active = this.active;
+    if (!active || this.lockOperation) throw new Error("Unlock a document to view activity");
+    if (!this.native.createContainerContext) {
+      throw new Error("Revision activity is unavailable for this container");
+    }
+    const context = this.native.createContainerContext();
+    let opened = false;
+    try {
+      context.open(active.baseContainer);
+      opened = true;
+      context.unlock(active.password);
+      return read(context);
+    } finally {
+      if (opened) context.close();
+    }
+  }
+
+  revisionActivityPage(offset, count) {
+    try {
+      return this.#withRevisionHistory((context) => context.historyPage(offset, count));
+    } catch (error) {
+      if (error?.code === "SCPEFE_NATIVE"
+          && error.message === "SCPEFE operation failed with status 8") {
+        return { items: [], nextOffset: offset, hasMore: false, unavailable: true };
+      }
+      throw error;
+    }
+  }
+
+  revisionActivityComparison(beforeId, afterId) {
+    return this.#withRevisionHistory((context) =>
+      context.historyCompare(beforeId, afterId));
+  }
+
+  #discardContainerContext() {
+    try { this.container = this.native.createContainerContext?.() ?? null; }
+    catch { this.container = null; }
+    this.containerTarget = null;
+    this.containerBytes = null;
+    this.pendingNativeCandidate = null;
   }
 
   async enterEditMode({ takeoverToken } = {}) {
@@ -462,9 +739,6 @@ export class DocumentService {
     }
     if (active.profileMismatch) {
       throw new Error("Reconcile the password-slot identity before editing");
-    }
-    if (active.migrationRequired) {
-      throw new Error("This older container must be migrated before editing or saving");
     }
     if (!active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
@@ -505,64 +779,42 @@ export class DocumentService {
     }
     let reopened;
     let published;
-    try {
-      await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
-        const inspected = this.#validateNativeOpened(
-          this.native.openDocument(current, currentPassword));
-        try {
-          if (inspected.documentId !== active.documentId
-              || inspected.baseRevision !== active.baseRevision) {
-            throw new Error("The target changed before the password change completed");
-          }
-        } finally {
-          inspected.journalKey.fill(0);
-        }
-        const candidate = this.native.changePassword(
-          current, currentPassword, newPassword);
-        await this.publications.publish({ documentId: active.documentId,
-          journalKey: active.journalKey, target: active.target, base: current, candidate,
-          text: active.opened.content, cursor: { start: 0, end: 0 },
-          baseRevision: active.baseRevision, purpose: "password-change",
-          reopenPassword: newPassword });
-        published = await this.fs.readFile(active.target);
-        reopened = this.#validateNativeOpened(
-          this.native.openDocument(published, newPassword));
-        if (reopened.documentId !== active.documentId
-            || reopened.baseRevision !== active.baseRevision) {
-          throw new Error("Published password change was not verified");
-        }
-      });
-    } catch (error) {
-      if (!error?.publicationPrepared) throw error;
+    await this.#queuePublication(async () => {
+      const current = await this.fs.readFile(active.target);
+      const inspected = this.#validateNativeOpened(
+        this.native.inspectDocument(current, currentPassword));
       try {
-        const record = await this.journals.read(active.documentId, active.journalKey);
-        if (record?.publication?.purpose !== "password-change") throw error;
-        const resumed = await this.publications.resume(
-          active.documentId, active.journalKey, record);
-        if (!resumed.completed) throw error;
-        published = await this.fs.readFile(active.target);
-        reopened = this.#validateNativeOpened(
-          this.native.openDocument(published, newPassword));
-      } catch {
-        throw error;
+        if (inspected.documentId !== active.documentId
+            || inspected.baseRevision !== active.baseRevision) {
+          throw new Error("The target changed before the password change completed");
+        }
+      } finally {
+        inspected.journalKey.fill(0);
       }
-    }
+      published = await this.#publishSlotCandidate(active, current, "password",
+        currentPassword, { newPassword }, "password-change", newPassword);
+      reopened = this.#validateNativeOpened(
+        this.native.inspectDocument(published, newPassword));
+      if (reopened.documentId !== active.documentId
+          || reopened.opened.slotId !== active.opened.slotId) {
+        throw new Error("Published password change was not verified");
+      }
+    });
     active.password = newPassword;
     active.journalKey.fill(0);
-    const passwordChangeBlocked = active.headMismatch || active.profileMismatch
-      || active.migrationRequired;
+    const passwordChangeBlocked = active.headMismatch || active.profileMismatch;
     const reopenedView = validateOpenedDocument({ ...reopened.opened,
       canEdit: passwordChangeBlocked ? false : reopened.opened.canEdit,
       publicationState: "target-published",
       ...(active.profileMismatch ? { profileMismatch: active.profileMismatch } : {}),
       ...(active.headMismatch ? { headMismatch: active.headMismatch } : {}),
-      ...(active.migrationRequired ? { migrationRequired: true,
-        migrationCanEdit: active.slotCanEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
     active.opened = active.editMode
       ? validateEditMode({ ...reopenedView, readOnly: false }) : reopenedView;
     active.baseContainer = Buffer.from(published);
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.slotCanEdit = reopened.opened.canEdit;
     active.journalKey = Buffer.from(reopened.journalKey);
     active.observation = this.#observation(reopened);
     reopened.journalKey.fill(0);
@@ -596,27 +848,31 @@ export class DocumentService {
     await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
       const inspected = this.#validateNativeOpened(
-        this.native.openDocument(current, active.password));
+        this.native.inspectDocument(current, active.password));
       if (!inspected.lease.active || !active.leaseSessionId
           || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
           || inspected.lease.heartbeatCounter !== active.leaseCounter) {
         throw new Error("Editing lease is no longer held by this session");
       }
-      const candidate = this.native.addInvitation(current, active.password, input);
-      await this.publications.publish({ documentId: active.documentId,
-        journalKey: active.journalKey, target: active.target, base: current, candidate,
-        text: active.opened.content, cursor: { start: 0, end: 0 },
-        baseRevision: active.baseRevision });
-      published = await this.fs.readFile(active.target);
-      reopened = this.#validateNativeOpened(this.native.openDocument(
+      published = await this.#publishSlotCandidate(active, current, "invitation",
+        active.password, { newPassword: temporaryPassword,
+          name: input.temporaryLabel, canEdit: input.canEdit,
+          canAddPasswords: input.canAddPasswords,
+          canRemovePasswords: input.canRemovePasswords }, "slot-administration");
+      reopened = this.#validateNativeOpened(this.native.inspectDocument(
         published, active.password));
     });
     active.journalKey.fill(0);
     active.opened = validateEditMode({ ...reopened.opened,
       readOnly: false, canEdit: active.opened.canEdit });
     active.baseContainer = Buffer.from(published);
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.slotCanEdit = reopened.opened.canEdit;
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
+    await this.witnesses.observe(active.target, active.observation);
     return Object.freeze({ created: true, temporaryPassword, opened: active.opened });
   }
 
@@ -636,28 +892,22 @@ export class DocumentService {
     let published;
     await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
-      const candidate = this.native.claimInvitation(current, active.password,
-        { newPassword: replacement, name: profile.name, email: profile.email });
-      await this.publications.publish({ documentId: active.documentId,
-        journalKey: active.journalKey, target: active.target, base: current, candidate,
-        text: "", cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
-        purpose: "invitation-claim", reopenPassword: replacement });
-      published = await this.fs.readFile(active.target);
+      published = await this.#publishSlotCandidate(active, current, "claim",
+        active.password, { newPassword: replacement,
+          name: profile.name, email: profile.email },
+        "invitation-claim", replacement);
       reopened = this.#validateNativeOpened(
-        this.native.openDocument(published, replacement));
+        this.native.inspectDocument(published, replacement));
       if (reopened.documentId !== active.documentId
           || reopened.opened.invitationRequired) {
         throw new Error("Published invitation claim was not verified");
       }
     });
-    const migrationRequired = reopened.containerFormatVersion < 3;
     active.password = replacement;
     active.journalKey.fill(0);
     active.opened = validateOpenedDocument({ ...reopened.opened,
-      canEdit: migrationRequired ? false : reopened.opened.canEdit,
+      canEdit: reopened.opened.canEdit,
       publicationState: "target-published",
-      ...(migrationRequired ? { migrationRequired: true,
-        migrationCanEdit: reopened.opened.canEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}) });
     active.documentId = reopened.documentId;
     active.baseRevision = reopened.baseRevision;
@@ -666,7 +916,6 @@ export class DocumentService {
     active.slotCanEdit = reopened.opened.canEdit;
     active.headMismatch = null;
     active.profileMismatch = null;
-    active.migrationRequired = migrationRequired;
     active.baseContainer = Buffer.from(published);
     active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);
@@ -702,24 +951,17 @@ export class DocumentService {
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
         const inspected = this.#validateNativeOpened(
-          this.native.openDocument(current, active.password));
+          this.native.inspectDocument(current, active.password));
         if (!inspected.lease.active || !active.leaseSessionId
             || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
             || inspected.lease.heartbeatCounter !== active.leaseCounter) {
           throw new Error("Editing lease is no longer held by this session");
         }
-        const identityCandidate = this.native.reconcileIdentity(
-          current, active.password, profile);
-        const candidate = this.native.saveDocument(identityCandidate, active.password, {
-          ...profile, content: active.opened.content, timestampMs: Date.now(),
-        });
-        await this.publications.publish({ documentId: active.documentId,
-          journalKey: active.journalKey, target: active.target, base: current, candidate,
-          text: active.opened.content, cursor: { start: 0, end: 0 },
-          baseRevision: active.baseRevision, purpose: "identity-reconciliation" });
-        published = await this.fs.readFile(active.target);
+        published = await this.#publishSlotCandidate(active, current, "identity",
+          active.password, { name: profile.name, email: profile.email },
+          "identity-reconciliation");
         reopened = this.#validateNativeOpened(
-          this.native.openDocument(published, active.password));
+          this.native.inspectDocument(published, active.password));
         if (reopened.opened.slotIdentityName !== profile.name
             || reopened.opened.slotIdentityEmail !== profile.email) {
           throw new Error("Published identity reconciliation was not verified");
@@ -766,8 +1008,7 @@ export class DocumentService {
         && !permissions.canEdit) {
       throw new TypeError("password administration implies edit permission");
     }
-    return this.#publishSlotAdministration((current) =>
-      this.native.updateSlotPermissions(current, active.password, permissions));
+    return this.#publishSlotAdministration("permissions", permissions);
   }
 
   async removeSlot(slotId) {
@@ -780,40 +1021,41 @@ export class DocumentService {
     }
     const targetSlot = String(slotId ?? "");
     if (!DOCUMENT_ID.test(targetSlot)) throw new TypeError("slot ID is invalid");
-    const opened = await this.#publishSlotAdministration((current) =>
-      this.native.removeSlot(current, active.password, targetSlot));
+    const opened = await this.#publishSlotAdministration("remove",
+      { slotId: targetSlot });
     return Object.freeze({ removed: true,
       warningCode: "SLOT_REMOVED", opened });
   }
 
-  async #publishSlotAdministration(createCandidate) {
+  async #publishSlotAdministration(kind, input) {
     const active = this.active;
     let reopened;
     let published;
     await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
       const inspected = this.#validateNativeOpened(
-        this.native.openDocument(current, active.password));
+        this.native.inspectDocument(current, active.password));
       if (!inspected.lease.active || !active.leaseSessionId
           || !Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId)
           || inspected.lease.heartbeatCounter !== active.leaseCounter) {
         throw new Error("Editing lease is no longer held by this session");
       }
-      const candidate = createCandidate(current);
-      await this.publications.publish({ documentId: active.documentId,
-        journalKey: active.journalKey, target: active.target, base: current, candidate,
-        text: active.opened.content, cursor: { start: 0, end: 0 },
-        baseRevision: active.baseRevision, purpose: "slot-administration" });
-      published = await this.fs.readFile(active.target);
-      reopened = this.#validateNativeOpened(this.native.openDocument(
+      published = await this.#publishSlotCandidate(active, current, kind,
+        active.password, input, "slot-administration");
+      reopened = this.#validateNativeOpened(this.native.inspectDocument(
         published, active.password));
     });
     active.journalKey.fill(0);
     active.opened = validateEditMode({ ...reopened.opened,
       readOnly: false, canEdit: active.opened.canEdit });
     active.baseContainer = Buffer.from(published);
+    active.baseRevision = reopened.baseRevision;
+    active.revisionGraph = reopened.revisionGraph;
+    active.observation = this.#observation(reopened);
+    active.slotCanEdit = reopened.opened.canEdit;
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
+    await this.witnesses.observe(active.target, active.observation);
     return active.opened;
   }
 
@@ -856,7 +1098,7 @@ export class DocumentService {
     this.active.opened = validateOpenedDocument({ ...this.active.opened,
       recovery: undefined, readOnly: true,
       canEdit: this.active.headMismatch || this.active.profileMismatch
-        || this.active.migrationRequired || this.active.unreadableJournal
+        || this.active.unreadableJournal
         ? false : this.active.slotCanEdit });
     return this.active.opened;
   }
@@ -883,7 +1125,7 @@ export class DocumentService {
     active.headMismatch = null;
     active.opened = validateOpenedDocument({ ...active.opened,
       headMismatch: undefined, readOnly: true,
-      canEdit: active.profileMismatch || active.migrationRequired
+      canEdit: active.profileMismatch
         || active.unreadableJournal ? false : active.slotCanEdit });
     return active.opened;
   }
@@ -906,7 +1148,7 @@ export class DocumentService {
     let targetOpened;
     try {
       targetOpened = this.#validateNativeOpened(
-        this.native.openDocument(target, active.password));
+        this.native.inspectDocument(target, active.password));
     } catch {
       return this.#markActiveConflict(active);
     }
@@ -921,11 +1163,33 @@ export class DocumentService {
     const resumed = await this.publications.resume(
       active.documentId, active.journalKey, active.pendingRecord);
     if (resumed.completed) {
+      if (active.pendingRecord.activity) {
+        const pendingActivity = active.pendingRecord.activity;
+        this.#resolveSaveCandidate(true);
+        const published = await this.fs.readFile(active.target);
+        this.containerBytes = Buffer.from(published);
+        await this.#adoptActivityImage(active, published);
+        active.pendingPublication = false;
+        active.pendingRecord = null;
+        active.pendingActivity = pendingActivity;
+        active.unresolvedJournal = true;
+        active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+          ...active.opened, publicationState: "target-published",
+          activityOutcomePending: true,
+          ...(pendingActivity.actionState === "started"
+            ? { activityConfirmationRequired: true } : {}) });
+        try { await this.#reconcileActivityOutcome(active); }
+        catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+        return validatePublicationResult({ publicationState: "target-published",
+          content: active.opened.content });
+      }
+      this.#resolveSaveCandidate(true);
       await this.#adoptPublishedCandidate(active);
       return validatePublicationResult({ publicationState: "target-published",
         content: active.opened.content });
     }
     if (resumed.reason === "changed") {
+      this.#resolveSaveCandidate(false);
       active.pendingRecord = await this.publications.markDiverged(
         active.documentId, active.journalKey, active.pendingRecord);
       active.opened = validateOpenedDocument({ ...active.opened,
@@ -937,7 +1201,7 @@ export class DocumentService {
       content: active.pendingRecord.text });
   }
 
-  async beginDivergenceResolution({ takeoverToken } = {}) {
+  async beginDivergenceResolution({ takeoverToken, targetPassword } = {}) {
     const active = this.active;
     if (!active?.pendingPublication || active.pendingRecord?.state !== "conflict") {
       throw new Error("No divergent pending publication is available");
@@ -945,22 +1209,57 @@ export class DocumentService {
     if (!active.slotCanEdit) {
       throw new Error("The active password slot does not permit editing");
     }
-    this.#validateCandidate(active.pendingRecord, active.password, active.documentId);
-    await this.#acquireActiveLease(active,
-      { takeoverToken, issueTakeoverToken: true });
+    const localPassword = active.password;
+    const currentPassword = targetPassword === undefined
+      ? localPassword : validatePassword(targetPassword);
+    this.#validateCandidate(active.pendingRecord, localPassword, active.documentId);
+    // Authenticate lineage and current target rights before changing its lease.
+    // A denied merge leaves the encrypted conflict journal exactly as it was.
+    const preflightTarget = await this.fs.readFile(active.target);
+    const preflightLocal = Buffer.from(
+      active.pendingRecord.publication.candidate, "base64");
+    const profile = await this.loadProfile();
+    if (this.active !== active || this.lockOperation) {
+      const error = new Error("The document was locked during divergence preflight");
+      error.code = "SESSION_LOCKED";
+      throw error;
+    }
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    try {
+      const probe = this.native.createContainerContext();
+      try {
+        probe.open(preflightTarget);
+        probe.unlock(currentPassword);
+        probe.assessMerge(preflightLocal, localPassword,
+          currentPassword, { ...profile, content: active.pendingRecord.text,
+            timestampMs: this.now() });
+      } finally { probe.close(); }
+    } catch (error) {
+      throw mergeDecisionError(error);
+    }
+    active.password = currentPassword;
+    active.mergeLocalPassword = localPassword;
+    try {
+      await this.#acquireActiveLease(active,
+        { takeoverToken, issueTakeoverToken: true });
+    } catch (error) {
+      active.password = localPassword;
+      active.mergeLocalPassword = null;
+      throw error;
+    }
     active.editMode = true;
     try {
       const currentBytes = await this.fs.readFile(active.target);
       const current = this.#validateNativeOpened(
-        this.native.openDocument(currentBytes, active.password));
+        this.native.inspectDocument(currentBytes, active.password));
       const localBytes = Buffer.from(active.pendingRecord.publication.candidate, "base64");
       const local = this.#validateNativeOpened(
-        this.native.openDocument(localBytes, active.password));
+        this.native.inspectDocument(localBytes, localPassword));
       const ancestorBytes = Buffer.from(
         active.pendingRecord.publication.mergeAncestor
           ?? active.pendingRecord.publication.base, "base64");
       const ancestor = this.#validateNativeOpened(
-        this.native.openDocument(ancestorBytes, active.password));
+        this.native.inspectDocument(ancestorBytes, localPassword));
       try {
         if (!current.journalKey.equals(local.journalKey)
             || !current.journalKey.equals(ancestor.journalKey)) {
@@ -1010,11 +1309,13 @@ export class DocumentService {
     } catch (error) {
       active.editMode = false;
       await this.#stopHeartbeat();
+      active.password = localPassword;
+      active.mergeLocalPassword = null;
       throw error;
     }
   }
 
-  async saveDivergenceResolution(content) {
+  async saveDivergenceResolution(content, submittedVersion = null) {
     const active = this.active;
     if (!active?.editMode || !active.pendingPublication
         || active.pendingRecord?.state !== "conflict"
@@ -1033,7 +1334,7 @@ export class DocumentService {
       await this.#queuePublication(async () => {
         const currentBytes = await this.fs.readFile(active.target);
         const current = this.#validateNativeOpened(
-          this.native.openDocument(currentBytes, active.password));
+          this.native.inspectDocument(currentBytes, active.password));
         try {
           const merge = active.pendingRecord.merge;
           if (current.documentId !== active.documentId
@@ -1049,35 +1350,79 @@ export class DocumentService {
           }
           const localBytes = Buffer.from(
             active.pendingRecord.publication.candidate, "base64");
-          const candidate = this.native.mergeDocument(
-            currentBytes, localBytes, active.password,
-            { ...profile, content: canonical, timestampMs: Date.now() });
+          if (this.pendingNativeCandidate !== null) {
+            throw new Error("Resolve the pending candidate before preparing a merge");
+          }
+          if (this.containerTarget !== active.target
+              || !this.containerBytes?.equals(currentBytes)) {
+            if (this.containerTarget) this.closeContainer();
+            this.container.open(currentBytes);
+            this.container.unlock(active.password);
+            this.containerTarget = active.target;
+            this.containerBytes = Buffer.from(currentBytes);
+          }
+          const mergeMode = this.container.leaseMode();
+          if (!mergeMode.editing || mergeMode.leaseStatus !== "held") {
+            this.container.confirmEditLease();
+          }
+          let prepared;
+          try {
+            prepared = this.container.prepareMerge(localBytes,
+              active.mergeLocalPassword ?? active.password, active.password,
+              { ...profile, content: canonical, timestampMs: Date.now(),
+                operationId: this.nextCandidateOperation++ });
+          } catch (error) {
+            throw mergeDecisionError(error);
+          }
+          const candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a merge container");
           }
-          await this.publications.publish({ documentId: active.documentId,
-            journalKey: active.journalKey, target: active.target,
-            base: currentBytes, candidate, text: canonical,
-            cursor: { start: 0, end: 0 }, baseRevision: current.baseRevision });
+          this.pendingNativeCandidate = prepared.operationId;
+          try {
+            await this.publications.publish({ documentId: active.documentId,
+              journalKey: active.journalKey, target: active.target,
+              base: currentBytes, candidate, text: canonical,
+              cursor: { start: 0, end: 0 }, baseRevision: current.baseRevision });
+            this.#finishSaveCandidate(prepared.operationId, "verified");
+          } catch (error) {
+            this.#finishSaveCandidate(prepared.operationId,
+              error.publicationPrepared ? "ambiguous" : "definite-failure");
+            throw error;
+          }
         } finally {
           current.journalKey.fill(0);
         }
       });
     } catch (error) {
+      if (MERGE_STATUS_CODES[error?.cause?.status]
+          || error?.code === "MERGE_TARGET_REAUTHENTICATION") {
+        await this.#stopHeartbeat();
+        active.editMode = false;
+        if (active.mergeLocalPassword) {
+          active.password = active.mergeLocalPassword;
+          active.mergeLocalPassword = null;
+        }
+      }
       if (error.publicationPrepared) {
+        active.pendingSubmittedVersion = submittedVersion;
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
         active.opened = validateOpenedDocument({ ...active.opened,
           content: canonical, publicationState: "pending-publication" });
-        active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-        active.dirty = false;
+        const newerWork = newerWorkingCopy(active.working, submittedVersion, canonical);
+        if (!newerWork) {
+          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        }
+        active.dirty = newerWork;
       }
       throw error;
     }
+    active.pendingSubmittedVersion = submittedVersion;
     await this.#adoptPublishedCandidate(active);
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical,
-      publicationState: "target-published" });
+      publicationState: "target-published", ...(submittedVersion ?? {}) });
   }
 
   async discardPendingPublication() {
@@ -1085,15 +1430,30 @@ export class DocumentService {
     if (!active?.pendingPublication || !active.pendingRecord) {
       throw new Error("No pending publication is available");
     }
+    if (active.pendingRecord.activity) {
+      throw new Error("Pending activity publication must be reconciled");
+    }
     if (active.editMode) {
       this.#cancelRegularSave();
       await this.#stopHeartbeat();
       active.editMode = false;
     }
+    if (this.pendingNativeCandidate !== null) {
+      const checked = await this.reconnectPendingPublication();
+      if (checked.publicationState === "target-published") return active.opened;
+      if (checked.publicationState !== "conflict") {
+        const target = await this.fs.readFile(active.target);
+        if (!target.equals(Buffer.from(active.pendingRecord.publication.base, "base64"))) {
+          throw new Error("Resolve the pending candidate before discarding it");
+        }
+        this.#resolveSaveCandidate(false);
+      }
+    }
     await this.publications.discard(
       active.documentId, active.journalKey, active.pendingRecord);
     active.pendingPublication = false;
     active.pendingRecord = null;
+    active.mergeLocalPassword = null;
     active.unresolvedJournal = false;
     active.working = null;
     active.dirty = false;
@@ -1137,20 +1497,27 @@ export class DocumentService {
     active.unresolvedJournal = false;
     active.opened = validateOpenedDocument({ ...active.opened,
       unreadableJournal: undefined,
-      canEdit: active.headMismatch || active.profileMismatch || active.migrationRequired
+      canEdit: active.headMismatch || active.profileMismatch
         ? false : active.slotCanEdit });
     return Object.freeze({ discarded: true, documentId: active.documentId });
   }
 
   updateWorkingCopy(value) {
     if (!this.active?.editMode) throw new Error("Enter edit mode before editing");
-    if (this.active.pendingPublication && !this.active.pendingRecord?.merge) {
+    if (this.active.compactionInProgress) {
+      throw new Error("Compaction is in progress; editing is unavailable");
+    }
+    if (this.active.pendingPublication && !this.active.pendingRecord?.merge
+        && this.active.pendingRecord?.publication.purpose !== "activity-outcome") {
       throw new Error("Resolve the interrupted publication before editing");
     }
     const working = validateWorkingCopy(value);
     this.active.working = working;
     this.active.dirty = !this.active.manuallySealed
-      || working.content !== this.active.opened.content;
+      || working.content !== this.active.opened.content
+      || Boolean(this.active.sealedWorkingVersion
+        && newerWorkingCopy(working, this.active.sealedWorkingVersion,
+          this.active.opened.content));
     if (this.active.dirty) this.#scheduleCheckpoint();
     this.notifyActivity();
     return { checkpointScheduled: this.active.dirty,
@@ -1192,6 +1559,17 @@ export class DocumentService {
   }
 
   async #finishLock(active, reason) {
+    if (this.containerTarget) {
+      try {
+        if (this.pendingNativeCandidate !== null) this.closeContainer();
+        else this.container.lock();
+      }
+      catch (error) {
+        try { this.closeContainer(); }
+        catch { this.#discardContainerContext(); }
+        this.onJournalWarning("NATIVE_LOCK_FAILED");
+      }
+    }
     this.#cancelCheckpoint();
     this.#cancelRegularSave();
     if (this.inactivityTimer !== null) this.clearTimer(this.inactivityTimer);
@@ -1210,8 +1588,10 @@ export class DocumentService {
     } finally {
       if (active.leaseSessionId) {
         let release = null;
-        try { release = this.#prepareSuspendedLeaseRelease(active); }
-        catch { /* Lock must clear secrets even if release preparation fails. */ }
+        if (!active.pendingPublication) {
+          try { release = this.#prepareSuspendedLeaseRelease(active); }
+          catch { /* Lock must clear secrets even if release preparation fails. */ }
+        }
         this.suspendedLeases.set(active.documentId, {
           target: active.target,
           sessionId: Buffer.from(active.leaseSessionId),
@@ -1236,23 +1616,28 @@ export class DocumentService {
     this.#cancelRegularSave();
     await this.#stopHeartbeat();
     await this.#flushActive(active);
-    await this.#queuePublication(async () => {
+    try { await this.#queuePublication(async () => {
       const current = await this.fs.readFile(active.target);
-      const inspected = this.#validateNativeOpened(
-        this.native.openDocument(current, active.password));
-      const sameSession = inspected.lease.active
-        && Buffer.from(inspected.lease.sessionId, "hex").equals(active.leaseSessionId);
-      if (sameSession && inspected.lease.heartbeatCounter !== active.leaseCounter) {
+      this.#requireNativeLease(active);
+      this.#syncNativeLeaseSource(active, current);
+      const lease = this.container.authenticatedLease();
+      if (this.container.leaseMode().leaseStatus !== "held"
+          || !lease.active || !active.leaseSessionId
+          || lease.sessionId !== active.leaseSessionId.toString("hex")
+          || lease.heartbeatCounter !== active.leaseCounter) {
         const error = new Error("Editing lease changed before it could be released");
         error.code = "LEASE_CHANGED";
         throw error;
       }
-      if (sameSession) {
-        const candidate = this.native.updateLease(current, active.password,
-          { ...inspected.lease, active: false });
-        await this.#atomicWrite(active.target, candidate, true);
-      }
-    });
+      await this.#publishNativeLease(active, current, "release",
+        active.leaseSessionId, lease, {
+          name: lease.holderName, email: lease.holderEmail,
+          deviceName: lease.deviceName,
+        });
+    }); } catch (error) {
+      await this.lock("lease-release-failed");
+      throw error;
+    }
     active.editMode = false;
     active.working = null;
     active.leaseSessionId = null;
@@ -1279,19 +1664,40 @@ export class DocumentService {
   #prepareSuspendedLeaseRelease(active) {
     const base = Buffer.from(active.baseContainer);
     const opened = this.#validateNativeOpened(
-      this.native.openDocument(base, active.password));
+      this.native.inspectDocument(base, active.password));
     try {
       if (opened.documentId !== active.documentId || !opened.lease.active
           || opened.lease.sessionId !== active.leaseSessionId.toString("hex")
           || opened.lease.heartbeatCounter !== active.leaseCounter) return null;
-      const candidate = this.native.updateLease(base, active.password,
-        { ...opened.lease, active: false });
-      if (Buffer.from(candidate).equals(base)) {
-        // A no-op bridge cannot supply bytes for a later safe release.
-        this.native.updateLease(base, active.password, opened.lease);
-        return null;
+      this.#requireNativeLease(active);
+      if (this.containerTarget !== active.target
+          || !this.containerBytes?.equals(base)
+          || this.pendingNativeCandidate !== null) return null;
+      const pendingWork = this.#leasePendingWork(active);
+      const lease = opened.lease;
+      const candidate = this.container.prepareLeaseChange("release", active.password, {
+        operationId: this.nextCandidateOperation++,
+        sessionId: active.leaseSessionId.toString("hex"),
+        expectedActive: true, expectedSessionId: lease.sessionId,
+        expectedHeartbeatCounter: lease.heartbeatCounter,
+        expectedHolderUtcMs: lease.holderUtcMs,
+        expectedDurationMs: lease.durationMs,
+        nowUtcMs: this.utcNow(), unchangedMonotonicMs: 0,
+        durationMs: lease.durationMs,
+        holderName: lease.holderName, holderEmail: lease.holderEmail,
+        deviceName: lease.deviceName, explicitTakeover: false,
+      });
+      if ((candidate.effects & LEASE_PUBLISH_EFFECTS) !== LEASE_PUBLISH_EFFECTS) {
+        this.container.finishSave(candidate.operationId, "definite-failure");
+        throw new Error("Native lease release omitted required effects");
       }
-      return { base, candidate: Buffer.from(candidate) };
+      this.pendingNativeCandidate = candidate.operationId;
+      return { base, candidate: Buffer.from(candidate.bytes),
+        operationId: candidate.operationId,
+        journalKey: Buffer.from(active.journalKey),
+        text: pendingWork?.text ?? active.opened.content ?? "",
+        cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
+        baseRevision: active.baseRevision, preserveWork: pendingWork !== null };
     } finally {
       opened.journalKey.fill(0);
     }
@@ -1309,14 +1715,45 @@ export class DocumentService {
     }
     try {
       await this.#queuePublication(async () => {
-        await this.#atomicWrite(target, suspended.release.candidate, true,
-          () => this.suspendedLeases.get(documentId) === suspended,
-          suspended.release.base);
+        if (suspended.release.operationId !== undefined) {
+          const current = await this.fs.readFile(target);
+          if (!current.equals(suspended.release.base)) {
+            const changed = new Error("Suspended lease target changed before release");
+            changed.code = "TARGET_CHANGED";
+            throw changed;
+          }
+          await this.publications.publish({ documentId,
+            journalKey: suspended.release.journalKey, target,
+            base: suspended.release.base,
+            candidate: suspended.release.candidate,
+            text: suspended.release.text, cursor: suspended.release.cursor,
+            baseRevision: suspended.release.baseRevision,
+            purpose: "lease-change",
+            preserveWork: suspended.release.preserveWork });
+        } else {
+          await this.#atomicWrite(target, suspended.release.candidate, true,
+            () => this.suspendedLeases.get(documentId) === suspended,
+            suspended.release.base);
+        }
       });
     } catch (error) {
       if (error?.code !== "TARGET_CHANGED") throw error;
+      if (suspended.release.operationId !== undefined) {
+        this.container.finishSave(suspended.release.operationId, "definite-failure");
+        this.pendingNativeCandidate = null;
+        suspended.release.journalKey.fill(0);
+      }
       this.suspendedLeases.delete(documentId);
       return { released: false, changed: true };
+    }
+    if (suspended.release.operationId !== undefined) {
+      const effects = this.container.finishSave(suspended.release.operationId, "verified");
+      if ((effects & LEASE_ADOPT_EFFECT) === 0) {
+        throw new Error("Native lease release was not adopted");
+      }
+      this.pendingNativeCandidate = null;
+      this.containerBytes = this.container.bytes();
+      suspended.release.journalKey.fill(0);
     }
     this.suspendedLeases.delete(documentId);
     return { released: true };
@@ -1340,7 +1777,7 @@ export class DocumentService {
     if (!profile) throw new Error("Configure name, email, and device name first");
     const source = active.working;
     const canonical = canonicalizeDocumentText(source.content);
-    const mergeAncestor = this.#regularSaveMergeAncestor(active);
+    const mergeAncestor = this.#regularSaveMergeAncestor(active, profile);
     await this.#flushActive(active);
     let published;
     let reopened;
@@ -1349,7 +1786,7 @@ export class DocumentService {
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
         const inspected = this.#validateNativeOpened(
-          this.native.openDocument(current, active.password));
+          this.native.inspectDocument(current, active.password));
         try {
           if (inspected.documentId !== active.documentId
               || inspected.baseRevision !== active.baseRevision
@@ -1362,9 +1799,9 @@ export class DocumentService {
             error.code = "REGULAR_SAVE_DIVERGED";
             throw error;
           }
-          candidate = this.native.regularSaveDocument(current, active.password, {
-            ...profile, content: canonical, timestampMs: Date.now(),
-          });
+          const prepared = this.#prepareSaveCandidate(
+            active, current, "regular", profile, canonical);
+          candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a provisional container");
           }
@@ -1374,9 +1811,10 @@ export class DocumentService {
             cursor: { ...active.working.cursor }, baseRevision: active.baseRevision,
             purpose: "regular-save", state: "unsaved",
             ...(mergeAncestor ? { mergeAncestor } : {}) });
+          this.#finishSaveCandidate(prepared.operationId, "verified");
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
-            this.native.openDocument(published, active.password));
+            this.native.inspectDocument(published, active.password));
           if (reopened.opened.content !== canonical || reopened.manuallySealed) {
             throw new Error("Regular save verification failed");
           }
@@ -1385,6 +1823,10 @@ export class DocumentService {
         }
       });
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error?.code === "REGULAR_SAVE_DIVERGED") {
         return this.#preserveRegularSaveConflict(
           active, profile, canonical, mergeAncestor);
@@ -1441,7 +1883,7 @@ export class DocumentService {
     return result;
   }
 
-  async saveDocument(content) {
+  async saveDocument(content, submittedVersion = null) {
     if (!this.active) throw new Error("Open a document first");
     if (!this.active.editMode) throw new Error("Enter edit mode before saving");
     if (this.active.pendingPublication) {
@@ -1468,10 +1910,9 @@ export class DocumentService {
           current = await this.fs.readFile(active.target);
         } catch (error) {
           if (!targetUnavailable(error)) throw error;
-          const candidate = this.native.saveDocument(
-            active.baseContainer, active.password, {
-              ...profile, content: canonical, timestampMs: Date.now(),
-            });
+          const prepared = this.#prepareSaveCandidate(
+            active, active.baseContainer, "manual", profile, canonical);
+          const candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a container");
           }
@@ -1485,24 +1926,29 @@ export class DocumentService {
             cursor: { start: 0, end: 0 },
             baseRevision: active.baseRevision,
           });
+          this.#finishSaveCandidate(prepared.operationId, "ambiguous");
           active.pendingPublication = true;
+          active.pendingSubmittedVersion = submittedVersion;
           active.unresolvedJournal = true;
-          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-          active.dirty = false;
+          const newerWork = newerWorkingCopy(active.working, submittedVersion, canonical);
+          if (!newerWork) {
+            active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+          }
+          active.dirty = newerWork;
           active.opened = validateOpenedDocument({ ...active.opened,
             content: canonical, publicationState: "pending-publication" });
           return null;
         }
         const currentLease = this.#validateNativeOpened(
-          this.native.openDocument(current, active.password)).lease;
+          this.native.inspectDocument(current, active.password)).lease;
         if (!currentLease.active || !active.leaseSessionId
             || !Buffer.from(currentLease.sessionId, "hex").equals(active.leaseSessionId)
             || currentLease.heartbeatCounter !== active.leaseCounter) {
           throw new Error("Editing lease is no longer held by this session");
         }
-        const candidate = this.native.saveDocument(current, active.password, {
-          ...profile, content: canonical, timestampMs: Date.now(),
-        });
+        const prepared = this.#prepareSaveCandidate(
+          active, current, "manual", profile, canonical);
+        const candidate = prepared.bytes;
         if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
           throw new Error("Native bridge did not produce a container");
         }
@@ -1516,26 +1962,35 @@ export class DocumentService {
           cursor: { start: 0, end: 0 },
           baseRevision: active.baseRevision,
         });
+        this.#finishSaveCandidate(prepared.operationId, "verified");
         published = await this.fs.readFile(active.target);
         return this.#validateNativeOpened(
-          this.native.openDocument(published, active.password));
+          this.native.inspectDocument(published, active.password));
       });
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error.publicationPrepared) {
         active.pendingPublication = true;
+        active.pendingSubmittedVersion = submittedVersion;
         active.unresolvedJournal = true;
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
         active.opened = validateOpenedDocument({ ...active.opened,
           content: canonical, publicationState: "pending-publication" });
-        active.working = { content: canonical, cursor: { start: 0, end: 0 } };
-        active.dirty = false;
+        const newerWork = newerWorkingCopy(active.working, submittedVersion, canonical);
+        if (!newerWork) {
+          active.working = { content: canonical, cursor: { start: 0, end: 0 } };
+        }
+        active.dirty = newerWork;
       }
       throw error;
     }
     if (!reopened) {
       return validateSaveResult({ saved: true, content: canonical,
-        publicationState: "pending-publication" });
+        publicationState: "pending-publication", ...(submittedVersion ?? {}) });
     }
     if (reopened.opened.content !== canonical) {
       reopened.journalKey.fill(0);
@@ -1553,12 +2008,14 @@ export class DocumentService {
     this.active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
     const latestWorking = this.active.working;
-    const newerWork = latestWorking && latestWorking.content !== canonical;
+    const newerWork = newerWorkingCopy(latestWorking, submittedVersion, canonical);
     this.active.working = newerWork
       ? latestWorking : { content: canonical, cursor: { start: 0, end: 0 } };
     this.active.dirty = Boolean(newerWork);
     this.active.manuallySealed = true;
+    this.active.sealedWorkingVersion = submittedVersion;
     this.active.pendingPublication = false;
+    this.active.pendingSubmittedVersion = null;
     this.active.pendingRecord = null;
     this.active.unresolvedJournal = false;
     this.active.recovery = null;
@@ -1566,7 +2023,7 @@ export class DocumentService {
     if (newerWork) this.#scheduleCheckpoint();
     this.notifyActivity();
     return validateSaveResult({ saved: true, content: canonical,
-      publicationState: "target-published" });
+      publicationState: "target-published", ...(submittedVersion ?? {}) });
   }
 
   async exportPlaintext(target, request) {
@@ -1578,11 +2035,17 @@ export class DocumentService {
     const content = validated.lineEndings === "native"
       ? validated.content.replace(/\n/g, this.nativeLineEnding)
       : validated.content;
-    await this.publications.publishPlaintext({
+    const action = () => this.publications.publishPlaintext({
       target, protectedTarget: this.active.target,
-      content: Buffer.from(content, "utf8"),
-    });
-    return validatePlaintextExportResult({ exported: true });
+      content: Buffer.from(content, "utf8") });
+    if (!this.#activityAvailable(this.active)) {
+      await action();
+      return validatePlaintextExportResult({ exported: true });
+    }
+    const result = await this.#runActivity("export", action, target,
+      Buffer.from(content, "utf8"));
+    return validatePlaintextExportResult({ exported: result.succeeded,
+      ...(result.outcomePending ? { outcomePending: true } : {}) });
   }
 
   suggestedBackupTarget() {
@@ -1603,13 +2066,323 @@ export class DocumentService {
         || this.active.unresolvedJournal) {
       throw new Error("Save or discard changes before creating a backup");
     }
-    const activeTarget = this.active.target;
-    const candidate = await this.fs.readFile(activeTarget);
-    await this.publications.publishReplica({ target, candidate });
-    if (this.active.target !== activeTarget) {
-      throw new Error("Backup changed the active target");
+    const result = await this.#runBackupActivity(target);
+    return validateBackupResult({ backedUp: result.succeeded,
+      ...(result.outcomePending ? { outcomePending: true } : {}) });
+  }
+
+  async #runBackupActivity(target) {
+    const active = this.active;
+    const action = async () => {
+      const candidate = await this.fs.readFile(active.target);
+      if (!candidate.equals(active.baseContainer)) {
+        throw new Error("Backup source changed after its activity attempt");
+      }
+      const copy = await this.publications.publishReplica({ target, candidate,
+        returnVerifiedBytes: true });
+      if (!copy.verifiedBytes.equals(candidate)) {
+        throw new Error("Backup replica differs from the attempted source");
+      }
+      return copy;
+    };
+    this.#activityAvailable(active);
+    return this.#runActivity("backup", action, target);
+  }
+
+  #activityAvailable(active) {
+    if (!this.container || typeof this.container.prepareActivity !== "function"
+        || typeof this.container.completeActivity !== "function"
+        || typeof this.container.restoreActivity !== "function"
+        || typeof this.container.activityStatus !== "function") {
+      throw new Error("Native activity interface is unavailable");
     }
-    return validateBackupResult({ backedUp: true });
+    return true;
+  }
+
+  async #publishActivityCandidate(active, phase, kind, source, profile) {
+    if (this.pendingNativeCandidate !== null || !this.containerBytes?.equals(source)
+        || !active.baseContainer.equals(source)) {
+      throw new Error("Activity source changed before publication");
+    }
+    const candidate = this.container.prepareActivity(phase, active.password, {
+      operationId: this.nextCandidateOperation++, kind,
+      cleanStateConfirmed: kind === "backup" && !active.dirty
+        && !active.recovery && !active.pendingPublication && !active.unresolvedJournal,
+      observedTarget: source, clientName: profile.name,
+      clientEmail: profile.email, deviceName: profile.deviceName,
+      timestampMs: this.now() });
+    if (!Buffer.isBuffer(candidate.bytes) || candidate.bytes.length === 0) {
+      this.container.finishSave(candidate.operationId, "definite-failure");
+      throw new Error("Native activity candidate has no container bytes");
+    }
+    this.pendingNativeCandidate = candidate.operationId;
+    try {
+      const candidateOpened = this.#validateNativeOpened(
+        this.native.inspectDocument(candidate.bytes, active.password));
+      let activity;
+      try {
+        const expected = `${kind}-${phase === "attempt" ? "attempted"
+          : active.pendingActivity?.succeeded ? "succeeded" : "failed"}`;
+        if (candidateOpened.documentId !== active.documentId
+            || candidateOpened.opened.content !== active.targetContent
+            || candidateOpened.historyEventType !== expected) {
+          throw new Error("Native activity candidate does not match its source");
+        }
+        activity = phase === "attempt"
+          ? { kind, attemptOperationId: candidate.operationId,
+            attemptHead: candidateOpened.baseRevision, succeeded: false,
+            actionState: "not-started" }
+          : active.pendingActivity;
+      } finally { candidateOpened.journalKey.fill(0); }
+      if (!activity) throw new Error("No pending activity outcome is available");
+      await this.#queueJournalOperation(async () => {
+        const prior = await this.journals.read(active.documentId, active.journalKey);
+        if (prior?.publication) throw new Error(
+          "Resolve the pending publication before recording activity");
+        const journalRecord = prior ? { ...prior, activity,
+          updateTime: this.now() } : {
+          text: active.opened.content, baseRevision: active.baseRevision,
+          cursor: { start: 0, end: 0 }, target: active.target,
+          state: "activity-outcome", updateTime: this.now(), activity };
+        await this.publications.publish({ documentId: active.documentId,
+          journalKey: active.journalKey, target: active.target,
+          base: source, candidate: candidate.bytes,
+          text: journalRecord.text, cursor: journalRecord.cursor,
+          baseRevision: journalRecord.baseRevision,
+          state: journalRecord.state,
+          purpose: `activity-${phase}`, journalRecord });
+      });
+      this.container.finishSave(candidate.operationId, "verified");
+      this.pendingNativeCandidate = null;
+      this.containerBytes = Buffer.from(candidate.bytes);
+      await this.#adoptActivityImage(active, candidate.bytes);
+      return candidate;
+    } catch (error) {
+      if (this.pendingNativeCandidate === candidate.operationId) {
+        const prepared = Boolean(error.publicationPrepared);
+        this.container.finishSave(candidate.operationId,
+          prepared ? "ambiguous" : "definite-failure");
+        this.pendingNativeCandidate = prepared ? candidate.operationId : null;
+        if (prepared) {
+          active.pendingPublication = true;
+          active.pendingRecord = await this.journals.read(
+            active.documentId, active.journalKey);
+          active.pendingActivity = active.pendingRecord?.activity ?? null;
+          active.unresolvedJournal = true;
+          active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+            ...active.opened, publicationState: "pending-publication",
+            activityOutcomePending: true });
+        }
+      }
+      throw error;
+    }
+  }
+
+  async #adoptActivityImage(active, bytes) {
+    const reopened = this.#validateNativeOpened(
+      this.native.inspectDocument(bytes, active.password));
+    try {
+      if (reopened.documentId !== active.documentId
+          || reopened.opened.slotId !== active.opened.slotId
+          || reopened.opened.content !== active.targetContent) {
+        throw new Error("Published activity changed document identity or content");
+      }
+      active.baseContainer = Buffer.from(bytes);
+      active.baseRevision = reopened.baseRevision;
+      active.revisionGraph = reopened.revisionGraph;
+      active.observation = this.#observation(reopened);
+      active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+        ...active.opened, content: reopened.opened.content,
+        readOnly: !active.editMode,
+        ...(active.pendingActivity ? { activityOutcomePending: true } : {}) });
+      await this.witnesses.observe(active.target, active.observation);
+    } finally { reopened.journalKey.fill(0); }
+  }
+
+  async #runActivity(kind, action, externalTarget, expectedPlaintext = null) {
+    const active = this.active;
+    if (active.pendingActivity || active.pendingPublication || active.headMismatch
+        || active.unreadableJournal) {
+      throw new Error("Resolve pending document activity before starting another action");
+    }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    return this.#queuePublication(async () => {
+      const source = await this.fs.readFile(active.target);
+      if (this.active !== active || !source.equals(active.baseContainer)) {
+        throw new Error("Activity source changed before attempt publication");
+      }
+      const attempt = await this.#publishActivityCandidate(active, "attempt", kind,
+        source, profile);
+      const status = this.container.activityStatus();
+      if (!status.hasPending || status.kind !== kind
+          || status.attemptOperationId !== attempt.operationId) {
+        throw new Error("Native activity attempt was not adopted");
+      }
+      const started = { kind, attemptOperationId: attempt.operationId,
+        attemptHead: status.attemptHead, succeeded: false,
+        actionState: "started", externalTarget,
+        externalHash: createHash("sha256").update(
+          expectedPlaintext ?? active.baseContainer).digest("hex") };
+      active.pendingActivity = { ...started, actionState: "not-started" };
+      active.unresolvedJournal = true;
+      active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+        ...active.opened, readOnly: !active.editMode,
+        activityOutcomePending: true });
+      await this.#writeActivityJournal(active, started);
+      active.pendingActivity = started;
+      let succeeded = false;
+      let actionResult;
+      let actionError;
+      try { actionResult = await action(); succeeded = true; }
+      catch (error) { actionError = error; }
+      this.container.completeActivity(attempt.operationId, succeeded);
+      const activity = { kind, attemptOperationId: attempt.operationId,
+        attemptHead: status.attemptHead, succeeded, actionState: "known",
+        externalTarget: started.externalTarget, externalHash: started.externalHash };
+      active.pendingActivity = activity;
+      try { await this.#writeActivityJournal(active, activity); }
+      catch {
+        this.onJournalWarning("ACTIVITY_OUTCOME_PENDING");
+        return { succeeded, outcomePending: true, actionResult, actionError };
+      }
+      let outcomePending = false;
+      try { await this.#reconcileActivityOutcome(active, profile); }
+      catch { outcomePending = true; this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+      return { succeeded, outcomePending, actionResult, actionError };
+    });
+  }
+
+  async #writeActivityJournal(active, activity) {
+    await this.#queueJournalOperation(async () => {
+      const prior = await this.journals.read(active.documentId, active.journalKey);
+      const record = prior ? { ...prior, activity,
+        baseRevision: active.baseRevision, updateTime: this.now() }
+        : { text: active.opened.content, baseRevision: active.baseRevision,
+          cursor: { start: 0, end: 0 }, target: active.target,
+          state: "activity-outcome", updateTime: this.now(), activity };
+      await this.journals.write(active.documentId, active.journalKey, record);
+    });
+  }
+
+  async resolvePendingActivityOutcome({ succeeded, replicaTarget } = {}) {
+    const active = this.active;
+    if (!active?.pendingActivity || active.pendingPublication) {
+      throw new Error("No reconcilable activity outcome is available");
+    }
+    return this.#queuePublication(async () => {
+      const pending = active.pendingActivity;
+      if (this.active !== active || !pending || active.pendingPublication) {
+        throw new Error("Activity outcome changed before reconciliation");
+      }
+      const journal = await this.journals.read(active.documentId, active.journalKey);
+      if (journal?.publication || journal?.activity?.attemptHead !== pending.attemptHead
+          || journal.activity.attemptOperationId !== pending.attemptOperationId) {
+        throw new Error("Activity journal changed before reconciliation");
+      }
+      if (pending.actionState === "started") {
+        if (typeof succeeded !== "boolean") {
+          throw new TypeError("Confirm whether the interrupted host action completed");
+        }
+        if (succeeded) {
+          const target = pending.kind === "backup" ? replicaTarget
+            : pending.externalTarget;
+          if (typeof target !== "string" || !target || target.includes("\0")
+              || path.resolve(target) === path.resolve(active.target)) {
+            throw new TypeError("Select the completed external result for verification");
+          }
+          const observed = await this.fs.readFile(target);
+          if (createHash("sha256").update(observed).digest("hex")
+              !== pending.externalHash) {
+            throw new Error("External result differs from the attempted action");
+          }
+        }
+        const known = { ...pending, succeeded, actionState: "known" };
+        await this.#writeActivityJournal(active, known);
+        active.pendingActivity = known;
+        active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+          ...active.opened, activityConfirmationRequired: undefined });
+      } else {
+        if (succeeded !== undefined || replicaTarget !== undefined) {
+          throw new TypeError("The activity outcome is already known; retry publication");
+        }
+        if (pending.actionState === "known"
+            && journal.activity.actionState !== "known") {
+          await this.#writeActivityJournal(active, pending);
+        }
+      }
+      try { await this.#reconcileActivityOutcome(active); }
+      catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+      return active.opened;
+    });
+  }
+
+  async #reconcileActivityOutcome(active, suppliedProfile = null) {
+    const pending = active.pendingActivity;
+    if (!pending) return;
+    if (pending.actionState === "started") {
+      const error = new Error(
+        "The interrupted host action outcome requires confirmation");
+      error.code = "ACTIVITY_OUTCOME_CONFIRMATION_REQUIRED";
+      throw error;
+    }
+    const source = await this.fs.readFile(active.target);
+    if (!source.equals(active.baseContainer)) {
+      throw new Error("Activity source changed before outcome publication");
+    }
+    const status = this.container.activityStatus();
+    if (!status.hasPending) {
+      const head = validateRevisionActivityPage(
+        this.container.historyPage(0, 1), 0, 1).items[0];
+      const expectedEvent = `${pending.kind}-${pending.succeeded
+        ? "succeeded" : "failed"}`;
+      if (head?.eventType === expectedEvent
+          && head.previousHead === pending.attemptHead
+          && head.details?.note === `attempt=${pending.attemptHead}`) {
+        await this.#clearActivityJournal(active, pending);
+        return;
+      }
+      this.container.restoreActivity({ ...pending, observedTarget: source });
+    } else {
+      if (status.kind !== pending.kind
+          || status.attemptOperationId !== pending.attemptOperationId
+          || status.attemptHead !== pending.attemptHead
+          || (status.hostActionComplete
+            && status.succeeded !== pending.succeeded)) {
+        throw new Error("Native pending activity differs from its journal");
+      }
+      if (!status.hostActionComplete) {
+        this.container.completeActivity(pending.attemptOperationId,
+          pending.succeeded);
+      }
+    }
+    this.nextCandidateOperation = Math.max(this.nextCandidateOperation,
+      pending.attemptOperationId + 1);
+    const profile = suppliedProfile ?? await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
+    await this.#publishActivityCandidate(active, "outcome", pending.kind,
+      source, profile);
+    await this.#clearActivityJournal(active, pending);
+  }
+
+  async #clearActivityJournal(active, pending) {
+    await this.#queueJournalOperation(async () => {
+      const record = await this.journals.read(active.documentId, active.journalKey);
+      if (record?.activity?.attemptHead === pending.attemptHead) {
+        if (record.state === "activity-outcome") {
+          await this.journals.clear(active.documentId);
+          active.unresolvedJournal = false;
+        } else {
+          const { activity: _activity, ...rest } = record;
+          await this.journals.write(active.documentId, active.journalKey,
+            { ...rest, baseRevision: active.baseRevision, updateTime: this.now() });
+        }
+      }
+    });
+    active.pendingActivity = null;
+    active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+      ...active.opened, readOnly: !active.editMode,
+      activityOutcomePending: false, activityConfirmationRequired: undefined });
   }
 
   async compactDocument(confirmation, backupTarget) {
@@ -1617,6 +2390,9 @@ export class DocumentService {
     if (!active?.editMode || !active.opened.canAddPasswords
         || !active.opened.canRemovePasswords) {
       throw new Error("Enter edit mode with a full administrative slot first");
+    }
+    if (!this.container?.prepareCompaction) {
+      throw new Error("The stateful compaction interface is unavailable");
     }
     if (confirmation !== COMPACTION_CONFIRMATION) {
       throw new Error("Confirm irreversible local history removal before compacting");
@@ -1634,14 +2410,62 @@ export class DocumentService {
         || path.resolve(selectedBackupTarget) === path.resolve(active.target)) {
       throw new TypeError("A distinct pre-compaction backup target is required");
     }
+    if (active.compactionInProgress) {
+      throw new Error("Compaction is already in progress");
+    }
+    active.compactionInProgress = true;
+    try {
+      return await this.#performCompaction(active, selectedBackupTarget);
+    } finally {
+      active.compactionInProgress = false;
+    }
+  }
+
+  async #performCompaction(active, selectedBackupTarget) {
     let reopened;
     let published;
-    const previousHead = active.baseRevision;
+    let previousHead;
     try {
+      const before = await this.fs.readFile(active.target);
+      const beforeOpened = this.#validateNativeOpened(
+        this.native.inspectDocument(before, active.password));
+      try {
+        if (beforeOpened.documentId !== active.documentId
+            || !before.equals(active.baseContainer)
+            || beforeOpened.baseRevision !== active.baseRevision
+            || !beforeOpened.manuallySealed
+            || !beforeOpened.lease.active || !active.leaseSessionId
+            || !Buffer.from(beforeOpened.lease.sessionId, "hex")
+              .equals(active.leaseSessionId)
+            || beforeOpened.lease.heartbeatCounter !== active.leaseCounter
+            || this.pendingNativeCandidate !== null) {
+          throw new Error("The target or editing lease changed before compaction");
+        }
+      } finally { beforeOpened.journalKey.fill(0); }
+      const priorJournal = await this.journals.read(
+        active.documentId, active.journalKey);
+      if (priorJournal) throw new Error(
+        "Compaction requires a clean, manually sealed, conflict-free document");
+      const backupResult = await this.#runBackupActivity(selectedBackupTarget);
+      if (!backupResult.succeeded) {
+        const error = new Error(
+          "The required pre-compaction backup could not be created and verified");
+        error.code = "COMPACTION_BACKUP_FAILED";
+        error.cause = backupResult.actionError;
+        throw error;
+      }
+      if (backupResult.outcomePending) {
+        const error = new Error(
+          "Resolve the pending backup outcome before compacting");
+        error.code = "ACTIVITY_OUTCOME_PENDING";
+        throw error;
+      }
+      const backup = backupResult.actionResult;
+      previousHead = active.baseRevision;
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
         const inspected = this.#validateNativeOpened(
-          this.native.openDocument(current, active.password));
+          this.native.inspectDocument(current, active.password));
         try {
           if (inspected.documentId !== active.documentId
               || inspected.baseRevision !== previousHead
@@ -1652,29 +2476,44 @@ export class DocumentService {
               || inspected.lease.heartbeatCounter !== active.leaseCounter) {
             throw new Error("The target or editing lease changed before compaction");
           }
-          try {
-            await this.publications.publishReplica({
-              target: selectedBackupTarget, candidate: current });
-          } catch (cause) {
-            const error = new Error(
-              "The required pre-compaction backup could not be created and verified");
-            error.code = "COMPACTION_BACKUP_FAILED";
-            error.cause = cause;
-            throw error;
+          if (this.pendingNativeCandidate !== null) {
+            throw new Error("Resolve the pending candidate before compacting");
           }
-          const revalidated = await this.fs.readFile(active.target);
-          if (!revalidated.equals(current)) {
-            throw new Error("The target changed after the pre-compaction backup");
+          const journal = await this.journals.read(
+            active.documentId, active.journalKey);
+          if (journal) throw new Error(
+            "Compaction requires a clean, manually sealed, conflict-free document");
+          const profile = await this.loadProfile();
+          if (!profile) throw new Error("Configure name, email, and device name first");
+          if (!Buffer.isBuffer(backup?.verifiedBytes)
+              || !backup.verifiedBytes.length) {
+            throw new Error("The pre-compaction backup read-back is unavailable");
           }
-          const candidate = this.native.compactDocument(current, active.password, {
+          this.#syncNativeLeaseSource(active, current);
+          const mode = this.container.leaseMode();
+          if (!mode.editing || mode.leaseStatus !== "held") {
+            throw new Error("Editing lease is no longer held by this session");
+          }
+          const prepared = this.container.prepareCompaction(active.password, {
+            operationId: this.nextCandidateOperation++,
             sessionId: active.leaseSessionId.toString("hex"),
             heartbeatCounter: active.leaseCounter,
+            explicitDecision: true, cleanStateConfirmed: true,
+            backupVerified: true, verifiedBackupBytes: backup.verifiedBytes,
+            clientName: profile.name, clientEmail: profile.email,
+            deviceName: profile.deviceName, timestampMs: this.now(),
           });
+          if (!Buffer.isBuffer(prepared?.bytes) || prepared.bytes.length === 0
+              || !Number.isSafeInteger(prepared.operationId)) {
+            throw new Error("Native bridge did not return an exact candidate");
+          }
+          this.pendingNativeCandidate = prepared.operationId;
+          const candidate = prepared.bytes;
           if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
             throw new Error("Native bridge did not produce a compacted container");
           }
           const candidateOpened = this.#validateNativeOpened(
-            this.native.openDocument(candidate, active.password));
+            this.native.inspectDocument(candidate, active.password));
           try {
             this.#verifyCompaction(active, inspected, candidateOpened, previousHead);
           } finally {
@@ -1685,15 +2524,20 @@ export class DocumentService {
             base: current, candidate, text: active.opened.content,
             cursor: { start: 0, end: 0 }, baseRevision: previousHead,
             purpose: "compaction" });
+          this.#finishSaveCandidate(this.pendingNativeCandidate, "verified");
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
-            this.native.openDocument(published, active.password));
+            this.native.inspectDocument(published, active.password));
           this.#verifyCompaction(active, inspected, reopened, previousHead);
         } finally {
           inspected.journalKey.fill(0);
         }
       });
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error.publicationPrepared) {
         active.pendingPublication = true;
         active.unresolvedJournal = true;
@@ -1719,131 +2563,22 @@ export class DocumentService {
       previousHead, head: active.baseRevision, opened: active.opened });
   }
 
-  async migrateDocument(backupTarget, { takeoverToken } = {}) {
-    const active = this.active;
-    if (!active?.migrationRequired) throw new Error("No older container is open");
-    if (!active.slotCanEdit || active.headMismatch || active.profileMismatch
-        || active.recovery || active.pendingPublication || active.unresolvedJournal
-        || !active.manuallySealed) {
-      throw new Error("Migration requires a clean, editable, conflict-free document");
-    }
-    const profile = await this.loadProfile();
-    if (!profile) throw new Error("Configure name, email, and device name first");
-    const selectedBackupTarget = backupTarget === undefined
-      ? this.suggestedBackupTarget() : backupTarget;
-    if (typeof selectedBackupTarget !== "string" || !selectedBackupTarget
-        || selectedBackupTarget.includes("\0")
-        || path.resolve(selectedBackupTarget) === path.resolve(active.target)) {
-      throw new TypeError("A distinct pre-migration backup target is required");
-    }
-    let acquisition;
-    let published;
-    let reopened;
-    try {
-      await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
-        const before = this.#validateNativeOpened(
-          this.native.openDocument(current, active.password));
-        try {
-          if (takeoverToken !== undefined) {
-            acquisition = this.#leaseAcquisition(active, before.lease,
-              { takeoverToken, issueTakeoverToken: true,
-                observedDocumentId: before.documentId });
-          }
-          if (before.containerFormatVersion !== 2
-              || before.documentId !== active.documentId
-              || before.baseRevision !== active.baseRevision) {
-            throw new Error("The target changed before migration");
-          }
-          acquisition ??= this.#leaseAcquisition(active, before.lease,
-            { issueTakeoverToken: true, observedDocumentId: before.documentId });
-          try {
-            await this.publications.publishReplica({
-              target: selectedBackupTarget, candidate: current });
-          } catch (cause) {
-            const error = new Error(
-              "The required pre-migration backup could not be created and verified");
-            error.code = "MIGRATION_BACKUP_FAILED";
-            error.cause = cause;
-            if (takeoverToken !== undefined) {
-              error.takeoverToken = this.#issueLeaseTakeoverToken(
-                active, before.lease, before.documentId);
-            }
-            throw error;
-          }
-          if (!(await this.fs.readFile(active.target)).equals(current)) {
-            throw new Error("The target changed after the pre-migration backup");
-          }
-          const nextLease = { active: true,
-            sessionId: acquisition.sessionId.toString("hex"),
-            heartbeatCounter: acquisition.heartbeatCounter, holderUtcMs: this.utcNow(),
-            durationMs: before.lease.durationMs, holderName: profile.name,
-            holderEmail: profile.email, deviceName: profile.deviceName };
-          const candidate = this.native.migrateDocument(current, active.password, {
-            ...profile, ...nextLease, timestampMs: this.now(),
-          });
-          const checked = this.#validateNativeOpened(
-            this.native.openDocument(candidate, active.password));
-          try {
-            if (checked.containerFormatVersion !== 3
-                || checked.documentId !== before.documentId
-                || checked.opened.content !== before.opened.content
-                || checked.historyEventType !== "format-migration"
-                || checked.revisionGraph.find((node) => node.revisionId === checked.baseRevision)
-                  ?.parentRevisionIds[0] !== before.baseRevision
-                || !checked.journalKey.equals(before.journalKey)
-                || checked.lease.sessionId !== nextLease.sessionId) {
-              throw new Error("Migrated container verification failed");
-            }
-          } finally { checked.journalKey.fill(0); }
-          await this.publications.publish({ documentId: active.documentId,
-            journalKey: active.journalKey, target: active.target,
-            base: current, candidate, text: active.opened.content,
-            cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
-            purpose: "format-migration" });
-          published = await this.fs.readFile(active.target);
-          reopened = this.#validateNativeOpened(
-            this.native.openDocument(published, active.password));
-        } finally { before.journalKey.fill(0); }
-      });
-    } catch (error) {
-      if (error.publicationPrepared) {
-        active.pendingPublication = true;
-        active.unresolvedJournal = true;
-        active.pendingRecord = await this.journals.read(active.documentId, active.journalKey);
-      }
-      throw error;
-    }
-    active.journalKey.fill(0);
-    active.opened = validateEditMode({ ...reopened.opened, readOnly: false });
-    active.baseRevision = reopened.baseRevision;
-    active.revisionGraph = reopened.revisionGraph;
-    active.observation = this.#observation(reopened);
-    active.baseContainer = Buffer.from(published);
-    active.journalKey = Buffer.from(reopened.journalKey);
-    reopened.journalKey.fill(0);
-    active.migrationRequired = false;
-    active.editMode = true;
-    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
-    active.dirty = false;
-    active.leaseSessionId = Buffer.from(acquisition.sessionId);
-    active.leaseCounter = acquisition.heartbeatCounter;
-    this.leaseGeneration += 1;
-    this.#scheduleHeartbeat(this.leaseGeneration);
-    await this.witnesses.observe(active.target, active.observation);
-    return Object.freeze({ migrated: true, backupCreated: true,
-      compatibilityCode: "MIGRATION_COMPATIBILITY",
-      opened: active.opened });
-  }
 
   #verifyCompaction(active, before, after, previousHead) {
     const baseline = after.revisionGraph.find(
       (node) => node.revisionId === after.baseRevision);
+    const oldIds = new Set(before.revisionGraph.map((node) => node.revisionId));
+    const historyValid = after.revisionGraph.length === before.revisionGraph.length + 1
+      && oldIds.size === before.revisionGraph.length
+      && !oldIds.has(after.baseRevision)
+      && [...oldIds].every((id) => after.revisionGraph.some(
+        (node) => node.revisionId === id));
     if (after.documentId !== before.documentId
         || !after.journalKey.equals(before.journalKey)
         || after.opened.content !== before.opened.content
+        || after.historyEventType !== "compaction"
         || !after.manuallySealed
-        || after.revisionGraph.length !== 1
+        || !historyValid
         || !baseline || baseline.parentRevisionIds.length !== 1
         || baseline.parentRevisionIds[0] !== previousHead
         || after.lease.sessionId !== before.lease.sessionId
@@ -1893,7 +2628,7 @@ export class DocumentService {
     const containerFormatVersion = value.containerFormatVersion ?? 3;
     const historyEventType = value.historyEventType ?? "";
     const historyEventDetail = value.historyEventDetail ?? "";
-    if (![2, 3].includes(containerFormatVersion)
+    if (containerFormatVersion !== 3
         || typeof historyEventType !== "string"
         || typeof historyEventDetail !== "string") {
       throw new TypeError("native bridge returned invalid format metadata");
@@ -1913,22 +2648,80 @@ export class DocumentService {
     await this.#queuePublication(async () => {
       const bytes = await this.fs.readFile(active.target);
       const latest = this.#validateNativeOpened(
-        this.native.openDocument(bytes, active.password));
-      const lease = latest.lease;
-      const acquisition = this.#leaseAcquisition(active, lease,
-        { takeoverToken, issueTakeoverToken });
-      const nextLease = {
-        active: true, sessionId: acquisition.sessionId.toString("hex"),
-        heartbeatCounter: acquisition.heartbeatCounter,
-        holderUtcMs: this.utcNow(), durationMs: lease.durationMs,
-        holderName: profile.name, holderEmail: profile.email,
-        deviceName: profile.deviceName,
-      };
-      const candidate = this.native.updateLease(bytes, active.password, nextLease);
-      await this.#atomicWrite(active.target, candidate, true, () => true, bytes);
-      active.baseContainer = Buffer.from(candidate);
-      active.leaseSessionId = Buffer.from(acquisition.sessionId);
-      active.leaseCounter = nextLease.heartbeatCounter;
+        this.native.inspectDocument(bytes, active.password));
+      this.#requireNativeLease(active);
+      const suspended = this.suspendedLeases.get(active.documentId);
+      if (suspended?.target === active.target && latest.lease.active
+          && latest.lease.sessionId === suspended.sessionId.toString("hex")
+          && latest.lease.heartbeatCounter !== suspended.counter) {
+        const error = new Error("Editing lease changed while this session was locked");
+        error.code = "LEASE_CHANGED";
+        error.lease = latest.lease;
+        throw error;
+      }
+      this.#syncNativeLeaseSource(active, bytes, { allowReplacement: true });
+      const lease = this.container.authenticatedLease();
+      if (takeoverToken !== undefined) {
+        const valid = takeoverToken !== null
+          && (typeof takeoverToken === "object" || typeof takeoverToken === "function")
+          ? this.leaseTakeoverConfirmations.get(takeoverToken) : undefined;
+        if (valid) this.leaseTakeoverConfirmations.delete(takeoverToken);
+        if (!valid || valid.documentId !== active.documentId
+            || valid.active !== active || valid.target !== active.target
+            || valid.baseRevision !== active.baseRevision
+            || valid.lease !== this.#leaseFingerprint(lease)) {
+          const error = new Error("Editing lease changed after takeover confirmation");
+          error.code = "LEASE_CHANGED";
+          error.lease = lease;
+          throw error;
+        }
+      }
+      const key = `${active.documentId}:${lease.sessionId}:${lease.heartbeatCounter}`;
+      const observedSince = this.leaseObservations.get(key) ?? this.monotonicNow();
+      this.leaseObservations.set(key, observedSince);
+      const elapsed = Math.max(0, this.monotonicNow() - observedSince);
+      const advice = this.container.leaseAdvice({
+        suspendedSessionId: suspended?.target === active.target
+          ? suspended.sessionId.toString("hex") : "0".repeat(32),
+        suspendedCounter: suspended?.target === active.target ? suspended.counter : 0,
+        nowUtcMs: this.utcNow(), unchangedMonotonicMs: elapsed,
+      });
+      if (advice === "changed") {
+        const error = new Error("Editing lease changed while this session was locked");
+        error.code = "LEASE_CHANGED";
+        error.lease = lease;
+        throw error;
+      }
+      if (advice === "blocked" || (advice === "confirm-takeover"
+          && takeoverToken === undefined)) {
+        const error = new Error(`Editing lease held by ${lease.holderName || "another editor"}`);
+        error.code = this.utcNow() < lease.holderUtcMs
+          ? "LEASE_CLOCK_UNCERTAIN" : "LEASE_ACTIVE";
+        error.lease = lease;
+        if (advice === "confirm-takeover" && issueTakeoverToken) {
+          error.takeoverToken = this.#issueLeaseTakeoverToken(active, lease);
+        }
+        throw error;
+      }
+      if (active !== this.active || this.lockOperation) {
+        const error = new Error("The document was locked while acquiring its editing lease");
+        error.code = "SESSION_LOCKED";
+        throw error;
+      }
+      const action = advice === "confirm-takeover" ? "takeover" : advice;
+      const sessionId = action === "resume" ? suspended.sessionId : this.randomSessionId();
+      const published = await this.#publishNativeLease(active, bytes, action,
+        sessionId, lease, profile, {
+          explicitTakeover: action === "takeover",
+          unchangedMonotonicMs: elapsed,
+          isCurrent: () => active === this.active && !this.lockOperation,
+        });
+      if (!this.container.leaseMode().editing
+          || this.container.leaseMode().leaseStatus !== "held") {
+        throw new Error("Native lease acquisition did not enter Edit mode");
+      }
+      active.leaseSessionId = Buffer.from(sessionId);
+      active.leaseCounter = published.heartbeatCounter;
       this.suspendedLeases.delete(active.documentId);
     });
     this.leaseGeneration += 1;
@@ -2014,6 +2807,118 @@ export class DocumentService {
       lease.deviceName]);
   }
 
+  #nativeLeaseAvailable(_active) {
+    return this.container && typeof this.container.prepareLeaseChange === "function";
+  }
+
+  #requireNativeLease(active) {
+    if (!this.#nativeLeaseAvailable(active)) {
+      throw new Error("The stateful native lease service is unavailable");
+    }
+  }
+
+  #leasePendingWork(active) {
+    if (active.dirty) {
+      if (!active.working) throw new Error("Dirty lease work has no working copy");
+      return { text: active.working.content, cursor: active.working.cursor };
+    }
+    if (active.recovery) {
+      return { text: active.recovery.text, cursor: active.recovery.cursor };
+    }
+    return null;
+  }
+
+  #syncNativeLeaseSource(active, bytes, { allowReplacement = false } = {}) {
+    if (this.containerTarget === active.target && this.containerBytes?.equals(bytes)) {
+      if (this.container.status().locked) this.container.unlock(active.password);
+      return;
+    }
+    if (this.containerTarget && !allowReplacement) {
+      const error = new Error("Editing lease source changed before publication");
+      error.code = "LEASE_CHANGED";
+      throw error;
+    }
+    if (this.containerTarget) this.closeContainer();
+    this.container.open(bytes);
+    this.container.unlock(active.password);
+    this.containerTarget = active.target;
+    this.containerBytes = Buffer.from(bytes);
+  }
+
+  async #publishNativeLease(active, source, action, sessionId, lease,
+    profile, { unchangedMonotonicMs = 0, explicitTakeover = false,
+      isCurrent = () => true } = {}) {
+    if (this.pendingNativeCandidate !== null) {
+      throw new Error("Resolve the pending candidate before changing the lease");
+    }
+    // The revision head is unchanged by heartbeats; compare the exact image.
+    if (!this.container.bytes().equals(source)) {
+      const error = new Error("Editing lease source changed before publication");
+      error.code = "LEASE_CHANGED";
+      throw error;
+    }
+    const candidate = this.container.prepareLeaseChange(action, active.password, {
+      operationId: this.nextCandidateOperation++,
+      sessionId: sessionId.toString("hex"), expectedActive: lease.active,
+      expectedSessionId: lease.sessionId,
+      expectedHeartbeatCounter: lease.heartbeatCounter,
+      expectedHolderUtcMs: lease.holderUtcMs,
+      expectedDurationMs: lease.durationMs,
+      nowUtcMs: this.utcNow(), unchangedMonotonicMs,
+      durationMs: lease.durationMs,
+      holderName: profile.name, holderEmail: profile.email,
+      deviceName: profile.deviceName, explicitTakeover,
+    });
+    if (!Buffer.isBuffer(candidate.bytes)
+        || (candidate.effects & LEASE_PUBLISH_EFFECTS) !== LEASE_PUBLISH_EFFECTS) {
+      this.container.finishSave(candidate.operationId, "definite-failure");
+      throw new Error("Native lease candidate omitted required publication effects");
+    }
+    this.pendingNativeCandidate = candidate.operationId;
+    try {
+      if (!isCurrent()) {
+        const stale = new Error("Lease publication no longer belongs to this session");
+        stale.code = "STALE_HEARTBEAT";
+        throw stale;
+      }
+      const pendingWork = this.#leasePendingWork(active);
+      await this.publications.publish({ documentId: active.documentId,
+        journalKey: active.journalKey, target: active.target, base: source,
+        candidate: candidate.bytes,
+        text: pendingWork?.text ?? active.opened.content ?? "",
+        cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
+        baseRevision: active.baseRevision, purpose: "lease-change",
+        preserveWork: pendingWork !== null });
+      const adopted = this.container.finishSave(candidate.operationId, "verified");
+      this.pendingNativeCandidate = null;
+      if ((adopted & LEASE_ADOPT_EFFECT) === 0) {
+        throw new Error("Native lease candidate was not adopted");
+      }
+      this.containerBytes = this.container.bytes();
+      active.baseContainer = Buffer.from(candidate.bytes);
+      return this.container.authenticatedLease();
+    } catch (error) {
+      if (this.pendingNativeCandidate === candidate.operationId) {
+        let observed;
+        try { observed = await this.fs.readFile(active.target); } catch {}
+        if (error.publicationPrepared) {
+          this.container.finishSave(candidate.operationId, "ambiguous");
+          active.pendingPublication = true;
+          active.unresolvedJournal = true;
+        } else if (observed?.equals(candidate.bytes)) {
+          this.container.finishSave(candidate.operationId, "verified");
+          this.containerBytes = this.container.bytes();
+          active.baseContainer = Buffer.from(candidate.bytes);
+        } else {
+          this.container.finishSave(candidate.operationId, "definite-failure");
+        }
+        this.pendingNativeCandidate = error.publicationPrepared
+          ? candidate.operationId : null;
+      }
+      throw error;
+    }
+  }
+
   #issueLeaseTakeoverToken(active, lease, observedDocumentId = active.documentId) {
     const token = Object.freeze({});
     this.leaseTakeoverConfirmations.set(token, {
@@ -2057,23 +2962,24 @@ export class DocumentService {
       this.#requireCurrentHeartbeat(active, generation);
       const bytes = await this.fs.readFile(active.target);
       this.#requireCurrentHeartbeat(active, generation);
-      const latest = this.#validateNativeOpened(
-        this.native.openDocument(bytes, active.password));
-      if (!latest.lease.active
-          || !Buffer.from(latest.lease.sessionId, "hex").equals(active.leaseSessionId)
-          || latest.lease.heartbeatCounter !== active.leaseCounter) {
+      this.#requireNativeLease(active);
+      this.#syncNativeLeaseSource(active, bytes);
+      const lease = this.container.authenticatedLease();
+      const mode = this.container.leaseMode();
+      if (!mode.editing || mode.leaseStatus !== "held"
+          || !lease.active || lease.sessionId !== active.leaseSessionId.toString("hex")
+          || lease.heartbeatCounter !== active.leaseCounter) {
         active.editMode = false;
         throw new Error("Editing lease was replaced by another client");
       }
-      const nextLease = { ...latest.lease,
-        heartbeatCounter: latest.lease.heartbeatCounter + 1,
-        holderUtcMs: this.utcNow() };
+      const profile = await this.loadProfile();
       this.#requireCurrentHeartbeat(active, generation);
-      const candidate = this.native.updateLease(bytes, active.password, nextLease);
-      await this.#atomicWrite(active.target, candidate, true,
-        () => active === this.active && generation === this.leaseGeneration);
-      active.baseContainer = Buffer.from(candidate);
-      active.leaseCounter = nextLease.heartbeatCounter;
+      const published = await this.#publishNativeLease(active, bytes, "refresh",
+        active.leaseSessionId, lease, profile, {
+          isCurrent: () => active === this.active
+            && generation === this.leaseGeneration,
+        });
+      active.leaseCounter = published.heartbeatCounter;
       this.#requireCurrentHeartbeat(active, generation);
     });
     if (active === this.active && active.editMode
@@ -2117,24 +3023,37 @@ export class DocumentService {
     if (candidateHash !== record.publication.candidateHash) {
       throw new Error("Pending publication candidate hash does not match its journal");
     }
-    const opened = this.#validateNativeOpened(this.native.openDocument(candidate, password));
+    const opened = this.#validateNativeOpened(this.native.inspectDocument(candidate, password));
     let mergeAncestor;
+    let leaseBase;
     try {
       const invitationClaim = record.publication.purpose === "invitation-claim";
-      const migration = record.publication.purpose === "format-migration";
+      const leaseChange = record.publication.purpose === "lease-change";
+      const activityPublication = ["activity-attempt", "activity-outcome"]
+        .includes(record.publication.purpose);
+      if (leaseChange || activityPublication) {
+        leaseBase = this.#validateNativeOpened(this.native.inspectDocument(
+          Buffer.from(record.publication.base, "base64"), password));
+      }
       if (opened.documentId !== documentId
           || (invitationClaim && (record.publication.reopenPassword !== password
             || record.text !== "" || opened.opened.invitationRequired))
-          || (!invitationClaim
-            && opened.opened.content !== (record.merge?.localContent ?? record.text))
-          || (migration && (opened.containerFormatVersion !== 3
-            || opened.historyEventType !== "format-migration"))) {
+          || (leaseChange && (opened.opened.content !== leaseBase.opened.content
+            || opened.baseRevision !== leaseBase.baseRevision
+            || !opened.journalKey.equals(leaseBase.journalKey)))
+          || (activityPublication && (opened.opened.content !== leaseBase.opened.content
+            || !opened.journalKey.equals(leaseBase.journalKey)
+            || opened.historyEventType !== `${record.activity.kind}-${
+              record.publication.purpose === "activity-attempt" ? "attempted"
+                : record.activity.succeeded ? "succeeded" : "failed"}`))
+          || (!invitationClaim && !leaseChange && !activityPublication
+            && opened.opened.content !== (record.merge?.localContent ?? record.text))) {
         throw new Error("Pending publication candidate does not match its document");
       }
       if (record.publication.mergeAncestor) {
         const ancestor = Buffer.from(record.publication.mergeAncestor, "base64");
         mergeAncestor = this.#validateNativeOpened(
-          this.native.openDocument(ancestor, password));
+          this.native.inspectDocument(ancestor, password));
         if (mergeAncestor.documentId !== documentId
             || !mergeAncestor.manuallySealed
             || !mergeAncestor.journalKey.equals(opened.journalKey)) {
@@ -2144,13 +3063,14 @@ export class DocumentService {
       }
     } finally {
       mergeAncestor?.journalKey.fill(0);
+      leaseBase?.journalKey.fill(0);
       opened.journalKey.fill(0);
     }
   }
 
   async #openPendingDocument(target, password, bootstrap) {
     let baseOpened = this.#validateNativeOpened(
-      this.native.openDocument(bootstrap.base, password));
+      this.native.inspectDocument(bootstrap.base, password));
     if (baseOpened.documentId !== bootstrap.documentId) {
       baseOpened.journalKey.fill(0);
       throw new Error("Pending publication bootstrap does not match its document");
@@ -2166,17 +3086,19 @@ export class DocumentService {
 
     let targetBytes = null;
     let targetOpened = null;
+    let targetPassword = password;
     let invalidTarget = false;
     let unavailable = false;
     try {
       targetBytes = await this.fs.readFile(target);
       try {
         targetOpened = this.#validateNativeOpened(
-          this.native.openDocument(targetBytes, password));
+          this.native.inspectDocument(targetBytes, password));
       } catch (passwordError) {
         if (reopenPassword === password) throw passwordError;
         targetOpened = this.#validateNativeOpened(
-          this.native.openDocument(targetBytes, reopenPassword));
+          this.native.inspectDocument(targetBytes, reopenPassword));
+        targetPassword = reopenPassword;
       }
       if (targetOpened.documentId !== baseOpened.documentId) invalidTarget = true;
     } catch (error) {
@@ -2204,13 +3126,19 @@ export class DocumentService {
       if (resumed?.completed) {
         const published = await this.fs.readFile(target);
         const reopened = this.#validateNativeOpened(
-          this.native.openDocument(published, reopenPassword));
+          this.native.inspectDocument(published, reopenPassword));
         const { headMismatch, slotCanEdit } = await this.#observeHead(target, reopened);
         baseOpened.journalKey.fill(0);
         targetOpened?.journalKey.fill(0);
         const regularSave = record.publication.purpose === "regular-save"
           && !reopened.manuallySealed;
-        const recovery = regularSave ? { content: reopened.opened.content,
+        const restoredWork = await this.journals.read(
+          reopened.documentId, reopened.journalKey);
+        const pendingActivity = restoredWork?.activity ?? null;
+        const recovery = restoredWork?.state === "unsaved"
+          ? { content: restoredWork.text, cursor: restoredWork.cursor,
+            state: "unsaved", updateTime: restoredWork.updateTime }
+          : regularSave ? { content: reopened.opened.content,
           cursor: { start: 0, end: 0 }, state: "unsaved",
           updateTime: Number.isSafeInteger(reopened.revisionTimestampMs)
             ? reopened.revisionTimestampMs : this.now(),
@@ -2221,21 +3149,30 @@ export class DocumentService {
           publicationState: "target-published",
           ...(reopened.lease.active ? { lease: reopened.lease } : {}),
           ...(recovery ? { recovery } : {}),
+          ...(pendingActivity ? { activityOutcomePending: true } : {}),
+          ...(pendingActivity?.actionState === "started"
+            ? { activityConfirmationRequired: true } : {}),
           ...(headMismatch ? { headMismatch } : {}) });
+        this.#openActiveContainer(target, published, reopenPassword, reopened);
         this.active = { target, password: reopenPassword, opened, editMode: false,
           documentId: reopened.documentId, baseRevision: reopened.baseRevision,
           revisionGraph: reopened.revisionGraph, observation: this.#observation(reopened),
-          slotCanEdit, headMismatch, migrationRequired: false,
+          slotCanEdit, headMismatch,
           journalKey: Buffer.from(reopened.journalKey), recovery,
           baseContainer: Buffer.from(published), targetContent: reopened.opened.content,
           working: null, dirty: false, manuallySealed: reopened.manuallySealed,
           pendingPublication: false, pendingRecord: null,
-          unresolvedJournal: recovery !== null,
+          unresolvedJournal: restoredWork !== null,
+          pendingActivity,
           continuousDue: null, journalWarning: null };
         reopened.journalKey.fill(0);
+        if (pendingActivity) {
+          try { await this.#reconcileActivityOutcome(this.active); }
+          catch { this.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+        }
         this.onJournalWarning("PUBLICATION_RECOVERED");
         this.notifyActivity();
-        return opened;
+        return this.active.opened;
       }
       if (resumed?.reason === "changed") {
         record = await this.publications.markDiverged(
@@ -2249,24 +3186,27 @@ export class DocumentService {
 
     const currentOpened = targetOpened && !invalidTarget ? targetOpened : baseOpened;
     const { headMismatch, slotCanEdit } = await this.#observeHead(target, currentOpened);
-    const migrationRequired = currentOpened.containerFormatVersion < 3;
     const opened = validateOpenedDocument({ ...baseOpened.opened,
       content: record.text, canEdit: headMismatch ? false : slotCanEdit,
       publicationState,
-      ...(migrationRequired ? { migrationRequired: true,
-        migrationCanEdit: slotCanEdit } : {}),
+      ...(record.activity ? { activityOutcomePending: true } : {}),
+      ...(record.activity?.actionState === "started"
+        ? { activityConfirmationRequired: true } : {}),
       ...(currentOpened.lease.active ? { lease: currentOpened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
-    this.active = { target, password, opened, editMode: false,
+    const currentBytes = targetOpened && !invalidTarget ? targetBytes : bootstrap.base;
+    const currentPassword = targetOpened && !invalidTarget ? targetPassword : password;
+    this.#openActiveContainer(target, currentBytes, currentPassword, currentOpened);
+    this.active = { target, password: currentPassword, opened, editMode: false,
       documentId: baseOpened.documentId, baseRevision: currentOpened.baseRevision,
       revisionGraph: currentOpened.revisionGraph,
       observation: this.#observation(currentOpened), slotCanEdit, headMismatch,
-      migrationRequired,
       journalKey: Buffer.from(baseOpened.journalKey), recovery: null,
-      baseContainer: Buffer.from(targetBytes && !invalidTarget ? targetBytes : bootstrap.base),
+      baseContainer: Buffer.from(currentBytes),
       targetContent: currentOpened.opened.content,
       working: null, dirty: false, manuallySealed: currentOpened.manuallySealed,
       pendingPublication: true, pendingRecord: record, unresolvedJournal: true,
+      pendingActivity: record.activity ?? null,
       continuousDue: null, journalWarning: null };
     baseOpened.journalKey.fill(0);
     targetOpened?.journalKey.fill(0);
@@ -2277,16 +3217,13 @@ export class DocumentService {
   async #adoptPublishedCandidate(active) {
     const published = await this.fs.readFile(active.target);
     const reopened = this.#validateNativeOpened(
-      this.native.openDocument(published, active.password));
+      this.native.inspectDocument(published, active.password));
     const { headMismatch, slotCanEdit } = await this.#observeHead(
       active.target, reopened);
-    const migrationRequired = reopened.containerFormatVersion < 3;
     active.journalKey.fill(0);
     active.opened = validateOpenedDocument({ ...reopened.opened,
-      canEdit: headMismatch || migrationRequired ? false : slotCanEdit,
+      canEdit: headMismatch ? false : slotCanEdit,
       publicationState: "target-published",
-      ...(migrationRequired ? { migrationRequired: true,
-        migrationCanEdit: slotCanEdit } : {}),
       ...(reopened.lease.active ? { lease: reopened.lease } : {}),
       ...(headMismatch ? { headMismatch } : {}) });
     active.documentId = reopened.documentId;
@@ -2295,18 +3232,26 @@ export class DocumentService {
     active.observation = this.#observation(reopened);
     active.slotCanEdit = slotCanEdit;
     active.headMismatch = headMismatch;
-    active.migrationRequired = migrationRequired;
     active.baseContainer = Buffer.from(published);
     active.targetContent = reopened.opened.content;
     active.journalKey = Buffer.from(reopened.journalKey);
     reopened.journalKey.fill(0);
-    active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
-    active.dirty = false;
+    const newerWork = newerWorkingCopy(active.working,
+      active.pendingSubmittedVersion, active.opened.content);
+    if (!newerWork) {
+      active.working = { content: active.opened.content, cursor: { start: 0, end: 0 } };
+    }
+    active.dirty = newerWork || !reopened.manuallySealed;
+    active.sealedWorkingVersion = active.pendingSubmittedVersion ?? null;
+    active.pendingSubmittedVersion = null;
     active.pendingPublication = false;
     active.pendingRecord = null;
+    active.mergeLocalPassword = null;
     active.manuallySealed = reopened.manuallySealed;
     active.unresolvedJournal = false;
     active.recovery = null;
+    active.continuousDue = null;
+    if (newerWork) this.#scheduleCheckpoint();
   }
 
   async #discardProvisional(active) {
@@ -2317,11 +3262,13 @@ export class DocumentService {
       await this.#acquireActiveLease(active);
       active.editMode = true;
     }
+    const profile = await this.loadProfile();
+    if (!profile) throw new Error("Configure name, email, and device name first");
     try {
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
         const inspected = this.#validateNativeOpened(
-          this.native.openDocument(current, active.password));
+          this.native.inspectDocument(current, active.password));
         try {
           if (inspected.baseRevision !== active.baseRevision
               || !inspected.lease.active || !active.leaseSessionId
@@ -2331,9 +3278,11 @@ export class DocumentService {
             throw new Error(
               "The target changed before provisional work could be discarded");
           }
-          const candidate = this.native.discardProvisional(current, active.password);
+          const prepared = this.#prepareSaveCandidate(active, current,
+            "discard", profile, inspected.opened.content);
+          const candidate = prepared.bytes;
           const candidateOpened = this.#validateNativeOpened(
-            this.native.openDocument(candidate, active.password));
+            this.native.inspectDocument(candidate, active.password));
           try {
             if (!candidateOpened.manuallySealed) {
               throw new Error("Discard did not restore a manually sealed revision");
@@ -2343,6 +3292,7 @@ export class DocumentService {
               base: current, candidate, text: candidateOpened.opened.content,
               cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
               purpose: "provisional-discard" });
+            this.#finishSaveCandidate(prepared.operationId, "verified");
           } finally {
             candidateOpened.journalKey.fill(0);
           }
@@ -2351,10 +3301,16 @@ export class DocumentService {
         }
       });
       await this.journals.clear(active.documentId);
+      active.working = null;
+      active.pendingSubmittedVersion = null;
       await this.#adoptPublishedCandidate(active);
       await this.exitEditMode();
       return active.opened;
     } catch (error) {
+      if (this.pendingNativeCandidate !== null) {
+        this.#finishSaveCandidate(this.pendingNativeCandidate,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
       if (error.publicationPrepared) {
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
@@ -2382,12 +3338,14 @@ export class DocumentService {
     }
   }
 
-  #regularSaveMergeAncestor(active) {
+  #regularSaveMergeAncestor(active, profile) {
     if (active.manuallySealed) return undefined;
-    const mergeAncestor = this.native.discardProvisional(
-      active.baseContainer, active.password);
+    const prepared = this.#prepareSaveCandidate(active, active.baseContainer,
+      "discard", profile, active.opened.content);
+    const mergeAncestor = Buffer.from(prepared.bytes);
+    this.#finishSaveCandidate(prepared.operationId, "definite-failure");
     const ancestorOpened = this.#validateNativeOpened(
-      this.native.openDocument(mergeAncestor, active.password));
+      this.native.inspectDocument(mergeAncestor, active.password));
     try {
       if (ancestorOpened.documentId !== active.documentId
           || !ancestorOpened.manuallySealed
@@ -2402,10 +3360,10 @@ export class DocumentService {
   }
 
   async #preserveRegularSaveConflict(active, profile, canonical, mergeAncestor) {
-    const candidate = this.native.regularSaveDocument(
-      active.baseContainer, active.password, {
-        ...profile, content: canonical, timestampMs: Date.now(),
-      });
+    const prepared = this.#prepareSaveCandidate(active, active.baseContainer,
+      "regular", profile, canonical);
+    const candidate = Buffer.from(prepared.bytes);
+    this.#finishSaveCandidate(prepared.operationId, "definite-failure");
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new Error("Native bridge did not produce a provisional container");
     }
@@ -2455,6 +3413,7 @@ export class DocumentService {
       active.pendingRecord = await this.publications.markDiverged(
         active.documentId, active.journalKey, active.pendingRecord);
     }
+    this.#resolveSaveCandidate(false);
     active.opened = validateOpenedDocument({ ...active.opened,
       publicationState: "conflict" });
     return validatePublicationResult({ publicationState: "conflict",
@@ -2482,20 +3441,36 @@ export class DocumentService {
 
   async #flushActive(active) {
     if (!active?.dirty || !active.working
-        || (active.pendingPublication && !active.pendingRecord?.merge)) return;
-    const record = active.pendingRecord?.merge
-      ? { ...active.pendingRecord, text: active.working.content,
-        cursor: { ...active.working.cursor }, updateTime: this.now() }
-      : { text: active.working.content, baseRevision: active.baseRevision,
-        cursor: { ...active.working.cursor }, target: active.target,
-        state: "unsaved", updateTime: this.now() };
-    const operation = this.flushChain.catch(() => {}).then(() =>
-      this.journals.write(active.documentId, active.journalKey, record));
-    this.flushChain = operation;
+        || (active.pendingPublication && !active.pendingRecord?.merge
+          && !["activity-attempt", "activity-outcome"].includes(
+            active.pendingRecord?.publication.purpose))) return;
+    const operation = this.#queueJournalOperation(async () => {
+      const prior = await this.journals.read(active.documentId, active.journalKey);
+      const record = prior?.publication
+        && ["activity-attempt", "activity-outcome"].includes(
+          prior.publication.purpose)
+        ? { ...prior, text: active.working.content,
+          cursor: { ...active.working.cursor }, state: "unsaved",
+          updateTime: this.now() }
+        : active.pendingRecord?.merge
+        ? { ...active.pendingRecord, text: active.working.content,
+          cursor: { ...active.working.cursor }, updateTime: this.now() }
+        : { text: active.working.content, baseRevision: active.baseRevision,
+          cursor: { ...active.working.cursor }, target: active.target,
+          state: "unsaved", updateTime: this.now() };
+      await this.journals.write(active.documentId, active.journalKey,
+        { ...record, ...(prior?.activity ? { activity: prior.activity } : {}) });
+    });
     await operation;
     active.unresolvedJournal = true;
     active.continuousDue = null;
     active.journalWarning = null;
+  }
+
+  #queueJournalOperation(operation) {
+    const queued = this.flushChain.catch(() => {}).then(operation);
+    this.flushChain = queued;
+    return queued;
   }
 
   #cancelHeartbeat() {

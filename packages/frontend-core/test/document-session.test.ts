@@ -10,8 +10,8 @@ interface OpenedDocument {
   publicationState: "target-published" | "pending-publication" | "conflict";
   targetName: string;
   canEdit: boolean;
-  migrationRequired?: true;
-  migrationCanEdit?: boolean;
+  activityOutcomePending?: true;
+  activityConfirmationRequired?: true;
   provisional?: true;
   recovery?: { content: string; state: "unsaved"; updateTime: number;
     cursor: { start: number; end: number }; authorName?: string; deviceName?: string };
@@ -141,17 +141,13 @@ class Host implements DocumentSessionHost<OpenedDocument> {
       holderName: string; authorization: string }> {
     return { ...opened(), recoveredUnsaved: true, cursor: { start: 0, end: 0 } };
   }
-  async beginDivergenceResolution(_request?: { authorization?: string }): Promise<{
+  async beginDivergenceResolution(_request?: { authorization?: string;
+    targetPassword?: string }): Promise<{
     content: string; hasConflicts: boolean; ancestorRevision: string;
-    localRevision: string; currentRevision: string }> {
+    localRevision: string; currentRevision: string } | { decisionRequired: "lease-takeover";
+      operation: "divergence"; holderName: string; authorization: string }> {
     return { content: "merge", hasConflicts: false, ancestorRevision: "a",
       localRevision: "l", currentRevision: "c" };
-  }
-  async migrateDocument(_request: { authorization?: string } = {}): Promise<{
-    opened: OpenedDocument; compatibilityCode: string } | {
-    decisionRequired: "lease-takeover"; operation: "migration";
-    holderName: string; authorization: string } | null> {
-    return { opened: opened(), compatibilityCode: "MIGRATED" };
   }
   async compactDocument(_request: { confirmed: true }): Promise<{
     opened: OpenedDocument; previousHead: string; head: string } | null> {
@@ -174,11 +170,15 @@ class Host implements DocumentSessionHost<OpenedDocument> {
   async discardRecoveredWork(): Promise<OpenedDocument> { return opened(); }
   async acceptHeadMismatch(): Promise<OpenedDocument> { return opened(); }
   async discardUnreadableJournal(): Promise<OpenedDocument> { return opened(); }
-  async backupDocument(): Promise<{ backedUp: true } | null> {
+  async backupDocument(): Promise<{ backedUp: boolean; outcomePending?: true } | null> {
     return { backedUp: true };
   }
+  async resolvePendingActivityOutcome(_request: { succeeded?: boolean } = {}):
+    Promise<OpenedDocument> { return opened(); }
   async exportPlaintext(_request: { content: string; lineEndings: "lf" | "native" }):
-    Promise<{ exported: true } | null> { return { exported: true }; }
+    Promise<{ exported: boolean; outcomePending?: true } | null> {
+    return { exported: true };
+  }
   async changePassword(_request: { currentPassword: string; newPassword: string;
     newPasswordConfirmation: string }): Promise<OpenedDocument> { return opened(); }
   async createInvitation(_request: { temporaryLabel: string; temporaryPassword?: string;
@@ -509,6 +509,28 @@ test("a save acknowledgement cannot replace edits made while the host was busy",
   session.dispose();
 });
 
+test("a later edit revision stays dirty even when it repeats submitted text", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("draft");
+  let finish!: (result: { saved: true; content: string;
+    publicationState: "target-published" }) => void;
+  host.saveDocument = () => new Promise((resolve) => { finish = resolve; });
+  const saving = session.save();
+  await Promise.resolve();
+  session.edit("another draft");
+  session.edit("draft");
+  finish({ saved: true, content: "draft", publicationState: "target-published" });
+  assert.deepEqual(await saving, { status: "saved", publicationState: "target-published" });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected edit session");
+  assert.equal(snapshot.working.text, "draft");
+  assert.equal(snapshot.working.dirty, true);
+  assert.equal(snapshot.commands.save, true);
+  session.dispose();
+});
+
 test("pending manual save becomes semantic attention with retry and discard commands", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
@@ -540,6 +562,42 @@ test("pending manual save becomes semantic attention with retry and discard comm
   session.dispose();
 });
 
+test("repeated pending retries retain the saved revision through conflict and discard", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt(opened("base", false));
+  session.edit("saved candidate");
+  host.saveDocument = async (content) => ({ saved: true, content,
+    publicationState: "pending-publication" });
+  assert.deepEqual(await session.save(),
+    { status: "saved", publicationState: "pending-publication" });
+  let retries = 0;
+  host.reconnectPendingPublication = async () => ({ content: "saved candidate",
+    publicationState: ++retries < 3 ? "pending-publication" : "conflict" });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.deepEqual(await session.retryPublication(),
+      { status: "publication", publicationState: "pending-publication" });
+    const pending = session.getSnapshot();
+    if (pending.kind !== "read-only") throw new Error("expected read-only");
+    assert.equal(pending.working.dirty, false);
+    assert.equal(pending.commands.publicationDiscard, true);
+  }
+  assert.deepEqual(await session.retryPublication(),
+    { status: "publication", publicationState: "conflict" });
+  const conflict = session.getSnapshot();
+  if (conflict.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(conflict.working.dirty, false);
+  assert.equal(conflict.commands.publicationDiscard, true);
+  host.discardPendingPublication = async () => opened("verified target");
+  assert.deepEqual(await session.discardPublication(),
+    { status: "publication-discarded" });
+  const restored = session.getSnapshot();
+  if (restored.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(restored.publication.state, "target-published");
+  assert.equal(restored.working.text, "verified target");
+  session.dispose();
+});
+
 test("backup and plaintext export preserve eligibility, cancellation, and current text", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
@@ -551,13 +609,14 @@ test("backup and plaintext export preserve eligibility, cancellation, and curren
     return null;
   };
   session.adopt(opened("sealed", false));
-  assert.deepEqual(await session.backup(), { status: "backup", created: false });
+  assert.deepEqual(await session.backup(),
+    { status: "backup", created: false, canceled: true });
   assert.equal(backupCalls, 1);
   session.edit("unsaved text");
   assert.deepEqual(await session.backup(), { status: "unavailable" });
   assert.equal(backupCalls, 1);
   assert.deepEqual(await session.exportPlaintext("native"),
-    { status: "export", exported: false });
+    { status: "export", exported: false, canceled: true });
   assert.deepEqual(exported, [{ content: "unsaved text", lineEndings: "native" }]);
   host.exportPlaintext = async () => { throw new Error("private target path"); };
   assert.deepEqual(await session.exportPlaintext("lf"),
@@ -565,6 +624,58 @@ test("backup and plaintext export preserve eligibility, cancellation, and curren
   assert.equal(JSON.stringify(session.getSnapshot()).includes("private target path"), false);
   session.lockStarted();
   assert.deepEqual(await session.exportPlaintext("lf"), { status: "unavailable" });
+  session.dispose();
+});
+
+test("view-only activity remains eligible and a pending outcome is visible", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("sealed"), canEdit: false });
+  const initial = session.getSnapshot();
+  assert.equal(initial.kind, "read-only");
+  if (initial.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(initial.commands.backup, true);
+  assert.equal(initial.commands.export, true);
+  host.backupDocument = async () => ({ backedUp: true, outcomePending: true });
+  assert.deepEqual(await session.backup(),
+    { status: "backup", created: true, outcomePending: true });
+  const pending = session.getSnapshot();
+  if (pending.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(pending.document.activityOutcomePending, true);
+  assert.equal(pending.commands.backup, false);
+  assert.equal(pending.commands.export, false);
+  session.dispose();
+
+  const exportSession = new DocumentSession(host, new Journal());
+  exportSession.adopt({ ...opened("sealed"), canEdit: false });
+  host.exportPlaintext = async () => ({ exported: false, outcomePending: true });
+  assert.deepEqual(await exportSession.exportPlaintext("lf"),
+    { status: "export", exported: false, outcomePending: true });
+  const exportPending = exportSession.getSnapshot();
+  if (exportPending.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(exportPending.document.activityOutcomePending, true);
+  exportSession.dispose();
+});
+
+test("confirmed interrupted activity becomes a retryable known outcome", async () => {
+  const host = new Host();
+  const requests: Array<{ succeeded?: boolean }> = [];
+  host.resolvePendingActivityOutcome = async (request = {}) => {
+    requests.push(request);
+    return { ...opened("sealed"), canEdit: false,
+      ...(requests.length === 1 ? { activityOutcomePending: true as const } : {}) };
+  };
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("sealed"), canEdit: false,
+    activityOutcomePending: true, activityConfirmationRequired: true });
+  assert.deepEqual(await session.resolveActivityOutcome(true), {
+    status: "activity-outcome", pending: true, confirmationRequired: false });
+  assert.deepEqual(await session.resolveActivityOutcome(), {
+    status: "activity-outcome", pending: false, confirmationRequired: false });
+  assert.deepEqual(requests, [{ succeeded: true }, {}]);
+  const current = session.getSnapshot();
+  if (current.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(current.commands.backup, true);
   session.dispose();
 });
 
@@ -863,6 +974,43 @@ test("failed divergence acquisition preserves even consented unsaved work for re
   session.dispose();
 });
 
+test("target reauthentication retains the candidate and forwards the password through lease takeover", async () => {
+  const host = new Host();
+  const session = new DocumentSession(host, new Journal());
+  session.adopt({ ...opened("saved candidate"), publicationState: "conflict" });
+  const requests: Array<{ authorization?: string; targetPassword?: string }> = [];
+  host.beginDivergenceResolution = async (request) => {
+    requests.push(request ?? {});
+    if (!request?.targetPassword) {
+      throw Object.assign(new Error("private target path"), {
+        name: "SafeBoundaryError", code: "MERGE_TARGET_REAUTHENTICATION",
+      });
+    }
+    if (!request.authorization) return { decisionRequired: "lease-takeover" as const,
+      operation: "divergence" as const, holderName: "Ada", authorization: "opaque" };
+    return { content: "merge draft", hasConflicts: false, ancestorRevision: "a",
+      localRevision: "l", currentRevision: "c" };
+  };
+  assert.deepEqual(await session.beginDivergenceResolution(),
+    { status: "failed", code: "MERGE_TARGET_REAUTHENTICATION" });
+  let snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.working.text, "saved candidate");
+  assert.equal(snapshot.attention?.kind, "publication-decision");
+  assert.deepEqual(await session.beginDivergenceResolution({ targetPassword: "new secret" }),
+    { status: "attention" });
+  assert.equal(JSON.stringify(session.getSnapshot()).includes("new secret"), false);
+  assert.deepEqual(await session.confirmLeaseTakeover(),
+    { status: "divergence", hasConflicts: false });
+  assert.deepEqual(requests, [{}, { targetPassword: "new secret" },
+    { authorization: "opaque", targetPassword: "new secret" }]);
+  snapshot = session.getSnapshot();
+  if (snapshot.kind !== "edit") throw new Error("expected merge draft");
+  assert.equal(snapshot.working.text, "merge draft");
+  assert.equal(JSON.stringify(snapshot).includes("new secret"), false);
+  session.dispose();
+});
+
 test("discarding a pending candidate restores a provisional target as still unsaved", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
@@ -1118,7 +1266,6 @@ test("automatic lease entry respects slot and unresolved-attention gates", async
     { ...opened(), headMismatch: { kind: "rollback", title: "changed",
       explanation: "review", editingBlocked: true } },
     { ...opened(), unreadableJournal: true },
-    { ...opened(), migrationRequired: true, migrationCanEdit: true },
     { ...opened(), publicationState: "pending-publication" },
   ];
   for (const document of blocked) {
@@ -1222,6 +1369,8 @@ test("lock start immediately drops working text and retains only target identity
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
   await session.openSelected("secret password");
+  assert.equal(session.getSnapshot().kind, "edit");
+  assert.equal(session.edit("unpublished private edit"), true);
   session.lockStarted();
   const locked = session.getSnapshot();
   assert.equal(locked.kind, "locked");
@@ -1230,6 +1379,11 @@ test("lock start immediately drops working text and retains only target identity
   assert.equal("document" in locked, false);
   assert.equal("working" in locked, false);
   assert.equal(JSON.stringify(locked).includes("private text"), false);
+  assert.equal(JSON.stringify(locked).includes("unpublished private edit"), false);
+  host.unlockDocument = async () => { throw new Error("wrong password"); };
+  assert.equal((await session.unlock("wrong password")).status, "failed");
+  assert.equal(session.getSnapshot().kind, "locked");
+  host.unlockDocument = async () => host.openResult;
   host.openResult = opened("reopened text");
   host.editResult = opened("reopened text", false);
   assert.equal((await session.unlock("another password")).status, "opened");
@@ -1544,65 +1698,6 @@ test("a late invitation publication neither reveals its passphrase nor updates a
   session.dispose();
 });
 
-test("migration uses canonical slot permission and adopts only the live verified result", async () => {
-  const host = new Host();
-  const session = new DocumentSession(host, new Journal());
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: false });
-  let state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("view expected");
-  assert.equal(state.commands.migrate, false);
-  assert.equal((await session.migrate()).status, "unavailable");
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: true });
-  state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("view expected");
-  assert.equal(state.commands.migrate, true);
-  assert.equal(state.attention?.kind, "migration-decision");
-  host.migrateDocument = async () => ({ opened: opened("migrated", false),
-    compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  const migration = await session.migrate();
-  assert.deepEqual(migration, { status: "migration",
-    compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  assert.equal("document" in migration, false);
-  assert.equal("content" in migration, false);
-  assert.equal(JSON.stringify(migration).includes("migrated"), false);
-  state = session.getSnapshot();
-  if (state.kind !== "edit") throw new Error("edit expected");
-  assert.equal(state.document.content, "migrated");
-  assert.equal(state.working.text, "migrated");
-  assert.equal(state.working.dirty, false);
-  assert.equal(state.commands.write, true);
-  session.dispose();
-});
-
-test("migration cancellation consumes takeover; late result after lock cannot adopt", async () => {
-  const host = new Host();
-  const session = new DocumentSession(host, new Journal());
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: true });
-  host.migrateDocument = async () => null;
-  assert.equal((await session.migrate()).status, "migration-canceled");
-  const canceled = session.getSnapshot();
-  if (canceled.kind !== "read-only") throw new Error("view expected");
-  assert.equal(canceled.attention?.kind, "migration-decision");
-  let finish!: (value: { opened: OpenedDocument; compatibilityCode: string }) => void;
-  let started!: () => void;
-  const active = new Promise<void>((resolve) => { started = resolve; });
-  host.migrateDocument = () => new Promise((resolve) => { finish = resolve; started(); });
-  const pending = session.migrate();
-  await active;
-  session.lockStarted();
-  session.adopt(opened("replacement"));
-  finish({ opened: opened("stale migration", false),
-    compatibilityCode: "MIGRATION_COMPATIBILITY" });
-  assert.equal((await pending).status, "superseded");
-  const replaced = session.getSnapshot();
-  if (replaced.kind !== "read-only") throw new Error("replacement expected");
-  assert.equal(replaced.document.content, "replacement");
-  session.dispose();
-});
-
 test("compaction requires full administration, explicit confirmation, and a clean document", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());
@@ -1636,33 +1731,6 @@ test("compaction requires full administration, explicit confirmation, and a clea
   assert.equal(state.working.dirty, false);
   assert.equal(state.commands.compact, true);
   assert.equal(state.attention?.kind, undefined);
-  session.dispose();
-});
-
-test("migration consumes takeover before a failed backup and requires fresh authorization", async () => {
-  const host = new Host();
-  const session = new DocumentSession(host, new Journal());
-  session.adopt({ ...opened("legacy"), canEdit: false, migrationRequired: true,
-    migrationCanEdit: true });
-  const requests: string[] = [];
-  host.migrateDocument = async (request = {}) => {
-    requests.push(request.authorization ?? "initial");
-    if (!request.authorization) return { decisionRequired: "lease-takeover",
-      operation: "migration", holderName: "Remote editor", authorization: "one-shot" };
-    throw Object.assign(new Error("private backup path"), { name: "SafeBoundaryError",
-      code: "MIGRATION_FAILED" });
-  };
-  assert.equal((await session.migrate()).status, "attention");
-  assert.equal((await session.confirmLeaseTakeover()).status, "failed");
-  assert.equal((await session.confirmLeaseTakeover()).status, "unavailable");
-  const state = session.getSnapshot();
-  if (state.kind !== "read-only") throw new Error("view expected");
-  assert.deepEqual(state.attention, { kind: "migration-decision", canMigrate: true,
-    failureCode: "MIGRATION_FAILED" });
-  assert.equal(JSON.stringify(state).includes("one-shot"), false);
-  assert.equal(JSON.stringify(state).includes("private backup path"), false);
-  assert.equal((await session.migrate()).status, "attention");
-  assert.deepEqual(requests, ["initial", "one-shot", "initial"]);
   session.dispose();
 });
 

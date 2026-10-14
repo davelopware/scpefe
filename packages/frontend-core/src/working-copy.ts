@@ -54,6 +54,7 @@ interface WorkingState {
   text: string;
   journalScope: string;
   baseline: string | null;
+  forceDirty: boolean;
   history: string[];
   index: number;
   selection: WorkingCopySelection;
@@ -149,19 +150,23 @@ export class WorkingCopy {
     state.journalScope = journalScope;
     state.text = text;
     state.baseline = text;
+    state.forceDirty = false;
     state.history[state.index] = text;
     state.selection = this.normalizedSelection(text, state.selection);
     this.publish();
   }
 
-  /** Seals the submitted text while preserving edits made after submission. */
-  sealPublication(text: string, submittedText: string): void {
+  /** Seals only the submitted edit revision; identical later text is still newer work. */
+  sealPublication(text: string, submittedVersion: Readonly<{
+    journalScope: string; revision: number }> | null): void {
     const state = this.requireReady();
-    if (state.text === submittedText) {
+    if (submittedVersion?.journalScope === state.journalScope
+        && submittedVersion.revision === state.revision) {
       this.adoptPublication(text);
       return;
     }
     state.baseline = text;
+    state.forceDirty = true;
     this.publish();
   }
 
@@ -186,7 +191,7 @@ export class WorkingCopy {
     const journalScope = this.journalHost.createJournalScope();
     this.startGeneration();
     this.state = {
-      text, baseline, journalScope,
+      text, baseline, forceDirty: false, journalScope,
       history: [text], index: 0, selection: this.normalizedSelection(text, selection),
       pending: new Map(), revision: 0, acceptedRevision: 0, failedRevision: 0,
       checkpointFailed: false,
@@ -342,7 +347,8 @@ export class WorkingCopy {
     this.snapshot = state ? Object.freeze({
       kind: "ready", text: state.text,
       baseline: state.baseline === null ? "invalid" : "valid",
-      dirty: state.baseline === null || state.text !== state.baseline,
+      dirty: state.baseline === null || state.forceDirty
+        || state.text !== state.baseline,
       selection: state.selection,
       canUndo: state.index > 0, canRedo: state.index < state.history.length - 1,
       historyLength: state.history.length,

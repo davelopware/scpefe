@@ -17,7 +17,17 @@
 namespace scpefe::format {
 namespace {
 
+#if defined(__EMSCRIPTEN__)
+void sodium_memzero(void *buffer, std::size_t size) noexcept
+{
+    // The portable format build has no Libsodium; volatile writes preserve the
+    // existing best-effort clear behavior for its owned identity and text data.
+    auto *bytes = static_cast<volatile std::uint8_t *>(buffer);
+    for (std::size_t index = 0; index < size; ++index) bytes[index] = 0;
+}
+#else
 extern "C" void sodium_memzero(void *buffer, std::size_t size);
+#endif
 
 void clear_identity_string(std::string &value) noexcept
 {

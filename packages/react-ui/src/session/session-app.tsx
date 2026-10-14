@@ -6,12 +6,13 @@ import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
 import { createShellCommands, type ShellCommand } from "../shell/shell-commands.ts";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
-import { DialogSuspensionContext } from "../dialogs/focused-dialog.tsx";
+import { DialogSuspensionContext, FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
 import { SecurityDialogs, type SecurityDialogsHandle } from "../security/security-dialogs.tsx";
 import { CreationFlow, type CreationFlowHandle } from "../security/creation-flow.tsx";
 import { clearMountedPasswordFields } from "../security/password-entry.ts";
 import { EditorView, type EditorViewHandle } from "../editor/editor-view.tsx";
+import { RevisionActivityDialog, type RevisionActivityHost } from "./revision-activity.tsx";
 import { SessionPresentation } from "./session-presentation.ts";
 import type { DialogAction } from "../dialogs/dialog-host.tsx";
 import { useSessionEvents } from "./use-session-events.ts";
@@ -35,6 +36,7 @@ export interface SharedAppProps {
   shellHost: ShellHost;
   creationTargetHost: CreationTargetHost;
   securityClipboard: SecurityClipboardHost;
+  revisionActivityHost?: RevisionActivityHost;
   completion: {
     setSessionSource(source: { getPendingWorkCount(): number;
       subscribe(listener: () => void): () => void } | null): void;
@@ -54,7 +56,7 @@ export interface SharedAppProps {
 }
 
 export function SharedApp({ sessionHost, journalTransport, events,
-  shellHost, creationTargetHost, securityClipboard,
+  shellHost, creationTargetHost, securityClipboard, revisionActivityHost,
   completion: rendererLifecycleCompletion,
   catalogText, safeRendererErrorMessage, closeWindow, sourceCommit, assessProposedPassword,
   proposedPasswordRejectionMessage, CreationSecurityDialog,
@@ -111,6 +113,12 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [dialog, setDialogState] = useState<DialogName>(null);
+  const [activityDialog, setActivityDialog] = useState(false);
+  useEffect(() => {
+    if (!opened || !isDocumentOpened(opened) || !opened.activityOutcomePending) {
+      setActivityDialog(false);
+    }
+  }, [opened]);
   function setDialog(next: DialogName) {
     setDialogState(next);
   }
@@ -127,8 +135,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
     || (dialog !== null && dialog !== "compaction") });
   const selected = presentationView.selectedDecision;
   const protection = selected?.kind === "lifecycle-protection" ? selected : null;
-  const visibleOpenedDialog = dialog === null ? presentationView.openedDialog : null;
-  modalBusy.current = protection !== null || creating || dialog !== null || visibleOpenedDialog !== null
+  const visibleOpenedDialog = dialog === null && !activityDialog
+    ? presentationView.openedDialog : null;
+  modalBusy.current = protection !== null || creating || dialog !== null
+    || activityDialog || visibleOpenedDialog !== null
     || presentationView.blocked;
   useSessionEvents({ session, presentation, events, shellHost,
     completion: rendererLifecycleCompletion,
@@ -195,7 +205,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const shellCommands = createShellCommands({ session,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
-      modalBusy: modalBusy.current }),
+      modalBusy: modalBusy.current, activityAvailable: Boolean(revisionActivityHost) }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -216,7 +226,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
         returnFocus?.isConnected ? returnFocus : document.activeElement as HTMLElement | null);
     } else if (command === "export") {
       shellDialogs.current?.showExport();
-    } else if (command === "passwords" || command === "profile" || command === "about") {
+    } else if (command === "passwords" || command === "profile"
+      || command === "about" || command === "activity") {
       setDialog(command as DialogName);
     } else if (command === "save") await runSave();
     else if (command === "backup") {
@@ -227,9 +238,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
       const current = session.getSnapshot();
       if (!presentationMounted.current || (current.kind === "read-only"
         || current.kind === "edit" ? current.adoption : null) !== adoption) return;
-      if (outcome.status === "backup") setMessage(outcome.created
-        ? "Verified byte-identical backup replica created."
-        : "Backup canceled; the document and destination are unchanged.");
+      if (outcome.status === "backup") setMessage(outcome.outcomePending
+        ? (outcome.created ? "Verified backup created; activity outcome pending publication."
+          : "Backup failed; activity outcome pending publication.")
+        : outcome.created ? "Verified byte-identical backup replica created."
+          : outcome.canceled
+            ? "Backup canceled; the document and destination are unchanged."
+            : "Backup failed; check the destination.");
       else if (outcome.status === "failed") setMessage(catalogText(outcome.code));
     }
     else if (command === "edit") {
@@ -255,6 +270,19 @@ export function SharedApp({ sessionHost, journalTransport, events,
     else if (command === "exit") {
       const outcome = await session.exit();
       if (outcome.status === "failed") setMessage(catalogText(outcome.code));
+    }
+  }
+
+  async function resolveActivityOutcome(succeeded?: boolean) {
+    const outcome = await rendererLifecycleCompletion.track(
+      () => session.resolveActivityOutcome(succeeded));
+    if (!presentationMounted.current) return;
+    if (outcome.status === "activity-outcome") {
+      setActivityDialog(false);
+      setMessage(outcome.pending ? "Activity outcome remains pending; retry publication."
+        : "Activity outcome published and verified.");
+    } else if (outcome.status === "failed") {
+      setMessage(catalogText(outcome.code));
     }
   }
 
@@ -302,7 +330,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     if (result.safeMessage !== null) setMessage(result.safeMessage);
   }
 
-  async function runDialogAction(action: DialogAction) {
+  async function runDialogAction(action: DialogAction, targetPassword?: string) {
     if (action === "lock") { await lockDocument(); return; }
     if (action === "open-passwords") { setDialog("passwords"); return; }
     const actionElement = document.activeElement instanceof HTMLElement
@@ -312,8 +340,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       ? started.adoption : null;
     const nextDialog = action === "protection-cancel" || action === "protection-save"
       || action === "protection-discard"
-      ? await rendererLifecycleCompletion.track(() => presentation.act(action))
-      : await presentation.act(action);
+      ? await rendererLifecycleCompletion.track(() => presentation.act(action, targetPassword))
+      : await presentation.act(action, targetPassword);
     if (!presentationMounted.current) return;
     const current = session.getSnapshot();
     if ((current.kind === "read-only" || current.kind === "edit"
@@ -334,8 +362,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     });
     if (result.focusIntent === "decision-action") {
       focusIfCurrent(() => { if (actionElement?.isConnected) actionElement.focus(); });
-    } else if (result.focusIntent === "migration-retry"
-      || result.focusIntent === "edit-retry"
+    } else if (result.focusIntent === "edit-retry"
       || result.focusIntent === "recovery-restore"
       || result.focusIntent === "publication-retry"
       || result.focusIntent === "save-retry") {
@@ -355,9 +382,35 @@ export function SharedApp({ sessionHost, journalTransport, events,
       locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
     <StatusBar session={session} active={activeDocument} commands={shellCommands}
-      message={presentation.statusMessage(message)} /></div>
+      message={presentation.statusMessage(message)}
+      activityActionAvailable={!modalBusy.current && !sessionSnapshot.pending}
+      onActivityOutcome={(returnFocus) => {
+        dialogReturnFocus.current = returnFocus; setActivityDialog(true);
+      }} /></div>
     <div hidden={protection !== null} inert={protection !== null}>
     <DialogSuspensionContext.Provider value={protection !== null}>
+    {activityDialog && opened && isDocumentOpened(opened)
+      && opened.activityOutcomePending && <FocusedDialog
+        title={opened.activityConfirmationRequired
+          ? "Confirm interrupted activity" : "Retry activity outcome"}
+        close={() => setActivityDialog(false)} returnFocus={dialogReturnFocus.current}>
+        {opened.activityConfirmationRequired
+          ? <><p>The external action may have completed before the interruption.
+            Check its destination before choosing an outcome. A completed backup
+            must be selected for byte-for-byte verification.</p>
+            <button type="button" onClick={() => void resolveActivityOutcome(true)}>
+              It completed</button>
+            <button type="button" onClick={() => void resolveActivityOutcome(false)}>
+              It did not complete</button></>
+          : <><p>The result is recorded locally, but its history event is pending.</p>
+            <button type="button" onClick={() => void resolveActivityOutcome()}>
+              Retry outcome publication</button></>}
+        <button type="button" onClick={() => setActivityDialog(false)}>Cancel</button>
+      </FocusedDialog>}
+    {dialog === "activity" && activeDocument && revisionActivityHost
+      && <RevisionActivityDialog host={revisionActivityHost}
+        returnFocus={dialogReturnFocus.current} close={() => setDialog(null)}
+        safeError={safeRendererErrorMessage} />}
     <CreationFlow ref={creationFlow} session={session} targetHost={creationTargetHost}
       completion={rendererLifecycleCompletion} Dialog={CreationSecurityDialog}
       catalogText={catalogText} safeRendererErrorMessage={safeRendererErrorMessage}

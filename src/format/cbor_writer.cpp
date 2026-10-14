@@ -27,6 +27,11 @@ void CborWriter::text(const char *data, std::size_t size)
     }
 }
 
+void CborWriter::raw(const std::uint8_t *data, std::size_t size)
+{
+    if (size != 0) output_.insert(output_.end(), data, data + size);
+}
+
 std::vector<std::uint8_t> CborWriter::take_output()
 {
     return std::move(output_);

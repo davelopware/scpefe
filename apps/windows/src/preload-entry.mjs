@@ -3,11 +3,12 @@ import { validateCreateFormRequest, validateCreationResult,
   validateCreationTargetResult, validatePassword,
   validateOpenTargetResult,
   validateProfile, validateOpenedDocument, validateActiveDocument,
-  validateEditMode, validateSaveResult,
+  validateEditMode, validateSaveResult, validateSaveSubmission,
   validatePlaintextExportRequest, validatePlaintextExportResult, validateBackupResult,
+  validateActivityOutcomeRequest,
   validateCompactionResult,
-  validateMigrationResult,
-  validateLeaseDecisionResult, validateTakeoverRequest, validateTakeoverCancellation,
+  validateLeaseDecisionResult, validateTakeoverRequest, validateDivergenceRequest,
+  validateTakeoverCancellation,
   validateCompactionRequest,
   canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
   validateClientSettings,
@@ -16,7 +17,9 @@ import { validateCreateFormRequest, validateCreationResult,
   validatePasswordChangeRequest, validateInvitationCreateRequest,
   validateInvitationResult, validateInvitationClaimRequest,
   validateSlotPermissionsRequest,
-  validateSlotId, validateRegularSaveResult, validateSlotRemovalResult } from "./contracts.mjs";
+  validateSlotId, validateRegularSaveResult, validateSlotRemovalResult,
+  validateRevisionActivityRequest, validateRevisionActivityId,
+  validateRevisionActivityPage, validateRevisionActivityComparison } from "./contracts.mjs";
 import { decodeBoundaryError, isCatalogCode } from "./error-boundary.mjs";
 
 const ipcRenderer = Object.freeze({
@@ -96,35 +99,43 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
     return value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateEditMode(value);
   },
-  saveDocument: async (content) => validateSaveResult(
-    await ipcRenderer.invoke("document:save", canonicalizeDocumentText(content))),
+  saveDocument: async (content, submittedVersion = null) => {
+    const request = submittedVersion ? { content, ...submittedVersion } : content;
+    const validated = validateSaveSubmission(request);
+    return validateSaveResult(await ipcRenderer.invoke("document:save",
+      validated.submittedVersion
+        ? { content: validated.content, ...validated.submittedVersion }
+        : validated.content));
+  },
   reconnectPendingPublication: async () => validatePublicationResult(
     await ipcRenderer.invoke("document:reconnect-publication")),
   beginDivergenceResolution: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:begin-divergence-resolution",
-      validateTakeoverRequest(request));
+      validateDivergenceRequest(request));
     return value?.decisionRequired === "lease-takeover"
       ? validateLeaseDecisionResult(value) : validateMergeDraft(value);
   },
-  saveDivergenceResolution: async (content) => validateSaveResult(
-    await ipcRenderer.invoke("document:save-divergence-resolution",
-      canonicalizeDocumentText(content))),
+  saveDivergenceResolution: async (content, submittedVersion = null) => {
+    const request = submittedVersion ? { content, ...submittedVersion } : content;
+    const validated = validateSaveSubmission(request);
+    return validateSaveResult(await ipcRenderer.invoke(
+      "document:save-divergence-resolution", validated.submittedVersion
+        ? { content: validated.content, ...validated.submittedVersion }
+        : validated.content));
+  },
   discardPendingPublication: async () => validateOpenedDocument(
     await ipcRenderer.invoke("document:discard-publication")),
   backupDocument: async () => {
     const value = await ipcRenderer.invoke("document:backup");
     return value === null ? null : validateBackupResult(value);
   },
+  resolvePendingActivityOutcome: async (request = {}) => validateOpenedDocument(
+    await ipcRenderer.invoke("document:resolve-activity",
+      validateActivityOutcomeRequest(request))),
   compactDocument: async (request) => {
     const value = await ipcRenderer.invoke("document:compact",
       validateCompactionRequest(request));
     return value === null ? null : validateCompactionResult(value);
-  },
-  migrateDocument: async (request = {}) => {
-    const value = await ipcRenderer.invoke("document:migrate",
-      validateTakeoverRequest(request));
-    return value === null ? null : value?.decisionRequired === "lease-takeover"
-      ? validateLeaseDecisionResult(value) : validateMigrationResult(value);
   },
   changePassword: async (request) => validateActiveDocument(
     await ipcRenderer.invoke("document:change-password",
@@ -166,6 +177,17 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   activity: async () => {
     await ipcRenderer.invoke("document:activity");
   },
+  revisionActivityPage: async (offset, count) => {
+    const request = validateRevisionActivityRequest(offset, count);
+    return validateRevisionActivityPage(await ipcRenderer.invoke(
+      "document:revision-activity", request), offset, count);
+  },
+  revisionActivityComparison: async (beforeId, afterId) =>
+    validateRevisionActivityComparison(await ipcRenderer.invoke(
+      "document:revision-compare", {
+        beforeId: validateRevisionActivityId(beforeId),
+        afterId: validateRevisionActivityId(afterId),
+      })),
   restoreRecoveredWork: async (request = {}) => {
     const value = await ipcRenderer.invoke("document:restore-recovery",
       validateTakeoverRequest(request));

@@ -23,6 +23,9 @@ test("menu, shortcut and status callers share current eligibility and tracked in
   const focus = {} as HTMLElement;
   const visible = current;
   assert.equal(commands.available("save"), true);
+  assert.equal(commands.available("activity"), false);
+  facts.activityAvailable = true;
+  assert.equal(commands.available("activity"), true);
   assert.equal(await commands.invoke("save", { returnFocus: focus,
     observedSnapshot: visible }), true);
   assert.deepEqual(calls, [["save", focus]]);
@@ -40,6 +43,7 @@ test("menu, shortcut and status callers share current eligibility and tracked in
   facts.activeAdoption = null;
   current = snapshot("locked", 2);
   assert.equal(commands.available("save"), false);
+  assert.equal(commands.available("activity"), false);
   assert.equal(await commands.invoke("save"), false);
   assert.equal(tracked, 1);
 });

@@ -1,0 +1,152 @@
+[
+  {
+    "path": "valid/baseline-payload.hex",
+    "bytes": 454,
+    "sha256": "b39501df318b7e26635386c7c72a6f727151cdb7c2545b82de93363b0efe6ee7",
+    "expect": "accept; text alpha\\n"
+  },
+  {
+    "path": "valid/baseline-container.hex",
+    "bytes": 668,
+    "sha256": "093d8d7c13e9cbbd456903075b34891b7f68cacb3a1daf31f7c6e12fdd934ce6",
+    "expect": "accept with test password; same payload"
+  },
+  {
+    "path": "valid/delta-event.hex",
+    "bytes": 981,
+    "sha256": "b721e24cd91735e2b840aa32251b092de113d7e2888810564279249807efeccc",
+    "expect": "accept; head event, content head delta; text alpha\\nbeta\\n"
+  },
+  {
+    "path": "valid/pruned-checkpoint.hex",
+    "bytes": 1229,
+    "sha256": "42ee02c56e69fbae21911c5d8e7244dc5b85e58e3b1ee1a5d23bffdfb47d63b1",
+    "expect": "accept; baseline text unavailable, reconstruct alpha\\nbeta\\n from checkpoint; IDs unchanged"
+  },
+  {
+    "path": "valid/pruned-checkpoint-container.hex",
+    "bytes": 1443,
+    "sha256": "f91fdfe1256096c83011a5f1c19b5cc5f8e4f9f75e5bbec1522e974705759eef",
+    "expect": "authenticate saved pruned history with the test password"
+  },
+  {
+    "path": "valid/repeated-compaction.hex",
+    "bytes": 1774,
+    "sha256": "8cea789741255b2fabe88b0a9e755c7618241ca32f7474507e9bd2b5620c61cc",
+    "expect": "accept; earlier compaction cutoff body was pruned by a later compaction"
+  },
+  {
+    "path": "valid/expanding-diagnostic.hex",
+    "bytes": 217546,
+    "sha256": "60f9301531616b1bbcd39d43d6625ec7292aabd3063dacbe0e2bd01d543f9977",
+    "expect": "accept graph; redacted diagnostic fits, opt-in content exceeds 32 MiB"
+  },
+  {
+    "path": "valid/foreign-merge.hex",
+    "bytes": 1398,
+    "sha256": "6640226832f26faa2f874134d26e640cf5362aae29774e4a2bdd1b57c8d4e486",
+    "expect": "accept; foreign metadata only with original ID and resolved-by merge; canonical merge text reconstructs"
+  },
+  {
+    "path": "invalid/orphan-foreign.hex",
+    "bytes": 1364,
+    "sha256": "87e644586f545f2685c69d963427c0b14d8fdf99012a3e4d176c8076c6d81736",
+    "expect": "reject imported metadata not linked to merge source"
+  },
+  {
+    "path": "invalid/compaction-count.hex",
+    "bytes": 1229,
+    "sha256": "c27e793231827bea5300b34631a9573bcbe68f2592e08c6317d75a8debcd28de",
+    "expect": "reject compaction retained-delta count mismatch"
+  },
+  {
+    "path": "invalid/nonminimal-key.hex",
+    "bytes": 455,
+    "sha256": "73cd02115f906722cf3b306bec581577dd77742be7b351f940c4a4f783d8df5e",
+    "expect": "reject noncanonical CBOR"
+  },
+  {
+    "path": "invalid/duplicate-key.hex",
+    "bytes": 456,
+    "sha256": "b22cdb1e73a2dc18a6be3890a66c42576e1efc956afa10adfcd16faf1bfc46f8",
+    "expect": "reject duplicate CBOR key"
+  },
+  {
+    "path": "invalid/timestamp-bound.hex",
+    "bytes": 454,
+    "sha256": "633121da58f43b46d87d497702caea517f9bdf627d541344a1793f79702d8810",
+    "expect": "reject timestamp above 2^63-1"
+  },
+  {
+    "path": "invalid/dangling-parent.hex",
+    "bytes": 750,
+    "sha256": "3a185383b135c75cbd94aa13334ed532176f913fc63a47633f5945c002b871e4",
+    "expect": "reject missing content-parent ID"
+  },
+  {
+    "path": "invalid/delta-out-of-range.hex",
+    "bytes": 752,
+    "sha256": "ed7dd6eae9572aa374754f37a530ee7093cb1f5ebe8dd41d49d15a1e813257d3",
+    "expect": "reject source range beyond parent text"
+  },
+  {
+    "path": "invalid/reconstruction-hash.hex",
+    "bytes": 750,
+    "sha256": "01432789d45620acc35e2511f16511ee5b3ac43d29e4f3b8c64408e42a3273ef",
+    "expect": "reject reconstructed content hash mismatch"
+  },
+  {
+    "path": "invalid/unsupported-codec.hex",
+    "bytes": 750,
+    "sha256": "c58b91cb1e9df8a39afacaede7ed684403de78a900bf9b604f263153d8f97699",
+    "expect": "reject unknown delta codec 1"
+  },
+  {
+    "path": "invalid/text-invalid-utf8.hex",
+    "bytes": 449,
+    "sha256": "6c0389520fb06690d0341ef6c998682a08b99b702535c217e79538e5e617e0c3",
+    "expect": "reject malformed UTF-8 content"
+  },
+  {
+    "path": "invalid/checkpoint-content-hash.hex",
+    "bytes": 1229,
+    "sha256": "bf00b9ef693b5ccd9624ad298f699dd0d8636ad0522aec2a3c37d68b71d16e86",
+    "expect": "reject checkpoint text hash mismatch"
+  },
+  {
+    "path": "invalid/incorrect-revision-id.hex",
+    "bytes": 750,
+    "sha256": "a293992d7e5727ce5da37f0db9f19ad7c2cf43b97bddb25bd816ab68ba8e049f",
+    "expect": "reject ID/preimage hash mismatch"
+  },
+  {
+    "path": "invalid/pruned-without-anchor.hex",
+    "bytes": 1213,
+    "sha256": "20d641900c9096975ba20c6c0e9bca23d3bce09903b999e203578f87904a4aab",
+    "expect": "reject missing reconstruction checkpoint"
+  },
+  {
+    "path": "invalid/unknown-required-feature.hex",
+    "bytes": 457,
+    "sha256": "880f60fb441b0f7f76618cb87595b6be9add8c48efbec7000772cfa446b02b31",
+    "expect": "reject unknown required feature"
+  },
+  {
+    "path": "invalid/envelope-slot-count-zero.hex",
+    "bytes": 668,
+    "sha256": "ad85d0030bc89817ec4a380ecca3879b905fdec7155c4c92bfca8ea53b58aa6e",
+    "expect": "reject slot count bound before KDF"
+  },
+  {
+    "path": "invalid/envelope-payload-length-overflow.hex",
+    "bytes": 668,
+    "sha256": "bb87c3a0900efbdeab0760fc4e4f60dd640cc1e18328472387d481d481675490",
+    "expect": "reject length arithmetic before KDF"
+  },
+  {
+    "path": "invalid/envelope-wrapper-length.hex",
+    "bytes": 668,
+    "sha256": "f380e4bf8d64f73b9c971644da4d1abc39425f58cb4ebceafc75cf68165d1aa2",
+    "expect": "reject unsupported wrapper length before KDF"
+  }
+]

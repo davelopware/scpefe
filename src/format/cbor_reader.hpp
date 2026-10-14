@@ -36,6 +36,12 @@ public:
     std::string text();
     /* Reports whether every encoded byte has been consumed. */
     bool finished() const;
+    /* Reports the current byte offset for canonical subitem hashing. */
+    std::size_t position() const { return position_; }
+    /* Reports the next item's major type without consuming it. */
+    std::uint8_t peek_major() const;
+    /* Skips one canonical extension value, including nested values. */
+    void skip_extension(std::size_t depth);
 
 private:
     /* Stops parsing with the supplied structured revision error. */

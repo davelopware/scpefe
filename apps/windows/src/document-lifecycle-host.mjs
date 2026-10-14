@@ -13,7 +13,9 @@ import { OpenRequestQueue } from "./switch-document.mjs";
 import { registerNativeWindowClose } from "./window-lifecycle.mjs";
 import { canonicalizeDocumentText, validateClientSettings, validateExternalOpenRequest,
   validatePassword, validateProfile, validateTakeoverCancellation,
-  validateTakeoverRequest, validateWorkingCopy } from "./contracts.mjs";
+  validateTakeoverRequest, validateDivergenceRequest,
+  validateWorkingCopy, validateRevisionActivityRequest,
+  validateRevisionActivityId, validateSaveSubmission } from "./contracts.mjs";
 import { safeEventCode } from "./error-boundary.mjs";
 import { DISCARD_UNREADABLE_JOURNAL_CONFIRMATION } from "./document-service.mjs";
 
@@ -166,6 +168,7 @@ export class DocumentLifecycleHost {
       if (this.lockedTarget) {
         await this.service.releaseSuspendedLease?.(this.lockedTarget);
       }
+      this.service.closeContainer?.();
       this.currentTarget = null; this.lockedTarget = null; this.selectedOpenTarget = null;
     });
     if (closed) {
@@ -234,22 +237,24 @@ export class DocumentLifecycleHost {
     this.#clearInactiveTimer();
     this.leaseTakeovers.clear(); const previous = this.service;
     const priorLockedTarget = this.lockedTarget;
-    if (target !== this.lockedTarget) {
-      await previous.releaseSuspendedLeases?.();
-    }
+    await previous.releaseSuspendedLeases?.();
     assertCurrent();
     if (this.service !== previous || this.lockedTarget !== priorLockedTarget) {
       throw new Error("The document changed before replacement could be adopted");
     }
-    if (target === this.lockedTarget) {
-      previous.transferSuspendedLeaseTo?.(staged.candidate, target);
-    }
     this.service = staged.candidate; staged.candidate.acceptCreatedDocument?.();
     this.currentTarget = target; this.lockedTarget = target;
-    if (previous !== this.service && previous.active) {
-      void previous.lock("document-replaced").catch((error) =>
-        this.#emit("document:journal-warning",
-          safeEventCode(error, "document:lock")));
+    if (previous !== this.service) {
+      if (previous.active) {
+        try { await previous.lock("document-replaced"); }
+        catch (error) {
+          this.#emit("document:journal-warning", safeEventCode(error, "document:lock"));
+        }
+      }
+      try { previous.closeContainer?.(); }
+      catch (error) {
+        this.#emit("document:journal-warning", safeEventCode(error, "document:close"));
+      }
     }
   }
 
@@ -319,14 +324,24 @@ export class DocumentLifecycleHost {
     this.#register("document:update-working-copy", (working) =>
       this.service.updateWorkingCopy(validateWorkingCopy(working)));
     this.#register("document:activity", () => this.notifyActivity());
-    this.#register("document:save", async (content) => {
+    this.#register("document:revision-activity", (request) => {
+      const { offset, count } = validateRevisionActivityRequest(
+        request?.offset, request?.count);
+      return this.service.revisionActivityPage(offset, count);
+    });
+    this.#register("document:revision-compare", (request) =>
+      this.service.revisionActivityComparison(
+        validateRevisionActivityId(request?.beforeId),
+        validateRevisionActivityId(request?.afterId)));
+    this.#register("document:save", async (request) => {
       let result;
-      const canonical = canonicalizeDocumentText(content);
-      try { result = await this.service.saveDocument(canonical); }
+      const { content: canonical, submittedVersion } = validateSaveSubmission(request);
+      try { result = await this.service.saveDocument(canonical, submittedVersion); }
       catch (error) {
         if (!error?.publicationPrepared || !this.service.active?.opened) throw error;
         result = { saved: true, content: canonical,
-          publicationState: this.service.active.opened.publicationState };
+          publicationState: this.service.active.opened.publicationState,
+          ...(submittedVersion ?? {}) };
       }
       await this.sendJournalSummary(); return result;
     });
@@ -335,15 +350,17 @@ export class DocumentLifecycleHost {
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:begin-divergence-resolution", (request = {}) => {
-      const validated = validateTakeoverRequest(request);
+      const validated = validateDivergenceRequest(request);
       const current = this.service;
       return runLeaseOperation({ authorizations: this.leaseTakeovers, operation: "divergence",
         service: current, authorization: validated.authorization,
-        perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken }) });
+        perform: (takeoverToken) => current.beginDivergenceResolution({ takeoverToken,
+          targetPassword: validated.targetPassword }) });
     });
-    this.#register("document:save-divergence-resolution", async (content) => {
+    this.#register("document:save-divergence-resolution", async (request) => {
+      const { content, submittedVersion } = validateSaveSubmission(request);
       const result = await this.service.saveDivergenceResolution(
-        canonicalizeDocumentText(content));
+        content, submittedVersion);
       await this.sendJournalSummary(); return result;
     });
     this.#register("document:discard-publication", async () => {
@@ -405,7 +422,7 @@ export class DocumentLifecycleHost {
 
   async #unlock(password) {
     if (!this.lockedTarget) throw new Error("No locked document is available");
-    const opened = await this.replacements.open(this.lockedTarget, password);
+    const opened = await this.service.openDocument(this.lockedTarget, password);
     await this.sendJournalSummary();
     return { ...opened, targetName: this.basename(this.lockedTarget) };
   }
@@ -444,7 +461,9 @@ export class DocumentLifecycleHost {
 
   async #claim(password) {
     let opened;
-    try { opened = await this.replacements.claim(password); }
+    try { opened = this.service.active?.opened.invitationRequired
+      ? await this.service.claimInvitation(password)
+      : await this.replacements.claim(password); }
     catch (error) {
       if (this.externalLifecycle.invitation
           && error?.code === "DOCUMENT_REPLACEMENT_CANCELED") {

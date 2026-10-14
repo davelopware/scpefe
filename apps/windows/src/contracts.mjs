@@ -5,6 +5,124 @@ const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
 const MIN_REGULAR_SAVE_INTERVAL_MS = 10_000;
 const MAX_REGULAR_SAVE_INTERVAL_MS = 86_400_000;
 const utf8Encoder = new TextEncoder();
+const REVISION_ID = /^[0-9a-f]{64}$/;
+const ACTOR_SLOT_ID = /^[0-9a-f]{32}$/;
+
+function decodeRevisionEventDetails(hex) {
+  if (hex === undefined) return undefined;
+  if (typeof hex !== "string" || hex.length > 8192
+      || hex.length % 2 !== 0 || !/^[0-9a-f]*$/.test(hex)) {
+    throw new TypeError("host returned invalid revision event details");
+  }
+  const bytes = Uint8Array.from(hex.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16));
+  let at = 0;
+  const take = (length) => {
+    if (!Number.isSafeInteger(length) || length < 0 || at + length > bytes.length) {
+      throw new TypeError("host returned invalid revision event details");
+    }
+    const value = bytes.subarray(at, at + length);
+    at += length;
+    return value;
+  };
+  const head = (major) => {
+    const first = take(1)[0];
+    if (first >> 5 !== major) throw new TypeError("host returned invalid revision event details");
+    const width = first & 31;
+    if (width < 24) return width;
+    const size = ({ 24: 1, 25: 2, 26: 4, 27: 8 })[width];
+    if (!size) throw new TypeError("host returned invalid revision event details");
+    return [...take(size)].reduce((value, byte) => value * 256 + byte, 0);
+  };
+  const binary = (expected) => {
+    const value = take(head(2));
+    if (value.length !== expected) throw new TypeError("host returned invalid revision event details");
+    return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const count = head(5);
+  if (count > 5) throw new TypeError("host returned invalid revision event details");
+  const details = {};
+  let prior = 0;
+  for (let index = 0; index < count; index += 1) {
+    const key = head(0);
+    if (key <= prior) throw new TypeError("host returned invalid revision event details");
+    prior = key;
+    if (key === 1) details.affectedSlotId = binary(16);
+    else if (key === 2) details.cutoffRevision = binary(32);
+    else if (key === 3) details.retainedDeltas = head(0);
+    else if (key === 4) details.outcome = head(0);
+    else if (key === 5) details.note = new TextDecoder("utf-8", { fatal: true })
+      .decode(take(head(3)));
+    else throw new TypeError("host returned invalid revision event details");
+  }
+  if (at !== bytes.length) throw new TypeError("host returned invalid revision event details");
+  return Object.freeze(details);
+}
+
+export function validateRevisionActivityRequest(offset, count) {
+  if (!Number.isSafeInteger(offset) || offset < 0
+      || !Number.isSafeInteger(count) || count < 1 || count > 50) {
+    throw new TypeError("invalid revision activity page request");
+  }
+  return Object.freeze({ offset, count });
+}
+
+export function validateRevisionActivityId(value) {
+  if (typeof value !== "string" || !REVISION_ID.test(value)) {
+    throw new TypeError("invalid revision activity ID");
+  }
+  return value;
+}
+
+export function validateRevisionActivityPage(value, offset = 0, count = 20) {
+  validateRevisionActivityRequest(offset, count);
+  if (!value || typeof value !== "object" || !Array.isArray(value.items)
+      || value.items.length > count || !Number.isSafeInteger(value.nextOffset)
+      || value.nextOffset !== offset + value.items.length
+      || typeof value.hasMore !== "boolean"
+      || (value.unavailable !== undefined && (value.unavailable !== true
+        || value.items.length !== 0 || value.hasMore))) {
+    throw new TypeError("host returned an invalid revision activity page");
+  }
+  const optionalId = (id) => id === undefined || REVISION_ID.test(id);
+  const items = value.items.map((item) => {
+    const details = decodeRevisionEventDetails(item?.eventDetailsCbor);
+    if (!item || typeof item !== "object" || !REVISION_ID.test(item.revisionId)
+        || !optionalId(item.previousHead) || !optionalId(item.contentParent)
+        || !optionalId(item.resolvedBy) || !Array.isArray(item.mergeSources)
+        || item.mergeSources.length > 8
+        || item.mergeSources.some((id) => typeof id !== "string" || !REVISION_ID.test(id))
+        || !Number.isSafeInteger(item.timestampMs) || item.timestampMs < 0
+        || !ACTOR_SLOT_ID.test(item.actorSlotId)
+        || ["actorName", "actorEmail", "clientName", "clientEmail", "device", "eventType"]
+          .some((field) => typeof item[field] !== "string" || item[field].length > 4096)
+        || ![0, 1, 2].includes(item.kind) || ![0, 1, 2, 3, 4, 5].includes(item.storageKind)
+        || ["foreign", "provisional", "bodyAvailable", "textAvailable"]
+          .some((field) => typeof item[field] !== "boolean")
+        || (item.detailsTruncated !== undefined && item.detailsTruncated !== true)
+        || (details && ((details.retainedDeltas !== undefined
+          && (!Number.isSafeInteger(details.retainedDeltas)
+            || details.retainedDeltas < 0))
+          || (details.outcome !== undefined && ![0, 1, 2].includes(details.outcome))
+          || (details.note !== undefined && details.note.length > 4096)))) {
+      throw new TypeError("host returned invalid revision activity metadata");
+    }
+    const { eventDetailsCbor: _encoded, ...metadata } = item;
+    return Object.freeze({ ...metadata, mergeSources: Object.freeze([...item.mergeSources]),
+      ...(details ? { details } : {}) });
+  });
+  return Object.freeze({ items: Object.freeze(items), nextOffset: value.nextOffset,
+    hasMore: value.hasMore, ...(value.unavailable ? { unavailable: true } : {}) });
+}
+
+export function validateRevisionActivityComparison(value) {
+  if (!value || typeof value !== "object" || typeof value.available !== "boolean"
+      || (value.available && typeof value.text !== "string")
+      || (!value.available && value.text !== undefined)) {
+    throw new TypeError("host returned an invalid revision comparison");
+  }
+  return value.available ? Object.freeze({ available: true, text: value.text })
+    : Object.freeze({ available: false });
+}
 
 function utf8ByteLength(value) {
   return utf8Encoder.encode(value).byteLength;
@@ -427,14 +545,6 @@ export function validateOpenedDocument(value) {
     throw new TypeError("host returned invalid provisional state");
   }
   const provisional = value.provisional === true || value.manuallySealed === false;
-  const migrationRequired = value.migrationRequired === true;
-  if (value.migrationRequired !== undefined && typeof value.migrationRequired !== "boolean") {
-    throw new TypeError("host returned invalid migration state");
-  }
-  if (value.migrationCanEdit !== undefined
-      && (typeof value.migrationCanEdit !== "boolean" || !migrationRequired)) {
-    throw new TypeError("host returned invalid migration permission");
-  }
   let profileMismatch;
   if (value.profileMismatch !== undefined) {
     const mismatch = value.profileMismatch;
@@ -485,13 +595,17 @@ export function validateOpenedDocument(value) {
   if (value.unreadableJournal !== undefined && value.unreadableJournal !== true) {
     throw new TypeError("host returned invalid unreadable journal decision");
   }
+  if (value.activityOutcomePending !== undefined
+      && typeof value.activityOutcomePending !== "boolean") {
+    throw new TypeError("host returned invalid activity outcome status");
+  }
+  if (value.activityConfirmationRequired !== undefined
+      && value.activityConfirmationRequired !== true) {
+    throw new TypeError("host returned invalid activity confirmation status");
+  }
   return Object.freeze({ content, readOnly: true,
-    canEdit: migrationRequired ? false : value.canEdit, publicationState,
+    canEdit: value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
-    ...(migrationRequired ? { migrationRequired: true,
-      ...(value.migrationCanEdit !== undefined
-        ? { migrationCanEdit: value.migrationCanEdit } : {}),
-      migrationWarning: "Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first." } : {}),
     ...(provisional ? { provisional: true } : {}),
     ...(value.canAddPasswords !== undefined
       ? { canAddPasswords: value.canAddPasswords } : {}),
@@ -510,6 +624,10 @@ export function validateOpenedDocument(value) {
     ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
     ...(value.unreadableJournal === true ? { unreadableJournal: true } : {}),
+    ...(value.activityOutcomePending === true
+      ? { activityOutcomePending: true } : {}),
+    ...(value.activityConfirmationRequired === true
+      ? { activityConfirmationRequired: true } : {}),
     ...(headMismatch ? { headMismatch } : {}) });
 }
 
@@ -533,7 +651,7 @@ export function validateEditMode(value) {
 export function validateLeaseDecisionResult(value) {
   if (!value || typeof value !== "object"
       || value.decisionRequired !== "lease-takeover"
-      || !["edit", "recovery", "divergence", "migration"].includes(value.operation)
+      || !["edit", "recovery", "divergence"].includes(value.operation)
       || typeof value.holderName !== "string" || !value.holderName
       || (value.reason !== undefined && value.reason !== "master")
       || typeof value.authorization !== "string"
@@ -559,6 +677,18 @@ export function validateTakeoverRequest(value = {}) {
   }
   return Object.freeze(value.authorization === undefined
     ? {} : { authorization: value.authorization });
+}
+
+export function validateDivergenceRequest(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).some((key) => !["authorization", "targetPassword"].includes(key))) {
+    throw new TypeError("divergence request is invalid");
+  }
+  const takeover = validateTakeoverRequest(
+    value.authorization === undefined ? {} : { authorization: value.authorization });
+  return Object.freeze({ ...takeover,
+    ...(value.targetPassword === undefined ? {}
+      : { targetPassword: validatePassword(value.targetPassword) }) });
 }
 
 export function validateTakeoverCancellation(value) {
@@ -593,15 +723,34 @@ export function validateRecoveredWork(value) {
       end: canonicalCursorOffset(value.content, value.cursor.end) }) });
 }
 
+export function validateSaveSubmission(value) {
+  if (typeof value === "string") return { content: canonicalizeDocumentText(value),
+    submittedVersion: null };
+  if (!value || typeof value !== "object" || typeof value.content !== "string"
+      || typeof value.journalScope !== "string"
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+      || !Number.isSafeInteger(value.revision) || value.revision < 0
+      || Object.keys(value).some((key) => !["content", "journalScope", "revision"].includes(key))) {
+    throw new TypeError("invalid save submission");
+  }
+  return { content: canonicalizeDocumentText(value.content),
+    submittedVersion: { journalScope: value.journalScope, revision: value.revision } };
+}
+
 export function validateSaveResult(value) {
+  const hasVersion = value?.journalScope !== undefined || value?.revision !== undefined;
   if (!value || typeof value !== "object" || value.saved !== true
       || typeof value.content !== "string"
       || !["target-published", "pending-publication", "conflict"].includes(value.publicationState)
-      || Object.keys(value).length !== 3) {
+      || Object.keys(value).length !== (hasVersion ? 5 : 3)
+      || (hasVersion && (typeof value.journalScope !== "string"
+        || !/^[A-Za-z0-9_-]{1,128}$/.test(value.journalScope)
+        || !Number.isSafeInteger(value.revision) || value.revision < 0))) {
     throw new TypeError("host returned an invalid save result");
   }
   return Object.freeze({ saved: true, content: canonicalizeDocumentText(value.content),
-    publicationState: value.publicationState });
+    publicationState: value.publicationState,
+    ...(hasVersion ? { journalScope: value.journalScope, revision: value.revision } : {}) });
 }
 
 export function validatePublicationResult(value) {
@@ -645,19 +794,33 @@ export function validatePlaintextExportRequest(value) {
 }
 
 export function validatePlaintextExportResult(value) {
-  if (!value || typeof value !== "object" || value.exported !== true
-      || Object.keys(value).length !== 1) {
+  if (!value || typeof value !== "object" || typeof value.exported !== "boolean"
+      || (value.outcomePending !== undefined && value.outcomePending !== true)
+      || Object.keys(value).some((key) => !["exported", "outcomePending"].includes(key))) {
     throw new TypeError("host returned an invalid plaintext export result");
   }
-  return Object.freeze({ exported: true });
+  return Object.freeze({ exported: value.exported,
+    ...(value.outcomePending ? { outcomePending: true } : {}) });
 }
 
 export function validateBackupResult(value) {
-  if (!value || typeof value !== "object" || value.backedUp !== true
-      || Object.keys(value).length !== 1) {
+  if (!value || typeof value !== "object" || typeof value.backedUp !== "boolean"
+      || (value.outcomePending !== undefined && value.outcomePending !== true)
+      || Object.keys(value).some((key) => !["backedUp", "outcomePending"].includes(key))) {
     throw new TypeError("host returned an invalid backup result");
   }
-  return Object.freeze({ backedUp: true });
+  return Object.freeze({ backedUp: value.backedUp,
+    ...(value.outcomePending ? { outcomePending: true } : {}) });
+}
+
+export function validateActivityOutcomeRequest(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).some((key) => key !== "succeeded")
+      || (value.succeeded !== undefined && typeof value.succeeded !== "boolean")) {
+    throw new TypeError("activity outcome confirmation is invalid");
+  }
+  return Object.freeze(value.succeeded === undefined
+    ? {} : { succeeded: value.succeeded });
 }
 
 export function validateCompactionResult(value) {
@@ -673,17 +836,7 @@ export function validateCompactionResult(value) {
     opened: validateEditMode(value.opened) });
 }
 
-export function validateMigrationResult(value) {
-  if (!value || typeof value !== "object" || value.migrated !== true
-      || value.backupCreated !== true || value.compatibilityCode !== "MIGRATION_COMPATIBILITY"
-      || Object.keys(value).some((key) => !["migrated", "backupCreated",
-        "compatibilityCode", "opened"].includes(key))) {
-    throw new TypeError("host returned an invalid migration result");
-  }
-  return Object.freeze({ migrated: true, backupCreated: true,
-    compatibilityCode: value.compatibilityCode,
-    opened: validateEditMode(value.opened) });
-}
+
 
 export function validateWorkingCopy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

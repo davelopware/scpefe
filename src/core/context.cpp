@@ -1,11 +1,19 @@
 #include "core/context.hpp"
+#include "core/service_factory.hpp"
+#include "container/container.hpp"
 
+#include <memory>
 #include <utility>
 
 namespace scpefe::core {
 
 Context::Context(HostServices host_services)
-    : host_services_(std::move(host_services))
+    : Context(std::move(host_services), ServiceFactory::create())
+{
+}
+
+Context::Context(HostServices host_services, ServiceRegistry services)
+    : host_services_(std::move(host_services)), services_(std::move(services))
 {
 }
 
@@ -15,6 +23,19 @@ bool Context::read_health(HealthInfo &health_info) const
     if (!host_services_.read_monotonic_time_ms(host_time)) return false;
     health_info.host_monotonic_time_ms = host_time;
     return true;
+}
+
+container::Container &Context::make_container()
+{
+    if (!container_) container_ = std::make_unique<container::Container>(
+        services_.state_manager(), services_.password(), services_.encryption(),
+        services_.persistence(), services_.history());
+    return *container_;
+}
+
+void Context::release_container() noexcept
+{
+    container_.reset();
 }
 
 } // namespace scpefe::core

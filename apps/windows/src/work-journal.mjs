@@ -5,7 +5,8 @@ const DOCUMENT_ID = /^[0-9a-f]{32}$/;
 const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
-const STATES = new Set(["unsaved", "pending-publication", "conflict"]);
+const STATES = new Set(["unsaved", "pending-publication", "conflict",
+  "activity-outcome"]);
 const TRANSACTION_STAGES = new Set([
   "prepared", "written", "flushed", "replaced", "verified", "cleanup",
 ]);
@@ -38,6 +39,36 @@ function validateRecord(value) {
   }
   let publication;
   let merge;
+  let activity;
+  if (value.activity !== undefined) {
+    const pending = value.activity;
+    if (!pending || typeof pending !== "object"
+        || !["backup", "export"].includes(pending.kind)
+        || !Number.isSafeInteger(pending.attemptOperationId)
+        || pending.attemptOperationId < 1
+        || !/^[0-9a-f]{64}$/.test(pending.attemptHead)
+        || typeof pending.succeeded !== "boolean"
+        || (pending.actionState !== undefined
+          && !["not-started", "started", "known"].includes(pending.actionState))
+        || (pending.externalTarget !== undefined
+          && (typeof pending.externalTarget !== "string" || !pending.externalTarget
+            || pending.externalTarget.includes("\0")))
+        || (pending.externalHash !== undefined
+          && !/^[0-9a-f]{64}$/.test(pending.externalHash))
+        || (value.state === "activity-outcome" && value.publication !== undefined
+          && !["activity-attempt", "activity-outcome"].includes(
+            value.publication.purpose))) {
+      throw new TypeError("invalid pending activity outcome");
+    }
+    activity = { kind: pending.kind,
+      attemptOperationId: pending.attemptOperationId,
+      attemptHead: pending.attemptHead, succeeded: pending.succeeded,
+      ...(pending.externalTarget ? { externalTarget: pending.externalTarget } : {}),
+      ...(pending.externalHash ? { externalHash: pending.externalHash } : {}),
+      ...(pending.actionState ? { actionState: pending.actionState } : {}) };
+  } else if (value.state === "activity-outcome") {
+    throw new TypeError("activity outcome state requires a pending outcome");
+  }
   if (value.merge !== undefined) {
     if (value.state !== "conflict" || !value.merge
         || typeof value.merge !== "object"
@@ -58,7 +89,8 @@ function validateRecord(value) {
     const mergeAncestor = value.publication?.mergeAncestor;
     const mergeAncestorHash = value.publication?.mergeAncestorHash;
     if (!value.publication || typeof value.publication !== "object"
-        || !["unsaved", "pending-publication", "conflict"].includes(value.state)
+        || !["unsaved", "pending-publication", "conflict",
+          "activity-outcome"].includes(value.state)
         || typeof value.publication.id !== "string"
         || !/^[0-9a-f]{32}$/.test(value.publication.id)
         || value.publication.target !== value.target
@@ -83,8 +115,12 @@ function validateRecord(value) {
         || (value.publication.purpose !== undefined
           && !["invitation-claim", "regular-save", "provisional-discard",
             "identity-reconciliation", "slot-administration", "compaction",
-            "format-migration", "password-change"]
+            "password-change", "lease-change", "activity-attempt",
+            "activity-outcome"]
             .includes(value.publication.purpose))
+        || (value.publication.preserveWork !== undefined
+          && (value.publication.purpose !== "lease-change"
+            || typeof value.publication.preserveWork !== "boolean"))
         || (value.publication.reopenPassword !== undefined
           && (typeof value.publication.reopenPassword !== "string"
             || !value.publication.reopenPassword
@@ -96,7 +132,11 @@ function validateRecord(value) {
           && !["invitation-claim", "password-change"].includes(
             value.publication.purpose))
         || (value.state === "unsaved"
-          && value.publication.purpose !== "regular-save")) {
+          && !["regular-save", "activity-attempt", "activity-outcome"]
+            .includes(value.publication.purpose))
+        || (value.state === "activity-outcome"
+          && !["activity-attempt", "activity-outcome"]
+            .includes(value.publication.purpose))) {
       throw new TypeError("invalid publication transaction");
     }
     publication = {
@@ -114,6 +154,8 @@ function validateRecord(value) {
         ? { purpose: value.publication.purpose } : {}),
       ...(value.publication.reopenPassword
         ? { reopenPassword: value.publication.reopenPassword } : {}),
+      ...(value.publication.preserveWork
+        ? { preserveWork: true } : {}),
     };
   }
   return {
@@ -124,6 +166,7 @@ function validateRecord(value) {
     state: value.state,
     updateTime: value.updateTime,
     ...(publication ? { publication } : {}),
+    ...(activity ? { activity } : {}),
     ...(merge ? { merge } : {}),
   };
 }

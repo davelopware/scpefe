@@ -11,9 +11,10 @@ type DialogSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>;
 /** User gestures emitted by semantic attention dialogs. */
 export type DialogAction = "retry-edit" | "continue-read-only"
   | "cancel-lease" | "confirm-lease"
-  | "retry-save" | "continue-editing" | "lock" | "migrate" | "open-passwords" | "accept-head"
+  | "retry-save" | "continue-editing" | "lock" | "open-passwords" | "accept-head"
   | "discard-recovery" | "restore-recovery" | "discard-unreadable"
   | "discard-publication" | "reconnect-publication" | "compact"
+  | "authenticate-target"
   | "compaction-canceled" | "protection-cancel" | "protection-save"
   | "protection-discard" | "keep-newer-edits" | "export-newer-edits"
   | "discard-newer-edits";
@@ -34,7 +35,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   returnFocus: HTMLElement | null;
   selectedDecision: SessionPresentationView["selectedDecision"];
   focusIntent: SessionPresentationView["focusIntent"];
-  onAction(action: DialogAction): void | Promise<void>;
+  onAction(action: DialogAction, targetPassword?: string): void | Promise<void>;
   ref?: React.Ref<DialogHostHandle>;
 }): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
@@ -55,8 +56,6 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   const headDecision = selectedDecision?.kind === "head-mismatch" ? selectedDecision : null;
   const unreadableDecision = selectedDecision?.kind === "unreadable-journal"
     ? selectedDecision : null;
-  const migrationDecision = selectedDecision?.kind === "migration-decision"
-    ? selectedDecision : null;
   const compactionDecision = selectedDecision?.kind === "compaction-decision"
     ? selectedDecision : null;
   const leaseBusy = snapshot.pending === "lease-confirm" || snapshot.pending === "lease-cancel"
@@ -66,12 +65,11 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
   const saveRetryAction = useRef<HTMLButtonElement>(null);
   const recoveryRestoreAction = useRef<HTMLButtonElement>(null);
   const publicationRetryAction = useRef<HTMLButtonElement>(null);
-  const migrationRetryAction = useRef<HTMLButtonElement>(null);
   useImperativeHandle(ref, () => ({ focus: (intent) => {
     const target = intent === "edit-retry" ? editRetryAction
       : intent === "save-retry" ? saveRetryAction
       : intent === "recovery-restore" ? recoveryRestoreAction
-        : intent === "migration-retry" ? migrationRetryAction : publicationRetryAction;
+        : publicationRetryAction;
     target.current?.focus();
   } }), []);
   return <>
@@ -110,7 +108,7 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
       <div className="dialog-actions"><button autoFocus disabled={leaseBusy}
         onClick={() => void onAction("cancel-lease")}>Cancel</button>
         <button disabled={leaseBusy} onClick={() => void onAction("confirm-lease")}>
-        {leaseDecision.operation === "migration" ? "Force takeover and migrate" : "Force takeover"}
+        Force takeover
       </button></div>
     </FocusedDialog>}
     {saveFailure && <FocusedDialog returnFocus={returnFocus}
@@ -136,24 +134,6 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
         onClick={() => void onAction("compact")}>
         Create verified backup and compact</button></div>
     </FocusedDialog>}
-    {visibleOpenedDialog === "migration" && activeDocument && <FocusedDialog
-      returnFocus={returnFocus} title="Older container"
-      close={snapshot.pending === "migration" ? undefined : () => void onAction("lock")}
-      initialFocus={focusIntent === "migration-retry"
-        ? migrationRetryAction : undefined}>
-      <div className="warning" role="alert"><p>Migrating makes this container unreadable by older SCPEFE clients. A verified exact backup is required first.</p>
-        <p>If you decline, this document stays read-only and any later save will still require migration.</p></div>
-      <div className="dialog-actions"><button onClick={() => void onAction("lock")}
-        disabled={snapshot.pending === "migration"}>Keep read-only and close</button>
-        {migrationDecision?.failureMessage && <p className="dialog-error" role="alert">
-          {migrationDecision.failureMessage}</p>}
-        {migrationDecision?.canceled && <p className="dialog-error" role="alert">
-          Migration was canceled before publication. Retry to acquire fresh lease authorization.</p>}
-        {!migrationDecision?.canMigrate && snapshot.pending === undefined
-          && <p role="note">This password slot cannot migrate this document until its edit permission and recovery decisions allow it.</p>}
-        <button ref={migrationRetryAction} disabled={!migrationDecision?.canMigrate}
-          onClick={() => void onAction("migrate")}>
-          Create verified backup and migrate…</button></div></FocusedDialog>}
     {visibleOpenedDialog === "profile-mismatch" && activeDocument && opened && !opened.invitationRequired && opened.profileMismatch && <FocusedDialog
       returnFocus={returnFocus} title="Profile mismatch">
       <div className="warning" role="alert"><p>This password slot is registered to {opened.profileMismatch.slotName} · {opened.profileMismatch.slotEmail}, while this client is configured as {opened.profileMismatch.profileName} · {opened.profileMismatch.profileEmail}.</p>
@@ -210,6 +190,20 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
         {publicationDecision.failureMessage
           && <p className="dialog-error" role="alert">
             {publicationDecision.failureMessage}</p>}
+        {publicationDecision.failureCode === "MERGE_TARGET_REAUTHENTICATION"
+          && <form onSubmit={(event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const password = String(new FormData(form).get("targetPassword") ?? "");
+            form.reset();
+            void onAction("authenticate-target", password);
+          }}>
+            <label>Current target password
+              <input type="password" name="targetPassword" autoComplete="off"
+                required minLength={1} />
+            </label>
+            <button type="submit">Authenticate target and resolve</button>
+          </form>}
         <div className="dialog-actions"><button disabled={snapshot.kind !== "read-only"
           && snapshot.kind !== "edit" || !snapshot.commands.publicationDiscard}
           onClick={() => void onAction("discard-publication")}>Discard pending save</button>

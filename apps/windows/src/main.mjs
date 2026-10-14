@@ -8,7 +8,6 @@ import { randomUUID } from "node:crypto";
 import { registerCompactionHandler } from "./compaction-flow.mjs";
 import { DocumentLifecycleHost } from "./document-lifecycle-host.mjs";
 import { COMPACTION_CONFIRMATION, DocumentService } from "./document-service.mjs";
-import { registerMigrationHandler } from "./migration-flow.mjs";
 import { createSafeIpc } from "./error-boundary.mjs";
 import { registerWindowFocusProtection } from "./window-focus-protection.mjs";
 import { acknowledgementCredentials, acknowledgementTargetHash,
@@ -16,7 +15,8 @@ import { acknowledgementCredentials, acknowledgementTargetHash,
   openTargetFromUrl, validateAcknowledgement } from "./single-instance.mjs";
 import { validateInvitationCreateRequest, validatePassword,
   validatePasswordChangeRequest, validatePlaintextExportRequest,
-  validateSlotId, validateSlotPermissionsRequest } from "./contracts.mjs";
+  validateActivityOutcomeRequest, validateSlotId,
+  validateSlotPermissionsRequest } from "./contracts.mjs";
 
 Menu.setApplicationMenu(null);
 
@@ -201,11 +201,34 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     return chosen.canceled || !chosen.filePath ? null
       : lifecycleHost.service.backupDocument(chosen.filePath);
   });
+  safeIpcMain.handle("document:resolve-activity", async (_event, request) => {
+    const confirmed = validateActivityOutcomeRequest(request);
+    const service = lifecycleHost.service;
+    const active = service.active;
+    const pending = active?.pendingActivity;
+    let replicaTarget;
+    if (pending?.actionState === "started" && pending.kind === "backup"
+        && confirmed.succeeded === true) {
+      const chosen = await dialog.showOpenDialog(window, {
+        title: "Select the completed backup for verification",
+        filters: [{ name: "SCPEFE document", extensions: ["scpefe"] }],
+        properties: ["openFile"] });
+      if (lifecycleHost.service !== service || service.active !== active) {
+        throw new Error("Document changed during backup verification");
+      }
+      if (chosen.canceled || chosen.filePaths.length !== 1) {
+        return active.opened;
+      }
+      replicaTarget = chosen.filePaths[0];
+    }
+    if (lifecycleHost.service !== service || service.active !== active) {
+      throw new Error("Document changed before activity reconciliation");
+    }
+    return service.resolvePendingActivityOutcome({
+      ...confirmed, ...(replicaTarget ? { replicaTarget } : {}) });
+  });
   registerCompactionHandler({ ipcMain: safeIpcMain, service: liveService, dialog, window,
     confirmation: COMPACTION_CONFIRMATION });
-  registerMigrationHandler({ ipcMain: safeIpcMain, getService: () => lifecycleHost.service,
-    dialog, window, authorizations: lifecycleHost.leaseTakeovers,
-    validateAuthorization: leaseRequestAuthorization });
   safeIpcMain.handle("document:change-password", (_event, request) =>
     lifecycleHost.service.changePassword(validatePasswordChangeRequest(request)));
   safeIpcMain.handle("security:assess-password-policy", (_event, password) =>

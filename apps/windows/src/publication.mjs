@@ -155,7 +155,7 @@ export class PublicationService {
     }
   }
 
-  async publishReplica({ target, candidate }) {
+  async publishReplica({ target, candidate, returnVerifiedBytes = false }) {
     if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
       throw new TypeError("backup candidate must contain container bytes");
     }
@@ -191,7 +191,9 @@ export class PublicationService {
         throw new Error("Backup replica verification failed");
       }
       await this.fs.unlink(transactionFile);
-      return { completed: true };
+      return returnVerifiedBytes
+        ? { completed: true, verifiedBytes: published }
+        : { completed: true };
     } catch (error) {
       if (handle) await handle.close().catch(() => {});
       if (publishedTarget
@@ -205,11 +207,13 @@ export class PublicationService {
 
   async prepare({ documentId, journalKey, target, base, candidate, text, cursor,
     baseRevision, purpose, reopenPassword, mergeAncestor,
-    state = "pending-publication" }) {
+    preserveWork = false,
+    state = "pending-publication", journalRecord = null }) {
     const id = randomBytes(16).toString("hex");
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
     const record = {
+      ...(journalRecord ?? {}),
       text,
       baseRevision,
       cursor: { ...cursor },
@@ -229,6 +233,7 @@ export class PublicationService {
         candidate: candidate.toString("base64"),
         stage: "prepared",
         ...(purpose ? { purpose } : {}),
+        ...(preserveWork ? { preserveWork: true } : {}),
         ...(reopenPassword ? { reopenPassword } : {}),
       },
     };
@@ -237,12 +242,13 @@ export class PublicationService {
   }
 
   async publish({ documentId, journalKey, target, base, candidate, text, cursor,
-    baseRevision, purpose, reopenPassword, mergeAncestor, state }) {
+    baseRevision, purpose, reopenPassword, mergeAncestor, preserveWork, state,
+    journalRecord }) {
     let record;
     try {
       record = await this.prepare({ documentId, journalKey, target, base,
         candidate, text, cursor, baseRevision, purpose, reopenPassword,
-        mergeAncestor, state });
+        mergeAncestor, preserveWork, state, journalRecord });
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };
@@ -297,6 +303,8 @@ export class PublicationService {
 
   async discard(documentId, journalKey, record) {
     if (!record?.publication) throw new Error("No pending publication is available");
+    if (record.activity) throw new Error(
+      "Pending activity publication must be reconciled");
     let transaction;
     try {
       transaction = await readIfPresent(this.fs, record.publication.transactionFile);
@@ -310,7 +318,15 @@ export class PublicationService {
         if (!targetUnavailable(error)) throw error;
       }
     }
-    await this.journals.clear(documentId);
+    if (record.publication.preserveWork) {
+      await this.journals.write(documentId, journalKey, {
+        text: record.text, baseRevision: record.baseRevision,
+        cursor: record.cursor, target: record.target, state: "unsaved",
+        updateTime: record.updateTime,
+      });
+    } else {
+      await this.journals.clear(documentId);
+    }
     const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
     if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
       await this.fs.unlink(record.publication.baseFile);
@@ -402,7 +418,18 @@ export class PublicationService {
     if (transaction && hash(transaction) === record.publication.candidateHash) {
       await this.fs.unlink(record.publication.transactionFile);
     }
-    await this.journals.clear(documentId);
+    if (record.activity) {
+      const { publication: _publication, ...pendingActivity } = record;
+      await this.journals.write(documentId, journalKey, pendingActivity);
+    } else if (record.publication.preserveWork) {
+      await this.journals.write(documentId, journalKey, {
+        text: record.text, baseRevision: record.baseRevision,
+        cursor: record.cursor, target: record.target, state: "unsaved",
+        updateTime: record.updateTime,
+      });
+    } else {
+      await this.journals.clear(documentId);
+    }
     const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
     if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
       await this.fs.unlink(record.publication.baseFile);

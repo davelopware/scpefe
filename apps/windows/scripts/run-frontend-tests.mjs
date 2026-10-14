@@ -40,9 +40,16 @@ if (tests.length === 0) {
 
 const loader = pathToFileURL(path.join(
   windowsRoot, "scripts/register-frontend-typescript.mjs")).href;
+const testArguments = tests.map((file) => {
+  const relative = path.relative(windowsRoot, file).split(path.sep).join("/");
+  if (path.isAbsolute(relative)) {
+    throw new Error("Frontend tests must be on the same volume as their working directory.");
+  }
+  return relative.startsWith(".") ? relative : `./${relative}`;
+});
 const result = spawnSync(process.execPath,
   ["--import", loader,
-    "--test", "--test-concurrency=1", ...tests],
+    "--test", "--test-concurrency=1", ...testArguments],
   { cwd: windowsRoot, stdio: "inherit" });
 if (result.error) throw result.error;
 if (result.status !== 0) {

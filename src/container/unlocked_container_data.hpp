@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <optional>
+#include "format/revision_graph.hpp"
 
 namespace scpefe::container {
 
@@ -77,6 +79,7 @@ struct UnlockedContainerData {
     EditingLeaseData editing_lease;
     std::vector<ManagedSlotData> managed_slots;
     std::vector<std::uint8_t> encoded_snapshot_revision;
+    std::optional<format::RevisionGraph> revision_graph;
 
 private:
     /* Wipes all currently owned authenticated plaintext in place. */

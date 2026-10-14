@@ -47,34 +47,43 @@ int main(int argc, char **argv)
         "scpefe_context_create",
         "scpefe_context_destroy",
         "scpefe_context_health",
-        "scpefe_decoded_snapshot_revision_destroy",
-        "scpefe_decoded_snapshot_revision_view",
+        "scpefe_container_create",
+        "scpefe_container_open",
+        "scpefe_container_unlock",
+        "scpefe_container_read",
+        "scpefe_container_prepare_save",
+        "scpefe_container_prepare_merge",
+        "scpefe_container_assess_merge",
+        "scpefe_container_prepare_compaction",
+        "scpefe_container_prepare_slot_change",
+        "scpefe_container_prepare_lease_change",
+        "scpefe_container_copy_candidate",
+        "scpefe_container_acknowledge_save",
+        "scpefe_container_resolve_save",
         "scpefe_library_version",
-        "scpefe_manual_save",
-        "scpefe_compact_document",
-        "scpefe_merge_save",
-        "scpefe_new_document_create",
         "scpefe_assess_password_policy",
-        "scpefe_provisional_save_discard",
+        "scpefe_revision_limits_default",
+        "scpefe_snapshot_revision_decode",
+        "scpefe_snapshot_revision_diagnostic_json",
+        "scpefe_snapshot_revision_encode",
+    };
+    static const char *retired[] = {
+        "scpefe_password_container_create",
+        "scpefe_password_container_unlock",
+        "scpefe_new_document_create",
+        "scpefe_manual_save",
         "scpefe_regular_save",
-        "scpefe_password_container_change_password",
+        "scpefe_provisional_save_discard",
+        "scpefe_merge_save",
+        "scpefe_revised_merge_save",
+        "scpefe_compact_document",
+        "scpefe_migrate_document",
+        "scpefe_editing_lease_update",
         "scpefe_password_container_add_invitation",
         "scpefe_password_container_claim_invitation",
         "scpefe_password_container_update_slot_permissions",
         "scpefe_password_container_remove_slot",
         "scpefe_password_container_reconcile_identity",
-        "scpefe_password_container_create",
-        "scpefe_password_container_unlock",
-        "scpefe_password_container_unlock_with_limits",
-        "scpefe_revision_limits_default",
-        "scpefe_snapshot_revision_decode",
-        "scpefe_snapshot_revision_diagnostic_json",
-        "scpefe_snapshot_revision_encode",
-        "scpefe_unlocked_container_destroy",
-        "scpefe_unlocked_container_slot_access",
-        "scpefe_unlocked_container_managed_slot_count",
-        "scpefe_unlocked_container_managed_slot",
-        "scpefe_unlocked_container_view",
     };
     static const char *internal[] = {
         "ZxcvbnMatch",
@@ -92,6 +101,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "missing public symbol: %s\n", required[index]);
             close_library(library);
             return 4;
+        }
+    }
+    for (index = 0; index < sizeof(retired) / sizeof(retired[0]); ++index) {
+        if (find_symbol(library, retired[index]) != NULL) {
+            fprintf(stderr, "retired symbol is public: %s\n", retired[index]);
+            close_library(library);
+            return 6;
         }
     }
     for (index = 0; index < sizeof(internal) / sizeof(internal[0]); ++index) {
