@@ -65,6 +65,37 @@ test("backup includes the published attempt and leaves a later success outcome",
   assert.equal(service.active.opened.activityOutcomePending, undefined);
 });
 
+test("lock after durable action-start write leaves no backup or confirmation", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { directory, target, service, options } = await fixture(t);
+  const backup = path.join(directory, "blocked-after-lock.scpefe");
+  const documentId = service.active.documentId;
+  const journalKey = Buffer.from(service.active.journalKey);
+  t.after(() => journalKey.fill(0));
+  const write = service.journals.write.bind(service.journals);
+  let locking: Promise<unknown> | null = null;
+  service.journals.write = async (...args: Parameters<typeof write>) => {
+    await write(...args);
+    if (args[2]?.activity?.actionState === "started" && !locking) {
+      locking = service.lock("screen-lock");
+    }
+  };
+
+  await assert.rejects(service.backupDocument(backup),
+    (error: unknown) => (error as { code?: string }).code === "SESSION_LOCKED");
+  await locking;
+  await assert.rejects(fs.readFile(backup), (error: unknown) =>
+    (error as NodeJS.ErrnoException).code === "ENOENT");
+  assert.equal((await service.journals.read(documentId, journalKey)).activity.actionState,
+    "not-started");
+  const restarted = new DocumentService(options);
+  const opened = await restarted.openDocument(target, password);
+  assert.equal(opened.activityConfirmationRequired, undefined);
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "backup-failed");
+});
+
 test("attempt publication failure prevents the external backup action", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {

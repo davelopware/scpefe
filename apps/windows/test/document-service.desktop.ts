@@ -811,6 +811,207 @@ test("view-only slots create exact backups without changing the active target", 
   assert.equal(service.active.opened.canEdit, false);
 });
 
+test("locking after an activity attempt publishes does not resume the closed session",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-activity-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const backup = path.join(directory, "document.backup.scpefe");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "32".repeat(16),
+        baseRevision: "43".repeat(32), journalKey: Buffer.alloc(32, 6),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const closedSession = service.active;
+    const originalBase = Buffer.from(closedSession.baseContainer);
+    const originalRevision = closedSession.baseRevision;
+    const context = service.container;
+    const finish = context.finishSave.bind(context);
+    let locking;
+    context.finishSave = (operationId, outcome) => {
+      const effects = finish(operationId, outcome);
+      if (outcome === "verified" && !locking) locking = service.lock("screen-lock");
+      return effects;
+    };
+
+    await assert.rejects(service.backupDocument(backup),
+      (error) => error.code === "SESSION_LOCKED");
+    await locking;
+    assert.equal(service.active, null);
+    assert.deepEqual(closedSession.baseContainer, originalBase);
+    assert.equal(closedSession.baseRevision, originalRevision);
+    await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+    assert.equal((await service.journals.read(closedSession.documentId,
+      Buffer.alloc(32, 6))).activity.actionState, "not-started");
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-attempted");
+    await service.openDocument(target, "password words");
+    assert.equal(service.active.pendingActivity, null);
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-failed");
+  });
+
+test("switching documents before activity adoption preserves both session images",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-activity-switch-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const firstTarget = path.join(directory, "first.scpefe");
+    const secondTarget = path.join(directory, "second.scpefe");
+    await fs.writeFile(firstTarget, "first");
+    await fs.writeFile(secondTarget, "second");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: (bytes) => ({
+        content: bytes.toString() === "second" ? "second text" : "first text",
+        readOnly: true, canEdit: false, manuallySealed: true,
+        documentId: (bytes.toString() === "second" ? "34" : "33").repeat(16),
+        baseRevision: (bytes.toString() === "second" ? "45" : "44").repeat(32),
+        journalKey: Buffer.alloc(32, bytes.toString() === "second" ? 8 : 7),
+        containerFormatVersion: 3,
+      }) } });
+    await service.openDocument(firstTarget, "password words");
+    const firstSession = service.active;
+    const originalBase = Buffer.from(firstSession.baseContainer);
+    const adopt = service.activities.adopt;
+    let resumeAdoption;
+    let adoptionStarted;
+    const started = new Promise((resolve) => { adoptionStarted = resolve; });
+    service.activities.adopt = async (...args) => {
+      adoptionStarted();
+      await new Promise((resolve) => { resumeAdoption = resolve; });
+      return adopt(...args);
+    };
+
+    const backup = service.backupDocument(path.join(directory, "first.backup.scpefe"));
+    await started;
+    await service.lock("screen-lock");
+    await service.openDocument(secondTarget, "password words");
+    const secondSession = service.active;
+    resumeAdoption();
+    await assert.rejects(backup, (error) => error.code === "SESSION_LOCKED");
+    assert.equal(service.active, secondSession);
+    assert.equal(secondSession.opened.content, "second text");
+    assert.deepEqual(firstSession.baseContainer, originalBase);
+    assert.equal(service.containerTarget, secondTarget);
+  });
+
+test("locking after the action-start journal write prevents an external backup",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-activity-start-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const backup = path.join(directory, "document.backup.scpefe");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "35".repeat(16),
+        baseRevision: "46".repeat(32), journalKey: Buffer.alloc(32, 9),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const write = service.journals.write.bind(service.journals);
+    let locking;
+    service.journals.write = async (...args) => {
+      await write(...args);
+      if (args[2]?.activity?.actionState === "started" && !locking) {
+        locking = service.lock("screen-lock");
+      }
+    };
+
+    await assert.rejects(service.backupDocument(backup),
+      (error) => error.code === "SESSION_LOCKED");
+    await locking;
+    assert.equal(service.active, null);
+    await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+    const pending = await service.journals.read("35".repeat(16), Buffer.alloc(32, 9));
+    assert.equal(pending.activity.actionState, "not-started");
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-attempted");
+    await service.openDocument(target, "password words");
+    assert.equal(service.active.opened.activityConfirmationRequired, undefined);
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-failed");
+  });
+
+test("locking after the action-start journal write prevents plaintext export",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-export-start-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const plaintext = path.join(directory, "plaintext.txt");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "36".repeat(16),
+        baseRevision: "47".repeat(32), journalKey: Buffer.alloc(32, 10),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const write = service.journals.write.bind(service.journals);
+    let locking;
+    service.journals.write = async (...args) => {
+      await write(...args);
+      if (args[2]?.activity?.actionState === "started" && !locking) {
+        locking = service.lock("screen-lock");
+      }
+    };
+
+    await assert.rejects(service.exportPlaintext(plaintext,
+      { content: "private text", lineEndings: "lf" }),
+    (error) => error.code === "SESSION_LOCKED");
+    await locking;
+    await assert.rejects(fs.readFile(plaintext), (error) => error.code === "ENOENT");
+    const pending = await service.journals.read("36".repeat(16), Buffer.alloc(32, 10));
+    assert.equal(pending.activity.actionState, "not-started");
+    await service.openDocument(target, "password words");
+    assert.equal(service.active.opened.activityConfirmationRequired, undefined);
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "export-failed");
+  });
+
+test("locking during an already started backup retains outcome confirmation",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-action-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const backup = path.join(directory, "document.backup.scpefe");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "37".repeat(16),
+        baseRevision: "48".repeat(32), journalKey: Buffer.alloc(32, 11),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const publishReplica = service.publications.publishReplica.bind(service.publications);
+    let actionStarted;
+    const started = new Promise((resolve) => { actionStarted = resolve; });
+    let resumeAction;
+    service.publications.publishReplica = async (...args) => {
+      const result = await publishReplica(...args);
+      actionStarted();
+      await new Promise((resolve) => { resumeAction = resolve; });
+      return result;
+    };
+
+    const operation = service.backupDocument(backup);
+    await started;
+    await service.lock("screen-lock");
+    resumeAction();
+    await assert.rejects(operation, (error) => error.code === "SESSION_LOCKED");
+    const pending = await service.journals.read("37".repeat(16), Buffer.alloc(32, 11));
+    assert.equal(pending.activity.actionState, "started");
+    assert.deepEqual(await fs.readFile(backup), await fs.readFile(target));
+    const opened = await service.openDocument(target, "password words");
+    assert.equal(opened.activityConfirmationRequired, true);
+    await service.resolvePendingActivityOutcome({ succeeded: true, replicaTarget: backup });
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-succeeded");
+  });
+
 test("backup requires clean, manually sealed state", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-gates-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

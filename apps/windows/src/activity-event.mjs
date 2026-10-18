@@ -25,7 +25,19 @@ export class ActivityEventWorkflow {
     return true;
   }
 
+  #isCurrent(active) {
+    return this.host.active === active && !this.host.lockOperation;
+  }
+
+  #assertCurrent(active) {
+    if (this.#isCurrent(active)) return;
+    const error = new Error("The document session changed during activity publication");
+    error.code = "SESSION_LOCKED";
+    throw error;
+  }
+
   async #publishCandidate(active, phase, kind, source, profile) {
+    this.#assertCurrent(active);
     if (this.host.pendingNativeCandidate !== null || !this.host.containerBytes?.equals(source)
         || !active.baseContainer.equals(source)) {
       throw new Error("Activity source changed before publication");
@@ -62,6 +74,7 @@ export class ActivityEventWorkflow {
       if (!activity) throw new Error("No pending activity outcome is available");
       await this.queueJournalOperation(async () => {
         const prior = await this.host.journals.read(active.documentId, active.journalKey);
+        this.#assertCurrent(active);
         if (prior?.publication) throw new Error(
           "Resolve the pending publication before recording activity");
         const journalRecord = prior ? { ...prior, activity,
@@ -78,7 +91,6 @@ export class ActivityEventWorkflow {
             state: journalRecord.state,
             purpose: `activity-${phase}`, journalRecord });
       });
-      this.host.containerBytes = Buffer.from(candidate.bytes);
       await this.adopt(active, candidate.bytes);
       return candidate;
     } catch (error) {
@@ -87,14 +99,17 @@ export class ActivityEventWorkflow {
         this.host.candidates.finish(this.host.container, candidate.operationId,
           prepared ? "ambiguous" : "definite-failure");
         if (prepared) {
-          active.pendingPublication = true;
-          active.pendingRecord = await this.host.journals.read(
+          const record = await this.host.journals.read(
             active.documentId, active.journalKey);
-          active.pendingActivity = active.pendingRecord?.activity ?? null;
-          active.unresolvedJournal = true;
-          active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
-            ...active.opened, publicationState: "pending-publication",
-            activityOutcomePending: true });
+          if (this.#isCurrent(active)) {
+            active.pendingPublication = true;
+            active.pendingRecord = record;
+            active.pendingActivity = record?.activity ?? null;
+            active.unresolvedJournal = true;
+            active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+              ...active.opened, publicationState: "pending-publication",
+              activityOutcomePending: true });
+          }
         }
       }
       throw error;
@@ -108,14 +123,17 @@ export class ActivityEventWorkflow {
       throw new Error("Resolve pending document activity before starting another action");
     }
     const profile = await this.loadProfile();
+    this.#assertCurrent(active);
     if (!profile) throw new Error("Configure name, email, and device name first");
     return this.queuePublication(async () => {
       const source = await this.host.fs.readFile(active.target);
-      if (this.host.active !== active || !source.equals(active.baseContainer)) {
+      this.#assertCurrent(active);
+      if (!source.equals(active.baseContainer)) {
         throw new Error("Activity source changed before attempt publication");
       }
       const attempt = await this.#publishCandidate(active, "attempt", kind,
         source, profile);
+      this.#assertCurrent(active);
       const status = this.host.container.activityStatus();
       if (!status.hasPending || status.kind !== kind
           || status.attemptOperationId !== attempt.operationId) {
@@ -126,18 +144,29 @@ export class ActivityEventWorkflow {
         actionState: "started", externalTarget,
         externalHash: createHash("sha256").update(
           expectedPlaintext ?? active.baseContainer).digest("hex") };
-      active.pendingActivity = { ...started, actionState: "not-started" };
+      const notStarted = { ...started, actionState: "not-started" };
+      active.pendingActivity = notStarted;
       active.unresolvedJournal = true;
       active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
         ...active.opened, readOnly: !active.editMode,
         activityOutcomePending: true });
-      await this.#writeJournal(active, started);
+      // Lock may clear the session key while the started write is completing.
+      const journalKey = Buffer.from(active.journalKey);
+      try {
+        await this.#writeJournal(active, started, journalKey);
+        if (!this.#isCurrent(active)) {
+          // The host action never ran, so restore the durable attempt state.
+          await this.#writeJournal(active, notStarted, journalKey);
+        }
+      } finally { journalKey.fill(0); }
+      this.#assertCurrent(active);
       active.pendingActivity = started;
       let succeeded = false;
       let actionResult;
       let actionError;
       try { actionResult = await action(); succeeded = true; }
       catch (error) {
+        this.#assertCurrent(active);
         if (error.activityOutcomeUnknown) {
           active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
             ...active.opened, activityConfirmationRequired: true });
@@ -146,6 +175,7 @@ export class ActivityEventWorkflow {
         }
         actionError = error;
       }
+      this.#assertCurrent(active);
       this.host.container.completeActivity(attempt.operationId, succeeded);
       const activity = { kind, attemptOperationId: attempt.operationId,
         attemptHead: status.attemptHead, succeeded, actionState: "known",
@@ -153,25 +183,31 @@ export class ActivityEventWorkflow {
       active.pendingActivity = activity;
       try { await this.#writeJournal(active, activity); }
       catch {
+        this.#assertCurrent(active);
         this.host.onJournalWarning("ACTIVITY_OUTCOME_PENDING");
         return { succeeded, outcomePending: true, actionResult, actionError };
       }
+      this.#assertCurrent(active);
       let outcomePending = false;
       try { await this.reconcile(active, profile); }
-      catch { outcomePending = true; this.host.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+      catch {
+        this.#assertCurrent(active);
+        outcomePending = true;
+        this.host.onJournalWarning("ACTIVITY_OUTCOME_PENDING");
+      }
       return { succeeded, outcomePending, actionResult, actionError };
     });
   }
 
-  async #writeJournal(active, activity) {
+  async #writeJournal(active, activity, journalKey = active.journalKey) {
     await this.queueJournalOperation(async () => {
-      const prior = await this.host.journals.read(active.documentId, active.journalKey);
+      const prior = await this.host.journals.read(active.documentId, journalKey);
       const record = prior ? { ...prior, activity,
         baseRevision: active.baseRevision, updateTime: this.host.now() }
         : { text: active.opened.content, baseRevision: active.baseRevision,
           cursor: { start: 0, end: 0 }, target: active.target,
           state: "activity-outcome", updateTime: this.host.now(), activity };
-      await this.host.journals.write(active.documentId, active.journalKey, record);
+      await this.host.journals.write(active.documentId, journalKey, record);
     });
   }
 
@@ -182,10 +218,12 @@ export class ActivityEventWorkflow {
     }
     return this.queuePublication(async () => {
       const pending = active.pendingActivity;
-      if (this.host.active !== active || !pending || active.pendingPublication) {
+      this.#assertCurrent(active);
+      if (!pending || active.pendingPublication) {
         throw new Error("Activity outcome changed before reconciliation");
       }
       const journal = await this.host.journals.read(active.documentId, active.journalKey);
+      this.#assertCurrent(active);
       if (journal?.publication || journal?.activity?.attemptHead !== pending.attemptHead
           || journal.activity.attemptOperationId !== pending.attemptOperationId
           || journal.activity.kind !== pending.kind
@@ -206,6 +244,7 @@ export class ActivityEventWorkflow {
             throw new TypeError("Select the completed external result for verification");
           }
           const observed = await this.host.fs.readFile(target);
+          this.#assertCurrent(active);
           if (createHash("sha256").update(observed).digest("hex")
               !== pending.externalHash
               || (pending.kind === "backup"
@@ -215,6 +254,7 @@ export class ActivityEventWorkflow {
         }
         const known = { ...pending, succeeded, actionState: "known" };
         await this.#writeJournal(active, known);
+        this.#assertCurrent(active);
         active.pendingActivity = known;
         active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
           ...active.opened, activityConfirmationRequired: undefined });
@@ -225,15 +265,21 @@ export class ActivityEventWorkflow {
         if (pending.actionState === "known"
             && journal.activity.actionState !== "known") {
           await this.#writeJournal(active, pending);
+          this.#assertCurrent(active);
         }
       }
       try { await this.reconcile(active); }
-      catch { this.host.onJournalWarning("ACTIVITY_OUTCOME_PENDING"); }
+      catch {
+        this.#assertCurrent(active);
+        this.host.onJournalWarning("ACTIVITY_OUTCOME_PENDING");
+      }
+      this.#assertCurrent(active);
       return active.opened;
     });
   }
 
   async reconcile(active, suppliedProfile = null) {
+    this.#assertCurrent(active);
     const pending = active.pendingActivity;
     if (!pending) return;
     if (pending.actionState === "started") {
@@ -243,6 +289,7 @@ export class ActivityEventWorkflow {
       throw error;
     }
     const source = await this.host.fs.readFile(active.target);
+    this.#assertCurrent(active);
     if (!source.equals(active.baseContainer)) {
       throw new Error("Activity source changed before outcome publication");
     }
@@ -275,15 +322,19 @@ export class ActivityEventWorkflow {
     this.host.nextCandidateOperation = Math.max(this.host.nextCandidateOperation,
       pending.attemptOperationId + 1);
     const profile = suppliedProfile ?? await this.loadProfile();
+    this.#assertCurrent(active);
     if (!profile) throw new Error("Configure name, email, and device name first");
     await this.#publishCandidate(active, "outcome", pending.kind,
       source, profile);
+    this.#assertCurrent(active);
     await this.#clearJournal(active, pending);
   }
 
   async #clearJournal(active, pending) {
     await this.queueJournalOperation(async () => {
+      this.#assertCurrent(active);
       const record = await this.host.journals.read(active.documentId, active.journalKey);
+      this.#assertCurrent(active);
       if (record?.activity?.attemptHead !== pending.attemptHead
           || record.activity.attemptOperationId !== pending.attemptOperationId
           || record.activity.kind !== pending.kind
@@ -293,6 +344,7 @@ export class ActivityEventWorkflow {
       }
       if (record.state === "activity-outcome") {
         await this.host.journals.clear(active.documentId);
+        this.#assertCurrent(active);
         active.unresolvedJournal = false;
       } else {
         const { activity: _activity, ...rest } = record;
@@ -300,6 +352,7 @@ export class ActivityEventWorkflow {
           { ...rest, baseRevision: active.baseRevision, updateTime: this.host.now() });
       }
     });
+    this.#assertCurrent(active);
     active.pendingActivity = null;
     active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
       ...active.opened, readOnly: !active.editMode,

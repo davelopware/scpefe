@@ -2123,14 +2123,23 @@ export class DocumentService {
   }
 
   async #adoptActivityImage(active, bytes) {
+    const assertCurrent = () => {
+      if (this.active === active && !this.lockOperation) return;
+      const error = new Error("The document session changed during activity publication");
+      error.code = "SESSION_LOCKED";
+      throw error;
+    };
+    assertCurrent();
     const reopened = this.#validateNativeOpened(
       this.native.inspectDocument(bytes, active.password));
     try {
+      assertCurrent();
       if (reopened.documentId !== active.documentId
           || reopened.opened.slotId !== active.opened.slotId
           || reopened.opened.content !== active.targetContent) {
         throw new Error("Published activity changed document identity or content");
       }
+      this.containerBytes = Buffer.from(bytes);
       active.baseContainer = Buffer.from(bytes);
       active.baseRevision = reopened.baseRevision;
       active.revisionGraph = reopened.revisionGraph;
@@ -2140,6 +2149,7 @@ export class DocumentService {
         readOnly: !active.editMode,
         ...(active.pendingActivity ? { activityOutcomePending: true } : {}) });
       await this.witnesses.observe(active.target, active.observation);
+      assertCurrent();
     } finally { reopened.journalKey.fill(0); }
   }
 
