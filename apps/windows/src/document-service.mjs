@@ -18,7 +18,6 @@ const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
 const LEASE_PUBLISH_EFFECTS = 0b111;
-const LEASE_ADOPT_EFFECT = 0b1000;
 export const COMPACTION_CONFIRMATION = "I understand that compaction irreversibly removes older history from this container and cannot delete copies held by backups, sync tools, caches, or storage providers.";
 export const DISCARD_UNREADABLE_JOURNAL_CONFIRMATION = "Permanently discard the unreadable recovery journal for this authenticated document.";
 const UNAVAILABLE_CODES = new Set([
@@ -1645,22 +1644,6 @@ export class DocumentService {
     return { released: true };
   }
 
-  // Carries a locked session's lease evidence into an authenticated replacement session.
-  transferSuspendedLeaseTo(next, target) {
-    const opened = next?.active;
-    if (this.active || !opened || opened.target !== target) return false;
-    const suspended = this.suspendedLeases.get(opened.documentId);
-    if (!suspended || suspended.target !== target) return false;
-    next.suspendedLeases.set(opened.documentId, {
-      target, sessionId: Buffer.from(suspended.sessionId), counter: suspended.counter,
-      release: suspended.release ? {
-        base: Buffer.from(suspended.release.base),
-        candidate: Buffer.from(suspended.release.candidate) } : null,
-    });
-    this.suspendedLeases.delete(opened.documentId);
-    return true;
-  }
-
   #prepareSuspendedLeaseRelease(active) {
     const base = Buffer.from(active.baseContainer);
     const opened = this.#validateNativeOpened(
@@ -1715,46 +1698,70 @@ export class DocumentService {
     }
     try {
       await this.#queuePublication(async () => {
-        if (suspended.release.operationId !== undefined) {
-          const current = await this.fs.readFile(target);
-          if (!current.equals(suspended.release.base)) {
+        const release = suspended.release;
+        const record = await this.journals.read(documentId, release.journalKey);
+        if (record?.publication
+            && record.publication.candidate !== release.candidate.toString("base64")) {
+          throw new Error("Another candidate is pending before suspended lease release");
+        }
+        if (record?.publication?.candidate === release.candidate.toString("base64")) {
+          const resumed = await this.candidates.resume(
+            documentId, release.journalKey, record, this.container);
+          if (resumed.reason === "changed") {
+            await this.publications.markDiverged(documentId,
+              release.journalKey, record);
             const changed = new Error("Suspended lease target changed before release");
             changed.code = "TARGET_CHANGED";
             throw changed;
           }
-          await this.publications.publish({ documentId,
-            journalKey: suspended.release.journalKey, target,
-            base: suspended.release.base,
-            candidate: suspended.release.candidate,
-            text: suspended.release.text, cursor: suspended.release.cursor,
-            baseRevision: suspended.release.baseRevision,
-            purpose: "lease-change",
-            preserveWork: suspended.release.preserveWork });
+          if (!resumed.completed || !resumed.nativeAdopted) {
+            const pending = new Error(
+              "Suspended lease publication still needs recovery");
+            pending.publicationPrepared = true;
+            throw pending;
+          }
         } else {
-          await this.#atomicWrite(target, suspended.release.candidate, true,
-            () => this.suspendedLeases.get(documentId) === suspended,
-            suspended.release.base);
+          const current = await this.fs.readFile(target);
+          if (!current.equals(release.base)) {
+            const changed = new Error("Suspended lease target changed before release");
+            changed.code = "TARGET_CHANGED";
+            throw changed;
+          }
+          await this.candidates.publish(this.container, {
+            operationId: release.operationId, bytes: release.candidate }, {
+            documentId, journalKey: release.journalKey, target,
+            base: release.base, text: release.text, cursor: release.cursor,
+            baseRevision: release.baseRevision, purpose: "lease-change",
+            preserveWork: release.preserveWork });
         }
       });
     } catch (error) {
-      if (error?.code !== "TARGET_CHANGED") throw error;
-      if (suspended.release.operationId !== undefined) {
-        this.container.finishSave(suspended.release.operationId, "definite-failure");
-        this.pendingNativeCandidate = null;
-        suspended.release.journalKey.fill(0);
+      if (error?.code !== "TARGET_CHANGED") {
+        if (this.pendingNativeCandidate === suspended.release.operationId
+            && !error.publicationPrepared) {
+          this.candidates.finish(this.container, suspended.release.operationId,
+            "definite-failure");
+        }
+        if (this.pendingNativeCandidate === null) {
+          suspended.release.journalKey.fill(0);
+          this.suspendedLeases.delete(documentId);
+        }
+        throw error;
       }
+      if (this.pendingNativeCandidate === suspended.release.operationId) {
+        this.candidates.finish(this.container, suspended.release.operationId,
+          "definite-failure");
+      }
+      suspended.release.journalKey.fill(0);
       this.suspendedLeases.delete(documentId);
       return { released: false, changed: true };
     }
-    if (suspended.release.operationId !== undefined) {
-      const effects = this.container.finishSave(suspended.release.operationId, "verified");
-      if ((effects & LEASE_ADOPT_EFFECT) === 0) {
-        throw new Error("Native lease release was not adopted");
-      }
-      this.pendingNativeCandidate = null;
-      this.containerBytes = this.container.bytes();
-      suspended.release.journalKey.fill(0);
+    if (!this.container.bytes().equals(suspended.release.candidate)
+        || this.container.authenticatedLease().active) {
+      throw new Error("Native lease release was not adopted");
     }
+    this.containerBytes = this.container.bytes();
+    suspended.release.journalKey.fill(0);
     this.suspendedLeases.delete(documentId);
     return { released: true };
   }
@@ -2868,16 +2875,14 @@ export class DocumentService {
         throw stale;
       }
       const pendingWork = this.#leasePendingWork(active);
-      await this.publications.publish({ documentId: active.documentId,
+      await this.candidates.publish(this.container, candidate, {
+        documentId: active.documentId,
         journalKey: active.journalKey, target: active.target, base: source,
-        candidate: candidate.bytes,
         text: pendingWork?.text ?? active.opened.content ?? "",
         cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
         baseRevision: active.baseRevision, purpose: "lease-change",
         preserveWork: pendingWork !== null });
-      const adopted = this.container.finishSave(candidate.operationId, "verified");
-      this.pendingNativeCandidate = null;
-      if ((adopted & LEASE_ADOPT_EFFECT) === 0) {
+      if (!this.container.bytes().equals(candidate.bytes)) {
         throw new Error("Native lease candidate was not adopted");
       }
       this.containerBytes = this.container.bytes();
@@ -2885,21 +2890,12 @@ export class DocumentService {
       return this.container.authenticatedLease();
     } catch (error) {
       if (this.pendingNativeCandidate === candidate.operationId) {
-        let observed;
-        try { observed = await this.fs.readFile(active.target); } catch {}
-        if (error.publicationPrepared) {
-          this.container.finishSave(candidate.operationId, "ambiguous");
-          active.pendingPublication = true;
-          active.unresolvedJournal = true;
-        } else if (observed?.equals(candidate.bytes)) {
-          this.container.finishSave(candidate.operationId, "verified");
-          this.containerBytes = this.container.bytes();
-          active.baseContainer = Buffer.from(candidate.bytes);
-        } else {
-          this.container.finishSave(candidate.operationId, "definite-failure");
-        }
-        this.pendingNativeCandidate = error.publicationPrepared
-          ? candidate.operationId : null;
+        this.candidates.finish(this.container, candidate.operationId,
+          error.publicationPrepared ? "ambiguous" : "definite-failure");
+      }
+      if (error.publicationPrepared) {
+        active.pendingPublication = true;
+        active.unresolvedJournal = true;
       }
       throw error;
     }
