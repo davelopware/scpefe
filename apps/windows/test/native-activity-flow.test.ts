@@ -462,6 +462,44 @@ test("restart clears a journal after the source already published its outcome", 
     restarted.active.journalKey), null);
 });
 
+test("published outcome preserves a different pending activity record", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let journalDirectory = "";
+  let failOnce = true;
+  const failingFs = { ...fs, async unlink(file: Parameters<typeof fs.unlink>[0]) {
+    if (failOnce && String(file).startsWith(journalDirectory)
+        && String(file).endsWith(".work-journal")) {
+      failOnce = false;
+      throw Object.assign(new Error("journal cleanup unavailable"), { code: "EIO" });
+    }
+    return fs.unlink(file);
+  } };
+  const { directory, service, options, target } = await fixture(t, failingFs);
+  journalDirectory = path.join(directory, "journals");
+  assert.deepEqual(await service.backupDocument(path.join(directory, "backup.scpefe")),
+    { backedUp: true, outcomePending: true });
+  const restarted = new DocumentService({ ...options, fs });
+  const read = restarted.journals.read.bind(restarted.journals);
+  let reads = 0;
+  restarted.journals.read = async (...args: Parameters<typeof read>) => {
+    const record = await read(...args);
+    if (++reads === 2 && record?.activity) {
+      return { ...record, activity: { ...record.activity,
+        attemptOperationId: record.activity.attemptOperationId + 1 } };
+    }
+    return record;
+  };
+  const opened = await restarted.openDocument(target, password);
+  assert.equal(opened.activityOutcomePending, true);
+  assert.ok((await read(restarted.active.documentId,
+    restarted.active.journalKey))?.activity);
+  assert.equal((await restarted.resolvePendingActivityOutcome()).activityOutcomePending,
+    undefined);
+  assert.equal(await read(restarted.active.documentId,
+    restarted.active.journalKey), null);
+});
+
 test("plaintext export publishes its outcome and records a failed host action", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {
