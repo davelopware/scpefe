@@ -18,6 +18,7 @@ const REVISION_ID = /^[0-9a-f]{64}$/;
 const HEARTBEAT_MS = 120_000;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
 const LEASE_PUBLISH_EFFECTS = 0b111;
+const LEASE_ADOPT_EFFECT = 0b1000;
 export const COMPACTION_CONFIRMATION = "I understand that compaction irreversibly removes older history from this container and cannot delete copies held by backups, sync tools, caches, or storage providers.";
 export const DISCARD_UNREADABLE_JOURNAL_CONFIRMATION = "Permanently discard the unreadable recovery journal for this authenticated document.";
 const UNAVAILABLE_CODES = new Set([
@@ -664,13 +665,13 @@ export class DocumentService {
   }
 
   #finishSaveCandidate(operationId, outcome) {
-    if (this.candidates.finish(this.container, operationId, outcome)) {
+    if (this.candidates.finish(this.container, operationId, outcome).verified) {
       this.containerBytes = this.container.bytes();
     }
   }
 
   #resolveSaveCandidate(published) {
-    if (this.candidates.resolve(this.container, published)) {
+    if (this.candidates.resolve(this.container, published).published) {
       this.containerBytes = this.container.bytes();
     }
   }
@@ -1696,6 +1697,7 @@ export class DocumentService {
       this.suspendedLeases.delete(documentId);
       return { released: false };
     }
+    let nativeEffects = 0;
     try {
       await this.#queuePublication(async () => {
         const release = suspended.release;
@@ -1720,6 +1722,7 @@ export class DocumentService {
             pending.publicationPrepared = true;
             throw pending;
           }
+          nativeEffects = resumed.nativeEffects;
         } else {
           const current = await this.fs.readFile(target);
           if (!current.equals(release.base)) {
@@ -1727,12 +1730,13 @@ export class DocumentService {
             changed.code = "TARGET_CHANGED";
             throw changed;
           }
-          await this.candidates.publish(this.container, {
+          const published = await this.candidates.publish(this.container, {
             operationId: release.operationId, bytes: release.candidate }, {
             documentId, journalKey: release.journalKey, target,
             base: release.base, text: release.text, cursor: release.cursor,
             baseRevision: release.baseRevision, purpose: "lease-change",
             preserveWork: release.preserveWork });
+          nativeEffects = published.nativeEffects;
         }
       });
     } catch (error) {
@@ -1756,8 +1760,8 @@ export class DocumentService {
       this.suspendedLeases.delete(documentId);
       return { released: false, changed: true };
     }
-    if (!this.container.bytes().equals(suspended.release.candidate)
-        || this.container.authenticatedLease().active) {
+    if ((nativeEffects & LEASE_ADOPT_EFFECT) === 0
+        || !this.container.bytes().equals(suspended.release.candidate)) {
       throw new Error("Native lease release was not adopted");
     }
     this.containerBytes = this.container.bytes();
@@ -2875,14 +2879,15 @@ export class DocumentService {
         throw stale;
       }
       const pendingWork = this.#leasePendingWork(active);
-      await this.candidates.publish(this.container, candidate, {
+      const publication = await this.candidates.publish(this.container, candidate, {
         documentId: active.documentId,
         journalKey: active.journalKey, target: active.target, base: source,
         text: pendingWork?.text ?? active.opened.content ?? "",
         cursor: pendingWork?.cursor ?? { start: 0, end: 0 },
         baseRevision: active.baseRevision, purpose: "lease-change",
         preserveWork: pendingWork !== null });
-      if (!this.container.bytes().equals(candidate.bytes)) {
+      if ((publication.nativeEffects & LEASE_ADOPT_EFFECT) === 0
+          || !this.container.bytes().equals(candidate.bytes)) {
         throw new Error("Native lease candidate was not adopted");
       }
       this.containerBytes = this.container.bytes();
