@@ -66,6 +66,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   const discardEntered = new Promise((resolve) => { discardStarted = resolve; });
   let holdNewLink = false; let releaseNewLink; let newLinkStarted;
   const newLinkEntered = new Promise((resolve) => { newLinkStarted = resolve; });
+  let delayedNewReleaseTimer = null;
   let holdOtherReadAt = 0; let otherReadCount = 0; let releaseOtherRead; let otherReadStarted;
   let holdInitialRead = false; let releaseInitialRead; let initialReadStarted;
   const initialReadReleased = new Promise((resolve) => { releaseInitialRead = resolve; });
@@ -402,6 +403,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
         || origin.startsWith("s5-") || origin.startsWith("s9-")
         || origin.startsWith("dr-new-") || origin.startsWith("prr-new-")
         || origin.startsWith("al-new-") || origin.startsWith("focus-")
+        || origin === "s3-new-delayed"
         || origin === "als-new-candidate"
         || (origin.startsWith("rn-") && origin !== "rn-picker-cancel")
         ? newTarget : null;
@@ -469,6 +471,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     completion: mountedCompletion,
     primaryError,
     cancelPendingWork: () => {
+      if (delayedNewReleaseTimer !== null) clearTimeout(delayedNewReleaseTimer);
       releaseMaintenance(); releaseSaveJournal(); releaseDiscard(); releaseNewLink?.(); releaseInitialRead();
       releaseOtherRead?.(); host.protections.cancelForLock();
     },
@@ -645,6 +648,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       await user.click(ui.getByRole(opened, "button", { name: "Open" }));
     }
     const expectedState = "Edit mode";
+    await awaitLifecycleCompletion(`${entry} replacement`);
     await waitScalar(() => host.service !== priorService,
       `${entry} candidate adoption as the authoritative service`);
     await waitScalar(() => ui.getByLabelText(document.body,
@@ -1117,6 +1121,23 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await ui.waitFor(() => assert.equal(ui.getByLabelText(document.body,
       "Document state").textContent, "Locked"));
     const entry = origin.slice(3);
+    if (entry === "new-delayed" || entry === "external-delayed") {
+      if (entry === "new-delayed") holdNewLink = true;
+      else holdOtherReadAt = 1;
+      const replacing = driveSuccessfulReplacement(entry === "new-delayed" ? "new" : "external");
+      void replacing.catch(() => {});
+      const release = entry === "new-delayed" ? () => releaseNewLink?.()
+        : () => releaseOtherRead?.();
+      try {
+        await awaitHarnessPhase(entry === "new-delayed" ? newLinkEntered : otherReadEntered,
+          `${entry} candidate host I/O`);
+        assert.equal(host.service === service, true,
+          "the locked original remains authoritative during candidate I/O");
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+      } finally { release(); }
+      await replacing;
+      return;
+    }
     if (["new", "open", "external"].includes(entry)) {
       await driveSuccessfulReplacement(entry); return;
     }
@@ -1206,6 +1227,12 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   if (origin.startsWith("al-")) {
     const [, entry, variant] = origin.split("-"); let request;
     if (entry === "new") {
+      if (origin === "al-new-discard-delayed") {
+        holdNewLink = true;
+        void newLinkEntered.then(() => {
+          delayedNewReleaseTimer = setTimeout(() => releaseNewLink(), 2_500);
+        });
+      }
       await command("File", /New/);
       const creation = await ui.findByRole(document.body, "dialog",
         { name: "Secure new document" });
@@ -1230,6 +1257,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     } else if (entry === "close") await command("File", /Close/);
     else if (entry === "exit") await command("File", "Exit");
     else { const event = fakeWindow.close(); assert.equal(event.prevented, true); }
+    if (entry === "new") await awaitHarnessPhase(protectionRequestObserved,
+      "New protection request after candidate creation");
     const protection = await ui.findByRole(document.body, "dialog",
       { name: entry === "new" ? /before New/ : ["open", "external"].includes(entry)
         ? /before Open/ : entry === "close" ? /before Close/ : /before Exit/ });
@@ -1949,6 +1978,12 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
 }
 
 export function lifecycleCaseName(origin) {
+  if (origin === "al-new-discard-delayed") {
+    return "AL-N delayed creation reaches protection before lock-start discard";
+  }
+  if (origin === "s3-new-delayed" || origin === "s3-external-delayed") {
+    return `L-S3-${origin === "s3-new-delayed" ? "N" : "X"} delayed candidate replaces locked session`;
+  }
   if (origin.startsWith("als-")) {
     const [, entry, stage] = origin.split("-");
     return `ALS-${{ new: "N", open: "O", external: "X" }[entry]} real lock-start during staged ${entry} ${stage}`;
@@ -2072,7 +2107,8 @@ const primaryOrigins = ["inactivity", "lease-refresh-failed", "window-close", "e
   "new", "new-approved", "open", "close", "exit", "s0-new", "s0-open", "s0-external",
   "s0-close", "s0-exit", "s0-window",
   ...["s1", "s2", "s3"].flatMap((state) => ["new", "open", "external", "close", "exit",
-    "window"].map((entry) => `${state}-${entry}`))];
+    "window"].map((entry) => `${state}-${entry}`)),
+  "s3-new-delayed", "s3-external-delayed"];
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const origin of primaryOrigins) {
