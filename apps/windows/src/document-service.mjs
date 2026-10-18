@@ -2518,12 +2518,13 @@ export class DocumentService {
           } finally {
             candidateOpened.journalKey.fill(0);
           }
-          await this.publications.publish({ documentId: active.documentId,
+          await this.candidates.publish(this.container, prepared, {
+            documentId: active.documentId,
             journalKey: active.journalKey, target: active.target,
-            base: current, candidate, text: active.opened.content,
+            base: current, text: active.opened.content,
             cursor: { start: 0, end: 0 }, baseRevision: previousHead,
             purpose: "compaction" });
-          this.#finishSaveCandidate(this.pendingNativeCandidate, "verified");
+          this.containerBytes = this.container.bytes();
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
             this.native.inspectDocument(published, active.password));

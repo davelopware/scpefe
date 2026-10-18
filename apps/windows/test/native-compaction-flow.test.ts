@@ -12,7 +12,8 @@ const addonPath = process.env.SCPEFE_NATIVE_ADDON_PATH;
 const native = addonPath ? createRequire(import.meta.url)(addonPath) : null;
 const password = "owner passphrase with independent words";
 
-async function setup(t: import("node:test").TestContext, revisions = 1) {
+async function setup(t: import("node:test").TestContext, revisions = 1,
+  fsImpl: typeof fs = fs) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-compaction-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const target = path.join(directory, "document.scpefe");
@@ -24,11 +25,12 @@ async function setup(t: import("node:test").TestContext, revisions = 1) {
   bridge.compactDocument = () => {
     throw new Error("legacy compaction writer must not run");
   };
-  const service = new DocumentService({ native: bridge, fs, profilePath,
+  const options = { native: bridge, fs: fsImpl, profilePath,
     journalDirectory: path.join(directory, "journals"),
     witnessDirectory: path.join(directory, "witnesses"),
     publicationCapabilities: { sameFilesystemTransaction: true,
-      replacementGuarantee: "atomic-replace" } });
+      replacementGuarantee: "atomic-replace" } };
+  const service = new DocumentService(options);
   const seed = native.createContainerContext();
   const initial = seed.create({ name: "Ada", email: "ada@example.test",
     deviceName: "Ada PC", content: "first version", ownerPassword: password,
@@ -43,7 +45,7 @@ async function setup(t: import("node:test").TestContext, revisions = 1) {
       cursor: { start: content.length, end: content.length } });
     await service.saveDocument(content);
   }
-  return { service, target, directory };
+  return { service, target, directory, options };
 }
 
 test("stateful compaction publishes only after exact durable backup and keeps old metadata", {
@@ -82,6 +84,8 @@ test("stateful compaction publishes only after exact durable backup and keeps ol
   assert.deepEqual(service.container.historyCompare(
     after.at(-1)!.revisionId, after[0].revisionId), { available: false });
   assert.equal(service.active.opened.content, "version 12");
+  assert.equal(service.pendingNativeCandidate, null);
+  assert.equal(service.container.bytes().equals(await fs.readFile(target)), true);
 });
 
 test("failed backup and unsaved journal leave history intact", {
@@ -101,6 +105,7 @@ test("failed backup and unsaved journal leave history intact", {
     "backup-failed");
   assert.equal(native?.inspectDocument(failedSource, password).content,
     native?.inspectDocument(before, password).content);
+  assert.equal(service.pendingNativeCandidate, null);
   service.publications.publishReplica = original;
   await service.journals.write(service.active.documentId, service.active.journalKey,
     { text: "journal-only work", baseRevision: service.active.baseRevision,
@@ -152,7 +157,107 @@ test("edits arriving during backup or publication are rejected without losing wo
   assert.notDeepEqual(await fs.readFile(target), before);
   assert.deepEqual(service.container.bytes(), await fs.readFile(target));
   assert.equal(service.active.opened.content, "version 1");
+  assert.equal(service.pendingNativeCandidate, null);
   service.updateWorkingCopy({ content: "new work after compaction",
     cursor: { start: 25, end: 25 } });
   assert.equal(service.active.dirty, true);
+});
+
+test("compaction rejects missing confirmation or lease before creating a backup", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { service, directory } = await setup(t);
+  await assert.rejects(service.compactDocument("not confirmed"),
+    /Confirm irreversible local history removal/);
+  await service.exitEditMode();
+  await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION),
+    /Enter edit mode with a full administrative slot/);
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    name.includes(".backup-")), []);
+});
+
+test("definite compaction preparation failure releases the native candidate", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { service, target, directory } = await setup(t);
+  const originalPrepare = service.publications.prepare.bind(service.publications);
+  service.publications.prepare = async (request: { purpose: string }) => {
+    if (request.purpose === "compaction") {
+      throw new Error("compaction journal could not be prepared");
+    }
+    return originalPrepare(request);
+  };
+  await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION),
+    /compaction journal could not be prepared/);
+  assert.equal(service.pendingNativeCandidate, null);
+  assert.equal(service.active.pendingPublication, false);
+  assert.equal(await service.journals.read(service.active.documentId,
+    service.active.journalKey), null);
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password)
+    .historyEventType, "backup-succeeded");
+  assert.equal((await fs.readdir(directory)).filter((name) =>
+    name.includes(".backup-")).length, 1);
+});
+
+test("interrupted compaction retains its exact candidate and backup for restart", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let sourceTarget = "";
+  let interrupt = false;
+  const interruptedFs = { ...fs, async rename(
+    from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    if (interrupt && to === sourceTarget) {
+      const candidate = await fs.readFile(from);
+      if (native?.inspectDocument(candidate, password).historyEventType
+          === "compaction") {
+        interrupt = false;
+        await fs.rename(from, to);
+        throw Object.assign(new Error("interrupted after compaction replacement"),
+          { code: "EIO" });
+      }
+    }
+    return fs.rename(from, to);
+  } };
+  const { service, target, directory, options } = await setup(t, 3,
+    interruptedFs);
+  sourceTarget = target;
+  const oldHistory = service.container.historyPage(0, 50).items;
+  interrupt = true;
+  await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION),
+    /interrupted after compaction replacement/);
+  const pending = await service.journals.read(service.active.documentId,
+    service.active.journalKey);
+  assert.equal(pending.publication.purpose, "compaction");
+  assert.equal(pending.publication.stage, "flushed");
+  assert.equal(service.active.pendingPublication, true);
+  assert.equal(service.pendingNativeCandidate !== null, true);
+  const candidate = Buffer.from(pending.publication.candidate, "base64");
+  assert.deepEqual(await fs.readFile(target), candidate);
+  assert.notDeepEqual(service.container.bytes(), candidate);
+  const backups = (await fs.readdir(directory)).filter((name) =>
+    /^document\.backup-.*\.scpefe$/u.test(name));
+  assert.equal(backups.length, 1);
+  const backup = await fs.readFile(path.join(directory, backups[0]));
+  assert.equal(native?.inspectDocument(backup, password).historyEventType,
+    "backup-attempted");
+  assert.equal(native?.inspectDocument(backup, password).content, "version 3");
+  await assert.rejects(service.compactDocument(COMPACTION_CONFIRMATION),
+    /clean, manually sealed, conflict-free/);
+
+  const restarted = new DocumentService({ ...options, fs });
+  const opened = await restarted.openDocument(target, password);
+  assert.equal(opened.content, "version 3");
+  assert.equal(opened.publicationState, "target-published");
+  assert.deepEqual(restarted.container.bytes(), candidate);
+  assert.equal(await restarted.journals.read(restarted.active.documentId,
+    restarted.active.journalKey), null);
+  const history = restarted.container.historyPage(0, 50).items;
+  assert.equal(history[0].eventType, "compaction");
+  for (const item of oldHistory) {
+    assert.ok(history.some((record: { revisionId: string }) =>
+      record.revisionId === item.revisionId));
+  }
+  assert.deepEqual((await fs.readdir(directory)).filter((name) =>
+    /^document\.backup-.*\.scpefe$/u.test(name)), backups);
 });
