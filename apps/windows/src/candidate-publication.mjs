@@ -32,22 +32,24 @@ export class CandidatePublication {
   }
 
   finish(container, operationId, outcome) {
-    if (operationId === null) return false;
+    if (operationId === null) return { verified: false, effects: 0 };
     if (this.#pendingOperationId !== operationId) {
       throw new Error("Native candidate operation does not match the pending publication");
     }
-    if (outcome === "ambiguous" && this.#ambiguousNotified) return false;
-    container.finishSave(operationId, outcome);
+    if (outcome === "ambiguous" && this.#ambiguousNotified) {
+      return { verified: false, effects: 0 };
+    }
+    const effects = container.finishSave(operationId, outcome);
     if (outcome === "ambiguous") this.#ambiguousNotified = true;
     if (outcome !== "ambiguous") this.track(null);
-    return outcome === "verified";
+    return { verified: outcome === "verified", effects };
   }
 
   resolve(container, published) {
-    if (this.#pendingOperationId === null) return false;
-    container.resolveSave(this.#pendingOperationId, published);
+    if (this.#pendingOperationId === null) return { published: false, effects: 0 };
+    const effects = container.resolveSave(this.#pendingOperationId, published);
     this.track(null);
-    return published;
+    return { published, effects };
   }
 
   async #settle(container, prepared, operation) {
@@ -91,8 +93,8 @@ export class CandidatePublication {
       journalKey: request.journalKey };
     const result = await this.#settle(container, identity, () =>
       this.publications.publish({ ...request, candidate }));
-    this.finish(container, prepared.operationId, "verified");
-    return result;
+    const native = this.finish(container, prepared.operationId, "verified");
+    return { ...result, nativeEffects: native.effects };
   }
 
   async journalUnavailable(container, prepared, request) {
@@ -112,7 +114,9 @@ export class CandidatePublication {
     }
     const result = await this.publications.resume(documentId, journalKey, record);
     if (container && result.completed) {
-      result.nativeAdopted = this.resolve(container, true);
+      const native = this.resolve(container, true);
+      result.nativeAdopted = native.published;
+      result.nativeEffects = native.effects;
     } else if (container && result.reason === "changed") {
       this.resolve(container, false);
     }
