@@ -137,7 +137,15 @@ export class ActivityEventWorkflow {
       let actionResult;
       let actionError;
       try { actionResult = await action(); succeeded = true; }
-      catch (error) { actionError = error; }
+      catch (error) {
+        if (error.activityOutcomeUnknown) {
+          active.opened = (active.editMode ? validateEditMode : validateOpenedDocument)({
+            ...active.opened, activityConfirmationRequired: true });
+          this.host.onJournalWarning("ACTIVITY_OUTCOME_PENDING");
+          return { succeeded: false, outcomePending: true, actionError: error };
+        }
+        actionError = error;
+      }
       this.host.container.completeActivity(attempt.operationId, succeeded);
       const activity = { kind, attemptOperationId: attempt.operationId,
         attemptHead: status.attemptHead, succeeded, actionState: "known",

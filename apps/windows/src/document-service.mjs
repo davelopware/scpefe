@@ -31,6 +31,12 @@ function targetUnavailable(error) {
   return UNAVAILABLE_CODES.has(error?.code);
 }
 
+function unknownPlaintextResult(cause) {
+  const error = new Error("Plaintext export result requires confirmation", { cause });
+  error.activityOutcomeUnknown = true;
+  return error;
+}
+
 function newerWorkingCopy(working, submittedVersion, content) {
   if (!working) return false;
   if (submittedVersion && working.journalScope) {
@@ -2042,15 +2048,35 @@ export class DocumentService {
     const content = validated.lineEndings === "native"
       ? validated.content.replace(/\n/g, this.nativeLineEnding)
       : validated.content;
-    const action = () => this.publications.publishPlaintext({
-      target, protectedTarget: this.active.target,
-      content: Buffer.from(content, "utf8") });
+    const plaintext = Buffer.from(content, "utf8");
+    // The attempt publication replaces the target inode; retain aliases to its prior inode.
+    let destinationError = null;
+    try {
+      await this.publications.assertDistinctPlaintextTarget(target, this.active.target);
+    } catch (error) { destinationError = error; }
+    const action = async () => {
+      if (destinationError) throw destinationError;
+      try {
+        await this.publications.publishPlaintext({
+          target, protectedTarget: this.active.target, content: plaintext });
+      } catch (error) {
+        if (error.plaintextReplacementMayHaveOccurred) {
+          throw unknownPlaintextResult(error);
+        }
+        throw error;
+      }
+      let observed;
+      try { observed = await this.fs.readFile(target); }
+      catch (cause) { throw unknownPlaintextResult(cause); }
+      if (!observed.equals(plaintext)) {
+        throw new Error("Plaintext export differs from expected bytes");
+      }
+    };
     if (!this.activities.available(this.active)) {
       await action();
       return validatePlaintextExportResult({ exported: true });
     }
-    const result = await this.activities.run("export", action, target,
-      Buffer.from(content, "utf8"));
+    const result = await this.activities.run("export", action, target, plaintext);
     return validatePlaintextExportResult({ exported: result.succeeded,
       ...(result.outcomePending ? { outcomePending: true } : {}) });
   }
