@@ -78,7 +78,6 @@ export class ActivityEventWorkflow {
             state: journalRecord.state,
             purpose: `activity-${phase}`, journalRecord });
       });
-      this.host.containerBytes = Buffer.from(candidate.bytes);
       await this.adopt(active, candidate.bytes);
       return candidate;
     } catch (error) {
