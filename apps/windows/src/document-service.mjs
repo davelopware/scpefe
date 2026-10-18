@@ -1701,10 +1701,22 @@ export class DocumentService {
     try {
       await this.#queuePublication(async () => {
         const release = suspended.release;
-        const record = await this.journals.read(documentId, release.journalKey);
+        let record;
+        try {
+          record = await this.journals.read(documentId, release.journalKey);
+        } catch (error) {
+          // A previous attempt may have persisted its candidate. An unreadable
+          // journal cannot prove definite failure, so retain the native state.
+          const uncertain = error instanceof Error ? error : new Error(String(error));
+          uncertain.publicationPrepared = true;
+          throw uncertain;
+        }
         if (record?.publication
             && record.publication.candidate !== release.candidate.toString("base64")) {
-          throw new Error("Another candidate is pending before suspended lease release");
+          const pending = new Error(
+            "Another candidate is pending before suspended lease release");
+          pending.publicationPrepared = true;
+          throw pending;
         }
         if (record?.publication?.candidate === release.candidate.toString("base64")) {
           const resumed = await this.candidates.resume(

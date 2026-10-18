@@ -169,3 +169,52 @@ test("retrying a suspended release resumes its journaled candidate",
     assert.deepEqual(await fs.readFile(target), candidate);
     assert.equal(decode(service.container.bytes()).active, false);
   });
+
+test("an unreadable journal on suspended-release retry retains the candidate",
+  async (t) => {
+    const { service, target } = await fixture(t);
+    await service.enterEditMode();
+    await service.lock("screen-lock");
+    interruptReplacement(service, target);
+    await assert.rejects(service.releaseSuspendedLease(target),
+      /interrupted lease replacement/);
+    const operationId = service.pendingNativeCandidate;
+    const read = service.journals.read.bind(service.journals);
+    const record = await read("56".repeat(16), Buffer.alloc(32, 8));
+    const candidate = Buffer.from(record.publication.candidate, "base64");
+    service.journals.read = async () => { throw new Error("journal read interrupted"); };
+    await assert.rejects(service.releaseSuspendedLease(target),
+      /journal read interrupted/);
+    assert.equal(service.pendingNativeCandidate, operationId);
+    assert.equal(service.hasSuspendedLease(), true);
+    assert.deepEqual(await fs.readFile(target), Buffer.from(record.publication.base, "base64"));
+
+    service.journals.read = read;
+    assert.deepEqual(await service.releaseSuspendedLease(target), { released: true });
+    assert.deepEqual(await fs.readFile(target), candidate);
+    assert.equal(service.pendingNativeCandidate, null);
+  });
+
+test("an unexpected journal candidate cannot clear the suspended release",
+  async (t) => {
+    const { service, target } = await fixture(t);
+    await service.enterEditMode();
+    await service.lock("screen-lock");
+    interruptReplacement(service, target);
+    await assert.rejects(service.releaseSuspendedLease(target),
+      /interrupted lease replacement/);
+    const operationId = service.pendingNativeCandidate;
+    const read = service.journals.read.bind(service.journals);
+    const record = await read("56".repeat(16), Buffer.alloc(32, 8));
+    service.journals.read = async () => ({ ...record,
+      publication: { ...record.publication, candidate: "unexpected" } });
+    await assert.rejects(service.releaseSuspendedLease(target),
+      /Another candidate is pending/);
+    assert.equal(service.pendingNativeCandidate, operationId);
+    assert.equal(service.hasSuspendedLease(), true);
+
+    service.journals.read = read;
+    assert.deepEqual(await service.releaseSuspendedLease(target), { released: true });
+    assert.deepEqual(await fs.readFile(target),
+      Buffer.from(record.publication.candidate, "base64"));
+  });
