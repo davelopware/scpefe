@@ -1374,22 +1374,12 @@ export class DocumentService {
           } catch (error) {
             throw mergeDecisionError(error);
           }
-          const candidate = prepared.bytes;
-          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
-            throw new Error("Native bridge did not produce a merge container");
-          }
           this.pendingNativeCandidate = prepared.operationId;
-          try {
-            await this.publications.publish({ documentId: active.documentId,
-              journalKey: active.journalKey, target: active.target,
-              base: currentBytes, candidate, text: canonical,
-              cursor: { start: 0, end: 0 }, baseRevision: current.baseRevision });
-            this.#finishSaveCandidate(prepared.operationId, "verified");
-          } catch (error) {
-            this.#finishSaveCandidate(prepared.operationId,
-              error.publicationPrepared ? "ambiguous" : "definite-failure");
-            throw error;
-          }
+          await this.candidates.publish(this.container, prepared, {
+            documentId: active.documentId, journalKey: active.journalKey,
+            target: active.target, base: currentBytes, text: canonical,
+            cursor: { start: 0, end: 0 }, baseRevision: current.baseRevision });
+          this.containerBytes = this.container.bytes();
         } finally {
           current.journalKey.fill(0);
         }

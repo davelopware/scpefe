@@ -67,19 +67,18 @@ export class CandidatePublication {
       return result;
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      if (!failure.publicationPrepared) {
-        // A journal write may succeed and then report failure. Never release
-        // its native candidate until the durable record has been checked.
-        try {
-          const record = await this.publications.journals.read(
-            prepared.documentId, prepared.journalKey);
-          if (record?.publication
-              && record.publication.candidate === prepared.bytes.toString("base64")) {
-            failure.publicationPrepared = true;
-          }
-        } catch {
-          failure.publicationPrepared = true;
+      // A prior conflict may already have a publication record. Only a record
+      // for this exact candidate proves that its preparation persisted; an
+      // unreadable journal remains ambiguous.
+      try {
+        const record = await this.publications.journals.read(
+          prepared.documentId, prepared.journalKey);
+        if (record?.publication) {
+          failure.publicationPrepared = record.publication.candidate
+            === prepared.bytes.toString("base64");
         }
+      } catch {
+        failure.publicationPrepared = true;
       }
       this.finish(container, prepared.operationId,
         failure.publicationPrepared ? "ambiguous" : "definite-failure");

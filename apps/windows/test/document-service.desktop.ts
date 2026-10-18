@@ -2808,6 +2808,8 @@ test("target revalidation prevents a changed head from being overwritten", async
   const fixture = await divergentService(directory);
   await fixture.service.openDocument(fixture.target, "password words");
   await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
   const changed = "76".repeat(32);
   await fs.writeFile(fixture.target, mergeContainer("newer current", changed,
     [{ revisionId: fixture.ancestor, parentRevisionIds: [] },
@@ -2815,6 +2817,118 @@ test("target revalidation prevents a changed head from being overwritten", async
   await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
     (error) => error.code === "MERGE_TARGET_CHANGED");
   assert.equal(JSON.parse((await fs.readFile(fixture.target)).toString()).head, changed);
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+});
+
+test("unavailable merge target preserves the exact conflict", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-missing-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  await fs.unlink(fixture.target);
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.code === "ENOENT");
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+});
+
+test("merge journal failure preserves the exact conflict and releases its candidate", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-journal-fail-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  const target = await fs.readFile(fixture.target);
+  const write = fixture.service.journals.write.bind(fixture.service.journals);
+  fixture.service.journals.write = async (documentId, journalKey, record) => {
+    if (record.publication?.candidate !== conflict.publication.candidate) {
+      throw new Error("merge journal unavailable before preparation");
+    }
+    return write(documentId, journalKey, record);
+  };
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.message === "merge journal unavailable before preparation"
+      && error.publicationPrepared !== true);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  assert.equal(fixture.service.active.opened.publicationState, "conflict");
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.deepEqual(await fs.readFile(fixture.target), target);
+
+  fixture.service.journals.write = write;
+  assert.equal((await fixture.service.saveDivergenceResolution("resolved text"))
+    .publicationState, "target-published");
+});
+
+test("merge access loss preserves the conflict before publication", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-access-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  const target = await fs.readFile(fixture.target);
+  fixture.options.native.mergeDocument = () => {
+    throw Object.assign(new Error("current slot is view-only"), { status: 24 });
+  };
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.code === "MERGE_PERMISSION_DENIED");
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  assert.equal(fixture.service.active.editMode, false);
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.deepEqual(await fs.readFile(fixture.target), target);
+});
+
+test("interrupted merge resumes its exact candidate and installs its head", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-interrupt-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const base = await fs.readFile(fixture.target);
+  const originalFs = fixture.service.publications.fs;
+  fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+    if (property !== "rename") return target[property];
+    return async () => { throw new Error("publication interrupted before replacement"); };
+  } });
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.publicationPrepared === true);
+  const pending = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  const exactCandidate = Buffer.from(pending.publication.candidate, "base64");
+  assert.equal(pending.publication.stage, "flushed");
+  assert.equal(pending.text, "resolved text");
+  assert.equal(fixture.service.pendingNativeCandidate !== null, true);
+  assert.deepEqual(await fs.readFile(fixture.target), base);
+
+  fixture.service.publications.fs = originalFs;
+  assert.deepEqual(await fixture.service.reconnectPendingPublication(), {
+    publicationState: "target-published", content: "resolved text" });
+  assert.deepEqual(await fs.readFile(fixture.target), exactCandidate);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  assert.equal(fixture.service.active.baseRevision, fixture.merged);
+  assert.equal(fixture.service.active.pendingPublication, false);
+  assert.equal(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), null);
+  const published = fixture.options.native.openDocument(exactCandidate,
+    "password words");
+  assert.deepEqual(published.revisionGraph.find(
+    (node) => node.revisionId === fixture.merged).parentRevisionIds,
+  [fixture.local, fixture.current]);
 });
 
 test("a target race after merge revalidation preserves the newer replica", async (t) => {
@@ -2845,6 +2959,17 @@ test("a target race after merge revalidation preserves the newer replica", async
     fixture.documentId, fixture.journalKey);
   assert.equal(journal.state, "pending-publication");
   assert.equal(journal.text, "resolved text");
+  const exactCandidate = Buffer.from(journal.publication.candidate, "base64");
+  assert.equal(JSON.parse(exactCandidate.toString()).head, fixture.merged);
+  assert.deepEqual(await fixture.service.reconnectPendingPublication(), {
+    publicationState: "conflict", content: "resolved text" });
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  assert.equal(conflict.state, "conflict");
+  assert.deepEqual(Buffer.from(conflict.publication.candidate, "base64"),
+    exactCandidate);
+  assert.equal(fixture.service.active.baseRevision === fixture.merged, false);
+  assert.deepEqual(await fs.readFile(fixture.target), racedBytes);
 });
 
 test("validated client settings opt into cumulative regular provisional saves", async (t) => {
