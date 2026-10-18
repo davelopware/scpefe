@@ -639,17 +639,14 @@ export class DocumentService {
     const prepared = await this.#prepareSlotCandidate(
       active, current, kind, actorPassword, input);
     try {
-      await this.publications.publish({ documentId: active.documentId,
+      await this.candidates.publish(this.container, prepared, {
+        documentId: active.documentId,
         journalKey: active.journalKey, target: active.target, base: current,
-        candidate: prepared.bytes, text: active.opened.content ?? "",
+        text: active.opened.content ?? "",
         cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
         purpose, ...(reopenPassword ? { reopenPassword } : {}) });
-      this.#finishSaveCandidate(prepared.operationId, "verified");
+      this.containerBytes = this.container.bytes();
     } catch (error) {
-      if (this.pendingNativeCandidate !== null) {
-        this.#finishSaveCandidate(prepared.operationId,
-          error.publicationPrepared ? "ambiguous" : "definite-failure");
-      }
       if (!error.publicationPrepared || purpose === "invitation-claim") {
         throw error;
       }
