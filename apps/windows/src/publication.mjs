@@ -117,7 +117,8 @@ export class PublicationService {
     return { lexical, canonical, file: fileIdentity(stat) };
   }
 
-  async #assertDistinctPlaintextTarget(target, protectedTarget) {
+  /* Rejects lexical, resolved-path, and inode aliases of the encrypted target. */
+  async assertDistinctPlaintextTarget(target, protectedTarget) {
     const [candidate, protectedFile] = await Promise.all([
       this.#pathIdentity(target), this.#pathIdentity(protectedTarget),
     ]);
@@ -135,7 +136,7 @@ export class PublicationService {
       throw new TypeError(
         "plaintext publication requires valid destination, protected target, and bytes");
     }
-    await this.#assertDistinctPlaintextTarget(target, protectedTarget);
+    await this.assertDistinctPlaintextTarget(target, protectedTarget);
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-plaintext-txn-${randomBytes(16).toString("hex")}`);
     let handle;
@@ -145,7 +146,7 @@ export class PublicationService {
       await handle.sync();
       await handle.close();
       handle = null;
-      await this.#assertDistinctPlaintextTarget(target, protectedTarget);
+      await this.assertDistinctPlaintextTarget(target, protectedTarget);
       await this.fs.rename(transactionFile, target);
       return { completed: true };
     } catch (error) {

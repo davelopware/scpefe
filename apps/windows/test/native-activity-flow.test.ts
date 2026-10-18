@@ -520,6 +520,193 @@ test("plaintext export publishes its outcome and records a failed host action", 
     "published words");
 });
 
+test("plaintext export does not write bytes before its attempt is published", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let target = "";
+  const failingFs = { ...fs, async rename(from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    if (to === target) throw Object.assign(new Error("attempt unavailable"),
+      { code: "EIO" });
+    return fs.rename(from, to);
+  } };
+  const { directory, service, target: source, original } =
+    await fixture(t, failingFs);
+  target = source;
+  const exported = path.join(directory, "blocked.txt");
+  await assert.rejects(service.exportPlaintext(exported,
+    { content: "secret", lineEndings: "lf" }), /attempt unavailable/);
+  assert.equal((await fs.readFile(source)).equals(original), true);
+  await assert.rejects(fs.readFile(exported), (error: unknown) =>
+    (error as NodeJS.ErrnoException).code === "ENOENT");
+  const pending = await service.journals.read(service.active.documentId,
+    service.active.journalKey);
+  assert.equal(pending.publication.purpose, "activity-attempt");
+  assert.equal(pending.activity.actionState, "not-started");
+});
+
+test("failed plaintext host action publishes a failure outcome", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { directory, service, target } = await fixture(t);
+  const missing = path.join(directory, "missing", "export.txt");
+  assert.deepEqual(await service.exportPlaintext(missing,
+    { content: "secret", lineEndings: "lf" }), { exported: false });
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-failed");
+  assert.equal(await service.journals.read(service.active.documentId,
+    service.active.journalKey), null);
+});
+
+test("plaintext export verifies the published bytes before recording success", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let exported = "";
+  const alteredFs = { ...fs, async rename(from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    await fs.rename(from, to);
+    if (to === exported) await fs.writeFile(exported, "changed after replacement");
+  } };
+  const { directory, service, target } = await fixture(t, alteredFs);
+  exported = path.join(directory, "altered.txt");
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: "expected text", lineEndings: "lf" }), { exported: false });
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-failed");
+  assert.equal(await fs.readFile(exported, "utf8"), "changed after replacement");
+});
+
+test("unreadable plaintext result leaves confirmation pending", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let exported = "";
+  let failRead = true;
+  const unreadableFs = { ...fs, readFile: (async (
+    ...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === exported && failRead) {
+      failRead = false;
+      throw Object.assign(new Error("result unreadable"), { code: "EIO" });
+    }
+    return fs.readFile(...args);
+  }) as typeof fs.readFile };
+  const { directory, service, options, target } = await fixture(t, unreadableFs);
+  exported = path.join(directory, "unreadable.txt");
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: "expected text", lineEndings: "lf" }),
+  { exported: false, outcomePending: true });
+  assert.equal(service.active.opened.activityConfirmationRequired, true);
+  assert.equal(await fs.readFile(exported, "utf8"), "expected text");
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-attempted");
+  const pending = await service.journals.read(service.active.documentId,
+    service.active.journalKey);
+  assert.equal(pending.activity.actionState, "started");
+  const restarted = new DocumentService({ ...options, fs });
+  assert.equal((await restarted.openDocument(target, password)).activityConfirmationRequired,
+    true);
+  assert.equal((await restarted.resolvePendingActivityOutcome({ succeeded: true }))
+    .activityOutcomePending, undefined);
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-succeeded");
+});
+
+test("plaintext export rejects aliases of its encrypted target", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { directory, service, target } = await fixture(t);
+  const alias = path.join(directory, "alias.txt");
+  const original = await fs.readFile(target);
+  await fs.link(target, alias);
+  assert.deepEqual(await service.exportPlaintext(alias,
+    { content: "must stay private", lineEndings: "lf" }), { exported: false });
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-failed");
+  assert.equal((await fs.readFile(alias)).equals(original), true);
+});
+
+test("interrupted plaintext export requires verified confirmation and never repeats", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let exportReplacements = 0;
+  let exported = "";
+  const countedFs = { ...fs, async rename(from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    if (to === exported) exportReplacements += 1;
+    return fs.rename(from, to);
+  } };
+  const { directory, service, options, target } = await fixture(t, countedFs);
+  service.nativeLineEnding = "\r\n";
+  exported = path.join(directory, "interrupted.txt");
+  const expected = "first\r\nsecond";
+  const write = service.journals.write.bind(service.journals);
+  let failOnce = true;
+  service.journals.write = async (...args: Parameters<typeof write>) => {
+    if (failOnce && args[2]?.activity?.actionState === "known") {
+      failOnce = false;
+      throw Object.assign(new Error("outcome journal unavailable"), { code: "EIO" });
+    }
+    return write(...args);
+  };
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: "first\nsecond", lineEndings: "native" }),
+  { exported: true, outcomePending: true });
+  assert.equal(await fs.readFile(exported, "utf8"), expected);
+  assert.equal(exportReplacements, 1);
+  const restarted = new DocumentService({ ...options, fs: countedFs });
+  const opened = await restarted.openDocument(target, password);
+  assert.equal(opened.activityConfirmationRequired, true);
+  assert.equal(exportReplacements, 1);
+  await fs.writeFile(exported, "unrelated plaintext");
+  await assert.rejects(restarted.resolvePendingActivityOutcome({ succeeded: true }),
+    /External result differs/);
+  assert.equal((await restarted.journals.read(restarted.active.documentId,
+    restarted.active.journalKey)).activity.actionState, "started");
+  await fs.writeFile(exported, expected);
+  const resolved = await restarted.resolvePendingActivityOutcome({ succeeded: true });
+  assert.equal(resolved.activityOutcomePending, undefined);
+  assert.equal(exportReplacements, 1);
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-succeeded");
+  assert.equal(await restarted.journals.read(restarted.active.documentId,
+    restarted.active.journalKey), null);
+});
+
+test("restart clears an already published export outcome without losing unsaved work", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { directory, service, options, target } = await fixture(t);
+  const draft = "unsaved local draft";
+  await service.journals.write(service.active.documentId, service.active.journalKey, {
+    text: draft, baseRevision: service.active.baseRevision,
+    cursor: { start: draft.length, end: draft.length }, target,
+    state: "unsaved", updateTime: 42 });
+  const write = service.journals.write.bind(service.journals);
+  let failOnce = true;
+  service.journals.write = async (...args: Parameters<typeof write>) => {
+    if (failOnce && args[2]?.state === "unsaved"
+        && args[2]?.activity === undefined
+        && args[2]?.text === draft) {
+      failOnce = false;
+      throw Object.assign(new Error("journal cleanup unavailable"), { code: "EIO" });
+    }
+    return write(...args);
+  };
+  const exported = path.join(directory, "already-published.txt");
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: draft, lineEndings: "lf" }),
+  { exported: true, outcomePending: true });
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-succeeded");
+  const restarted = new DocumentService(options);
+  const opened = await restarted.openDocument(target, password);
+  assert.equal(opened.activityOutcomePending, undefined);
+  assert.equal(opened.recovery.content, draft);
+  const journal = await restarted.journals.read(restarted.active.documentId,
+    restarted.active.journalKey);
+  assert.equal(journal.activity, undefined);
+  assert.equal(journal.text, draft);
+});
+
 test("export activity preserves an unsaved work journal across restart", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {
