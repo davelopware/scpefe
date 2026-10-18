@@ -351,6 +351,61 @@ test("lost journal acknowledgement retains the exact native candidate", {
   await service.lock("document-close");
 });
 
+test("recovery-base cleanup failure retains a reconnectable native candidate", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-native-cleanup-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const profilePath = path.join(directory, "profile.json");
+  const target = path.join(directory, "document.scpefe");
+  const recoveryBase = path.join(directory, ".document.scpefe.scpefe-recovery-base");
+  const password = "owner passphrase with independent words";
+  await fs.writeFile(profilePath, JSON.stringify({ name: "Ada",
+    email: "ada@example.test", deviceName: "Ada PC" }));
+  let failCleanup = false;
+  const guardedFs = Object.create(fs);
+  guardedFs.unlink = async (file: string) => {
+    if (failCleanup && file === recoveryBase) {
+      const error = new Error("recovery-base cleanup failed") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return fs.unlink(file);
+  };
+  const service = new DocumentService({ native, fs: guardedFs, profilePath,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    publicationCapabilities: { sameFilesystemTransaction: true,
+      replacementGuarantee: "atomic-replace" } });
+  await service.createDocument(target, { ownerPassword: password,
+    content: "base", understandsIrrecoverable: true });
+  await service.openDocument(target, password);
+  await service.enterEditMode();
+  const base = await fs.readFile(target);
+  failCleanup = true;
+  await assert.rejects(service.saveDocument("saved candidate"),
+    (error: Error & { publicationPrepared?: boolean }) =>
+      error.message === "recovery-base cleanup failed"
+      && error.publicationPrepared === true);
+  const record = service.active.pendingRecord;
+  assert.ok(record?.publication, "the publication remains in the work journal");
+  assert.equal(service.active.pendingPublication, true);
+  const candidate = Buffer.from(record.publication.candidate, "base64");
+  assert.deepEqual(await fs.readFile(target), candidate);
+  assert.deepEqual(await fs.readFile(recoveryBase), base);
+  assert.deepEqual(service.container.bytes(), base);
+  assert.notEqual(service.pendingNativeCandidate, null);
+  failCleanup = false;
+  const resumed = await service.reconnectPendingPublication();
+  assert.equal(resumed.publicationState, "target-published");
+  assert.deepEqual(service.container.bytes(), candidate);
+  assert.equal(service.pendingNativeCandidate, null);
+  assert.equal(await service.journals.read(service.active.documentId,
+    service.active.journalKey), null);
+  await assert.rejects(fs.readFile(recoveryBase), { code: "ENOENT" });
+  await service.lock("document-close");
+});
+
 for (const targetAlreadyPublished of [false, true]) {
   test(`ambiguous manual save resumes exact candidate after restart (${targetAlreadyPublished ? "already published" : "base unchanged"})`, {
     skip: !native && "native addon path was not supplied",
