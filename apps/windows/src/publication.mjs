@@ -433,6 +433,12 @@ export class PublicationService {
     if (transaction && hash(transaction) === record.publication.candidateHash) {
       await this.fs.unlink(record.publication.transactionFile);
     }
+    // Keep the publication record until every fallible file cleanup finishes.
+    // A failed recovery-base unlink can then be retried against the verified target.
+    const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
+    if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
+      await this.fs.unlink(record.publication.baseFile);
+    }
     if (record.activity) {
       const { publication: _publication, ...pendingActivity } = record;
       await this.journals.write(documentId, journalKey, pendingActivity);
@@ -444,10 +450,6 @@ export class PublicationService {
       });
     } else {
       await this.journals.clear(documentId);
-    }
-    const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
-    if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
-      await this.fs.unlink(record.publication.baseFile);
     }
   }
 }
