@@ -3026,6 +3026,104 @@ async function regularPublicationFixture(directory) {
   return { service, options, target, initial, revisionId };
 }
 
+test("regular save journals the submitted cursor while publication overlaps a newer edit",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      "scpefe-regular-newer-edit-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    const publish = fixture.service.publications.publish.bind(
+      fixture.service.publications);
+    let submittedCursor;
+    fixture.service.publications.publish = async (request) => {
+      submittedCursor = request.cursor;
+      return publish(request);
+    };
+    const prepareSave = fixture.service.container.prepareSave.bind(
+      fixture.service.container);
+    fixture.service.container.prepareSave = (...args) => {
+      const prepared = prepareSave(...args);
+      fixture.service.updateWorkingCopy({ content: "newer edit",
+        cursor: { start: 10, end: 10 } });
+      return prepared;
+    };
+
+    assert.deepEqual(await fixture.service.regularSaveDocument(), {
+      published: true, provisional: true, content: "local unsaved" });
+    assert.deepEqual(submittedCursor, { start: 13, end: 13 });
+    assert.equal(fixture.service.active.working.content, "newer edit");
+    const journal = await fixture.service.journals.read(
+      fixture.service.active.documentId, fixture.service.active.journalKey);
+    assert.equal(journal.text, "newer edit");
+    assert.deepEqual(journal.cursor, { start: 10, end: 10 });
+    assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).sealed, false);
+  });
+
+for (const operation of ["regular save", "provisional discard"]) {
+  test(`${operation} retains its exact candidate when a journaled publish reports failure`,
+    async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+        "scpefe-regular-journal-interruption-"));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const fixture = await regularPublicationFixture(directory);
+      if (operation === "provisional discard") {
+        await fixture.service.regularSaveDocument();
+      }
+      fixture.service.publications.publish = async (request) => {
+        await fixture.service.publications.prepare(request);
+        throw new Error("journal persisted before publication stopped");
+      };
+
+      await assert.rejects(operation === "regular save"
+        ? fixture.service.regularSaveDocument()
+        : fixture.service.discardWorkingCopy(),
+      (error) => error.publicationPrepared === true);
+      const active = fixture.service.active;
+      const pending = await fixture.service.journals.read(
+        active.documentId, active.journalKey);
+      assert.equal(active.pendingPublication, true);
+      assert.equal(fixture.service.pendingNativeCandidate !== null, true);
+      assert.equal(pending.publication.purpose,
+        operation === "regular save" ? "regular-save" : "provisional-discard");
+      const exactCandidate = Buffer.from(pending.publication.candidate, "base64");
+      assert.equal(JSON.parse(exactCandidate.toString()).sealed,
+        operation === "provisional discard");
+
+      const restarted = new DocumentService(fixture.options);
+      const opened = await restarted.openDocument(fixture.target, "password words");
+      assert.deepEqual(await fs.readFile(fixture.target), exactCandidate);
+      assert.equal(opened.provisional, operation === "regular save" ? true : undefined);
+      assert.equal(opened.content,
+        operation === "regular save" ? "local unsaved" : "base");
+    });
+}
+
+for (const operation of ["regular save", "provisional discard"]) {
+  test(`${operation} releases a candidate when publication fails before journaling`,
+    async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+        "scpefe-regular-definite-failure-"));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const fixture = await regularPublicationFixture(directory);
+      if (operation === "provisional discard") {
+        await fixture.service.regularSaveDocument();
+      }
+      fixture.service.publications.publish = async () => {
+        throw new Error("publication rejected before journal preparation");
+      };
+
+      await assert.rejects(operation === "regular save"
+        ? fixture.service.regularSaveDocument()
+        : fixture.service.discardWorkingCopy(),
+      (error) => error.publicationPrepared !== true);
+      assert.equal(fixture.service.pendingNativeCandidate, null);
+      assert.equal(fixture.service.active.pendingPublication, false);
+      const journal = await fixture.service.journals.read(
+        fixture.service.active.documentId, fixture.service.active.journalKey);
+      assert.equal(journal?.publication, undefined);
+    });
+}
+
 test("real service staged Open faults and lock fences preserve original journal and restart",
   async (t) => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-real-open-stage-"));
@@ -3274,6 +3372,57 @@ test("regular-save divergence remains restart-safe and accessible", async (t) =>
   assert.equal(opened.content, "local unsaved");
   assert.equal(restarted.active.pendingRecord.state, "conflict");
 });
+
+test("regular-save conflict can enter resolution in the same session", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+    "scpefe-regular-same-session-conflict-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await regularPublicationFixture(directory);
+  const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+    parent: fixture.revisionId(fixture.initial) }));
+  await fs.writeFile(fixture.target, remote);
+
+  assert.deepEqual(await fixture.service.regularSaveDocument(), {
+    published: false, conflict: true, content: "local unsaved" });
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  fixture.options.native.updateLease(remote, "password words", {
+    ...fixture.options.native.currentLease(), active: false,
+    sessionId: "0".repeat(32), heartbeatCounter: 0 });
+  const draft = await fixture.service.beginDivergenceResolution();
+  assert.equal(draft.ancestorRevision, fixture.revisionId(fixture.initial));
+  assert.deepEqual(await fixture.service.saveDivergenceResolution("resolved"), {
+    saved: true, content: "resolved", publicationState: "target-published" });
+});
+
+test("regular-save conflict journal interruption keeps the exact pending candidate",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      "scpefe-regular-conflict-journal-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+      parent: fixture.revisionId(fixture.initial) }));
+    await fs.writeFile(fixture.target, remote);
+    fixture.service.publications.markDiverged = async () => {
+      throw new Error("conflict journal update interrupted");
+    };
+
+    await assert.rejects(fixture.service.regularSaveDocument(),
+      /conflict journal update interrupted/);
+    const active = fixture.service.active;
+    assert.equal(active.pendingPublication, true);
+    assert.equal(fixture.service.pendingNativeCandidate !== null, true);
+    const pending = await fixture.service.journals.read(
+      active.documentId, active.journalKey);
+    assert.equal(pending.publication.purpose, "regular-save");
+    assert.equal(JSON.parse(Buffer.from(pending.publication.candidate,
+      "base64").toString()).content, "local unsaved");
+
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target, "password words");
+    assert.equal(opened.publicationState, "conflict");
+    assert.equal(opened.content, "local unsaved");
+  });
 
 test("second regular save resolves divergence from the sealed ancestor", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(),

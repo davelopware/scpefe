@@ -1784,7 +1784,6 @@ export class DocumentService {
     await this.#flushActive(active);
     let published;
     let reopened;
-    let candidate;
     try {
       await this.#queuePublication(async () => {
         const current = await this.fs.readFile(active.target);
@@ -1804,17 +1803,14 @@ export class DocumentService {
           }
           const prepared = this.#prepareSaveCandidate(
             active, current, "regular", profile, canonical);
-          candidate = prepared.bytes;
-          if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
-            throw new Error("Native bridge did not produce a provisional container");
-          }
-          await this.publications.publish({ documentId: active.documentId,
+          await this.candidates.publish(this.container, prepared, {
+            documentId: active.documentId,
             journalKey: active.journalKey, target: active.target,
-            base: current, candidate, text: canonical,
-            cursor: { ...active.working.cursor }, baseRevision: active.baseRevision,
+            base: current, text: canonical,
+            cursor: { ...source.cursor }, baseRevision: active.baseRevision,
             purpose: "regular-save", state: "unsaved",
             ...(mergeAncestor ? { mergeAncestor } : {}) });
-          this.#finishSaveCandidate(prepared.operationId, "verified");
+          this.containerBytes = this.container.bytes();
           published = await this.fs.readFile(active.target);
           reopened = this.#validateNativeOpened(
             this.native.inspectDocument(published, active.password));
@@ -1832,7 +1828,7 @@ export class DocumentService {
       }
       if (error?.code === "REGULAR_SAVE_DIVERGED") {
         return this.#preserveRegularSaveConflict(
-          active, profile, canonical, mergeAncestor);
+          active, profile, canonical, source.cursor, mergeAncestor);
       }
       if (error.publicationPrepared) {
         active.pendingRecord = await this.journals.read(
@@ -3280,12 +3276,13 @@ export class DocumentService {
             if (!candidateOpened.manuallySealed) {
               throw new Error("Discard did not restore a manually sealed revision");
             }
-            await this.publications.publish({ documentId: active.documentId,
+            await this.candidates.publish(this.container, prepared, {
+              documentId: active.documentId,
               journalKey: active.journalKey, target: active.target,
-              base: current, candidate, text: candidateOpened.opened.content,
+              base: current, text: candidateOpened.opened.content,
               cursor: { start: 0, end: 0 }, baseRevision: active.baseRevision,
               purpose: "provisional-discard" });
-            this.#finishSaveCandidate(prepared.operationId, "verified");
+            this.containerBytes = this.container.bytes();
           } finally {
             candidateOpened.journalKey.fill(0);
           }
@@ -3352,28 +3349,28 @@ export class DocumentService {
     return mergeAncestor;
   }
 
-  async #preserveRegularSaveConflict(active, profile, canonical, mergeAncestor) {
+  async #preserveRegularSaveConflict(active, profile, canonical, cursor,
+    mergeAncestor) {
     const prepared = this.#prepareSaveCandidate(active, active.baseContainer,
       "regular", profile, canonical);
-    const candidate = Buffer.from(prepared.bytes);
-    this.#finishSaveCandidate(prepared.operationId, "definite-failure");
-    if (!Buffer.isBuffer(candidate) || candidate.length === 0) {
-      throw new Error("Native bridge did not produce a provisional container");
-    }
-    let record = await this.publications.prepare({
+    let record = await this.candidates.journalUnavailable(this.container, prepared, {
       documentId: active.documentId, journalKey: active.journalKey,
-      target: active.target, base: active.baseContainer, candidate,
-      text: canonical, cursor: { ...active.working.cursor },
+      target: active.target, base: active.baseContainer,
+      text: canonical, cursor: { ...cursor },
       baseRevision: active.baseRevision, purpose: "regular-save",
       ...(mergeAncestor ? { mergeAncestor } : {}), state: "unsaved",
     });
-    record = await this.publications.markDiverged(
-      active.documentId, active.journalKey, record);
     active.pendingPublication = true;
     active.pendingRecord = record;
     active.unresolvedJournal = true;
     active.opened = validateOpenedDocument({ ...active.opened,
-      content: canonical, publicationState: "conflict" });
+      content: canonical, publicationState: "pending-publication" });
+    record = await this.publications.markDiverged(
+      active.documentId, active.journalKey, record);
+    this.#resolveSaveCandidate(false);
+    active.pendingRecord = record;
+    active.opened = validateOpenedDocument({ ...active.opened,
+      publicationState: "conflict" });
     this.onJournalWarning("REGULAR_SAVE_CONFLICT");
     return Object.freeze({ published: false, conflict: true, content: canonical });
   }
