@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>SCPEFE C++ library architecture</title>
+  <style>
+    :root { --ink:#18283a; --muted:#53677a; --line:#d7e1e8; --paper:#f5f8fa; --white:#fff; --navy:#10283b; --teal:#0b786e; --blue:#315da5; --amber:#a85e10; --lavender:#66528e; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    a { color:#155b88; text-underline-offset:3px; }
+    a:hover { color:#0a786d; }
+    code { font:0.9em/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
+    .shell { max-width:1480px; margin:auto; display:grid; grid-template-columns:240px minmax(0,1fr); }
+    aside { position:sticky; top:0; height:100vh; padding:30px 20px; border-right:1px solid var(--line); background:#edf3f5; overflow:auto; }
+    aside .eyebrow { color:var(--teal); font-size:0.7rem; font-weight:800; letter-spacing:0.14em; text-transform:uppercase; }
+    aside strong { display:block; margin:9px 0 25px; font-size:1.07rem; line-height:1.25; }
+    aside nav a { display:block; padding:8px 10px; border-radius:8px; color:#344c5d; text-decoration:none; font-size:0.91rem; }
+    aside nav a:hover, aside nav a:focus { background:#dcebe9; color:#075d55; }
+    aside .small { margin-top:30px; font-size:0.77rem; color:var(--muted); }
+    main { min-width:0; padding:0 5vw 72px; }
+    header { margin:0 -5vw 42px; padding:61px 5vw 54px; color:white; background:linear-gradient(125deg,#10283b 0%,#153d52 60%,#0e625e 100%); }
+    header .kicker { color:#8de3d0; font-size:0.74rem; font-weight:800; letter-spacing:0.16em; text-transform:uppercase; }
+    h1 { margin:13px 0 13px; max-width:850px; font-size:clamp(2.3rem,4.5vw,4.6rem); line-height:1.06; letter-spacing:-0.045em; }
+    header p { max-width:800px; margin:0; color:#d4e8e8; font-size:1.13rem; }
+    .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:26px; }
+    .meta span { padding:5px 10px; border:1px solid #70aba8; border-radius:100px; color:#d7f3eb; font-size:0.78rem; }
+    section { margin:0 0 48px; scroll-margin-top:28px; }
+    h2 { margin:0 0 10px; font-size:clamp(1.45rem,2.5vw,2.25rem); line-height:1.18; letter-spacing:-0.03em; }
+    h3 { margin:0 0 8px; font-size:1.1rem; }
+    .lead { max-width:900px; margin:0 0 23px; color:var(--muted); font-size:1.04rem; }
+    .figure { margin:22px 0; padding:20px; overflow:auto; background:var(--white); border:1px solid var(--line); border-radius:16px; box-shadow:0 7px 24px #19364a0b; }
+    .figure svg { display:block; width:100%; height:auto; min-width:730px; }
+    figcaption { margin-top:16px; padding-top:13px; border-top:1px solid var(--line); color:var(--muted); font-size:0.88rem; }
+    .callouts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:13px; }
+    .callout { padding:17px; border:1px solid var(--line); border-radius:12px; background:var(--white); }
+    .callout strong { display:block; margin-bottom:5px; color:var(--teal); }
+    .callout p { margin:0; color:var(--muted); font-size:0.89rem; }
+    .legend { display:flex; flex-wrap:wrap; gap:16px; margin:0 0 16px; color:var(--muted); font-size:0.82rem; }
+    .legend span { display:inline-flex; align-items:center; gap:6px; }
+    .swatch { width:12px; height:12px; border-radius:3px; }
+    .story { margin:24px 0; padding:22px; background:white; border:1px solid var(--line); border-radius:16px; box-shadow:0 7px 24px #19364a0b; }
+    .story > p { margin:0 0 18px; color:var(--muted); }
+    .flow { display:flex; gap:0; margin:0; padding:2px 0 8px; list-style:none; overflow-x:auto; }
+    .flow li { position:relative; flex:1 0 165px; min-width:0; margin-right:24px; padding:15px 14px 14px; border:1px solid var(--line); border-top:5px solid var(--blue); border-radius:10px; background:#f8fafb; }
+    .flow li:last-child { margin-right:0; }
+    .flow li:not(:last-child)::after { content:'→'; position:absolute; right:-23px; top:43%; color:#557789; font-size:1.55rem; line-height:1; }
+    .flow li.host { border-top-color:var(--amber); background:#fffaf3; }
+    .flow li.core { border-top-color:var(--teal); background:#f3faf8; }
+    .flow li.format { border-top-color:var(--lavender); background:#f8f6fc; }
+    .flow .lane { display:block; margin-bottom:7px; color:var(--muted); font-size:0.67rem; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; }
+    .flow strong { display:block; margin-bottom:6px; line-height:1.25; font-size:0.95rem; }
+    .flow small { display:block; color:#44596b; line-height:1.4; font-size:0.8rem; }
+    .flow code { color:#174e68; }
+    .story-note { margin-top:13px; padding:10px 13px; border-left:3px solid var(--teal); background:#f1f8f7; color:#355361; font-size:0.88rem; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px; }
+    .card { padding:17px; border:1px solid var(--line); border-radius:12px; background:white; }
+    .card p { margin:0; color:var(--muted); font-size:0.9rem; }
+    .card .tag { display:inline-block; margin-bottom:8px; padding:3px 8px; border-radius:5px; background:#e8f4f2; color:#0b6a61; font:700 0.72rem ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:12px; background:white; }
+    table { width:100%; border-collapse:collapse; min-width:650px; }
+    th,td { padding:12px 15px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    tr:last-child td { border-bottom:0; }
+    th { color:#486072; background:#edf3f5; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em; }
+    td { font-size:0.9rem; }
+    .source-list { columns:2; padding-left:21px; }
+    .source-list li { break-inside:avoid; margin-bottom:8px; }
+    .note { padding:16px 18px; border-left:4px solid var(--amber); background:#fff8ed; border-radius:0 9px 9px 0; }
+    footer { padding:22px 0; border-top:1px solid var(--line); color:var(--muted); font-size:0.84rem; }
+    svg text { font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    svg .t { fill:#1c3545; font-size:18px; font-weight:750; }
+    svg .s { fill:#53677a; font-size:12px; }
+    svg .edge { stroke:#638190; stroke-width:2; fill:none; }
+    #boundary-diagram .edge { marker-end:url(#arrow-boundary); }
+    #class-diagram .edge { marker-end:url(#arrow-classes); }
+    svg .edge-label { fill:#4a6370; font-size:12px; font-weight:650; }
+    @media (max-width:900px) { .shell { display:block; } aside { position:static; height:auto; border-right:0; border-bottom:1px solid var(--line); padding:15px 5vw; } aside strong, aside .small { display:none; } aside nav { display:flex; gap:2px; overflow:auto; white-space:nowrap; } aside nav a { flex:none; } main { padding:0 5vw 50px; } header { padding-top:48px; } .callouts,.grid { grid-template-columns:1fr; } }
+    @media print { body { background:white; } .shell { display:block; } aside { display:none; } main { padding:0; } header { margin:0 0 30px; padding:30px; print-color-adjust:exact; } section,.story,.figure { break-inside:avoid; } .figure,.story,.card { box-shadow:none; } .flow { overflow:visible; } .flow li { flex-basis:0; } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside aria-label="Document navigation">
+    <div class="eyebrow">Architecture map</div>
+    <strong>SCPEFE<br>C++ library</strong>
+    <nav>
+      <a href="#overview">01 · System boundary</a>
+      <a href="#classes">02 · Class relationships</a>
+      <a href="#stories">03 · User story flows</a>
+      <a href="#state">04 · State &amp; ownership</a>
+      <a href="#build">05 · Build surfaces</a>
+      <a href="#sources">06 · Source map</a>
+    </nav>
+    <p class="small">A code-oriented guide to the current revised-v3 implementation. All diagrams render without network access.</p>
+  </aside>
+  <main>
+    <header>
+      <div class="kicker">Engineering reference · libscpefe</div>
+      <h1>C++ library architecture</h1>
+      <p>How an encrypted document moves through the C ABI, the stateful container, its services, and the revision format—and where the desktop host takes responsibility.</p>
+      <div class="meta"><span>Native shared library</span><span>Versioned C ABI</span><span>Revised-v3 container</span><span>Portable history subset</span></div>
+    </header>
+
+    <section id="overview">
+      <h2>01 · System boundary</h2>
+      <p class="lead">The host handles files, journals, backups, UI, and publication. The library validates and authenticates bytes, manages one in-memory document session per context, and prepares exact encrypted candidates. The host must report the publication outcome before the library adopts a candidate.</p>
+      <figure class="figure">
+        <svg id="boundary-diagram" viewBox="0 0 1120 330" role="img" aria-labelledby="boundary-title boundary-desc">
+          <title id="boundary-title">Native and portable library boundaries</title>
+          <desc id="boundary-desc">The Windows host and Node addon call the versioned C ABI. Its stateful native path owns Context, Container, services, and revised-v3 cryptography. A separate portable ABI exposes revision and history format code to native and WebAssembly callers.</desc>
+          <defs><marker id="arrow-boundary" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#638190"/></marker></defs>
+          <rect x="10" y="30" width="190" height="240" rx="14" fill="#fff5e8" stroke="#e8c895"/>
+          <text x="30" y="70" class="t">Windows host</text><text x="30" y="94" class="s">Electron + Node addon</text>
+          <text x="30" y="142" class="s">Target file &amp; journal</text><text x="30" y="164" class="s">Atomic publication</text><text x="30" y="186" class="s">Backup / export</text><text x="30" y="208" class="s">User decisions</text>
+          <rect x="258" y="30" width="192" height="102" rx="14" fill="#eef5fc" stroke="#a5bedb"/>
+          <text x="278" y="68" class="t">Stateful C ABI</text><text x="278" y="92" class="s">context_abi.cpp</text>
+          <rect x="508" y="30" width="195" height="102" rx="14" fill="#eaf8f5" stroke="#98d0c7"/>
+          <text x="528" y="68" class="t">Context</text><text x="528" y="92" class="s">One active Container</text>
+          <rect x="761" y="30" width="343" height="102" rx="14" fill="#eaf8f5" stroke="#98d0c7"/>
+          <text x="781" y="68" class="t">Container + services</text><text x="781" y="92" class="s">State, candidates, v3 authentication</text>
+          <path d="M200 81 H252" class="edge"/><path d="M450 81 H502" class="edge"/><path d="M703 81 H755" class="edge"/>
+          <rect x="258" y="178" width="192" height="92" rx="14" fill="#f3eff9" stroke="#c7b9dc"/>
+          <text x="278" y="214" class="t">Portable C ABI</text><text x="278" y="238" class="s">history / revision ABI</text>
+          <rect x="508" y="178" width="320" height="92" rx="14" fill="#f3eff9" stroke="#c7b9dc"/>
+          <text x="528" y="214" class="t">Portable format code</text><text x="528" y="238" class="s">RevisionGraph, CBOR, SnapshotRevision</text>
+          <path d="M450 224 H502" class="edge"/>
+          <text x="841" y="214" class="s">Native + Emscripten</text><text x="841" y="238" class="s">No container I/O in WASM</text>
+          <path d="M200 224 H252" class="edge"/><text x="31" y="296" class="s">Native callers use both ABI families; format-only callers use the lower path.</text>
+        </svg>
+        <figcaption>Boundary diagram. The lower portable path does not decrypt containers, manage leases, or publish files. See <a href="../CMakeLists.txt">CMake source lists</a> and <a href="../include/scpefe/scpefe.h">the public API</a>.</figcaption>
+      </figure>
+      <div class="callouts">
+        <div class="callout"><strong>ABI boundary</strong><p>Opaque handles and sized byte spans keep internal C++ classes private. ABI functions translate internal failures to stable status codes.</p></div>
+        <div class="callout"><strong>Publication boundary</strong><p>A candidate is an exact byte sequence held by <code>Container</code>. The host copies, journals, publishes, and verifies it.</p></div>
+        <div class="callout"><strong>Format boundary</strong><p>The revised-v3 envelope protects the document key and payload. <code>RevisionGraph</code> validates decrypted history and content.</p></div>
+      </div>
+    </section>
+
+    <section id="classes">
+      <h2>02 · Key classes and interactions</h2>
+      <p class="lead">Arrows name the actual ownership or call relationship. <code>Context</code> owns services and the active container; the container borrows those services, owns the installed data, and asks the state manager to calculate transitions.</p>
+      <div class="legend"><span><i class="swatch" style="background:#eaf8f5"></i> Stateful core</span><span><i class="swatch" style="background:#eef5fc"></i> Service boundary</span><span><i class="swatch" style="background:#f3eff9"></i> Format / authenticated data</span></div>
+      <figure class="figure">
+        <svg id="class-diagram" viewBox="0 0 1160 635" role="img" aria-labelledby="class-title class-desc">
+          <title id="class-title">Ownership and collaboration of C++ library classes</title>
+          <desc id="class-desc">Context owns ServiceRegistry and one Container. ServiceRegistry owns password, encryption, persistence, history, and state manager services. Container borrows services, owns committed bytes, unlocked data, and one candidate, and calls MergeSave. Persistence delegates to RevisedV3Container, which decodes RevisionGraph. MergeSave also uses RevisedV3Container and RevisionGraph.</desc>
+          <defs><marker id="arrow-classes" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#638190"/></marker></defs>
+          <rect x="25" y="185" width="205" height="115" rx="12" fill="#eaf8f5" stroke="#98d0c7"/><text x="42" y="220" class="t">Context</text><text x="42" y="246" class="s">HostServices clock adapter</text><text x="42" y="266" class="s">At most one active Container</text>
+          <rect x="310" y="26" width="215" height="106" rx="12" fill="#eaf8f5" stroke="#98d0c7"/><text x="328" y="62" class="t">ServiceRegistry</text><text x="328" y="87" class="s">Per-context service owner</text><text x="328" y="107" class="s">Built by ServiceFactory</text>
+          <rect x="310" y="225" width="215" height="145" rx="12" fill="#eaf8f5" stroke="#98d0c7"/><text x="328" y="261" class="t">Container</text><text x="328" y="286" class="s">Committed bytes + state</text><text x="328" y="306" class="s">Submitted clear content</text><text x="328" y="326" class="s">One unresolved candidate</text><text x="328" y="346" class="s">Observer notifications</text>
+          <rect x="605" y="20" width="220" height="165" rx="12" fill="#eef5fc" stroke="#a5bedb"/><text x="623" y="55" class="t">Document services</text><text x="623" y="83" class="s">PasswordService</text><text x="623" y="103" class="s">EncryptionService</text><text x="623" y="123" class="s">PersistenceService</text><text x="623" y="143" class="s">HistoryService</text>
+          <rect x="605" y="225" width="220" height="90" rx="12" fill="#eef5fc" stroke="#a5bedb"/><text x="623" y="260" class="t">State manager</text><text x="623" y="284" class="s">Pure transition + effects</text>
+          <rect x="605" y="385" width="220" height="108" rx="12" fill="#f3eff9" stroke="#c7b9dc"/><text x="623" y="421" class="t">Unlocked data</text><text x="623" y="446" class="s">Slot, lease, graph, keys</text><text x="623" y="466" class="s">Owned by Container</text>
+          <rect x="605" y="530" width="220" height="80" rx="12" fill="#f3eff9" stroke="#c7b9dc"/><text x="623" y="563" class="t">Candidate</text><text x="623" y="585" class="s">Exact bytes + adopted data</text>
+          <rect x="905" y="20" width="235" height="95" rx="12" fill="#f3eff9" stroke="#c7b9dc"/><text x="923" y="55" class="t">RevisedV3Container</text><text x="923" y="79" class="s">Frame, authenticate, encrypt</text>
+          <rect x="905" y="225" width="235" height="90" rx="12" fill="#f3eff9" stroke="#c7b9dc"/><text x="923" y="260" class="t">MergeSave</text><text x="923" y="284" class="s">Authenticate two replicas</text>
+          <rect x="905" y="385" width="235" height="108" rx="12" fill="#f3eff9" stroke="#c7b9dc"/><text x="923" y="421" class="t">RevisionGraph</text><text x="923" y="446" class="s">Validate, save, merge,</text><text x="923" y="466" class="s">reconstruct, compact</text>
+          <path d="M230 218 C258 218 270 79 304 79" class="edge"/><text x="245" y="125" class="edge-label">owns</text>
+          <path d="M230 265 H304" class="edge"/><text x="244" y="252" class="edge-label">owns</text>
+          <path d="M525 78 H599" class="edge"/><text x="537" y="66" class="edge-label">owns</text>
+          <path d="M525 107 C570 107 565 270 599 270" class="edge"/>
+          <path d="M525 240 C562 240 565 163 599 163" class="edge"/><text x="540" y="202" class="edge-label">borrows</text>
+          <path d="M525 270 H599" class="edge"/><text x="539" y="258" class="edge-label">calls</text>
+          <path d="M525 336 C565 336 560 440 599 440" class="edge"/><text x="544" y="405" class="edge-label">owns</text>
+          <path d="M418 370 V570 H599" class="edge"/><text x="435" y="556" class="edge-label">owns</text>
+          <path d="M825 105 H899" class="edge"/><text x="837" y="93" class="edge-label">delegates</text>
+          <path d="M525 347 H860 V270 H899" class="edge"/><text x="793" y="337" class="edge-label">merge</text>
+          <path d="M825 440 H899" class="edge"/><text x="837" y="428" class="edge-label">contains</text>
+          <path d="M905 94 H866 V410 H899" class="edge"/><text x="837" y="370" class="edge-label">decodes</text>
+          <path d="M1022 315 V379" class="edge"/><text x="1035" y="353" class="edge-label">builds</text>
+        </svg>
+        <figcaption>Class relationship diagram. “Owns” means lifetime ownership; “borrows” means references supplied at construction. <code>PasswordSlots</code> is a focused helper for slot-change proposals, and <code>SnapshotRevision</code> serves the separate portable v1 record API.</figcaption>
+      </figure>
+      <div class="grid">
+        <div class="card"><span class="tag">src/core</span><h3>Composition and policy</h3><p><code>ServiceFactory</code> builds the production registry. Each service has a virtual boundary for context-level substitution. <code>PersistenceService</code> delegates v3 envelope operations; <code>HistoryService</code> chooses compaction cutoffs.</p></div>
+        <div class="card"><span class="tag">src/container</span><h3>Session and encryption</h3><p><code>Container</code> coordinates operations, while <code>ContainerStateManagerService</code> computes valid transitions and host effects. <code>RevisedV3Container</code> handles the encrypted envelope and wrapper table.</p></div>
+        <div class="card"><span class="tag">src/format</span><h3>Authenticated history</h3><p><code>RevisionGraph</code> validates deterministic CBOR, immutable IDs, links, hashes, and reconstructable content. It can produce replacement graph bytes for saves, merges, events, and compaction.</p></div>
+        <div class="card"><span class="tag">src/document</span><h3>Divergent replicas</h3><p><code>MergeSave</code> authenticates local and target containers, checks shared identity and rights, asks <code>RevisionGraph</code> to merge, then encrypts the result using target wrappers.</p></div>
+      </div>
+    </section>
+
+    <section id="stories">
+      <h2>03 · Data flows for key user stories</h2>
+      <p class="lead">Each strip follows the data from left to right. Ochre means the host or caller, green means the stateful core, blue means the ABI, and purple means encrypted-format or history code.</p>
+
+      <article class="story" id="open-flow">
+        <h3>Open and read an existing document</h3>
+        <p>The first stage checks public framing only. Clear content becomes available after password authentication and complete graph validation.</p>
+        <ol class="flow">
+          <li class="host"><span class="lane">Host</span><strong>Read target bytes</strong><small>Pass an explicit byte span and length.</small></li>
+          <li><span class="lane">C ABI</span><strong><code>container_open</code></strong><small>Creates the active handle through <code>Context</code>.</small></li>
+          <li class="core"><span class="lane">Container</span><strong>Validate framing</strong><small><code>PersistenceService</code> checks the v3 envelope; state becomes locked.</small></li>
+          <li class="format"><span class="lane">V3 + graph</span><strong>Unlock and validate</strong><small>Password slot, payload AEAD, CBOR, IDs, links, and bodies.</small></li>
+          <li class="core"><span class="lane">Container</span><strong>Expose permitted data</strong><small><code>container_read</code> returns an owned snapshot; history is copied into a separate graph handle.</small></li>
+        </ol>
+        <div class="story-note">An eligible editor may then attempt the advisory editing lease. Until its lease is confirmed, the session stays read-only. A temporary invitation must be claimed before clear reads.</div>
+      </article>
+
+      <article class="story" id="save-flow">
+        <h3>Manual save and verified publication</h3>
+        <p>Candidate preparation changes no committed image. The host owns the durable transaction and reports its exact outcome.</p>
+        <ol class="flow">
+          <li class="host"><span class="lane">Host</span><strong>Submit working text</strong><small>Confirm edit lease and send canonical content with <code>submit_content</code>.</small></li>
+          <li class="core"><span class="lane">Container + graph</span><strong>Prepare save</strong><small>Check rights/state; <code>save_content</code> creates a sealed revision.</small></li>
+          <li class="format"><span class="lane">V3 envelope</span><strong>Encrypt candidate</strong><small>Fresh nonce; reauthenticate proposed bytes; retain operation ID and source head.</small></li>
+          <li class="host"><span class="lane">Host</span><strong>Journal &amp; publish</strong><small>Copy exact candidate, reread target, verify rights, then publish and verify.</small></li>
+          <li class="core"><span class="lane">Container</span><strong>Acknowledge result</strong><small>Verified success adopts bytes and data; definite failure discards; ambiguity retains candidate for reconciliation.</small></li>
+        </ol>
+        <div class="story-note">The same prepare → copy → host publication → acknowledgement pattern is used for slot, lease, activity, merge, and compaction candidates. <code>resolve_save</code> settles an ambiguous result after target reread.</div>
+      </article>
+
+      <article class="story" id="merge-flow">
+        <h3>Resolve divergent replicas</h3>
+        <p>The user supplies resolved text; the library proves that the two authenticated containers represent related versions of the same document.</p>
+        <ol class="flow">
+          <li class="host"><span class="lane">Host</span><strong>Observe conflict</strong><small>Collect current target bytes, local replica, passwords, and resolved text.</small></li>
+          <li class="core"><span class="lane">Container</span><strong>Assess or prepare</strong><small><code>assess_merge</code> checks without retaining state; <code>prepare_merge</code> holds a candidate.</small></li>
+          <li class="format"><span class="lane">MergeSave</span><strong>Authenticate both</strong><small>Check document ID, journal key, active slot, permissions, and graph lineage.</small></li>
+          <li class="format"><span class="lane">RevisionGraph</span><strong>Build resolved head</strong><small>Keep local content line; link the foreign head and preserve its metadata.</small></li>
+          <li class="host"><span class="lane">Host + core</span><strong>Publish &amp; acknowledge</strong><small>Encrypt with target wrappers, publish exact bytes, then adopt only on verified success.</small></li>
+        </ol>
+        <div class="story-note">The API distinguishes unrelated targets, rollback, unavailable merge base, revoked access, and denied target permissions so the host can ask for the right decision.</div>
+      </article>
+
+      <article class="story" id="history-flow">
+        <h3>Inspect an earlier revision</h3>
+        <p>The history view receives its own graph handle, so it does not depend on borrowed pointers into the active container.</p>
+        <ol class="flow">
+          <li class="host"><span class="lane">Host</span><strong>Request history</strong><small>Call <code>container_revision_graph</code> after unlock.</small></li>
+          <li><span class="lane">C ABI</span><strong>Copy graph</strong><small>Decode the authenticated payload into an independently owned handle.</small></li>
+          <li class="format"><span class="lane">RevisionGraph</span><strong>List and locate</strong><small>Page metadata; inspect heads and a selected revision ID.</small></li>
+          <li class="format"><span class="lane">RevisionGraph</span><strong>Reconstruct</strong><small>Replay an available canonical body or report unavailable pruned/foreign content.</small></li>
+          <li class="host"><span class="lane">Host</span><strong>Display &amp; destroy</strong><small>Use owned result views and release page, result, and graph handles.</small></li>
+        </ol>
+      </article>
+    </section>
+
+    <section id="state">
+      <h2>04 · State and ownership invariants</h2>
+      <p class="lead">The state manager returns a new snapshot and required host effects; it does not authenticate bytes or perform I/O. <code>Container</code> verifies the relevant facts, installs transitions, then notifies observers.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Concern</th><th>Owner</th><th>Invariant</th></tr></thead>
+        <tbody>
+          <tr><td>Active lifetime</td><td><code>Context</code></td><td>One active <code>Container</code>; close releases it before another lifecycle.</td></tr>
+          <tr><td>Access and editing</td><td><code>ContainerState</code> + manager</td><td>Closed/open, locked/unlocked, read-only/editing, lease, attention, and publication are separate axes.</td></tr>
+          <tr><td>Authenticated material</td><td><code>UnlockedContainerData</code></td><td>Owns document ID, slot identity, work-journal key, lease, and decoded graph. Its destructor clears fixed secrets and selected plaintext buffers, then releases the graph.</td></tr>
+          <tr><td>Pending publication</td><td><code>ContainerCandidate</code></td><td>At most one unresolved candidate; a matching operation ID is required to acknowledge or resolve it.</td></tr>
+          <tr><td>Durable storage</td><td>Host</td><td>The library returns encrypted bytes and effect hints; it does not write the target or local work journal.</td></tr>
+          <tr><td>History view</td><td>C ABI owned handles</td><td>Graph, page, result, snapshot, and slot views have explicit destroy functions and independent lifetimes.</td></tr>
+        </tbody>
+      </table></div>
+      <p class="note"><strong>Terminology:</strong> “lock” hides clear content on screen; the editing lease is advisory shared document state. A lease rewrite changes encrypted payload metadata without creating a revision. See the <a href="DOMAIN_MODEL.md">domain glossary</a>.</p>
+    </section>
+
+    <section id="build">
+      <h2>05 · Build surfaces</h2>
+      <div class="grid">
+        <div class="card"><span class="tag">Native</span><h3>Full shared library</h3><p>CMake builds <code>src/abi</code>, <code>core</code>, <code>container</code>, <code>document</code>, <code>format</code>, and <code>security</code>. It links libsodium. The optional Node-API addon in <code>apps/windows/native</code> adapts this C ABI for Electron.</p></div>
+        <div class="card"><span class="tag">Emscripten</span><h3>Portable format subset</h3><p>The WASM target compiles only revision/history ABI and format sources. It can validate and inspect already-decrypted format data, but has no password-container, lease, or publication path.</p></div>
+      </div>
+    </section>
+
+    <section id="sources">
+      <h2>06 · Source map</h2>
+      <p class="lead">Start here when following a diagram into code. The <a href="CPP_LIBRARY_ARCHITECTURE.md">Markdown guide</a> gives a shorter narrative; the <a href="SPECIFICATION.md">specification</a> and <a href="format/password-container-v3.md">v3 format</a> define behavior and bytes.</p>
+      <ul class="source-list">
+        <li><a href="../include/scpefe/scpefe.h">Public C ABI and status codes</a></li>
+        <li><a href="../src/abi/context_abi.cpp">Stateful ABI adapter</a></li>
+        <li><a href="../src/core/context.hpp">Context</a> and <a href="../src/core/service_registry.hpp">ServiceRegistry</a></li>
+        <li><a href="../src/container/container.hpp">Container</a> and <a href="../src/container/container_state.hpp">state manager</a></li>
+        <li><a href="../src/container/revised_v3_container.hpp">RevisedV3Container</a> and <a href="../src/container/password_slots.hpp">PasswordSlots</a></li>
+        <li><a href="../src/document/merge_save.hpp">MergeSave</a></li>
+        <li><a href="../src/format/revision_graph.hpp">RevisionGraph</a> and <a href="../src/format/snapshot_revision.hpp">SnapshotRevision</a></li>
+        <li><a href="../src/abi/history_abi.cpp">History ABI</a> and <a href="../src/abi/revision_abi.cpp">snapshot ABI</a></li>
+      </ul>
+    </section>
+    <footer>SCPEFE C++ architecture · Current implementation map, 14 October 2026 · This document is self-contained and printable.</footer>
+  </main>
+</div>
+</body>
+</html>
