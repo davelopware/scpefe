@@ -610,6 +610,70 @@ test("unreadable plaintext result leaves confirmation pending", {
     "export-succeeded");
 });
 
+test("replaced plaintext with interrupted rename needs verified confirmation", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let exported = "";
+  let replacements = 0;
+  const interruptedFs = { ...fs, async rename(from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    await fs.rename(from, to);
+    if (to === exported) {
+      replacements += 1;
+      throw Object.assign(new Error("rename acknowledgement interrupted"),
+        { code: "EIO" });
+    }
+  } };
+  const { directory, service, options, target } = await fixture(t, interruptedFs);
+  exported = path.join(directory, "interrupted-rename.txt");
+  const expected = "published plaintext";
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: expected, lineEndings: "lf" }),
+  { exported: false, outcomePending: true });
+  assert.equal(replacements, 1);
+  assert.equal(await fs.readFile(exported, "utf8"), expected);
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-attempted");
+  const pending = await service.journals.read(service.active.documentId,
+    service.active.journalKey);
+  assert.equal(pending.activity.actionState, "started");
+  assert.equal(service.active.opened.activityConfirmationRequired, true);
+  const restarted = new DocumentService({ ...options, fs: interruptedFs });
+  assert.equal((await restarted.openDocument(target, password)).activityConfirmationRequired,
+    true);
+  assert.equal(replacements, 1);
+  assert.equal((await restarted.resolvePendingActivityOutcome({ succeeded: true }))
+    .activityOutcomePending, undefined);
+  assert.equal(replacements, 1);
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-succeeded");
+  assert.equal(await restarted.journals.read(restarted.active.documentId,
+    restarted.active.journalKey), null);
+});
+
+test("plaintext rename rejected before replacement records a failed action", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  let exported = "";
+  const failingFs = { ...fs, async rename(from: Parameters<typeof fs.rename>[0],
+    to: Parameters<typeof fs.rename>[1]) {
+    if (to === exported) {
+      throw Object.assign(new Error("destination replacement rejected"), { code: "EIO" });
+    }
+    return fs.rename(from, to);
+  } };
+  const { directory, service, target } = await fixture(t, failingFs);
+  exported = path.join(directory, "rejected-rename.txt");
+  assert.deepEqual(await service.exportPlaintext(exported,
+    { content: "expected text", lineEndings: "lf" }), { exported: false });
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password).historyEventType,
+    "export-failed");
+  assert.equal(await service.journals.read(service.active.documentId,
+    service.active.journalKey), null);
+  await assert.rejects(fs.readFile(exported), (error: unknown) =>
+    (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
 test("plaintext export rejects aliases of its encrypted target", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {

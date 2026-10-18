@@ -140,6 +140,7 @@ export class PublicationService {
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-plaintext-txn-${randomBytes(16).toString("hex")}`);
     let handle;
+    let replacementAttempted = false;
     try {
       handle = await this.fs.open(transactionFile, "wx", 0o600);
       await handle.writeFile(content);
@@ -147,11 +148,24 @@ export class PublicationService {
       await handle.close();
       handle = null;
       await this.assertDistinctPlaintextTarget(target, protectedTarget);
+      replacementAttempted = true;
       await this.fs.rename(transactionFile, target);
       return { completed: true };
     } catch (error) {
+      let replacementMayHaveOccurred = false;
+      if (replacementAttempted) {
+        // An absent staging file after rename starts leaves replacement uncertain.
+        try { await this.fs.lstat(transactionFile); }
+        catch { replacementMayHaveOccurred = true; }
+      }
       if (handle) await handle.close().catch(() => {});
       await this.fs.unlink(transactionFile).catch(() => {});
+      if (replacementMayHaveOccurred) {
+        const uncertain = new Error("Plaintext replacement outcome requires confirmation",
+          { cause: error });
+        uncertain.plaintextReplacementMayHaveOccurred = true;
+        throw uncertain;
+      }
       throw error;
     }
   }

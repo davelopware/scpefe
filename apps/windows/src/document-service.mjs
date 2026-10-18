@@ -31,6 +31,12 @@ function targetUnavailable(error) {
   return UNAVAILABLE_CODES.has(error?.code);
 }
 
+function unknownPlaintextResult(cause) {
+  const error = new Error("Plaintext export result requires confirmation", { cause });
+  error.activityOutcomeUnknown = true;
+  return error;
+}
+
 function newerWorkingCopy(working, submittedVersion, content) {
   if (!working) return false;
   if (submittedVersion && working.journalScope) {
@@ -2050,15 +2056,18 @@ export class DocumentService {
     } catch (error) { destinationError = error; }
     const action = async () => {
       if (destinationError) throw destinationError;
-      await this.publications.publishPlaintext({
-        target, protectedTarget: this.active.target, content: plaintext });
-      let observed;
-      try { observed = await this.fs.readFile(target); }
-      catch (cause) {
-        const error = new Error("Plaintext export result requires confirmation", { cause });
-        error.activityOutcomeUnknown = true;
+      try {
+        await this.publications.publishPlaintext({
+          target, protectedTarget: this.active.target, content: plaintext });
+      } catch (error) {
+        if (error.plaintextReplacementMayHaveOccurred) {
+          throw unknownPlaintextResult(error);
+        }
         throw error;
       }
+      let observed;
+      try { observed = await this.fs.readFile(target); }
+      catch (cause) { throw unknownPlaintextResult(cause); }
       if (!observed.equals(plaintext)) {
         throw new Error("Plaintext export differs from expected bytes");
       }
