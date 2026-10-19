@@ -117,7 +117,8 @@ export class PublicationService {
     return { lexical, canonical, file: fileIdentity(stat) };
   }
 
-  async #assertDistinctPlaintextTarget(target, protectedTarget) {
+  /* Rejects lexical, resolved-path, and inode aliases of the encrypted target. */
+  async assertDistinctPlaintextTarget(target, protectedTarget) {
     const [candidate, protectedFile] = await Promise.all([
       this.#pathIdentity(target), this.#pathIdentity(protectedTarget),
     ]);
@@ -135,22 +136,36 @@ export class PublicationService {
       throw new TypeError(
         "plaintext publication requires valid destination, protected target, and bytes");
     }
-    await this.#assertDistinctPlaintextTarget(target, protectedTarget);
+    await this.assertDistinctPlaintextTarget(target, protectedTarget);
     const transactionFile = path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-plaintext-txn-${randomBytes(16).toString("hex")}`);
     let handle;
+    let replacementAttempted = false;
     try {
       handle = await this.fs.open(transactionFile, "wx", 0o600);
       await handle.writeFile(content);
       await handle.sync();
       await handle.close();
       handle = null;
-      await this.#assertDistinctPlaintextTarget(target, protectedTarget);
+      await this.assertDistinctPlaintextTarget(target, protectedTarget);
+      replacementAttempted = true;
       await this.fs.rename(transactionFile, target);
       return { completed: true };
     } catch (error) {
+      let replacementMayHaveOccurred = false;
+      if (replacementAttempted) {
+        // An absent staging file after rename starts leaves replacement uncertain.
+        try { await this.fs.lstat(transactionFile); }
+        catch { replacementMayHaveOccurred = true; }
+      }
       if (handle) await handle.close().catch(() => {});
       await this.fs.unlink(transactionFile).catch(() => {});
+      if (replacementMayHaveOccurred) {
+        const uncertain = new Error("Plaintext replacement outcome requires confirmation",
+          { cause: error });
+        uncertain.plaintextReplacementMayHaveOccurred = true;
+        throw uncertain;
+      }
       throw error;
     }
   }
@@ -418,6 +433,12 @@ export class PublicationService {
     if (transaction && hash(transaction) === record.publication.candidateHash) {
       await this.fs.unlink(record.publication.transactionFile);
     }
+    // Keep the publication record until every fallible file cleanup finishes.
+    // A failed recovery-base unlink can then be retried against the verified target.
+    const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
+    if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
+      await this.fs.unlink(record.publication.baseFile);
+    }
     if (record.activity) {
       const { publication: _publication, ...pendingActivity } = record;
       await this.journals.write(documentId, journalKey, pendingActivity);
@@ -429,10 +450,6 @@ export class PublicationService {
       });
     } else {
       await this.journals.clear(documentId);
-    }
-    const recoveryBase = await readIfPresent(this.fs, record.publication.baseFile);
-    if (recoveryBase && hash(recoveryBase) === record.publication.baseHash) {
-      await this.fs.unlink(record.publication.baseFile);
     }
   }
 }

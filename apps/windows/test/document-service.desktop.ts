@@ -811,6 +811,207 @@ test("view-only slots create exact backups without changing the active target", 
   assert.equal(service.active.opened.canEdit, false);
 });
 
+test("locking after an activity attempt publishes does not resume the closed session",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-activity-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const backup = path.join(directory, "document.backup.scpefe");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "32".repeat(16),
+        baseRevision: "43".repeat(32), journalKey: Buffer.alloc(32, 6),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const closedSession = service.active;
+    const originalBase = Buffer.from(closedSession.baseContainer);
+    const originalRevision = closedSession.baseRevision;
+    const context = service.container;
+    const finish = context.finishSave.bind(context);
+    let locking;
+    context.finishSave = (operationId, outcome) => {
+      const effects = finish(operationId, outcome);
+      if (outcome === "verified" && !locking) locking = service.lock("screen-lock");
+      return effects;
+    };
+
+    await assert.rejects(service.backupDocument(backup),
+      (error) => error.code === "SESSION_LOCKED");
+    await locking;
+    assert.equal(service.active, null);
+    assert.deepEqual(closedSession.baseContainer, originalBase);
+    assert.equal(closedSession.baseRevision, originalRevision);
+    await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+    assert.equal((await service.journals.read(closedSession.documentId,
+      Buffer.alloc(32, 6))).activity.actionState, "not-started");
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-attempted");
+    await service.openDocument(target, "password words");
+    assert.equal(service.active.pendingActivity, null);
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-failed");
+  });
+
+test("switching documents before activity adoption preserves both session images",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-activity-switch-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const firstTarget = path.join(directory, "first.scpefe");
+    const secondTarget = path.join(directory, "second.scpefe");
+    await fs.writeFile(firstTarget, "first");
+    await fs.writeFile(secondTarget, "second");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: (bytes) => ({
+        content: bytes.toString() === "second" ? "second text" : "first text",
+        readOnly: true, canEdit: false, manuallySealed: true,
+        documentId: (bytes.toString() === "second" ? "34" : "33").repeat(16),
+        baseRevision: (bytes.toString() === "second" ? "45" : "44").repeat(32),
+        journalKey: Buffer.alloc(32, bytes.toString() === "second" ? 8 : 7),
+        containerFormatVersion: 3,
+      }) } });
+    await service.openDocument(firstTarget, "password words");
+    const firstSession = service.active;
+    const originalBase = Buffer.from(firstSession.baseContainer);
+    const adopt = service.activities.adopt;
+    let resumeAdoption;
+    let adoptionStarted;
+    const started = new Promise((resolve) => { adoptionStarted = resolve; });
+    service.activities.adopt = async (...args) => {
+      adoptionStarted();
+      await new Promise((resolve) => { resumeAdoption = resolve; });
+      return adopt(...args);
+    };
+
+    const backup = service.backupDocument(path.join(directory, "first.backup.scpefe"));
+    await started;
+    await service.lock("screen-lock");
+    await service.openDocument(secondTarget, "password words");
+    const secondSession = service.active;
+    resumeAdoption();
+    await assert.rejects(backup, (error) => error.code === "SESSION_LOCKED");
+    assert.equal(service.active, secondSession);
+    assert.equal(secondSession.opened.content, "second text");
+    assert.deepEqual(firstSession.baseContainer, originalBase);
+    assert.equal(service.containerTarget, secondTarget);
+  });
+
+test("locking after the action-start journal write prevents an external backup",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-activity-start-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const backup = path.join(directory, "document.backup.scpefe");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "35".repeat(16),
+        baseRevision: "46".repeat(32), journalKey: Buffer.alloc(32, 9),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const write = service.journals.write.bind(service.journals);
+    let locking;
+    service.journals.write = async (...args) => {
+      await write(...args);
+      if (args[2]?.activity?.actionState === "started" && !locking) {
+        locking = service.lock("screen-lock");
+      }
+    };
+
+    await assert.rejects(service.backupDocument(backup),
+      (error) => error.code === "SESSION_LOCKED");
+    await locking;
+    assert.equal(service.active, null);
+    await assert.rejects(fs.readFile(backup), (error) => error.code === "ENOENT");
+    const pending = await service.journals.read("35".repeat(16), Buffer.alloc(32, 9));
+    assert.equal(pending.activity.actionState, "not-started");
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-attempted");
+    await service.openDocument(target, "password words");
+    assert.equal(service.active.opened.activityConfirmationRequired, undefined);
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-failed");
+  });
+
+test("locking after the action-start journal write prevents plaintext export",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-export-start-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const plaintext = path.join(directory, "plaintext.txt");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "36".repeat(16),
+        baseRevision: "47".repeat(32), journalKey: Buffer.alloc(32, 10),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const write = service.journals.write.bind(service.journals);
+    let locking;
+    service.journals.write = async (...args) => {
+      await write(...args);
+      if (args[2]?.activity?.actionState === "started" && !locking) {
+        locking = service.lock("screen-lock");
+      }
+    };
+
+    await assert.rejects(service.exportPlaintext(plaintext,
+      { content: "private text", lineEndings: "lf" }),
+    (error) => error.code === "SESSION_LOCKED");
+    await locking;
+    await assert.rejects(fs.readFile(plaintext), (error) => error.code === "ENOENT");
+    const pending = await service.journals.read("36".repeat(16), Buffer.alloc(32, 10));
+    assert.equal(pending.activity.actionState, "not-started");
+    await service.openDocument(target, "password words");
+    assert.equal(service.active.opened.activityConfirmationRequired, undefined);
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "export-failed");
+  });
+
+test("locking during an already started backup retains outcome confirmation",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-action-lock-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const target = path.join(directory, "document.scpefe");
+    const backup = path.join(directory, "document.backup.scpefe");
+    await fs.writeFile(target, "container");
+    const service = new DocumentService({ fs, publicationCapabilities,
+      profilePath: await writeProfile(directory, "Ada", "Desk"),
+      native: { openDocument: () => ({ content: "hello", readOnly: true,
+        canEdit: false, manuallySealed: true, documentId: "37".repeat(16),
+        baseRevision: "48".repeat(32), journalKey: Buffer.alloc(32, 11),
+        containerFormatVersion: 3 }) } });
+    await service.openDocument(target, "password words");
+    const publishReplica = service.publications.publishReplica.bind(service.publications);
+    let actionStarted;
+    const started = new Promise((resolve) => { actionStarted = resolve; });
+    let resumeAction;
+    service.publications.publishReplica = async (...args) => {
+      const result = await publishReplica(...args);
+      actionStarted();
+      await new Promise((resolve) => { resumeAction = resolve; });
+      return result;
+    };
+
+    const operation = service.backupDocument(backup);
+    await started;
+    await service.lock("screen-lock");
+    resumeAction();
+    await assert.rejects(operation, (error) => error.code === "SESSION_LOCKED");
+    const pending = await service.journals.read("37".repeat(16), Buffer.alloc(32, 11));
+    assert.equal(pending.activity.actionState, "started");
+    assert.deepEqual(await fs.readFile(backup), await fs.readFile(target));
+    const opened = await service.openDocument(target, "password words");
+    assert.equal(opened.activityConfirmationRequired, true);
+    await service.resolvePendingActivityOutcome({ succeeded: true, replicaTarget: backup });
+    assert.equal(service.native.inspectDocument(await fs.readFile(target),
+      "password words").historyEventType, "backup-succeeded");
+  });
+
 test("backup requires clean, manually sealed state", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-backup-gates-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -2808,6 +3009,8 @@ test("target revalidation prevents a changed head from being overwritten", async
   const fixture = await divergentService(directory);
   await fixture.service.openDocument(fixture.target, "password words");
   await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
   const changed = "76".repeat(32);
   await fs.writeFile(fixture.target, mergeContainer("newer current", changed,
     [{ revisionId: fixture.ancestor, parentRevisionIds: [] },
@@ -2815,6 +3018,118 @@ test("target revalidation prevents a changed head from being overwritten", async
   await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
     (error) => error.code === "MERGE_TARGET_CHANGED");
   assert.equal(JSON.parse((await fs.readFile(fixture.target)).toString()).head, changed);
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+});
+
+test("unavailable merge target preserves the exact conflict", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-missing-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  await fs.unlink(fixture.target);
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.code === "ENOENT");
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+});
+
+test("merge journal failure preserves the exact conflict and releases its candidate", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-journal-fail-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  const target = await fs.readFile(fixture.target);
+  const write = fixture.service.journals.write.bind(fixture.service.journals);
+  fixture.service.journals.write = async (documentId, journalKey, record) => {
+    if (record.publication?.candidate !== conflict.publication.candidate) {
+      throw new Error("merge journal unavailable before preparation");
+    }
+    return write(documentId, journalKey, record);
+  };
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.message === "merge journal unavailable before preparation"
+      && error.publicationPrepared !== true);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  assert.equal(fixture.service.active.opened.publicationState, "conflict");
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.deepEqual(await fs.readFile(fixture.target), target);
+
+  fixture.service.journals.write = write;
+  assert.equal((await fixture.service.saveDivergenceResolution("resolved text"))
+    .publicationState, "target-published");
+});
+
+test("merge access loss preserves the conflict before publication", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-access-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  const target = await fs.readFile(fixture.target);
+  fixture.options.native.mergeDocument = () => {
+    throw Object.assign(new Error("current slot is view-only"), { status: 24 });
+  };
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.code === "MERGE_PERMISSION_DENIED");
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  assert.equal(fixture.service.active.editMode, false);
+  assert.deepEqual(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), conflict);
+  assert.deepEqual(await fs.readFile(fixture.target), target);
+});
+
+test("interrupted merge resumes its exact candidate and installs its head", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-merge-interrupt-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await divergentService(directory);
+  await fixture.service.openDocument(fixture.target, "password words");
+  await fixture.service.beginDivergenceResolution();
+  const base = await fs.readFile(fixture.target);
+  const originalFs = fixture.service.publications.fs;
+  fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+    if (property !== "rename") return target[property];
+    return async () => { throw new Error("publication interrupted before replacement"); };
+  } });
+
+  await assert.rejects(fixture.service.saveDivergenceResolution("resolved text"),
+    (error) => error.publicationPrepared === true);
+  const pending = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  const exactCandidate = Buffer.from(pending.publication.candidate, "base64");
+  assert.equal(pending.publication.stage, "flushed");
+  assert.equal(pending.text, "resolved text");
+  assert.equal(fixture.service.pendingNativeCandidate !== null, true);
+  assert.deepEqual(await fs.readFile(fixture.target), base);
+
+  fixture.service.publications.fs = originalFs;
+  assert.deepEqual(await fixture.service.reconnectPendingPublication(), {
+    publicationState: "target-published", content: "resolved text" });
+  assert.deepEqual(await fs.readFile(fixture.target), exactCandidate);
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  assert.equal(fixture.service.active.baseRevision, fixture.merged);
+  assert.equal(fixture.service.active.pendingPublication, false);
+  assert.equal(await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey), null);
+  const published = fixture.options.native.openDocument(exactCandidate,
+    "password words");
+  assert.deepEqual(published.revisionGraph.find(
+    (node) => node.revisionId === fixture.merged).parentRevisionIds,
+  [fixture.local, fixture.current]);
 });
 
 test("a target race after merge revalidation preserves the newer replica", async (t) => {
@@ -2845,6 +3160,17 @@ test("a target race after merge revalidation preserves the newer replica", async
     fixture.documentId, fixture.journalKey);
   assert.equal(journal.state, "pending-publication");
   assert.equal(journal.text, "resolved text");
+  const exactCandidate = Buffer.from(journal.publication.candidate, "base64");
+  assert.equal(JSON.parse(exactCandidate.toString()).head, fixture.merged);
+  assert.deepEqual(await fixture.service.reconnectPendingPublication(), {
+    publicationState: "conflict", content: "resolved text" });
+  const conflict = await fixture.service.journals.read(
+    fixture.documentId, fixture.journalKey);
+  assert.equal(conflict.state, "conflict");
+  assert.deepEqual(Buffer.from(conflict.publication.candidate, "base64"),
+    exactCandidate);
+  assert.equal(fixture.service.active.baseRevision === fixture.merged, false);
+  assert.deepEqual(await fs.readFile(fixture.target), racedBytes);
 });
 
 test("validated client settings opt into cumulative regular provisional saves", async (t) => {
@@ -3024,6 +3350,104 @@ async function regularPublicationFixture(directory) {
   service.updateWorkingCopy({ content: "local unsaved",
     cursor: { start: 13, end: 13 } });
   return { service, options, target, initial, revisionId };
+}
+
+test("regular save journals the submitted cursor while publication overlaps a newer edit",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      "scpefe-regular-newer-edit-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    const publish = fixture.service.publications.publish.bind(
+      fixture.service.publications);
+    let submittedCursor;
+    fixture.service.publications.publish = async (request) => {
+      submittedCursor = request.cursor;
+      return publish(request);
+    };
+    const prepareSave = fixture.service.container.prepareSave.bind(
+      fixture.service.container);
+    fixture.service.container.prepareSave = (...args) => {
+      const prepared = prepareSave(...args);
+      fixture.service.updateWorkingCopy({ content: "newer edit",
+        cursor: { start: 10, end: 10 } });
+      return prepared;
+    };
+
+    assert.deepEqual(await fixture.service.regularSaveDocument(), {
+      published: true, provisional: true, content: "local unsaved" });
+    assert.deepEqual(submittedCursor, { start: 13, end: 13 });
+    assert.equal(fixture.service.active.working.content, "newer edit");
+    const journal = await fixture.service.journals.read(
+      fixture.service.active.documentId, fixture.service.active.journalKey);
+    assert.equal(journal.text, "newer edit");
+    assert.deepEqual(journal.cursor, { start: 10, end: 10 });
+    assert.equal(JSON.parse(await fs.readFile(fixture.target, "utf8")).sealed, false);
+  });
+
+for (const operation of ["regular save", "provisional discard"]) {
+  test(`${operation} retains its exact candidate when a journaled publish reports failure`,
+    async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+        "scpefe-regular-journal-interruption-"));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const fixture = await regularPublicationFixture(directory);
+      if (operation === "provisional discard") {
+        await fixture.service.regularSaveDocument();
+      }
+      fixture.service.publications.publish = async (request) => {
+        await fixture.service.publications.prepare(request);
+        throw new Error("journal persisted before publication stopped");
+      };
+
+      await assert.rejects(operation === "regular save"
+        ? fixture.service.regularSaveDocument()
+        : fixture.service.discardWorkingCopy(),
+      (error) => error.publicationPrepared === true);
+      const active = fixture.service.active;
+      const pending = await fixture.service.journals.read(
+        active.documentId, active.journalKey);
+      assert.equal(active.pendingPublication, true);
+      assert.equal(fixture.service.pendingNativeCandidate !== null, true);
+      assert.equal(pending.publication.purpose,
+        operation === "regular save" ? "regular-save" : "provisional-discard");
+      const exactCandidate = Buffer.from(pending.publication.candidate, "base64");
+      assert.equal(JSON.parse(exactCandidate.toString()).sealed,
+        operation === "provisional discard");
+
+      const restarted = new DocumentService(fixture.options);
+      const opened = await restarted.openDocument(fixture.target, "password words");
+      assert.deepEqual(await fs.readFile(fixture.target), exactCandidate);
+      assert.equal(opened.provisional, operation === "regular save" ? true : undefined);
+      assert.equal(opened.content,
+        operation === "regular save" ? "local unsaved" : "base");
+    });
+}
+
+for (const operation of ["regular save", "provisional discard"]) {
+  test(`${operation} releases a candidate when publication fails before journaling`,
+    async (t) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+        "scpefe-regular-definite-failure-"));
+      t.after(() => fs.rm(directory, { recursive: true, force: true }));
+      const fixture = await regularPublicationFixture(directory);
+      if (operation === "provisional discard") {
+        await fixture.service.regularSaveDocument();
+      }
+      fixture.service.publications.publish = async () => {
+        throw new Error("publication rejected before journal preparation");
+      };
+
+      await assert.rejects(operation === "regular save"
+        ? fixture.service.regularSaveDocument()
+        : fixture.service.discardWorkingCopy(),
+      (error) => error.publicationPrepared !== true);
+      assert.equal(fixture.service.pendingNativeCandidate, null);
+      assert.equal(fixture.service.active.pendingPublication, false);
+      const journal = await fixture.service.journals.read(
+        fixture.service.active.documentId, fixture.service.active.journalKey);
+      assert.equal(journal?.publication, undefined);
+    });
 }
 
 test("real service staged Open faults and lock fences preserve original journal and restart",
@@ -3274,6 +3698,57 @@ test("regular-save divergence remains restart-safe and accessible", async (t) =>
   assert.equal(opened.content, "local unsaved");
   assert.equal(restarted.active.pendingRecord.state, "conflict");
 });
+
+test("regular-save conflict can enter resolution in the same session", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+    "scpefe-regular-same-session-conflict-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixture = await regularPublicationFixture(directory);
+  const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+    parent: fixture.revisionId(fixture.initial) }));
+  await fs.writeFile(fixture.target, remote);
+
+  assert.deepEqual(await fixture.service.regularSaveDocument(), {
+    published: false, conflict: true, content: "local unsaved" });
+  assert.equal(fixture.service.pendingNativeCandidate, null);
+  fixture.options.native.updateLease(remote, "password words", {
+    ...fixture.options.native.currentLease(), active: false,
+    sessionId: "0".repeat(32), heartbeatCounter: 0 });
+  const draft = await fixture.service.beginDivergenceResolution();
+  assert.equal(draft.ancestorRevision, fixture.revisionId(fixture.initial));
+  assert.deepEqual(await fixture.service.saveDivergenceResolution("resolved"), {
+    saved: true, content: "resolved", publicationState: "target-published" });
+});
+
+test("regular-save conflict journal interruption keeps the exact pending candidate",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      "scpefe-regular-conflict-journal-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+      parent: fixture.revisionId(fixture.initial) }));
+    await fs.writeFile(fixture.target, remote);
+    fixture.service.publications.markDiverged = async () => {
+      throw new Error("conflict journal update interrupted");
+    };
+
+    await assert.rejects(fixture.service.regularSaveDocument(),
+      /conflict journal update interrupted/);
+    const active = fixture.service.active;
+    assert.equal(active.pendingPublication, true);
+    assert.equal(fixture.service.pendingNativeCandidate !== null, true);
+    const pending = await fixture.service.journals.read(
+      active.documentId, active.journalKey);
+    assert.equal(pending.publication.purpose, "regular-save");
+    assert.equal(JSON.parse(Buffer.from(pending.publication.candidate,
+      "base64").toString()).content, "local unsaved");
+
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target, "password words");
+    assert.equal(opened.publicationState, "conflict");
+    assert.equal(opened.content, "local unsaved");
+  });
 
 test("second regular save resolves divergence from the sealed ancestor", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(),

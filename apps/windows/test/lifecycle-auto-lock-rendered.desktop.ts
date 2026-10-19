@@ -13,3 +13,6 @@ for (const origin of ["als-new-candidate", "als-open-auth", "als-external-auth",
   "als-open-revalidation", "als-external-revalidation"]) {
   test(lifecycleCaseName(origin), (t) => runMountedLock(t, origin));
 }
+
+test(lifecycleCaseName("al-new-discard-delayed"), (t) =>
+  runMountedLock(t, "al-new-discard-delayed"));

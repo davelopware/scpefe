@@ -176,6 +176,8 @@ test("Lock releases its suspended native lease before a document switch", {
   await service.enterEditMode();
   await service.lock("document-switch");
   assert.equal(service.hasSuspendedLease(), true);
+  assert.throws(() => service.container.authenticatedLease(), /status 15/,
+    "the native context stays locked while its suspended lease is released");
   assert.deepEqual(await service.releaseSuspendedLease(target), { released: true });
   assert.equal(service.hasSuspendedLease(), false);
   await service.openDocument(target, password);
