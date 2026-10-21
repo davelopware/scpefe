@@ -5,6 +5,7 @@ Status: working terminology, started 19 September 2026. This document defines th
 ## 1. Naming rules
 
 - Use **document** for the logical encrypted text and its durable metadata/history.
+- Use **content type** for the document's immutable Plain Text or CSV classification; distinguish the Plain Text content type from an unencrypted plaintext export.
 - Use **container** for one physical `.scpefe` serialization of a document.
 - Use **replica** for another container carrying the same document ID.
 - Use **target** for the storage location currently opened or published by a client.
@@ -48,6 +49,7 @@ Important boundaries:
 | Term | Canonical meaning |
 |---|---|
 | Document | The logical SCPEFE object: current text, metadata, password slots, history, and lease state identified by one permanent document ID. |
+| Content type | The classification of a document's content, selected at creation and fixed for the document's lifetime. Initially Plain Text or CSV. |
 | Document ID | A permanent random identifier shared by every legitimate replica of a document. It does not change during backup, migration, or compaction. |
 | Container | One self-contained physical `.scpefe` representation of a document. |
 | Target | The path, URI, or opaque host handle from which the active container was opened and to which it is published. |
