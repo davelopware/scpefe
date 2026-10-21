@@ -22,6 +22,8 @@ const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | nu
 export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
   snapshot: DocumentSessionSnapshot<Doc>;
   commands: ShellCommands<Doc> }) {
+  const csv = (snapshot.kind === "read-only" || snapshot.kind === "edit")
+    && snapshot.document.contentType === "csv";
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || (!event.ctrlKey && !event.metaKey)
@@ -117,6 +119,7 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
               requestAnimationFrame(() => {
                 if (!document.querySelector('[role="dialog"]')) triggers.current[name]?.focus();
               });
-            }}><span>{item[1]}</span>{item[2] && <kbd>{item[2]}</kbd>}</button>)}</div>}
+            }}><span>{csv && item[0] === "export" ? "Export CSV…" : item[1]}</span>
+            {item[2] && <kbd>{item[2]}</kbd>}</button>)}</div>}
     </div>)}</nav>;
 }

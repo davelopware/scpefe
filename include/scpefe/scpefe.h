@@ -125,6 +125,7 @@ typedef struct scpefe_new_document_v1 {
     size_t owner_password_size;
     const uint8_t *recovery_password;
     size_t recovery_password_size;
+    uint8_t content_type; /* 0 = Plain Text, 1 = CSV. */
 } scpefe_new_document_v1;
 
 /* Versioned request to create an active container from a new document. */
@@ -646,6 +647,9 @@ SCPEFE_API scpefe_status scpefe_context_assess_password(
 SCPEFE_API scpefe_status scpefe_container_create(
     scpefe_context *context, const scpefe_container_create_v1 *request,
     scpefe_container **container);
+/* Returns the immutable content type of an unlocked document. */
+SCPEFE_API scpefe_status scpefe_container_content_type(
+    const scpefe_container *container, uint8_t *content_type);
 /* Opens the sole active container in screen-locked state. */
 SCPEFE_API scpefe_status scpefe_container_open(
     scpefe_context *context, const scpefe_container_open_v1 *request,

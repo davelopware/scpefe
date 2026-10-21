@@ -132,6 +132,14 @@ test("mounted post-picker dialog is focused and has no initial-text field", asyn
     true, "Tab wraps back to the first creation field");
 });
 
+test("creation content type defaults to Plain Text and offers CSV", async (t) => {
+  const { user, ui } = mountedDialog(t);
+  const selector = ui.getByRole("combobox", { name: "Content type" });
+  assert.equal(selector.value, "plain-text");
+  await user.selectOptions(selector, "csv");
+  assert.equal(selector.value, "csv");
+});
+
 test("shared modal frame keeps its title outside a long scrolling body", async (t) => {
   const user = userEvent.setup({ document: dom.window.document });
   const rendered = render(React.createElement(FocusedDialog,

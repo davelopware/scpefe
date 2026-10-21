@@ -9,8 +9,10 @@
 #include "format/revision_limits.hpp"
 #include "format/snapshot_revision.hpp"
 #include "format/text_validation.hpp"
+#include "format/csv_source.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -62,7 +64,10 @@ bool valid_document(const scpefe_new_document_v1 &document)
 {
     using scpefe::format::span_is_valid;
     using scpefe::format::valid_utf8;
-    return document.struct_size >= sizeof(document)
+    const auto content_type = document.struct_size
+        >= offsetof(scpefe_new_document_v1, content_type) + sizeof(document.content_type)
+        ? document.content_type : 0;
+    return document.struct_size >= offsetof(scpefe_new_document_v1, content_type)
         && document.profile_name_size > 0 && document.profile_email_size > 0
         && document.device_name_size > 0 && document.owner_password_size > 0
         && span_is_valid(document.owner_password, document.owner_password_size)
@@ -72,6 +77,9 @@ bool valid_document(const scpefe_new_document_v1 &document)
         && valid_utf8(document.profile_email, document.profile_email_size)
         && valid_utf8(document.device_name, document.device_name_size)
         && scpefe::format::valid_canonical_document_text(document.content, document.content_size)
+        && content_type <= 1
+        && (content_type != 1 || scpefe::format::valid_csv_source(
+            {document.content, document.content_size}))
         && !(document.recovery_password && document.owner_password_size == document.recovery_password_size
             && std::memcmp(document.owner_password, document.recovery_password,
                 document.owner_password_size) == 0);
@@ -271,10 +279,13 @@ scpefe_status scpefe_container_create(scpefe_context *context,
     const scpefe_container_create_v1 *request, scpefe_container **output)
 {
     if (output) *output = nullptr;
-    if (!context || !request || !output || request->struct_size < sizeof(*request))
+    if (!context || !request || !output
+        || request->struct_size < offsetof(scpefe_container_create_v1, document)
+            + offsetof(scpefe_new_document_v1, content_type))
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     if (request->abi_version != SCPEFE_ABI_VERSION) return SCPEFE_STATUS_UNSUPPORTED_ABI;
-    if (request->document.struct_size < sizeof(request->document))
+    if (request->document.struct_size
+        < offsetof(scpefe_new_document_v1, content_type))
         return SCPEFE_STATUS_INVALID_ARGUMENT;
     if (document_exceeds_limits(request->document)) return SCPEFE_STATUS_LIMIT_EXCEEDED;
     if (!valid_document(request->document)) return SCPEFE_STATUS_INVALID_ARGUMENT;
@@ -288,7 +299,10 @@ scpefe_status scpefe_container_create(scpefe_context *context,
             {document.profile_name, document.profile_name_size},
             {document.profile_email, document.profile_email_size},
             {document.device_name, document.device_name_size},
-            {document.content, document.content_size}, document.timestamp_ms,
+            {document.content, document.content_size},
+            document.struct_size >= offsetof(scpefe_new_document_v1, content_type)
+                + sizeof(document.content_type) ? document.content_type : 0,
+            document.timestamp_ms,
             document.owner_password, document.owner_password_size,
             document.recovery_password, document.recovery_password_size);
         container.open_document(bytes.data(), bytes.size());
@@ -309,6 +323,18 @@ scpefe_status scpefe_container_create(scpefe_context *context,
     } catch (const std::bad_alloc &) {
         return SCPEFE_STATUS_OUT_OF_MEMORY;
     }
+}
+
+scpefe_status scpefe_container_content_type(const scpefe_container *handle,
+    uint8_t *content_type)
+{
+    if (!content_type) return SCPEFE_STATUS_INVALID_ARGUMENT;
+    if (!live(handle)) return SCPEFE_STATUS_INVALID_STATE;
+    const auto *unlocked = handle->owner->implementation.make_container()
+        .read_authenticated_state();
+    if (!unlocked) return SCPEFE_STATUS_LOCKED;
+    *content_type = unlocked->content_type;
+    return SCPEFE_STATUS_OK;
 }
 
 scpefe_status scpefe_container_open(scpefe_context *context,

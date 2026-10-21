@@ -1,4 +1,5 @@
 import { isCatalogCode } from "./error-boundary.mjs";
+import { requireValidCsvSource } from "../../../packages/frontend-core/src/csv-source.mjs";
 
 const MAX_TEXT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REGULAR_SAVE_INTERVAL_MS = 120_000;
@@ -260,8 +261,13 @@ export function validateCreateRequest(value) {
   if (recoveryPassword && value.storedRecoverySeparately !== true) {
     throw new TypeError("recovery password storage must be acknowledged");
   }
+  const contentType = value.contentType ?? "plain-text";
+  if (contentType !== "plain-text" && contentType !== "csv")
+    throw new TypeError("content type must be Plain Text or CSV");
+  const content = canonicalizeDocumentText(value.content);
+  if (contentType === "csv") requireValidCsvSource(content);
   return { ownerPassword, recoveryPassword,
-    content: canonicalizeDocumentText(value.content),
+    ...(contentType === "csv" ? { contentType } : {}), content,
     understandsIrrecoverable: true,
     storedRecoverySeparately: recoveryPassword !== null };
 }
@@ -284,7 +290,7 @@ export function validateCreateFormRequest(value) {
   if (recoveryPasswordConfirmation !== recoveryPassword) {
     throw new TypeError("recovery passwords do not match");
   }
-  if (value.content !== "") {
+  if (value.content !== (value.contentType === "csv" ? '""' : "")) {
     throw new TypeError("new document content must be blank");
   }
   const validated = validateCreateRequest({ ...value, ownerPassword,
@@ -434,6 +440,9 @@ export function validateOpenedDocument(value) {
     throw new TypeError("native bridge returned an invalid document");
   }
   const content = canonicalizeDocumentText(value.content);
+  const contentType = value.contentType ?? "plain-text";
+  if (contentType !== "plain-text" && contentType !== "csv")
+    throw new TypeError("native bridge returned an invalid content type");
   if (value.mustBeChanged !== undefined && typeof value.mustBeChanged !== "boolean") {
     throw new TypeError("native bridge returned invalid invitation state");
   }
@@ -603,7 +612,8 @@ export function validateOpenedDocument(value) {
       && value.activityConfirmationRequired !== true) {
     throw new TypeError("host returned invalid activity confirmation status");
   }
-  return Object.freeze({ content, readOnly: true,
+  return Object.freeze({ content, ...(contentType === "csv" ? { contentType } : {}),
+    readOnly: true,
     canEdit: value.canEdit, publicationState,
     ...(targetName ? { targetName } : {}),
     ...(provisional ? { provisional: true } : {}),

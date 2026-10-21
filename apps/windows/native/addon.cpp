@@ -476,6 +476,11 @@ napi_value open_revised_document(napi_env env, const std::uint8_t *bytes,
     set_string(env, result, "profileEmail", view.client_email, view.client_email_size);
     set_string(env, result, "deviceName", view.device_name, view.device_name_size);
     set_string(env, result, "content", "", 0);
+    uint8_t content_type = 0;
+    status = scpefe_container_content_type(handle, &content_type);
+    if (status != SCPEFE_STATUS_OK) { throw_status(env, status); return nullptr; }
+    set_string(env, result, "contentType", content_type == 1 ? "csv" : "plain-text",
+        content_type == 1 ? 3 : 10);
     set_boolean(env, result, "readOnly", true);
     set_boolean(env, result, "canEdit", access.can_edit && !access.must_change_password);
     set_boolean(env, result, "canAddPasswords",
@@ -647,6 +652,13 @@ napi_value container_create(napi_env env, napi_callback_info info)
         const std::string email = string_value(env, property(env, args[0], "email"));
         const std::string device = string_value(env, property(env, args[0], "deviceName"));
         const std::string content = string_value(env, property(env, args[0], "content"));
+        napi_value content_type_value = property(env, args[0], "contentType");
+        napi_valuetype content_type_kind;
+        check(env, napi_typeof(env, content_type_value, &content_type_kind));
+        const std::string content_type = content_type_kind == napi_undefined
+            ? "plain-text" : string_value(env, content_type_value);
+        if (content_type != "plain-text" && content_type != "csv")
+            throw std::runtime_error("unknown content type");
         const SecretBytes password{env, property(env, args[0], "ownerPassword")};
         napi_value recovery_value = property(env, args[0], "recoveryPassword");
         napi_valuetype recovery_type;
@@ -665,6 +677,7 @@ napi_value container_create(napi_env env, napi_callback_info info)
             password.data(), password.size(),
             has_recovery ? recovery.data() : nullptr,
             has_recovery ? recovery.size() : 0,
+            static_cast<uint8_t>(content_type == "csv" ? 1 : 0),
         };
         if (owner->active) {
             throw_status(env, SCPEFE_STATUS_INVALID_STATE);

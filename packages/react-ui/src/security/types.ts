@@ -9,5 +9,6 @@ export type ProposedPasswordOutcome =
 export type CreationFormRequest = {
   ownerPassword: string; ownerPasswordConfirmation: string;
   recoveryPassword: string; recoveryPasswordConfirmation: string;
-  content: ""; understandsIrrecoverable: true; storedRecoverySeparately: boolean;
+  content: "" | '""'; contentType?: "plain-text" | "csv";
+  understandsIrrecoverable: true; storedRecoverySeparately: boolean;
 };

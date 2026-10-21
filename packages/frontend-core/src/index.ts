@@ -21,3 +21,5 @@ export type { DocumentSessionHost, DocumentSessionOutcome, DocumentSessionSnapsh
 export type { WorkingCopyFindResult, WorkingCopyJournalHost, WorkingCopySelection,
   WorkingCopySnapshot,
   WorkingCopyUpdate } from "./working-copy.ts";
+export { parseCsvSource, writeCsvSource, requireValidCsvSource,
+  serializeCsvSource } from "./csv-source.mjs";
