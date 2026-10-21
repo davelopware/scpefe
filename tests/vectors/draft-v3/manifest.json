@@ -7,8 +7,8 @@
   },
   {
     "path": "valid/baseline-container.hex",
-    "bytes": 668,
-    "sha256": "093d8d7c13e9cbbd456903075b34891b7f68cacb3a1daf31f7c6e12fdd934ce6",
+    "bytes": 669,
+    "sha256": "545b3cd050c9c477cc3d9e179d0bfa2cbfa371741e9c38494a7266f687b37d0e",
     "expect": "accept with test password; same payload"
   },
   {
@@ -25,8 +25,8 @@
   },
   {
     "path": "valid/pruned-checkpoint-container.hex",
-    "bytes": 1443,
-    "sha256": "f91fdfe1256096c83011a5f1c19b5cc5f8e4f9f75e5bbec1522e974705759eef",
+    "bytes": 1444,
+    "sha256": "04110fbe266a716b8f2c72efad78e9790171d0f5f007c46be8ee110f281524fa",
     "expect": "authenticate saved pruned history with the test password"
   },
   {
@@ -132,21 +132,33 @@
     "expect": "reject unknown required feature"
   },
   {
-    "path": "invalid/envelope-slot-count-zero.hex",
+    "path": "invalid/envelope-missing-content-type.hex",
     "bytes": 668,
-    "sha256": "ad85d0030bc89817ec4a380ecca3879b905fdec7155c4c92bfca8ea53b58aa6e",
+    "sha256": "093d8d7c13e9cbbd456903075b34891b7f68cacb3a1daf31f7c6e12fdd934ce6",
+    "expect": "reject authenticated development container without required content type"
+  },
+  {
+    "path": "invalid/envelope-unknown-content-type.hex",
+    "bytes": 669,
+    "sha256": "855bd61d383b670589958b92d263b731edab6ab197655178c17e238cba464587",
+    "expect": "reject authenticated unknown content type"
+  },
+  {
+    "path": "invalid/envelope-slot-count-zero.hex",
+    "bytes": 669,
+    "sha256": "3085c695797e31b665f13d9ec120d6fa74359a88af496da3d69d87aef7dca4a4",
     "expect": "reject slot count bound before KDF"
   },
   {
     "path": "invalid/envelope-payload-length-overflow.hex",
-    "bytes": 668,
-    "sha256": "bb87c3a0900efbdeab0760fc4e4f60dd640cc1e18328472387d481d481675490",
+    "bytes": 669,
+    "sha256": "1501e32c10fad4aed2660dcd14b76c78e588c9ea7d8e3f95875772abc149eb93",
     "expect": "reject length arithmetic before KDF"
   },
   {
     "path": "invalid/envelope-wrapper-length.hex",
-    "bytes": 668,
-    "sha256": "f380e4bf8d64f73b9c971644da4d1abc39425f58cb4ebceafc75cf68165d1aa2",
+    "bytes": 669,
+    "sha256": "3200d8d0bbc41bfb17e793c54cde112a801968a385be6cedaf56d39f1be76596",
     "expect": "reject unsupported wrapper length before KDF"
   }
 ]

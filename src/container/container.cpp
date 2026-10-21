@@ -94,7 +94,8 @@ const UnlockedContainerData &Container::unlock_document(
     const auto &source = authenticating_target ? target_bytes_ : committed_bytes_;
     auto decoded = persistence_.unlock_revised_envelope(source.data(), source.size(),
         password, password_size, format::RevisionLimits::defaults());
-    if (document_id_ && decoded.document_id != *document_id_)
+    if (document_id_ && (decoded.document_id != *document_id_
+        || (unlocked_ && decoded.content_type != unlocked_->content_type)))
         throw ContainerFailure{ContainerError::malformed_container};
     if (authenticating_target && state_.target_access
         && (decoded.slot_id != state_.target_access->slot_id
@@ -142,7 +143,8 @@ TransitionResult Container::apply_target_document(
     persistence_.validate_revised_envelope(target_bytes, target_size);
     auto decoded = persistence_.unlock_revised_envelope(target_bytes, target_size,
         password, password_size, format::RevisionLimits::defaults());
-    if (decoded.document_id != *document_id_) {
+    if (decoded.document_id != *document_id_
+        || (unlocked_ && decoded.content_type != unlocked_->content_type)) {
         throw format::MergeFailure{format::MergeProblem::unrelated_target};
     }
     if (unlocked_ && decoded.work_journal_key != unlocked_->work_journal_key)

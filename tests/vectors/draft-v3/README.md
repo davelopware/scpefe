@@ -42,9 +42,11 @@ rows; the native stateful C ABI test authenticates the saved checkpoint envelope
 | `invalid/envelope-slot-count-zero.hex` | Reject slot count 0 before KDF. |
 | `invalid/envelope-payload-length-overflow.hex` | Reject impossible total length before KDF. |
 | `invalid/envelope-wrapper-length.hex` | Reject wrapper length 65 before KDF. |
+| `invalid/envelope-missing-content-type.hex` | Reject an authenticated earlier development container without the required content type. |
+| `invalid/envelope-unknown-content-type.hex` | Reject an authenticated container with an unknown content type. |
 
 Payload rows begin at `container-v3`, excluding the preceding 16-byte document
-ID. Structural envelope errors are intentionally tested without decrypting.
+ID and required one-byte content type. Structural envelope errors are intentionally tested without decrypting.
 The portable revision graph reader checks decrypted payload rows, and the
 stateful container reader authenticates the saved checkpoint vector. A reader
 should verify all valid records' IDs, original body digests, content

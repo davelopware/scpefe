@@ -116,6 +116,7 @@ UnlockedContainerData &UnlockedContainerData::operator=(
     if (this == &other) return *this;
     clear();
     document_id = other.document_id;
+    content_type = other.content_type;
     slot_id = other.slot_id;
     work_journal_key = other.work_journal_key;
     permissions = other.permissions;
@@ -140,6 +141,7 @@ UnlockedContainerData::~UnlockedContainerData()
 void UnlockedContainerData::clear() noexcept
 {
     sodium_memzero(document_id.data(), document_id.size());
+    content_type = 0;
     sodium_memzero(slot_id.data(), slot_id.size());
     sodium_memzero(work_journal_key.data(), work_journal_key.size());
     permissions = 0;

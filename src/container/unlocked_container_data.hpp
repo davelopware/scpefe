@@ -68,6 +68,7 @@ struct UnlockedContainerData {
     UnlockedContainerData &operator=(const UnlockedContainerData &) = delete;
 
     std::array<std::uint8_t, 16> document_id{};
+    std::uint8_t content_type{};
     std::array<std::uint8_t, 16> slot_id{};
     std::array<std::uint8_t, 32> work_journal_key{};
     std::uint8_t permissions{};
