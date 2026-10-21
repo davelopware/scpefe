@@ -1465,6 +1465,7 @@ export class DocumentService {
     active.working = null;
     active.dirty = false;
     active.opened = validateOpenedDocument({ content: active.targetContent,
+      ...(active.opened.contentType ? { contentType: active.opened.contentType } : {}),
       readOnly: true, canEdit: active.headMismatch ? false : active.slotCanEdit,
       publicationState: "target-published",
       ...(active.opened.lease ? { lease: active.opened.lease } : {}),
