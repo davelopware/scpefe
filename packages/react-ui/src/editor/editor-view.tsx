@@ -34,12 +34,13 @@ interface EditorViewProps {
   csvView: "source" | "table";
   onMessage(message: string): void;
   onReturnFocus(element: HTMLElement | null): void;
+  onSave?(): void;
   ref?: React.Ref<EditorViewHandle>;
 }
 
 /** Presents the working copy and owns modeless search state for one adoption. */
 export function EditorView({ session, active, locked, blocked, csvView, onMessage,
-  onReturnFocus, ref }: EditorViewProps): React.ReactElement {
+  onReturnFocus, onSave, ref }: EditorViewProps): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
   const working = snapshot.kind === "read-only" || snapshot.kind === "edit"
     ? snapshot.working : null;
@@ -201,6 +202,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
       </div>}
     {showTable && active && !blocked && <CsvTable ref={table} rows={csvParse.rows}
       readOnly={readOnly} onEdit={(rows) => session.edit(writeCsvSource(rows))}
+      onSave={onSave}
       onFind={() => { onReturnFocus(document.activeElement as HTMLElement | null);
         openFind("find", document.activeElement as HTMLElement | null); }} />}
     {!showTable && <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}

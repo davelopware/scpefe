@@ -11,6 +11,7 @@ interface CsvTableProps {
   rows: string[][];
   readOnly?: boolean;
   onEdit?(rows: string[][]): void;
+  onSave?(): void;
   ref?: React.Ref<CsvTableHandle>;
   onFind(): void;
 }
@@ -21,7 +22,8 @@ const rowHeight = 36;
 const overscan = 4;
 
 /** Presents CSV headings and values as one keyboard-navigable, editable table. */
-export function CsvTable({ rows, readOnly = true, onEdit, ref, onFind }: CsvTableProps): React.ReactElement {
+export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
+  onFind }: CsvTableProps): React.ReactElement {
   const scroll = useRef<HTMLDivElement>(null);
   const focusPending = useRef(false);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -39,6 +41,13 @@ export function CsvTable({ rows, readOnly = true, onEdit, ref, onFind }: CsvTabl
     firstVisibleRow + visibleRows + overscan);
 
   useLayoutEffect(() => {
+    if (readOnly && draftRef.current) {
+      const current = draftRef.current;
+      focusDraftPending.current = false;
+      setCellDraft(null);
+      move(current.row, current.column);
+      return;
+    }
     if (focusDraftPending.current && input.current) {
       input.current.focus();
       input.current.select();
@@ -110,11 +119,20 @@ export function CsvTable({ rows, readOnly = true, onEdit, ref, onFind }: CsvTabl
   }
 
   function editKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    event.stopPropagation();
     if ((event.ctrlKey || event.metaKey) && ["z", "y"].includes(event.key.toLowerCase())) {
       event.preventDefault();
+      event.stopPropagation();
       return;
     }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      event.stopPropagation();
+      commitEdit();
+      onSave?.();
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
       const current = draftRef.current;
@@ -136,7 +154,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, ref, onFind }: CsvTabl
   }
 
   function cellContent(value: string, cellRow: number, cellColumn: number): React.ReactNode {
-    if (draft?.row === cellRow && draft.column === cellColumn) {
+    if (!readOnly && draft?.row === cellRow && draft.column === cellColumn) {
       return <textarea ref={input} className="csv-cell-editor" aria-label={
         `Edit ${cellRow === 0 ? "heading" : `row ${cellRow}`}, column ${cellColumn + 1}`}
         value={draft.value} onChange={(event) => setCellDraft({ ...draft,

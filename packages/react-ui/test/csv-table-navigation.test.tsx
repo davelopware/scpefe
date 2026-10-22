@@ -1,11 +1,13 @@
 // @ts-nocheck -- mounted DOM fixture checks keyboard and clipboard behavior.
 import assert from "node:assert/strict";
 import test from "node:test";
-import React, { act, createRef, useState } from "react";
+import React, { act, createRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { CsvTable } from "../src/editor/csv-table.tsx";
 import { EditorView } from "../src/editor/editor-view.tsx";
+import { MenuBar } from "../src/shell/menu-bar.tsx";
+import { createShellCommands } from "../src/shell/shell-commands.ts";
 import { parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
 
 function mounted(t) {
@@ -207,6 +209,14 @@ test("CSV table cell drafts commit, navigate, cancel, and serialize as one value
   await act(async () => user.type(cell(dom, 2, 1), "ignored"));
   assert.equal(parseCsvSource(saved).rows[2][1], "", "typing outside edit does nothing");
 
+  await key(dom, cell(dom, 2, 1), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.type(input, "unsaved draft"));
+  await act(async () => root.render(<Harness readOnly />));
+  assert.equal(dom.window.document.querySelector(".csv-cell-editor"), null,
+    "losing edit mode removes the open cell editor");
+  assert.equal(parseCsvSource(saved).rows[2][1], "", "read-only transition cancels draft");
+
   const reopened = parseCsvSource(saved);
   assert.equal(reopened.valid, true);
   await act(async () => root.render(<CsvTable rows={reopened.rows} readOnly onFind={() => {}} />));
@@ -214,4 +224,58 @@ test("CSV table cell drafts commit, navigate, cancel, and serialize as one value
   await key(dom, cell(dom, 0, 1), "Delete");
   assert.equal(dom.window.document.querySelector(".csv-cell-editor"), null);
   assert.equal(cell(dom, 0, 1).textContent, "name", "read-only cells stay unchanged");
+});
+
+test("cell editing keeps Find and Save shortcuts available and saves the current draft", async (t) => {
+  const { dom, root } = mounted(t);
+  const initial = writeCsvSource([["heading"], ["before"]]);
+  let snapshot = { kind: "edit", adoption: 1,
+    document: { content: initial, contentType: "csv" },
+    working: { text: initial, selection: { start: 0, end: 0 } },
+    commands: { write: true, save: true } };
+  const listeners = new Set();
+  const saved = [];
+  const session = { subscribe: (listener) => { listeners.add(listener);
+      return () => listeners.delete(listener); }, getSnapshot: () => snapshot,
+    edit: (text) => { snapshot = { ...snapshot, working: { ...snapshot.working, text } };
+      for (const listener of listeners) listener(); return true; },
+    setSelection: () => true, undo: () => true, redo: () => true,
+    findNext: () => null, replaceSelection: () => null, replaceAll: () => null };
+  const commands = createShellCommands({ session,
+    facts: () => ({ activeAdoption: 1, profileReady: true, modalBusy: false,
+      csvView: "table" }),
+    run: (command) => { if (command === "save") saved.push(session.getSnapshot().working.text); },
+    track: async (operation) => { await operation(); } });
+  function Harness() {
+    const current = useSyncExternalStore(session.subscribe, session.getSnapshot,
+      session.getSnapshot);
+    return <><MenuBar snapshot={current} commands={commands} />
+      <EditorView session={session} active locked={false} blocked={false}
+        csvView="table" onMessage={() => {}} onReturnFocus={() => {}}
+        onSave={() => { void commands.invoke("save"); }} /></>;
+  }
+  await act(async () => root.render(<Harness />));
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const user = userEvent.setup({ document: dom.window.document });
+  await act(async () => cell(dom, 1, 0).click());
+  await key(dom, cell(dom, 1, 0), "Enter");
+  let input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(input));
+  await act(async () => user.type(input, "find me"));
+  await key(dom, input, "f", { ctrlKey: true });
+  assert.ok(dom.window.document.querySelector('[role="dialog"]'),
+    "Ctrl+F opens Find while a cell draft is focused");
+  assert.equal(parseCsvSource(snapshot.working.text).rows[1][0], "find me",
+    "moving focus to Find commits the cell draft");
+  await act(async () => dom.window.document.querySelector('.dialog-actions button:last-child').click());
+
+  await key(dom, cell(dom, 1, 0), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(input));
+  await act(async () => user.type(input, "save this draft"));
+  await key(dom, input, "s", { ctrlKey: true });
+  assert.equal(saved.length, 1, "Ctrl+S invokes Save exactly once");
+  assert.equal(parseCsvSource(saved[0]).rows[1][0], "save this draft",
+    "Save receives the committed draft");
+  assert.equal(dom.window.document.querySelector(".csv-cell-editor"), null);
 });
