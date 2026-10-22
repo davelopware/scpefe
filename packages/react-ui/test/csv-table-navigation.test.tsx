@@ -167,33 +167,43 @@ test("CSV table cell drafts commit, navigate, cancel, and serialize as one value
   await act(async () => cell(dom, 0, 0).click());
   await key(dom, cell(dom, 0, 0), "Enter");
   let input = dom.window.document.querySelector(".csv-cell-editor");
-  assert.equal(dom.window.document.activeElement, input);
+  assert.equal(dom.window.document.activeElement === input, true);
   await act(async () => user.clear(input));
+  // A key edit makes the mounted React change tracker observe the empty value.
+  await act(async () => user.type(input, "!"));
+  await act(async () => user.keyboard("{Backspace}"));
+  assert.equal(dom.window.document.activeElement === input, true,
+    "clearing leaves the editor focused");
   await key(dom, input, "Enter");
   assert.equal(cell(dom, 0, 0).textContent, "", "blank heading commits");
-  assert.equal(dom.window.document.activeElement, cell(dom, 1, 0), "Enter moves down");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(input?.closest("[data-row][data-column]") === cell(dom, 1, 0), true,
+    "Enter opens the cell below");
+  assert.equal(dom.window.document.activeElement === input, true);
   assert.deepEqual(parseCsvSource(saved).rows[0], ["", "name"]);
 
-  await key(dom, cell(dom, 1, 0), "Enter");
-  input = dom.window.document.querySelector(".csv-cell-editor");
   await act(async () => user.clear(input));
   await act(async () => user.paste('comma,\tline\nbreak"quoted'));
+  // Flush the pasted value through a key edit in this JSDOM fixture.
+  await act(async () => user.type(input, "!"));
+  await act(async () => user.keyboard("{Backspace}"));
   assert.equal(dom.window.document.querySelectorAll(".csv-cell-editor").length, 1,
     "multiline paste stays in one cell");
   await key(dom, input, "Tab");
-  assert.equal(dom.window.document.activeElement, cell(dom, 1, 1), "Tab moves right");
-  assert.equal(parseCsvSource(saved).rows[1][0], 'comma,\tline\nbreak"quoted');
-  await key(dom, cell(dom, 1, 1), "Enter");
   input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(input?.closest("[data-row][data-column]") === cell(dom, 1, 1), true,
+    "Tab opens the cell to the right");
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(parseCsvSource(saved).rows[1][0], 'comma,\tline\nbreak"quoted');
   await act(async () => user.clear(input));
   await act(async () => user.type(input, "next{Shift>}{Enter}{/Shift}line"));
   await key(dom, input, "Tab");
   assert.equal(parseCsvSource(saved).rows[1][1], "next\nline");
-  assert.equal(dom.window.document.activeElement, cell(dom, 2, 0), "Tab wraps");
-
-  await act(async () => cell(dom, 2, 0).dispatchEvent(new dom.window.MouseEvent("dblclick",
-    { bubbles: true, cancelable: true })));
   input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(input?.closest("[data-row][data-column]") === cell(dom, 2, 0), true,
+    "Tab wraps and opens the next editor");
+  assert.equal(dom.window.document.activeElement === input, true);
+
   await act(async () => user.clear(input));
   await act(async () => user.type(input, "discard"));
   await key(dom, input, "Escape");
@@ -240,29 +250,30 @@ test("new CSV heading is ready to type and an untouched insertion row stays out 
   const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document: dom.window.document });
   let input = dom.window.document.querySelector(".csv-cell-editor");
-  assert.equal(dom.window.document.activeElement, input, "blank first heading is editing");
+  assert.equal(dom.window.document.activeElement === input, true,
+    "blank first heading is editing");
   assert.equal(input.getAttribute("aria-label"), "Edit heading, column 1");
   await act(async () => table.current.focus());
-  assert.equal(dom.window.document.activeElement, input,
+  assert.equal(dom.window.document.activeElement === input, true,
     "creation flow focus restoration preserves the open heading editor");
   await act(async () => user.type(input, "name"));
   await key(dom, input, "Enter");
   assert.deepEqual(parseCsvSource(saved).rows, [["name"]]);
-  assert.equal(dom.window.document.activeElement, cell(dom, 1, 0),
-    "Enter reaches the insertion row from the heading");
-  await key(dom, cell(dom, 1, 0), "Enter");
   input = dom.window.document.querySelector(".csv-cell-editor");
-  assert.equal(dom.window.document.activeElement, input);
+  assert.equal(input?.closest("[data-row][data-column]") === cell(dom, 1, 0), true,
+    "Enter opens the insertion row from the heading");
+  assert.equal(dom.window.document.activeElement === input, true);
   await key(dom, input, "Enter");
   assert.equal(edits, 1, "leaving an empty insertion draft makes no edit");
   assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
-  await key(dom, cell(dom, 1, 0), "Enter");
   input = dom.window.document.querySelector(".csv-cell-editor");
   await act(async () => user.type(input, "Ada"));
   await key(dom, input, "Enter");
   assert.deepEqual(parseCsvSource(saved).rows, [["name"], ["Ada"]]);
-  assert.equal(dom.window.document.activeElement, cell(dom, 2, 0),
-    "Enter advances to the fresh insertion row");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(input?.closest("[data-row][data-column]") === cell(dom, 2, 0), true,
+    "Enter opens the fresh insertion row");
+  assert.equal(dom.window.document.activeElement === input, true);
   assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
   assert.equal(dom.window.document.querySelectorAll(".csv-table tbody tr").length, 2,
     "one real row and one placeholder are rendered");
@@ -282,9 +293,9 @@ test("Tab reaches insertion cells while saved empty rows remain distinct", async
     false, "saved empty data row remains a real row");
   await act(async () => cell(dom, 1, 1).click());
   await key(dom, cell(dom, 1, 1), "Tab");
-  assert.equal(dom.window.document.activeElement, cell(dom, 2, 0));
+  assert.equal(dom.window.document.activeElement === cell(dom, 2, 0), true);
   await key(dom, cell(dom, 2, 0), "Tab");
-  assert.equal(dom.window.document.activeElement, cell(dom, 2, 1));
+  assert.equal(dom.window.document.activeElement === cell(dom, 2, 1), true);
   assert.equal(edits, 0, "traversal creates no data");
   await key(dom, cell(dom, 2, 1), "Enter");
   let input = dom.window.document.querySelector(".csv-cell-editor");
@@ -293,8 +304,10 @@ test("Tab reaches insertion cells while saved empty rows remain distinct", async
   await act(async () => user.type(input, "new"));
   await key(dom, input, "Tab");
   assert.deepEqual(parseCsvSource(saved).rows, [["a", "b"], ["", ""], ["", "new"]]);
-  assert.equal(dom.window.document.activeElement, cell(dom, 3, 0),
-    "Tab advances to a fresh placeholder after inserting");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(input?.closest("[data-row][data-column]") === cell(dom, 3, 0), true,
+    "Tab opens a fresh placeholder after inserting");
+  assert.equal(dom.window.document.activeElement === input, true);
   await act(async () => cell(dom, 2, 1).click());
   await key(dom, cell(dom, 2, 1), "Delete");
   assert.deepEqual(parseCsvSource(saved).rows, [["a", "b"], ["", ""], ["", ""]],
@@ -312,7 +325,7 @@ test("Tab reaches insertion cells while saved empty rows remain distinct", async
   await act(async () => cell(dom, 0, 0).click());
   await act(async () => cell(dom, 0, 0).dispatchEvent(copy));
   assert.equal(clipboard.get("text/plain"), "a");
-  assert.equal(dom.window.document.activeElement, cell(dom, 0, 0));
+  assert.equal(dom.window.document.activeElement === cell(dom, 0, 0), true);
   assert.equal(edits, 2, "read-only focus and copy create no rows");
 });
 
