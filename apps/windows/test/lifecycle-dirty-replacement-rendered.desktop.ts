@@ -8,3 +8,6 @@ for (const entry of ["new", "open", "external"]) {
     test(lifecycleCaseName(origin), (t) => runMountedLock(t, origin));
   }
 }
+
+test("D-S4-O dirty Open waits for slow candidate authentication before Save", (t) =>
+  runMountedLock(t, "dr-open-save", null, { candidateReadDelayMs: 1_500 }));
