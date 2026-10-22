@@ -1063,6 +1063,27 @@ test("a merge draft hides the publication decision until save or discard", () =>
   session.dispose();
 });
 
+test("CSV merge repair checkpoints edits while save waits for markers and rectangular source", () => {
+  const journal = new Journal();
+  const session = new DocumentSession(new Host(), journal);
+  session.adopt({ ...opened("name,value\nlocal,1", false), contentType: "csv",
+    publicationState: "conflict" });
+  const markers = "<<<<<<< local\nlocal\n=======\ncurrent\n>>>>>>> current";
+  assert.equal(session.adoptDivergence(markers), true);
+  const edit = () => {
+    const snapshot = session.getSnapshot();
+    if (snapshot.kind !== "edit") throw new Error("expected CSV merge edit");
+    return snapshot;
+  };
+  assert.equal(edit().commands.save, false, "single-column markers parse as CSV");
+  assert.equal(session.edit("name,value\npartial"), true);
+  assert.equal(journal.updates.at(-1)?.content, "name,value\npartial");
+  assert.equal(edit().commands.save, false);
+  assert.equal(session.edit("name,value\nresolved,2"), true);
+  assert.equal(edit().commands.save, true);
+  session.dispose();
+});
+
 test("edit lease attention is secret-free and one-shot confirmation enters edit mode", async () => {
   const host = new Host();
   const session = new DocumentSession(host, new Journal());

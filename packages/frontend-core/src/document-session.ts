@@ -1,5 +1,11 @@
 import { WorkingCopy, type ReadyWorkingCopySnapshot, type WorkingCopyFindResult,
   type WorkingCopyJournalHost, type WorkingCopySelection } from "./working-copy.ts";
+import { parseCsvSource } from "./csv-source.mjs";
+
+/** Detects unresolved source conflict lines before a CSV parser can treat them as cells. */
+function hasConflictMarkers(content: string): boolean {
+  return /^(?:<<<<<<<.*|=======.*|>>>>>>>.*)$/m.test(content);
+}
 
 /** Host-validated document data required for frontend lifecycle projection. */
 export interface SessionDocument {
@@ -2119,7 +2125,10 @@ export class DocumentSession<Doc extends SessionDocument,
       redo: !document.readOnly && !document.recovery && !document.headMismatch
         && !document.unreadableJournal && pending !== "compaction" && working.canRedo,
       save: !document.readOnly && !document.recovery && !document.headMismatch
-        && !document.unreadableJournal && working.dirty && pending === undefined,
+        && !document.unreadableJournal && working.dirty && pending === undefined
+        && (document.contentType !== "csv" || (parseCsvSource(working.text).valid
+          && !(this.publicationState === "conflict"
+            && hasConflictMarkers(working.text)))),
       backup: !working.dirty && this.publicationState === "target-published"
         && !document.provisional && !document.recovery && !document.headMismatch
         && !document.activityOutcomePending

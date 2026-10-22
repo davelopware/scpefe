@@ -106,6 +106,11 @@ test("CSV table commands protect read-only presentation and reject invalid sourc
     commands: { write: false } } as unknown as DocumentSessionSnapshot<Doc>;
   assert.equal(commands.available("replace"), true);
   assert.equal(commands.available("show-table"), true);
+  current = { ...make("heading\nvalue"),
+    publication: { state: "conflict", resolving: true } } as unknown as
+    DocumentSessionSnapshot<Doc>;
+  assert.equal(commands.available("show-table"), false,
+    "CSV conflict repair stays in source view even when the draft parses");
   current = snapshot("locked");
   assert.equal(commands.available("show-csv-source"), false);
   assert.equal(commands.available("show-table"), false);

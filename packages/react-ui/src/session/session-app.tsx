@@ -103,6 +103,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const dirty = working?.dirty ?? false;
   const publicationResolving = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
+  const csvRepair = (sessionSnapshot.kind === "read-only"
+    || sessionSnapshot.kind === "edit")
+    && sessionSnapshot.document.contentType === "csv"
+    && sessionSnapshot.publication.state === "conflict";
   useEffect(() => () => {
     presentationMounted.current = false;
     presentation.dispose();
@@ -114,6 +118,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [csvView, setCsvView] = useState<"source" | "table">("table");
+  const effectiveCsvView = csvRepair ? "source" : csvView;
   const [tableFocus, setTableFocus] = useState<{ row: number; column: number } | null>(null);
   const [dialog, setDialogState] = useState<DialogName>(null);
   const [activityDialog, setActivityDialog] = useState(false);
@@ -211,7 +216,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
       modalBusy: modalBusy.current, activityAvailable: Boolean(revisionActivityHost),
-      csvView, tableFocus }),
+      csvView: effectiveCsvView, tableFocus }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -397,7 +402,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   return <main className="app-shell"><div className="shell-chrome">
     <MenuBar snapshot={sessionSnapshot} commands={shellCommands} />
     <EditorView ref={editorView} session={session} active={activeDocument}
-      locked={lockedDocument} blocked={modalBusy.current} csvView={csvView}
+      locked={lockedDocument} blocked={modalBusy.current} csvView={effectiveCsvView}
       onMessage={setMessage}
       onTableFocus={(focus) => setTableFocus((current) =>
         current?.row === focus.row && current.column === focus.column ? current : focus)}
