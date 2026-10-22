@@ -94,6 +94,7 @@ test("CSV table commands protect read-only presentation and reject invalid sourc
   assert.equal(commands.available("show-table"), false);
   assert.equal(commands.available("undo"), false);
   assert.equal(commands.available("redo"), false);
+  assert.equal(commands.available("find"), true);
   assert.equal(commands.available("replace"), false);
   facts.csvView = "source";
   assert.equal(commands.available("show-table"), true);
