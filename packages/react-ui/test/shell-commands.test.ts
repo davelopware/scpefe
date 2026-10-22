@@ -78,3 +78,34 @@ test("File compaction follows current command eligibility and rejects stale menu
   assert.equal(commands.available("compact"), false);
   assert.deepEqual(calls, ["compact", "compact"]);
 });
+
+test("CSV table commands protect read-only presentation and reject invalid source", async () => {
+  const make = (text: string) => ({ kind: "edit", adoption: 1,
+    document: { contentType: "csv" }, working: { text },
+    commands: { undo: true, redo: true, write: true } }) as unknown as
+    DocumentSessionSnapshot<Doc>;
+  let current = make("heading\nvalue");
+  const facts: ShellCommandFacts = { activeAdoption: 1, profileReady: true,
+    modalBusy: false, csvView: "table" };
+  const commands = createShellCommands({ session: { getSnapshot: () => current,
+    subscribe: () => () => {} }, facts: () => facts,
+    run: () => {}, track: async (operation) => { await operation(); } });
+  assert.equal(commands.available("show-csv-source"), true);
+  assert.equal(commands.available("show-table"), false);
+  assert.equal(commands.available("undo"), false);
+  assert.equal(commands.available("redo"), false);
+  assert.equal(commands.available("replace"), false);
+  facts.csvView = "source";
+  assert.equal(commands.available("show-table"), true);
+  assert.equal(commands.available("undo"), true);
+  assert.equal(commands.available("replace"), true);
+  current = make("heading\n\"unterminated");
+  assert.equal(commands.available("show-table"), false);
+  current = { ...make("heading\nvalue"), kind: "read-only",
+    commands: { write: false } } as unknown as DocumentSessionSnapshot<Doc>;
+  assert.equal(commands.available("replace"), true);
+  assert.equal(commands.available("show-table"), true);
+  current = snapshot("locked");
+  assert.equal(commands.available("show-csv-source"), false);
+  assert.equal(commands.available("show-table"), false);
+});

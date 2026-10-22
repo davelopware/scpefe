@@ -42,14 +42,14 @@ test("CSV source view reports a parse location and Go to error selects it", asyn
     cancelAnimationFrame: (token) => frames.delete(token),
     IS_REACT_ACT_ENVIRONMENT: true });
   const text = "heading,other\nonly-one";
-  const snapshot = { kind: "edit", document: { content: text, contentType: "csv" },
+  let snapshot = { kind: "edit", document: { content: text, contentType: "csv" },
     working: { text, selection: { start: 0, end: 0 } }, commands: { write: true } };
   const session = { subscribe: () => () => {}, getSnapshot: () => snapshot,
     edit: () => true, setSelection: () => true, undo: () => true, redo: () => true,
     findNext: () => null, replaceSelection: () => null, replaceAll: () => null };
   root = createRoot(dom.window.document.getElementById("root"));
   await act(async () => root.render(<EditorView session={session} active locked={false}
-    blocked={false} onMessage={() => {}} onReturnFocus={() => {}} />));
+    blocked={false} csvView="source" onMessage={() => {}} onReturnFocus={() => {}} />));
   const alert = dom.window.document.querySelector('[role="alert"]');
   assert.match(alert?.textContent ?? "", /line 2, column 1/);
   const editor = dom.window.document.querySelector("textarea");
@@ -62,5 +62,44 @@ test("CSV source view reports a parse location and Go to error selects it", asyn
   await act(async () => dom.window.document.querySelector('button[aria-label="File"]').click());
   assert.match(dom.window.document.querySelector('[role="menu"]')?.textContent ?? "",
     /Export CSV…/);
+  assert.ok(dom.window.document.querySelector('button[aria-label="Table"]'));
+
+  const valid = "same,,same\n,,\nvalue,,\"\"";
+  snapshot = { ...snapshot, document: { ...snapshot.document, content: valid },
+    working: { ...snapshot.working, text: valid } };
+  await act(async () => root.render(<EditorView session={session} active locked={false}
+    blocked={false} csvView="table" onMessage={() => {}} onReturnFocus={() => {}} />));
+  assert.equal(dom.window.document.querySelector("textarea"), null);
+  const rows = dom.window.document.querySelectorAll(".csv-table tr");
+  assert.equal(rows.length, 4, "heading, two saved rows, and one placeholder");
+  assert.deepEqual([...rows[0].querySelectorAll("th")].map((cell) => cell.textContent),
+    ["same", "", "same"]);
+  assert.deepEqual([...rows[1].querySelectorAll("td")].map((cell) => cell.textContent),
+    ["", "", ""]);
+  assert.equal(rows[1].classList.contains("csv-insertion-placeholder"), false);
+  assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+  assert.equal(rows[3].getAttribute("aria-label"), "Insertion placeholder");
+  await act(async () => root.render(<EditorView session={session} active locked={false}
+    blocked csvView="table" onMessage={() => {}} onReturnFocus={() => {}} />));
+  assert.equal(dom.window.document.querySelector(".csv-table"), null,
+    "modal protection hides table content");
+  await act(async () => root.render(<EditorView session={session} active locked={false}
+    blocked={false} csvView="source" onMessage={() => {}} onReturnFocus={() => {}} />));
+  assert.equal(dom.window.document.querySelector("textarea")?.value, valid);
+  snapshot = { ...snapshot, kind: "read-only",
+    commands: { write: false } };
+  await act(async () => root.render(<EditorView session={session} active locked={false}
+    blocked={false} csvView="source" onMessage={() => {}} onReturnFocus={() => {}} />));
+  assert.equal(dom.window.document.querySelector("textarea")?.readOnly, true);
+  snapshot = { ...snapshot, kind: "locked" };
+  await act(async () => root.render(<EditorView session={session} active={false} locked
+    blocked={false} csvView="table" onMessage={() => {}} onReturnFocus={() => {}} />));
+  assert.equal(dom.window.document.querySelector(".csv-table"), null);
+  assert.equal(dom.window.document.querySelector("textarea")?.value, "");
+  snapshot = { ...snapshot, kind: "edit",
+    document: { ...snapshot.document, contentType: "plain-text" } };
+  await act(async () => root.render(<MenuBar snapshot={snapshot}
+    commands={{ available: () => true, invoke: async () => true }} />));
+  assert.equal(dom.window.document.querySelector('button[aria-label="Table"]'), null);
   await act(async () => { root.unmount(); root = null; });
 });
