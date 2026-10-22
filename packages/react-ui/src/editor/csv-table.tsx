@@ -34,11 +34,17 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
   const [firstVisibleRow, setFirstVisibleRow] = useState(1);
   const [visibleRows, setVisibleRows] = useState(20);
   const columns = rows[0].length;
-  const row = Math.min(position.row, rows.length - 1);
+  const row = Math.min(position.row, readOnly ? rows.length - 1 : rows.length);
   const column = Math.min(position.column, columns - 1);
   const windowStart = Math.max(1, firstVisibleRow - overscan);
   const windowEnd = Math.min(rows.length,
     firstVisibleRow + visibleRows + overscan);
+
+  useEffect(() => {
+    if (!readOnly && rows.length === 1 && rows[0].length === 1 && rows[0][0] === "") {
+      beginEdit(0, 0);
+    }
+  }, []);
 
   useLayoutEffect(() => {
     if (readOnly && draftRef.current) {
@@ -55,7 +61,8 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       return;
     }
     if (!focusPending.current) return;
-    const target = cellAt(row, column);
+    if (position.row > rows.length) return;
+    const target = cellAt(position.row, column);
     if (!target) return;
     target.focus();
     if (typeof target.scrollIntoView === "function") {
@@ -82,8 +89,9 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       `[data-row="${nextRow}"][data-column="${nextColumn}"]`) ?? null;
   }
 
-  function move(nextRow: number, nextColumn: number): void {
-    const targetRow = Math.max(0, Math.min(rows.length - 1, nextRow));
+  function move(nextRow: number, nextColumn: number,
+    lastRow = readOnly ? rows.length - 1 : rows.length): void {
+    const targetRow = Math.max(0, Math.min(lastRow, nextRow));
     const targetColumn = Math.max(0, Math.min(columns - 1, nextColumn));
     focusPending.current = true;
     if (targetRow < windowStart || targetRow >= windowEnd) {
@@ -103,19 +111,25 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     if (readOnly || !onEdit) return;
     focusDraftPending.current = true;
     setPosition({ row: nextRow, column: nextColumn });
-    setCellDraft({ row: nextRow, column: nextColumn, value: rows[nextRow][nextColumn] });
+    setCellDraft({ row: nextRow, column: nextColumn,
+      value: rows[nextRow]?.[nextColumn] ?? "" });
   }
 
   function commitEdit(nextRow?: number, nextColumn?: number): void {
     const current = draftRef.current;
     if (!current) return;
     setCellDraft(null);
-    if (!readOnly && current.value !== rows[current.row][current.column]) {
+    const inserting = current.row === rows.length;
+    if (!readOnly && current.value !== (rows[current.row]?.[current.column] ?? "")) {
       const updated = rows.map((values) => [...values]);
+      if (inserting) updated.push(Array(columns).fill(""));
       updated[current.row][current.column] = current.value;
       onEdit?.(updated);
     }
-    if (nextRow !== undefined && nextColumn !== undefined) move(nextRow, nextColumn);
+    if (nextRow !== undefined && nextColumn !== undefined) {
+      move(nextRow, nextColumn, inserting && current.value !== ""
+        ? rows.length + 1 : rows.length);
+    }
   }
 
   function editKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
@@ -147,7 +161,9 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       const current = draftRef.current;
       if (current) {
         const index = current.row * columns + current.column + (event.shiftKey ? -1 : 1);
-        const bounded = Math.max(0, Math.min(rows.length * columns - 1, index));
+        const lastRow = current.row === rows.length && current.value !== ""
+          ? rows.length + 1 : rows.length;
+        const bounded = Math.max(0, Math.min((lastRow + 1) * columns - 1, index));
         commitEdit(Math.floor(bounded / columns), bounded % columns);
       }
     }
@@ -156,7 +172,8 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
   function cellContent(value: string, cellRow: number, cellColumn: number): React.ReactNode {
     if (!readOnly && draft?.row === cellRow && draft.column === cellColumn) {
       return <textarea ref={input} className="csv-cell-editor" aria-label={
-        `Edit ${cellRow === 0 ? "heading" : `row ${cellRow}`}, column ${cellColumn + 1}`}
+        `Edit ${cellRow === 0 ? "heading" : cellRow === rows.length
+          ? "new row" : `row ${cellRow}`}, column ${cellColumn + 1}`}
         value={draft.value} onChange={(event) => setCellDraft({ ...draft,
           value: event.target.value.replace(/\r\n?/g, "\n") })}
         onKeyDown={editKeyDown} onBlur={() => commitEdit()}
@@ -184,7 +201,10 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
   }
 
   useImperativeHandle(ref, () => ({
-    focus: () => move(row, column), findNext,
+    focus: () => {
+      if (draftRef.current && input.current) input.current.focus();
+      else move(row, column);
+    }, findNext,
   }));
 
   function pageRows(): number {
@@ -204,7 +224,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     }
     if (event.key === "Delete" && !readOnly && onEdit) {
       event.preventDefault();
-      if (rows[row][column] !== "") {
+      if (rows[row]?.[column]) {
         const updated = rows.map((values) => [...values]);
         updated[row][column] = "";
         onEdit(updated);
@@ -222,8 +242,10 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       case "PageDown": nextRow += pageRows(); break;
       case "Tab": {
         const index = row * columns + column + (event.shiftKey ? -1 : 1);
-        nextRow = Math.floor(Math.max(0, Math.min(rows.length * columns - 1, index)) / columns);
-        nextColumn = Math.max(0, Math.min(rows.length * columns - 1, index)) % columns;
+        const bounded = Math.max(0, Math.min(
+          (readOnly ? rows.length : rows.length + 1) * columns - 1, index));
+        nextRow = Math.floor(bounded / columns);
+        nextColumn = bounded % columns;
         break;
       }
       default: return;
@@ -235,7 +257,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
   function copy(event: React.ClipboardEvent<HTMLTableCellElement>): void {
     const copyRow = Number(event.currentTarget.dataset.row);
     const copyColumn = Number(event.currentTarget.dataset.column);
-    event.clipboardData.setData("text/plain", rows[copyRow][copyColumn]);
+    event.clipboardData.setData("text/plain", rows[copyRow]?.[copyColumn] ?? "");
     event.preventDefault();
   }
 
@@ -284,13 +306,23 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
         </tr>}
         <tr className="csv-insertion-placeholder" aria-label="Insertion placeholder"
           aria-rowindex={rows.length + 1}>
-          <td colSpan={columns}>+ New row</td>
+          {rows[0].map((_, columnIndex) => <td key={columnIndex}
+            data-row={rows.length} data-column={columnIndex}
+            tabIndex={!readOnly && row === rows.length && column === columnIndex ? 0 : -1}
+            onClick={readOnly ? undefined : (event) => click(event, rows.length, columnIndex)}
+            onDoubleClick={readOnly ? undefined : (event) =>
+              doubleClick(event, rows.length, columnIndex)}
+            onKeyDown={readOnly ? undefined : keyDown} onCopy={readOnly ? undefined : copy}>
+            {cellContent("", rows.length, columnIndex)}
+            {draft?.row !== rows.length && columnIndex === 0 &&
+              <span className="csv-insertion-hint" aria-hidden="true">+ New row</span>}
+          </td>)}
         </tr>
       </tbody></table>
     </div>
     <div className="csv-focused-value" aria-live="polite">
       <span>Focused value (row {row === 0 ? "heading" : row}, column {column + 1})</span>
-      <pre>{rows[row][column]}</pre>
+      <pre>{rows[row]?.[column] ?? ""}</pre>
     </div>
   </div>;
 }
