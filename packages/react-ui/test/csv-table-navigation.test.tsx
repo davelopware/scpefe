@@ -218,6 +218,67 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   assert.equal(count(), undefined);
 });
 
+test("table Find reveals matches below the sticky heading and clear of the dialog", async (t) => {
+  const { dom, root } = mounted(t);
+  const rows = Array.from({ length: 16 }, (_, row) => [
+    `row ${row}`, row === 2 ? 'STICKY-TARGET' : `value ${row}`,
+    `other ${row}`, row === 12 ? 'DIALOG-TARGET' : `last ${row}`]);
+  rows[0] = ['Name', 'Note', 'Extra', 'Far right'];
+  const text = writeCsvSource(rows);
+  const snapshot = { kind: 'read-only', document: { content: text, contentType: 'csv' },
+    working: { text, selection: { start: 0, end: 0 } }, commands: { write: false } };
+  const session = { subscribe: () => () => {}, getSnapshot: () => snapshot,
+    edit: () => false, setSelection: () => false, undo: () => false, redo: () => false,
+    findNext: () => null, replaceSelection: () => null, replaceAll: () => null };
+  const view = createRef();
+  await act(async () => root.render(<EditorView ref={view} session={session} active
+    locked={false} blocked={false} csvView="table" onMessage={() => {}}
+    onReturnFocus={() => {}} />));
+  await act(async () => view.current.openFind('find', cell(dom, 0, 0)));
+  const document = dom.window.document;
+  const scroll = document.querySelector('.csv-table-scroll');
+  const heading = document.querySelector('.csv-table thead');
+  const dialog = document.querySelector('.modeless-dialog');
+  const bounds = (left, top, right, bottom) => ({ left, top, right, bottom,
+    width: right - left, height: bottom - top });
+  scroll.getBoundingClientRect = () => bounds(0, 31, 920, 616);
+  heading.getBoundingClientRect = () => bounds(452, 43, 891, 79);
+  dialog.getBoundingClientRect = () => bounds(434, 470, 910, 650);
+  const nearHeading = cell(dom, 2, 1);
+  nearHeading.getBoundingClientRect = () =>
+    bounds(452 - scroll.scrollLeft, 115 - scroll.scrollTop,
+      891 - scroll.scrollLeft, 151 - scroll.scrollTop);
+  const underDialog = cell(dom, 12, 3);
+  underDialog.getBoundingClientRect = () =>
+    bounds(1000 - scroll.scrollLeft, 500 - scroll.scrollTop,
+      1300 - scroll.scrollLeft, 536 - scroll.scrollTop);
+  const userEvent = (await import('@testing-library/user-event')).default;
+  const user = userEvent.setup({ document });
+  const input = document.querySelector('input');
+  await act(async () => user.type(input, 'STICKY-TARGET'));
+  await act(async () => {
+    scroll.scrollTop = 51;
+    scroll.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+  });
+  await key(dom, input, 'Enter');
+  assert.equal(document.activeElement === input, true);
+  assert.equal(nearHeading.getAttribute('data-current-cell'), 'true');
+  assert.ok(nearHeading.getBoundingClientRect().top >= heading.getBoundingClientRect().bottom,
+    'the current cell is fully below the sticky heading');
+
+  await act(async () => user.clear(input));
+  await act(async () => user.type(input, 'DIALOG-TARGET'));
+  await act(async () => {
+    scroll.scrollTop = 0; scroll.scrollLeft = 0;
+    scroll.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+  });
+  await key(dom, input, 'Enter');
+  assert.equal(underDialog.getAttribute('data-current-cell'), 'true');
+  assert.ok(scroll.scrollLeft > 0, 'the far-right match is scrolled horizontally into view');
+  assert.ok(underDialog.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
+    'the match remains clear of the dialog after horizontal scrolling');
+});
+
 test("CSV table cell drafts commit, navigate, cancel, and serialize as one value", async (t) => {
   const { dom, root } = mounted(t);
   let saved = writeCsvSource([["name", "name"], ["old", "right"], ["last", "end"]]);

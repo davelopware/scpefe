@@ -91,16 +91,32 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       if (target && scroll.current) {
         searchRevealPending.current = false;
         const viewport = scroll.current.getBoundingClientRect();
-        const bounds = target.getBoundingClientRect();
+        let bounds = target.getBoundingClientRect();
         if (bounds.left < viewport.left) scroll.current.scrollLeft += bounds.left - viewport.left;
         else if (bounds.right > viewport.right) {
           scroll.current.scrollLeft += bounds.right - viewport.right;
         }
+        // Horizontal scrolling can move a cell beneath the modeless dialog.
+        bounds = target.getBoundingClientRect();
+        const heading = scroll.current.querySelector('thead')?.getBoundingClientRect();
+        let visibleTop = Math.max(viewport.top + 8,
+          row === 0 ? viewport.top + 8 : (heading?.bottom ?? viewport.top) + 8);
+        let visibleBottom = viewport.bottom - 8;
         const dialog = scroll.current.closest('.editor-surface')
           ?.querySelector('.modeless-dialog')?.getBoundingClientRect();
         if (dialog && bounds.right > dialog.left && bounds.left < dialog.right
           && bounds.bottom > dialog.top && bounds.top < dialog.bottom) {
-          scroll.current.scrollTop += bounds.bottom - dialog.top + 8;
+          const above = dialog.top - 8 - visibleTop;
+          const below = visibleBottom - dialog.bottom - 8;
+          if (above >= bounds.height || above >= below) {
+            visibleBottom = Math.min(visibleBottom, dialog.top - 8);
+          } else {
+            visibleTop = Math.max(visibleTop, dialog.bottom + 8);
+          }
+        }
+        if (bounds.top < visibleTop) scroll.current.scrollTop += bounds.top - visibleTop;
+        else if (bounds.bottom > visibleBottom) {
+          scroll.current.scrollTop += bounds.bottom - visibleBottom;
         }
       }
     }
