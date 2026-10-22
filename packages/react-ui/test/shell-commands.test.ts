@@ -110,3 +110,43 @@ test("CSV table commands protect read-only presentation and reject invalid sourc
   assert.equal(commands.available("show-csv-source"), false);
   assert.equal(commands.available("show-table"), false);
 });
+
+test("Table structure availability follows focused row, column, and write mode", () => {
+  const make = (text: string, kind: "edit" | "read-only" = "edit") => ({
+    kind, adoption: 1, document: { contentType: "csv" }, working: { text },
+    commands: { write: kind === "edit" },
+  }) as unknown as DocumentSessionSnapshot<Doc>;
+  let current = make("name,age\nAda,36");
+  const facts: ShellCommandFacts = { activeAdoption: 1, profileReady: true,
+    modalBusy: false, csvView: "table", tableFocus: null };
+  const commands = createShellCommands({ session: { getSnapshot: () => current,
+    subscribe: () => () => {} }, facts: () => facts,
+    run: () => {}, track: async (operation) => { await operation(); } });
+  const available = (values: ShellCommand[]) => values.map((command) =>
+    commands.available(command));
+  const row = ["add-row-above", "add-row-below", "delete-row"] as ShellCommand[];
+  const column = ["add-column-left", "add-column-right", "delete-column"] as ShellCommand[];
+  assert.deepEqual(available([...row, ...column]), [false, false, false,
+    false, false, false], "no focus");
+  facts.tableFocus = { row: 0, column: 0 };
+  assert.deepEqual(available(row), [false, true, false], "heading");
+  assert.deepEqual(available(column), [true, true, true]);
+  facts.tableFocus = { row: 1, column: 1 };
+  assert.deepEqual(available(row), [true, true, true], "data row");
+  facts.tableFocus = { row: 2, column: 1 };
+  assert.deepEqual(available(row), [false, false, false], "insertion row");
+  assert.deepEqual(available(column), [true, true, true]);
+  current = make("only");
+  facts.tableFocus = { row: 0, column: 0 };
+  assert.deepEqual(available(column), [true, true, false], "final column");
+  current = make("name,age\nAda,36", "read-only");
+  assert.deepEqual(available([...row, ...column]), [false, false, false,
+    false, false, false], "read-only");
+  current = make("name,age\ninvalid");
+  assert.deepEqual(available([...row, ...column]), [false, false, false,
+    false, false, false], "invalid CSV");
+  current = make("name,age\nAda,36");
+  facts.csvView = "source";
+  assert.deepEqual(available([...row, ...column]), [false, false, false,
+    false, false, false], "source view");
+});

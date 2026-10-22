@@ -369,3 +369,129 @@ test("cell editing keeps Find and Save shortcuts available and saves the current
     "Save receives the committed draft");
   assert.equal(dom.window.document.querySelector(".csv-cell-editor"), null);
 });
+
+test("Table structure commands preserve rectangular saved rows and focus their result", async (t) => {
+  const { dom, root } = mounted(t);
+  let saved = writeCsvSource([["name", "age"], ["Ada", "36"], ["Bob", "41"]]);
+  const table = createRef();
+  const confirmations = [];
+  dom.window.confirm = (message) => { confirmations.push(message); return false; };
+  function Harness({ readOnly = false }) {
+    const [rows, setRows] = useState(parseCsvSource(saved).rows);
+    return <CsvTable ref={table} rows={rows} readOnly={readOnly} onFind={() => {}}
+      onEdit={(next) => { saved = writeCsvSource(next); setRows(next); }} />;
+  }
+  await act(async () => root.render(<Harness />));
+  const run = async (command) => act(async () => table.current.runStructure(command));
+  const focus = async (row, column) => act(async () => cell(dom, row, column).click());
+  const assertFocus = (row, column) => assert.equal(dom.window.document.activeElement ===
+    cell(dom, row, column), true, `${row}:${column} focused`);
+  const assertShape = () => {
+    const parsed = parseCsvSource(saved);
+    assert.equal(parsed.valid, true);
+    assert.equal(new Set(parsed.rows.map((values) => values.length)).size, 1);
+    assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+  };
+
+  await focus(0, 0);
+  await run("add-row-above");
+  await run("delete-row");
+  assert.deepEqual(parseCsvSource(saved).rows, [["name", "age"], ["Ada", "36"],
+    ["Bob", "41"]], "heading cannot be inserted above or deleted");
+  await run("add-row-below");
+  assert.deepEqual(parseCsvSource(saved).rows[1], ["", ""]);
+  assertFocus(1, 0);
+  assertShape();
+  assert.equal(cell(dom, 1, 0).closest("tr").classList.contains("csv-insertion-placeholder"),
+    false, "explicit empty row is saved");
+
+  await run("add-row-below");
+  assertFocus(2, 0);
+  await run("add-row-above");
+  assertFocus(2, 0);
+  await run("delete-row");
+  assertFocus(2, 0, "deleting a row focuses the row below");
+  await focus(4, 1);
+  await run("delete-row");
+  assert.equal(confirmations.length, 1, "nonempty row asks for confirmation");
+  assertFocus(4, 1);
+  dom.window.confirm = (message) => { confirmations.push(message); return true; };
+  await run("delete-row");
+  assertFocus(3, 1, "deleting last row focuses above");
+  assertShape();
+
+  await focus(0, 0);
+  await run("add-column-left");
+  assertFocus(0, 0);
+  assert.deepEqual(parseCsvSource(saved).rows[0], ["", "name", "age"]);
+  await focus(0, 2);
+  await run("add-column-right");
+  assertFocus(0, 3);
+  assertShape();
+  await run("delete-column");
+  assertFocus(0, 2, "deleting last column focuses left");
+  await focus(1, 1);
+  dom.window.confirm = (message) => { confirmations.push(message); return false; };
+  await run("delete-column");
+  assert.equal(parseCsvSource(saved).rows[0][1], "name", "cancel keeps column");
+  dom.window.confirm = (message) => { confirmations.push(message); return true; };
+  await run("delete-column");
+  assertFocus(1, 1, "deleting middle column focuses right");
+  assert.deepEqual(parseCsvSource(saved).rows[0], ["", "age"]);
+  await focus(parseCsvSource(saved).rows.length, 0);
+  const before = saved;
+  await run("add-row-below");
+  await run("delete-row");
+  assert.equal(saved, before, "insertion placeholder cannot receive row commands");
+  await run("delete-column");
+  assert.equal(parseCsvSource(saved).rows[0].length, 1,
+    "column command works from insertion placeholder");
+  await run("delete-column");
+  assert.equal(parseCsvSource(saved).rows[0].length, 1, "last column cannot be deleted");
+  assertShape();
+  const reopened = parseCsvSource(saved);
+  await act(async () => root.render(<CsvTable rows={reopened.rows} readOnly
+    onFind={() => {}} />));
+  assert.equal(cell(dom, 1, 0).closest("tr").classList.contains("csv-insertion-placeholder"),
+    false, "added empty data row survives reopening");
+});
+
+test("Table menu enables focused structure actions and dispatches them to the table", async (t) => {
+  const { dom, root } = mounted(t);
+  const table = createRef();
+  let saved = writeCsvSource([["name", "age"], ["Ada", "36"]]);
+  function Harness() {
+    const [rows, setRows] = useState(parseCsvSource(saved).rows);
+    const [focus, setFocus] = useState(null);
+    const snapshot = { kind: "edit", adoption: 1,
+      document: { contentType: "csv" }, working: { text: saved },
+      commands: { write: true } };
+    const commands = createShellCommands({ session: { getSnapshot: () => snapshot,
+      subscribe: () => () => {} }, facts: () => ({ activeAdoption: 1,
+      profileReady: true, modalBusy: false, csvView: "table", tableFocus: focus }),
+    run: (command) => table.current.runStructure(command),
+    track: async (operation) => { await operation(); } });
+    return <><MenuBar snapshot={snapshot} commands={commands} />
+      <CsvTable ref={table} rows={rows} readOnly={false} onFind={() => {}}
+        onFocusChange={(next) => setFocus((current) => current?.row === next.row
+          && current.column === next.column ? current : next)}
+        onEdit={(next) => { saved = writeCsvSource(next); setRows(next); }} /></>;
+  }
+  await act(async () => root.render(<Harness />));
+  const menu = async () => act(async () =>
+    dom.window.document.querySelector('button[aria-label="Table"]').click());
+  const action = (label) => [...dom.window.document.querySelectorAll(
+    '[role="menu"][aria-label="Table"] button')].find((button) =>
+    button.textContent === label);
+  await menu();
+  assert.equal(action("Add Row Below").disabled, true, "no focused cell");
+  await act(async () => cell(dom, 0, 1).click());
+  await menu();
+  assert.equal(action("Add Row Above").disabled, true, "heading guard");
+  assert.equal(action("Add Row Below").disabled, false);
+  await act(async () => action("Add Row Below").click());
+  assert.deepEqual(parseCsvSource(saved).rows[1], ["", ""]);
+  assert.equal(dom.window.document.activeElement === cell(dom, 1, 1), true);
+  await menu();
+  assert.equal(action("Delete Row").disabled, false, "new data row can be deleted");
+});

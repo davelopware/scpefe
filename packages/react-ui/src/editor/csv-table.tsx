@@ -1,10 +1,12 @@
 import React, { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState,
   type KeyboardEvent, type MouseEvent } from "react";
+import type { CsvStructureCommand } from "../shell/shell-commands.ts";
 
 /** Controls exposed to the workspace Find command and focus restoration. */
 export interface CsvTableHandle {
   focus(): void;
   findNext(query: string): "found" | "wrapped" | "missing";
+  runStructure(command: CsvStructureCommand): void;
 }
 
 interface CsvTableProps {
@@ -14,6 +16,7 @@ interface CsvTableProps {
   onSave?(): void;
   ref?: React.Ref<CsvTableHandle>;
   onFind(): void;
+  onFocusChange?(focus: { row: number; column: number }): void;
 }
 
 interface CellDraft { row: number; column: number; value: string }
@@ -23,7 +26,7 @@ const overscan = 4;
 
 /** Presents CSV headings and values as one keyboard-navigable, editable table. */
 export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
-  onFind }: CsvTableProps): React.ReactElement {
+  onFind, onFocusChange }: CsvTableProps): React.ReactElement {
   const scroll = useRef<HTMLDivElement>(null);
   const focusPending = useRef(false);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -64,11 +67,11 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     if (position.row > rows.length) return;
     const target = cellAt(position.row, column);
     if (!target) return;
+    focusPending.current = false;
     target.focus();
     if (typeof target.scrollIntoView === "function") {
       target.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
-    focusPending.current = false;
   });
 
   useEffect(() => {
@@ -90,9 +93,10 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
   }
 
   function move(nextRow: number, nextColumn: number,
-    lastRow = readOnly ? rows.length - 1 : rows.length): void {
+    lastRow = readOnly ? rows.length - 1 : rows.length,
+    lastColumn = columns - 1): void {
     const targetRow = Math.max(0, Math.min(lastRow, nextRow));
-    const targetColumn = Math.max(0, Math.min(columns - 1, nextColumn));
+    const targetColumn = Math.max(0, Math.min(lastColumn, nextColumn));
     focusPending.current = true;
     if (targetRow < windowStart || targetRow >= windowEnd) {
       const start = Math.max(1, targetRow - Math.floor(visibleRows / 2));
@@ -200,11 +204,52 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     return "missing";
   }
 
+  function runStructure(command: CsvStructureCommand): void {
+    if (readOnly || !onEdit || !scroll.current) return;
+    const focused = position;
+    if (focused.row < 0 || focused.row > rows.length
+        || focused.column < 0 || focused.column >= columns) return;
+    const rowCommand = command === "add-row-above" || command === "add-row-below"
+      || command === "delete-row";
+    if (rowCommand && focused.row === rows.length) return;
+    if ((command === "add-row-above" || command === "delete-row") && focused.row === 0) return;
+    if (command === "delete-column" && columns === 1) return;
+    const updated = rows.map((values) => [...values]);
+    let nextRow = focused.row;
+    let nextColumn = focused.column;
+    if (command === "add-row-above" || command === "add-row-below") {
+      nextRow += command === "add-row-below" ? 1 : 0;
+      updated.splice(nextRow, 0, Array(columns).fill(""));
+    } else if (command === "delete-row") {
+      if (updated[focused.row].some((value) => value !== "")
+          && !window.confirm(`Delete row ${focused.row} and its values?`)) {
+        move(focused.row, focused.column);
+        return;
+      }
+      updated.splice(focused.row, 1);
+      nextRow = focused.row < updated.length ? focused.row : focused.row - 1;
+    } else if (command === "add-column-left" || command === "add-column-right") {
+      nextColumn += command === "add-column-right" ? 1 : 0;
+      for (const values of updated) values.splice(nextColumn, 0, "");
+    } else if (command === "delete-column") {
+      if (updated.some((values) => values[focused.column] !== "")
+          && !window.confirm(`Delete column ${focused.column + 1} and its values?`)) {
+        move(focused.row, focused.column);
+        return;
+      }
+      for (const values of updated) values.splice(focused.column, 1);
+      nextColumn = focused.column < columns - 1 ? focused.column : focused.column - 1;
+    }
+    setCellDraft(null);
+    onEdit(updated);
+    move(nextRow, nextColumn, updated.length, updated[0].length - 1);
+  }
+
   useImperativeHandle(ref, () => ({
     focus: () => {
       if (draftRef.current && input.current) input.current.focus();
       else move(row, column);
-    }, findNext,
+    }, findNext, runStructure,
   }));
 
   function pageRows(): number {
@@ -273,7 +318,12 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     beginEdit(nextRow, nextColumn);
   }
 
-  return <div className="csv-table-workspace">
+  return <div className="csv-table-workspace" onFocusCapture={(event) => {
+    const cell = (event.target as HTMLElement).closest<HTMLElement>("[data-row][data-column]");
+    if (cell && scroll.current?.contains(cell)) {
+      onFocusChange?.({ row: Number(cell.dataset.row), column: Number(cell.dataset.column) });
+    }
+  }}>
     <div ref={scroll} className="csv-table-scroll"
       onScroll={(event) => setFirstVisibleRow(Math.max(1,
         Math.floor(event.currentTarget.scrollTop / rowHeight) + 1))}>

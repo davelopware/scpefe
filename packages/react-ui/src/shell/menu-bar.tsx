@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { DocumentSessionSnapshot, SessionDocument } from "@scpefe/frontend-core";
-import type { ShellCommand, ShellCommands } from "./shell-commands.ts";
+import { isCsvStructureCommand, type ShellCommand,
+  type ShellCommands } from "./shell-commands.ts";
 
 const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | null>]> = [
   ["File", [["new", "New", "Ctrl+N"], ["open", "Open…", "Ctrl+O"], null,
@@ -26,7 +27,12 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
     && snapshot.document.contentType === "csv";
   const visibleMenus = csv ? [menuDefinitions[0], menuDefinitions[1],
     ["Table", [["show-csv-source", "Show CSV Source"],
-      ["show-table", "Show Table"]]] as typeof menuDefinitions[number],
+      ["show-table", "Show Table"], null,
+      ["add-row-above", "Add Row Above"], ["add-row-below", "Add Row Below"],
+      ["delete-row", "Delete Row"], null,
+      ["add-column-left", "Add Column Left"],
+      ["add-column-right", "Add Column Right"],
+      ["delete-column", "Delete Column"]]] as typeof menuDefinitions[number],
     ...menuDefinitions.slice(2)] : menuDefinitions;
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
@@ -117,10 +123,12 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
           : <button key={item[0]} type="button" role="menuitem"
             disabled={!commands.available(item[0])} onClick={() => {
               const returnFocus = triggers.current[name];
-              returnFocus?.focus(); setOpen(null);
+              const structure = isCsvStructureCommand(item[0]);
+              if (!structure) returnFocus?.focus();
+              setOpen(null);
               if (returnFocus) void commands.invoke(item[0], { returnFocus,
                 observedSnapshot: snapshot });
-              requestAnimationFrame(() => {
+              if (!structure) requestAnimationFrame(() => {
                 if (!document.querySelector('[role="dialog"]')) triggers.current[name]?.focus();
               });
             }}><span>{csv && item[0] === "export" ? "Export CSV…" : item[1]}</span>
