@@ -92,17 +92,21 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       `[data-row="${nextRow}"][data-column="${nextColumn}"]`) ?? null;
   }
 
+  function reveal(nextRow: number): void {
+    if (nextRow < windowStart || nextRow >= windowEnd) {
+      const start = Math.max(1, nextRow - Math.floor(visibleRows / 2));
+      setFirstVisibleRow(start);
+      if (scroll.current) scroll.current.scrollTop = Math.max(0, (start - 1) * rowHeight);
+    }
+  }
+
   function move(nextRow: number, nextColumn: number,
     lastRow = readOnly ? rows.length - 1 : rows.length,
     lastColumn = columns - 1): void {
     const targetRow = Math.max(0, Math.min(lastRow, nextRow));
     const targetColumn = Math.max(0, Math.min(lastColumn, nextColumn));
     focusPending.current = true;
-    if (targetRow < windowStart || targetRow >= windowEnd) {
-      const start = Math.max(1, targetRow - Math.floor(visibleRows / 2));
-      setFirstVisibleRow(start);
-      if (scroll.current) scroll.current.scrollTop = Math.max(0, (start - 1) * rowHeight);
-    }
+    reveal(targetRow);
     setPosition({ row: targetRow, column: targetColumn });
   }
 
@@ -111,28 +115,32 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     setDraft(next);
   }
 
-  function beginEdit(nextRow: number, nextColumn: number): void {
+  function beginEdit(nextRow: number, nextColumn: number,
+    nextRows = rows): void {
     if (readOnly || !onEdit) return;
     focusDraftPending.current = true;
+    reveal(nextRow);
     setPosition({ row: nextRow, column: nextColumn });
     setCellDraft({ row: nextRow, column: nextColumn,
-      value: rows[nextRow]?.[nextColumn] ?? "" });
+      value: nextRows[nextRow]?.[nextColumn] ?? "" });
   }
 
   function commitEdit(nextRow?: number, nextColumn?: number): void {
     const current = draftRef.current;
     if (!current) return;
-    setCellDraft(null);
     const inserting = current.row === rows.length;
+    let nextRows = rows;
     if (!readOnly && current.value !== (rows[current.row]?.[current.column] ?? "")) {
-      const updated = rows.map((values) => [...values]);
-      if (inserting) updated.push(Array(columns).fill(""));
-      updated[current.row][current.column] = current.value;
-      onEdit?.(updated);
+      nextRows = rows.map((values) => [...values]);
+      if (inserting) nextRows.push(Array(columns).fill(""));
+      nextRows[current.row][current.column] = current.value;
+      onEdit?.(nextRows);
     }
     if (nextRow !== undefined && nextColumn !== undefined) {
-      move(nextRow, nextColumn, inserting && current.value !== ""
-        ? rows.length + 1 : rows.length);
+      beginEdit(Math.max(0, Math.min(nextRows.length, nextRow)),
+        Math.max(0, Math.min(columns - 1, nextColumn)), nextRows);
+    } else {
+      setCellDraft(null);
     }
   }
 
@@ -178,9 +186,17 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       return <textarea ref={input} className="csv-cell-editor" aria-label={
         `Edit ${cellRow === 0 ? "heading" : cellRow === rows.length
           ? "new row" : `row ${cellRow}`}, column ${cellColumn + 1}`}
-        value={draft.value} onChange={(event) => setCellDraft({ ...draft,
-          value: event.target.value.replace(/\r\n?/g, "\n") })}
-        onKeyDown={editKeyDown} onBlur={() => commitEdit()}
+        value={draft.value} onChange={(event) => {
+          // An event from the prior textarea can arrive as the next editor mounts.
+          if (draftRef.current?.row === cellRow && draftRef.current.column === cellColumn) {
+            setCellDraft({ ...draft, value: event.target.value.replace(/\r\n?/g, "\n") });
+          }
+        }}
+        onKeyDown={editKeyDown} onBlur={() => {
+          if (draftRef.current?.row === cellRow && draftRef.current.column === cellColumn) {
+            commitEdit();
+          }
+        }}
         onClick={(event) => event.stopPropagation()}
         onDoubleClick={(event) => event.stopPropagation()}
         onCopy={(event) => event.stopPropagation()} />;
