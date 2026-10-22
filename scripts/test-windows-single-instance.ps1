@@ -99,45 +99,9 @@ try {
             SCPEFE_SINGLE_INSTANCE_SMOKE_READY_DELAY_MS = "1000"
             SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS = "5000"
         }
-    try {
-        Wait-Until -Description "the startup request to survive renderer startup" -Condition {
-            $Events = Read-Events $ResponsiveSmoke
-            @($Events | Where-Object { $_.event -eq "presented" }).Count -ge 1
-        }
-    } catch {
-        $Events = @(Read-Events $ResponsiveSmoke)
-        $ExitCode = if ($ResponsivePrimary.HasExited) { $ResponsivePrimary.ExitCode } else { "running" }
-        Write-Host "Startup diagnostic: exit-code=$ExitCode event-count=$($Events.Count)"
-        Write-Host "Startup diagnostic: smoke-directory-exists=$(Test-Path $ResponsiveSmoke) " `
-            "event-file-exists=$(Test-Path (Join-Path $ResponsiveSmoke 'events.jsonl')) " `
-            "window-title=$($ResponsivePrimary.MainWindowTitle)"
-        $Children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($ResponsivePrimary.Id)" `
-            -ErrorAction SilentlyContinue)
-        Write-Host "Startup diagnostic: child-count=$($Children.Count) " `
-            "child-names=$(($Children | ForEach-Object { $_.Name }) -join ',')"
-        if ($ResponsivePrimary.MainWindowTitle -eq "Error" -and $ResponsivePrimary.MainWindowHandle) {
-            try {
-                Add-Type -AssemblyName UIAutomationClient
-                $Window = [System.Windows.Automation.AutomationElement]::FromHandle(
-                    $ResponsivePrimary.MainWindowHandle)
-                $Controls = $Window.FindAll(
-                    [System.Windows.Automation.TreeScope]::Descendants,
-                    [System.Windows.Automation.Condition]::TrueCondition)
-                for ($Index = 0; $Index -lt [Math]::Min($Controls.Count, 12); $Index += 1) {
-                    $Name = [string]$Controls[$Index].Current.Name
-                    if ($Name) {
-                        Write-Host "Startup error control: $($Name.Substring(0, [Math]::Min($Name.Length, 1200)))"
-                    }
-                }
-            } catch {
-                Write-Host "Startup diagnostic: error-window-inspection-failed=$($_.Exception.GetType().Name)"
-            }
-        }
-        foreach ($Event in $Events) {
-            $Target = if ($Event.PSObject.Properties["target"]) { $Event.target } else { "none" }
-            Write-Host "Startup diagnostic event=$($Event.event) target=$Target"
-        }
-        throw
+    Wait-Until -Description "the startup request to survive renderer startup" -Condition {
+        $Events = Read-Events $ResponsiveSmoke
+        @($Events | Where-Object { $_.event -eq "presented" }).Count -ge 1
     }
 
     $Second = Start-Preview `
