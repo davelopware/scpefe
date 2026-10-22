@@ -99,9 +99,19 @@ try {
             SCPEFE_SINGLE_INSTANCE_SMOKE_READY_DELAY_MS = "1000"
             SCPEFE_SINGLE_INSTANCE_SMOKE_COMPLETE_MS = "5000"
         }
-    Wait-Until -Description "the startup request to survive renderer startup" -Condition {
+    try {
+        Wait-Until -Description "the startup request to survive renderer startup" -Condition {
+            $Events = Read-Events $ResponsiveSmoke
+            @($Events | Where-Object { $_.event -eq "presented" }).Count -ge 1
+        }
+    } catch {
         $Events = Read-Events $ResponsiveSmoke
-        @($Events | Where-Object { $_.event -eq "presented" }).Count -ge 1
+        $ExitCode = if ($ResponsivePrimary.HasExited) { $ResponsivePrimary.ExitCode } else { "running" }
+        Write-Host "Startup diagnostic: exit-code=$ExitCode event-count=$($Events.Count)"
+        foreach ($Event in $Events) {
+            Write-Host "Startup diagnostic event=$($Event.event) target=$($Event.target)"
+        }
+        throw
     }
 
     $Second = Start-Preview `

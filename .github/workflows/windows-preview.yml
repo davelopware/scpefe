@@ -34,6 +34,14 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: powershell
         run: .\scripts\build-windows-preview.ps1
+      - name: Retain temporary packaged startup diagnostic
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests != true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCPEFE-startup-diagnostic
+          path: apps/windows/release/SCPEFE-win32-x64.zip
+          if-no-files-found: error
+          retention-days: 2
       - name: Build unsigned manual-testing preview (automated tests skipped)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
         shell: powershell
