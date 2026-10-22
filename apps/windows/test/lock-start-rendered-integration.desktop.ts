@@ -99,6 +99,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
     }
     return fs.readFile(file, ...args);
   }, async link(source, destination) {
+    if (destination === newTarget && options.candidateLinkDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.candidateLinkDelayMs));
+    }
     if (holdNewLink && destination === newTarget) {
       newLinkStarted();
       await new Promise((resolve) => { releaseNewLink = resolve; });
@@ -1094,6 +1097,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
     await user.click(ui.getByLabelText(creation,
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    await awaitHarnessPhase(protectionRequestObserved,
+      "New protection request after candidate creation");
     const decision = await ui.findByRole(document.body, "dialog", { name: /before New/ });
     assert.equal(ui.queryByRole(document.body, "dialog", { name: "Secure new document" }) === null, true,
       "the interrupted form is not actionable during protection");
