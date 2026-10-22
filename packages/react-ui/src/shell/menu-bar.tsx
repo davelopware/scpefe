@@ -24,6 +24,10 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
   commands: ShellCommands<Doc> }) {
   const csv = (snapshot.kind === "read-only" || snapshot.kind === "edit")
     && snapshot.document.contentType === "csv";
+  const visibleMenus = csv ? [menuDefinitions[0], menuDefinitions[1],
+    ["Table", [["show-csv-source", "Show CSV Source"],
+      ["show-table", "Show Table"]]] as typeof menuDefinitions[number],
+    ...menuDefinitions.slice(2)] : menuDefinitions;
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || (!event.ctrlKey && !event.metaKey)
@@ -65,16 +69,16 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
     const accessKey = (event: globalThis.KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey
         || document.querySelector(".shell-chrome")?.hasAttribute("inert")) return;
-      const match = menuDefinitions.find(([name]) =>
+      const match = visibleMenus.find(([name]) =>
         name[0].toLowerCase() === event.key.toLowerCase());
       if (!match) return;
       event.preventDefault(); openMenu(match[0]);
     };
     window.addEventListener("keydown", accessKey);
     return () => window.removeEventListener("keydown", accessKey);
-  }, []);
+  }, [csv]);
   return <nav className="menu-bar" role="menubar" aria-label="Application menu" ref={bar}>
-    {menuDefinitions.map(([name, items], menuIndex) => <div className="menu" key={name}>
+    {visibleMenus.map(([name, items], menuIndex) => <div className="menu" key={name}>
       <button type="button" role="menuitem" aria-label={name} aria-haspopup="menu"
         aria-expanded={open === name} ref={(node) => { triggers.current[name] = node; }}
         onClick={() => open === name ? setOpen(null) : openMenu(name)}
@@ -83,8 +87,8 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
             event.preventDefault(); openMenu(name);
           } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
             event.preventDefault();
-            const offset = event.key === "ArrowRight" ? 1 : menuDefinitions.length - 1;
-            const next = menuDefinitions[(menuIndex + offset) % menuDefinitions.length][0];
+            const offset = event.key === "ArrowRight" ? 1 : visibleMenus.length - 1;
+            const next = visibleMenus[(menuIndex + offset) % visibleMenus.length][0];
             if (open !== null) { setOpen(next); focusFirst(next); }
             triggers.current[next]?.focus();
           }
@@ -96,8 +100,8 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
           }
           if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
             event.preventDefault();
-            const offset = event.key === "ArrowRight" ? 1 : menuDefinitions.length - 1;
-            const next = menuDefinitions[(menuIndex + offset) % menuDefinitions.length][0];
+            const offset = event.key === "ArrowRight" ? 1 : visibleMenus.length - 1;
+            const next = visibleMenus[(menuIndex + offset) % visibleMenus.length][0];
             setOpen(next); triggers.current[next]?.focus(); focusFirst(next); return;
           }
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {

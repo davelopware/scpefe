@@ -1,9 +1,11 @@
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource } from "@scpefe/frontend-core";
+import { parseCsvSource } from "@scpefe/frontend-core";
 
 /** Commands exposed by the shared shell. */
 export type ShellCommand = "new" | "open" | "save" | "backup" | "export" | "close"
   | "exit" | "edit" | "undo" | "redo" | "find" | "replace" | "lock"
-  | "unlock" | "passwords" | "profile" | "compact" | "about" | "activity";
+  | "unlock" | "passwords" | "profile" | "compact" | "about" | "activity"
+  | "show-csv-source" | "show-table";
 
 /** Presentation facts read at invocation rather than stored as command state. */
 export interface ShellCommandFacts {
@@ -11,6 +13,7 @@ export interface ShellCommandFacts {
   profileReady: boolean;
   modalBusy: boolean;
   activityAvailable?: boolean;
+  csvView?: "source" | "table";
 }
 
 /** One eligibility and invocation path for menus, shortcuts and status. */
@@ -37,6 +40,8 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
     const active = (snapshot.kind === "read-only" || snapshot.kind === "edit")
       && snapshot.adoption === view.activeAdoption;
     const commands = active ? snapshot.commands : null;
+    const csv = active && snapshot.document?.contentType === "csv";
+    const table = csv && view.csvView === "table";
     switch (command) {
       case "new": case "open": case "profile": return view.profileReady;
       case "exit": case "about": return true;
@@ -46,11 +51,15 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
       case "backup": return active && commands?.backup === true;
       case "export": return active && commands?.export === true;
       case "edit": return active && commands?.enterEdit === true;
-      case "undo": return active && commands?.undo === true;
-      case "redo": return active && commands?.redo === true;
+      case "undo": return active && !table && commands?.undo === true;
+      case "redo": return active && !table && commands?.redo === true;
+      case "show-csv-source": return csv && table;
+      case "show-table": return csv && !table
+        && parseCsvSource(snapshot.working.text).valid;
       case "compact": return active && commands?.compact === true;
       case "activity": return active && view.activityAvailable === true;
-      case "find": case "replace": case "lock": case "passwords": return active;
+      case "find": case "replace": return active && !table;
+      case "lock": case "passwords": return active;
     }
   }
   return {

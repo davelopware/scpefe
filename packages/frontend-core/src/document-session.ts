@@ -1497,6 +1497,14 @@ export class DocumentSession<Doc extends SessionDocument,
       && this.workingCopy?.redo() === true;
   }
 
+  /** Begins a fresh presentation-specific Undo/Redo interval for an open document. */
+  clearHistory(): boolean {
+    if ((this.snapshot.kind !== "edit" && this.snapshot.kind !== "read-only")
+      || !this.workingCopy) return false;
+    this.workingCopy.clearHistory();
+    return true;
+  }
+
   findNext(query: string): WorkingCopyFindResult | null {
     if (this.snapshot.kind !== "edit" && this.snapshot.kind !== "read-only") return null;
     return this.workingCopy?.findNext(query) ?? null;

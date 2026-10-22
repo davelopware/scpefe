@@ -83,6 +83,22 @@ test("undo and redo follow a bounded history and a new edit drops the redo branc
   assert.equal(journal.calls.at(-1)?.update.content, "ABC!");
 });
 
+test("entering CSV source starts fresh Undo/Redo without changing the saved baseline", () => {
+  const copy = new WorkingCopy(new ControlledJournal());
+  copy.adoptOpen("heading\nvalue");
+  copy.edit("heading\nchanged");
+  assert.equal(ready(copy).canUndo, true);
+  copy.clearHistory();
+  assert.equal(ready(copy).text, "heading\nchanged");
+  assert.equal(ready(copy).dirty, true);
+  assert.equal(ready(copy).historyLength, 1);
+  assert.equal(ready(copy).canUndo, false);
+  assert.equal(ready(copy).canRedo, false);
+  copy.edit("heading\nnew");
+  copy.undo();
+  assert.equal(ready(copy).text, "heading\nchanged");
+});
+
 test("publication establishes a manual baseline while provisional and recovered text stay dirty", () => {
   const copy = new WorkingCopy(new ControlledJournal());
   copy.adoptOpen("base");

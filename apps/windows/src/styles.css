@@ -26,6 +26,13 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .editor-surface textarea[aria-invalid="true"] { box-shadow: inset 0 0 0 2px #9b1c1c; }
 .csv-parse-error { display: flex; align-items: center; gap: .75rem; padding: .4rem .75rem;
   color: #9b1c1c; background: #fff1f0; font-weight: 600; }
+.csv-table-scroll { flex: 1; min-height: 0; overflow: auto; padding: .85rem 1rem; }
+.csv-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.csv-table th, .csv-table td { min-width: 8rem; padding: .55rem .7rem; border: 1px solid #aab0b7;
+  text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; vertical-align: top; }
+.csv-table th { background: #f1f3f5; font-weight: 650; }
+.csv-table .csv-insertion-placeholder td { border: 2px dashed #6386a8;
+  color: #355b7d; background: #f4f8fc; font-style: italic; }
 .editor-surface textarea:disabled { color: GrayText; background: Canvas; }
 .editor-placeholder { position: absolute; inset: 1rem auto auto 1rem; z-index: 1; margin: 0;
   color: GrayText; pointer-events: none; }

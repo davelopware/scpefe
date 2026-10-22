@@ -30,13 +30,14 @@ interface EditorViewProps {
   active: boolean;
   locked: boolean;
   blocked: boolean;
+  csvView: "source" | "table";
   onMessage(message: string): void;
   onReturnFocus(element: HTMLElement | null): void;
   ref?: React.Ref<EditorViewHandle>;
 }
 
 /** Presents the working copy and owns modeless search state for one adoption. */
-export function EditorView({ session, active, locked, blocked, onMessage,
+export function EditorView({ session, active, locked, blocked, csvView, onMessage,
   onReturnFocus, ref }: EditorViewProps): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
   const working = snapshot.kind === "read-only" || snapshot.kind === "edit"
@@ -45,8 +46,10 @@ export function EditorView({ session, active, locked, blocked, onMessage,
   const csv = (snapshot.kind === "read-only" || snapshot.kind === "edit")
     && snapshot.document.contentType === "csv";
   const csvParse = csv ? parseCsvSource(text) : null;
+  const showTable = csv && csvView === "table" && csvParse?.valid === true;
   const readOnly = snapshot.kind !== "edit" || !snapshot.commands.write;
   const editor = useRef<HTMLTextAreaElement>(null);
+  const table = useRef<HTMLDivElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const findReturnFocus = useRef<HTMLElement | null>(null);
@@ -99,7 +102,8 @@ export function EditorView({ session, active, locked, blocked, onMessage,
   }
 
   useImperativeHandle(ref, () => ({ openFind, reset,
-    focus: () => editor.current?.focus() }), [active]);
+    focus: () => (showTable ? table.current : editor.current)?.focus() }),
+  [active, showTable]);
 
   function findNext(): void {
     if (!findText || !editor.current) { setFindStatus("Enter text to find."); return; }
@@ -171,7 +175,7 @@ export function EditorView({ session, active, locked, blocked, onMessage,
     {!active && <p className="editor-placeholder" role="note">
       {locked ? "Document locked. Use Security → Unlock to continue."
         : "No document. Use File → New or File → Open."}</p>}
-    {csv && csvParse && !csvParse.valid && active && !blocked &&
+    {csv && csvView === "source" && csvParse && !csvParse.valid && active && !blocked &&
       <div id="csv-source-error" className="csv-parse-error" role="alert">
         CSV source error at line {csvParse.line}, column {csvParse.column}: {csvParse.message}
         <button type="button" onClick={() => {
@@ -180,7 +184,21 @@ export function EditorView({ session, active, locked, blocked, onMessage,
             Math.min(csvParse.offset + 1, text.length));
         }}>Go to error</button>
       </div>}
-    <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}
+    {showTable && active && !blocked && <div ref={table} className="csv-table-scroll"
+      tabIndex={-1} aria-label="CSV table view">
+      <table className="csv-table"><thead><tr>
+        {csvParse.rows[0].map((heading, index) => <th scope="col" key={index}>
+          {heading}</th>)}
+      </tr></thead><tbody>
+        {csvParse.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>
+          {row.map((cell, columnIndex) => <td key={columnIndex}>{cell}</td>)}
+        </tr>)}
+        <tr className="csv-insertion-placeholder" aria-label="Insertion placeholder">
+          <td colSpan={csvParse.rows[0].length}>+ New row</td>
+        </tr>
+      </tbody></table>
+    </div>}
+    {!showTable && <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}
       aria-invalid={csv && csvParse?.valid === false ? true : undefined}
       aria-describedby={csv && csvParse?.valid === false ? "csv-source-error" : undefined}
       value={active && !blocked ? text : ""}
@@ -192,7 +210,7 @@ export function EditorView({ session, active, locked, blocked, onMessage,
             || selection.end !== working.selection.end)) session.setSelection(selection);
       }}
       onKeyDown={editorKeyDown} onChange={(event) => session.edit(event.target.value,
-        { start: event.target.selectionStart, end: event.target.selectionEnd })} />
+        { start: event.target.selectionStart, end: event.target.selectionEnd })} />}
     {findOpen && active && !blocked && <section className="modeless-dialog" role="dialog"
       aria-modal="false" aria-labelledby="find-replace-title" onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); closeFind(); }
