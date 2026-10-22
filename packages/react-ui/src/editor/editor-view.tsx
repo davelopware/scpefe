@@ -4,6 +4,7 @@ import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource,
   WorkingCopySelection } from "@scpefe/frontend-core";
 import { parseCsvSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
+import { CsvTable, type CsvTableHandle } from "./csv-table.tsx";
 
 /** Editing commands needed by the shared document workspace. */
 export interface EditorSession extends SnapshotSource<DocumentSessionSnapshot<SessionDocument>> {
@@ -49,7 +50,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
   const showTable = csv && csvView === "table" && csvParse?.valid === true;
   const readOnly = snapshot.kind !== "edit" || !snapshot.commands.write;
   const editor = useRef<HTMLTextAreaElement>(null);
-  const table = useRef<HTMLDivElement>(null);
+  const table = useRef<CsvTableHandle>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const findReturnFocus = useRef<HTMLElement | null>(null);
@@ -85,14 +86,17 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
     findReturnFocus.current = returnFocus?.isConnected
       ? returnFocus : document.activeElement as HTMLElement | null;
     setFindOpen(true);
-    requestAnimationFrame(() => (mode === "replace"
+    requestAnimationFrame(() => (mode === "replace" && !showTable
       ? replaceInput.current : findInput.current)?.focus());
   }
 
   function closeFind(): void {
     setFindOpen(false);
-    requestAnimationFrame(() => (findReturnFocus.current?.isConnected
-      ? findReturnFocus.current : editor.current)?.focus());
+    requestAnimationFrame(() => {
+      if (showTable) table.current?.focus();
+      else if (findReturnFocus.current?.isConnected) findReturnFocus.current.focus();
+      else editor.current?.focus();
+    });
   }
 
   function reset(): void {
@@ -102,10 +106,21 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
   }
 
   useImperativeHandle(ref, () => ({ openFind, reset,
-    focus: () => (showTable ? table.current : editor.current)?.focus() }),
+    focus: () => { if (showTable) table.current?.focus(); else editor.current?.focus(); } }),
   [active, showTable]);
 
   function findNext(): void {
+    if (showTable) {
+      if (!findText) { setFindStatus("Enter text to find."); return; }
+      const result = table.current?.findNext(findText);
+      if (!result || result === "missing") {
+        setFindStatus("Text not found."); onMessage("Text not found."); return;
+      }
+      const status = result === "wrapped" ? "Match focused after wrapping to the start."
+        : "Match focused.";
+      setFindStatus(status); onMessage(status);
+      return;
+    }
     if (!findText || !editor.current) { setFindStatus("Enter text to find."); return; }
     session.setSelection({ start: editor.current.selectionStart,
       end: editor.current.selectionEnd });
@@ -184,20 +199,9 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
             Math.min(csvParse.offset + 1, text.length));
         }}>Go to error</button>
       </div>}
-    {showTable && active && !blocked && <div ref={table} className="csv-table-scroll"
-      tabIndex={-1} aria-label="CSV table view">
-      <table className="csv-table"><thead><tr>
-        {csvParse.rows[0].map((heading, index) => <th scope="col" key={index}>
-          {heading}</th>)}
-      </tr></thead><tbody>
-        {csvParse.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>
-          {row.map((cell, columnIndex) => <td key={columnIndex}>{cell}</td>)}
-        </tr>)}
-        <tr className="csv-insertion-placeholder" aria-label="Insertion placeholder">
-          <td colSpan={csvParse.rows[0].length}>+ New row</td>
-        </tr>
-      </tbody></table>
-    </div>}
+    {showTable && active && !blocked && <CsvTable ref={table} rows={csvParse.rows}
+      onFind={() => { onReturnFocus(document.activeElement as HTMLElement | null);
+        openFind("find", document.activeElement as HTMLElement | null); }} />}
     {!showTable && <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}
       aria-invalid={csv && csvParse?.valid === false ? true : undefined}
       aria-describedby={csv && csvParse?.valid === false ? "csv-source-error" : undefined}
@@ -214,19 +218,21 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
     {findOpen && active && !blocked && <section className="modeless-dialog" role="dialog"
       aria-modal="false" aria-labelledby="find-replace-title" onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); closeFind(); }
-      }}><div className="app-dialog-header"><h2 id="find-replace-title">Find and replace</h2>
-        <button type="button" className="dialog-close" aria-label="Close Find and replace"
+      }}><div className="app-dialog-header"><h2 id="find-replace-title">
+        {showTable ? "Find" : "Find and replace"}</h2>
+        <button type="button" className="dialog-close"
+          aria-label={showTable ? "Close Find" : "Close Find and replace"}
           onClick={closeFind}>×</button></div>
       <div className="modeless-dialog-body">
       <label>Find<input ref={findInput} value={findText}
         onChange={(event) => { setFindText(event.target.value); setFindStatus(""); }} /></label>
-      <label>Replace with<input ref={replaceInput} value={replaceText}
-        onChange={(event) => setReplaceText(event.target.value)} /></label>
+      {!showTable && <label>Replace with<input ref={replaceInput} value={replaceText}
+        onChange={(event) => setReplaceText(event.target.value)} /></label>}
       <div className="dialog-actions"><button type="button" disabled={!findText}
         onClick={findNext}>Find next</button>
-        <button type="button" disabled={readOnly || !findText}
+        <button type="button" disabled={showTable || readOnly || !findText}
           onClick={replaceSelection}>Replace</button>
-        <button type="button" disabled={readOnly || !findText}
+        <button type="button" disabled={showTable || readOnly || !findText}
           onClick={replaceAll}>Replace all</button>
         <button type="button" onClick={closeFind}>Close</button></div>
       <p className="modeless-status" role="status" aria-live="polite">{findStatus}</p></div>

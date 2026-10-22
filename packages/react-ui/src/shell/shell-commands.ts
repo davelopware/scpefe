@@ -58,7 +58,8 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
         && parseCsvSource(snapshot.working.text).valid;
       case "compact": return active && commands?.compact === true;
       case "activity": return active && view.activityAvailable === true;
-      case "find": case "replace": return active && !table;
+      case "find": return active;
+      case "replace": return active && !table;
       case "lock": case "passwords": return active;
     }
   }

@@ -26,11 +26,24 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .editor-surface textarea[aria-invalid="true"] { box-shadow: inset 0 0 0 2px #9b1c1c; }
 .csv-parse-error { display: flex; align-items: center; gap: .75rem; padding: .4rem .75rem;
   color: #9b1c1c; background: #fff1f0; font-weight: 600; }
-.csv-table-scroll { flex: 1; min-height: 0; overflow: auto; padding: .85rem 1rem; }
-.csv-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.csv-table th, .csv-table td { min-width: 8rem; padding: .55rem .7rem; border: 1px solid #aab0b7;
-  text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; vertical-align: top; }
-.csv-table th { background: #f1f3f5; font-weight: 650; }
+.csv-table-workspace { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.csv-table-scroll { flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: .85rem 1rem; }
+.csv-table { border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.csv-table th, .csv-table td { box-sizing: border-box; width: 12rem; max-width: 12rem;
+  padding: .55rem .7rem; border-right: 1px solid #aab0b7; border-bottom: 1px solid #aab0b7;
+  text-align: left; vertical-align: top; cursor: default; }
+.csv-table thead tr, .csv-table tbody tr:not(.csv-spacer-row):not(.csv-insertion-placeholder) { height: 36px; }
+.csv-table .csv-spacer-row td { padding: 0; border: 0; }
+.csv-table th { position: sticky; top: 0; z-index: 1; background: #f1f3f5; font-weight: 650; }
+.csv-table th:focus, .csv-table td:focus { z-index: 2;
+  outline: 3px solid #145da0; outline-offset: -3px; background: #e8f3ff; }
+.csv-table td:focus { position: relative; }
+.csv-cell-preview { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.csv-focused-value { flex: none; max-height: 9rem; overflow: auto; padding: .45rem 1rem;
+  border-top: 1px solid #aab0b7; background: #f8fafc; }
+.csv-focused-value span { font-weight: 600; }
+.csv-focused-value pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 14px/1.4 Consolas, monospace; }
 .csv-table .csv-insertion-placeholder td { border: 2px dashed #6386a8;
   color: #355b7d; background: #f4f8fc; font-style: italic; }
 .editor-surface textarea:disabled { color: GrayText; background: Canvas; }
