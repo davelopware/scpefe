@@ -108,6 +108,13 @@ try {
         $Events = @(Read-Events $ResponsiveSmoke)
         $ExitCode = if ($ResponsivePrimary.HasExited) { $ResponsivePrimary.ExitCode } else { "running" }
         Write-Host "Startup diagnostic: exit-code=$ExitCode event-count=$($Events.Count)"
+        Write-Host "Startup diagnostic: smoke-directory-exists=$(Test-Path $ResponsiveSmoke) " `
+            "event-file-exists=$(Test-Path (Join-Path $ResponsiveSmoke 'events.jsonl')) " `
+            "window-title=$($ResponsivePrimary.MainWindowTitle)"
+        $Children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($ResponsivePrimary.Id)" `
+            -ErrorAction SilentlyContinue)
+        Write-Host "Startup diagnostic: child-count=$($Children.Count) " `
+            "child-names=$(($Children | ForEach-Object { $_.Name }) -join ',')"
         foreach ($Event in $Events) {
             $Target = if ($Event.PSObject.Properties["target"]) { $Event.target } else { "none" }
             Write-Host "Startup diagnostic event=$($Event.event) target=$Target"
