@@ -9,3 +9,7 @@ test("focus changes preserve an active document and its in-progress New dialog",
 
 test("focus changes preserve a pending save-or-discard decision",
   (t) => runMountedLock(t, "focus-decision"));
+
+test("focus changes preserve a pending decision after slow candidate publication",
+  (t) => runMountedLock(t, "focus-decision", null,
+    { candidateLinkDelayMs: 1_500 }));
