@@ -5,18 +5,20 @@ import { parseCsvSource } from "@scpefe/frontend-core";
 export type ShellCommand = "new" | "open" | "save" | "backup" | "export" | "close"
   | "exit" | "edit" | "undo" | "redo" | "find" | "replace" | "lock"
   | "unlock" | "passwords" | "profile" | "compact" | "about" | "activity"
-  | "show-csv-source" | "show-table" | CsvStructureCommand;
+  | "show-csv-source" | "show-table" | CsvTableCommand;
 
-/** Structural edits available from the CSV Table menu. */
-export type CsvStructureCommand = "add-row-above" | "add-row-below" | "delete-row"
-  | "add-column-left" | "add-column-right" | "delete-column";
+/** Working-copy edits available from the CSV Table menu. */
+export type CsvTableCommand = "add-row-above" | "add-row-below" | "delete-row"
+  | "add-column-left" | "add-column-right" | "delete-column"
+  | "sort-asc" | "sort-desc";
 
-const csvStructureCommands = new Set<ShellCommand>(["add-row-above", "add-row-below",
-  "delete-row", "add-column-left", "add-column-right", "delete-column"]);
+const csvTableCommands = new Set<ShellCommand>(["add-row-above", "add-row-below",
+  "delete-row", "add-column-left", "add-column-right", "delete-column",
+  "sort-asc", "sort-desc"]);
 
 /** Identifies the commands dispatched to the active CSV table. */
-export function isCsvStructureCommand(command: ShellCommand): command is CsvStructureCommand {
-  return csvStructureCommands.has(command);
+export function isCsvTableCommand(command: ShellCommand): command is CsvTableCommand {
+  return csvTableCommands.has(command);
 }
 
 /** Presentation facts read at invocation rather than stored as command state. */
@@ -55,10 +57,10 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
     const commands = active ? snapshot.commands : null;
     const csv = active && snapshot.document?.contentType === "csv";
     const table = csv && view.csvView === "table";
-    const parsed = table && isCsvStructureCommand(command)
+    const parsed = table && isCsvTableCommand(command)
       ? parseCsvSource(snapshot.working.text) : null;
     const focus = view.tableFocus;
-    const structure = snapshot.kind === "edit" && commands?.write === true
+    const tableEdit = snapshot.kind === "edit" && commands?.write === true
       && parsed?.valid === true && focus !== null && focus !== undefined
       && Number.isInteger(focus.row) && Number.isInteger(focus.column)
       && focus.row >= 0 && focus.row <= parsed.rows.length
@@ -79,10 +81,12 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
         && snapshot.publication?.state !== "conflict"
         && parseCsvSource(snapshot.working.text).valid;
       case "add-row-above": case "delete-row":
-        return structure && focus!.row > 0 && focus!.row < parsed!.rows.length;
-      case "add-row-below": return structure && focus!.row < parsed!.rows.length;
-      case "add-column-left": case "add-column-right": return structure;
-      case "delete-column": return structure && parsed!.rows[0].length > 1;
+        return tableEdit && focus!.row > 0 && focus!.row < parsed!.rows.length;
+      case "add-row-below": return tableEdit && focus!.row < parsed!.rows.length;
+      case "add-column-left": case "add-column-right": return tableEdit;
+      case "delete-column": return tableEdit && parsed!.rows[0].length > 1;
+      case "sort-asc": case "sort-desc":
+        return tableEdit && focus!.row === 0 && parsed!.rows.length >= 3;
       case "compact": return active && commands?.compact === true;
       case "activity": return active && view.activityAvailable === true;
       case "find": return active;

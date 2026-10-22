@@ -1,12 +1,12 @@
 import React, { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState,
   type KeyboardEvent, type MouseEvent } from "react";
-import type { CsvStructureCommand } from "../shell/shell-commands.ts";
+import type { CsvTableCommand } from "../shell/shell-commands.ts";
 
-/** Controls exposed to the workspace Find command and focus restoration. */
+/** Controls exposed for table commands, Find, and focus restoration. */
 export interface CsvTableHandle {
   focus(): void;
   findNext(query: string): "found" | "wrapped" | "missing";
-  runStructure(command: CsvStructureCommand): void;
+  runCommand(command: CsvTableCommand): void;
 }
 
 interface CsvTableProps {
@@ -23,6 +23,7 @@ interface CellDraft { row: number; column: number; value: string }
 
 const rowHeight = 36;
 const overscan = 4;
+const sortCollator = new Intl.Collator("en", { sensitivity: "accent", numeric: false });
 
 /** Presents CSV headings and values as one keyboard-navigable, editable table. */
 export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
@@ -220,20 +221,34 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     return "missing";
   }
 
-  function runStructure(command: CsvStructureCommand): void {
+  function runCommand(command: CsvTableCommand): void {
     if (readOnly || !onEdit || !scroll.current) return;
     const focused = position;
     if (focused.row < 0 || focused.row > rows.length
         || focused.column < 0 || focused.column >= columns) return;
     const rowCommand = command === "add-row-above" || command === "add-row-below"
       || command === "delete-row";
+    const sorting = command === "sort-asc" || command === "sort-desc";
     if (rowCommand && focused.row === rows.length) return;
+    if (sorting && (focused.row !== 0 || rows.length < 3)) return;
     if ((command === "add-row-above" || command === "delete-row") && focused.row === 0) return;
     if (command === "delete-column" && columns === 1) return;
     const updated = rows.map((values) => [...values]);
     let nextRow = focused.row;
     let nextColumn = focused.column;
-    if (command === "add-row-above" || command === "add-row-below") {
+    if (sorting) {
+      const direction = command === "sort-asc" ? 1 : -1;
+      const ordered = updated.slice(1).map((values, index) => ({ values, index }));
+      ordered.sort((left, right) => {
+        const leftKey = left.values[focused.column].trim();
+        const rightKey = right.values[focused.column].trim();
+        if (!leftKey) return rightKey ? 1 : left.index - right.index;
+        if (!rightKey) return -1;
+        return direction * sortCollator.compare(leftKey, rightKey)
+          || left.index - right.index;
+      });
+      updated.splice(1, updated.length - 1, ...ordered.map(({ values }) => values));
+    } else if (command === "add-row-above" || command === "add-row-below") {
       nextRow += command === "add-row-below" ? 1 : 0;
       updated.splice(nextRow, 0, Array(columns).fill(""));
     } else if (command === "delete-row") {
@@ -265,7 +280,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     focus: () => {
       if (draftRef.current && input.current) input.current.focus();
       else move(row, column);
-    }, findNext, runStructure,
+    }, findNext, runCommand,
   }));
 
   function pageRows(): number {

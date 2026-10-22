@@ -5,7 +5,7 @@ import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource,
 import { parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { CsvTable, type CsvTableHandle } from "./csv-table.tsx";
-import type { CsvStructureCommand } from "../shell/shell-commands.ts";
+import type { CsvTableCommand } from "../shell/shell-commands.ts";
 
 /** Editing commands needed by the shared document workspace. */
 export interface EditorSession extends SnapshotSource<DocumentSessionSnapshot<SessionDocument>> {
@@ -25,7 +25,7 @@ export interface EditorViewHandle {
   openFind(mode: "find" | "replace", returnFocus?: HTMLElement | null): void;
   reset(): void;
   focus(): void;
-  runTableStructure(command: CsvStructureCommand): void;
+  runTableCommand(command: CsvTableCommand): void;
 }
 
 interface EditorViewProps {
@@ -111,7 +111,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
 
   useImperativeHandle(ref, () => ({ openFind, reset,
     focus: () => { if (showTable) table.current?.focus(); else editor.current?.focus(); },
-    runTableStructure: (command) => { if (showTable) table.current?.runStructure(command); } }));
+    runTableCommand: (command) => { if (showTable) table.current?.runCommand(command); } }));
 
   function findNext(): void {
     if (showTable) {
