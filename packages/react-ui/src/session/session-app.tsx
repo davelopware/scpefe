@@ -392,6 +392,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} csvView={csvView}
       onMessage={setMessage}
+      onSave={() => { void shellCommands.invoke("save"); }}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
     <StatusBar session={session} active={activeDocument} commands={shellCommands}
       message={presentation.statusMessage(message)}

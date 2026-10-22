@@ -39,6 +39,10 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
   outline: 3px solid #145da0; outline-offset: -3px; background: #e8f3ff; }
 .csv-table td:focus { position: relative; }
 .csv-cell-preview { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.csv-table .csv-cell-editor { display: block; flex: none; width: 100%; height: auto;
+  min-height: 1.5rem; max-height: 7rem;
+  resize: vertical; padding: 0; border: 0; outline: 0; background: transparent;
+  color: inherit; font: inherit; white-space: pre-wrap; }
 .csv-focused-value { flex: none; max-height: 9rem; overflow: auto; padding: .45rem 1rem;
   border-top: 1px solid #aab0b7; background: #f8fafc; }
 .csv-focused-value span { font-weight: 600; }
