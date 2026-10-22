@@ -2,9 +2,9 @@ import React, { useEffect, useImperativeHandle, useRef, useState,
   type KeyboardEvent } from "react";
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource,
   WorkingCopySelection } from "@scpefe/frontend-core";
-import { parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
+import { findTextOccurrences, parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
-import { CsvTable, type CsvTableHandle } from "./csv-table.tsx";
+import { CsvTable, tableMatches, type CsvTableHandle } from "./csv-table.tsx";
 import type { CsvTableCommand } from "../shell/shell-commands.ts";
 
 /** Editing commands needed by the shared document workspace. */
@@ -64,6 +64,13 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
   const [replaceText, setReplaceText] = useState("");
   const [findOpen, setFindOpen] = useState(false);
   const [findStatus, setFindStatus] = useState("");
+  const [matchCurrent, setMatchCurrent] = useState(0);
+  const searchSelection = useRef<WorkingCopySelection | null>(null);
+  const matchTotal = findText ? showTable
+    ? tableMatches(csvParse.rows, findText).length
+    : findTextOccurrences(text, findText).length : 0;
+
+  useEffect(() => { setMatchCurrent(0); }, [text, csvView]);
 
   if (blocked && !wasBlocked.current && findOpen) {
     suspendedFindFocus.current = document.activeElement === replaceInput.current
@@ -105,6 +112,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
 
   function reset(): void {
     setFindOpen(false); setFindText(""); setReplaceText(""); setFindStatus("");
+    setMatchCurrent(0);
     suspendedFindFocus.current = null;
     findReturnFocus.current = null;
   }
@@ -115,23 +123,34 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
 
   function findNext(): void {
     if (showTable) {
-      if (!findText) { setFindStatus("Enter text to find."); return; }
+      if (!findText) { setFindStatus("Enter text to find."); setMatchCurrent(0); return; }
       const result = table.current?.findNext(findText);
-      if (!result || result === "missing") {
+      findInput.current?.focus();
+      if (!result || result.status === "missing") {
+        setMatchCurrent(0);
         setFindStatus("Text not found."); onMessage("Text not found."); return;
       }
-      const status = result === "wrapped" ? "Match focused after wrapping to the start."
-        : "Match focused.";
+      setMatchCurrent(result.current);
+      const location = `${result.row === 0 ? "heading" : `row ${result.row}`}, `
+        + `column ${(result.column ?? 0) + 1}`;
+      const status = `Match selected in ${location}${result.status === "wrapped"
+        ? " after wrapping to the start" : ""}.`;
       setFindStatus(status); onMessage(status);
       return;
     }
-    if (!findText || !editor.current) { setFindStatus("Enter text to find."); return; }
+    if (!findText || !editor.current) {
+      setFindStatus("Enter text to find."); setMatchCurrent(0); return;
+    }
     session.setSelection({ start: editor.current.selectionStart,
       end: editor.current.selectionEnd });
     const found = session.findNext(findText);
     if (!found || found.status !== "selected" || !found.selection) {
+      setMatchCurrent(0);
       setFindStatus("Text not found."); onMessage("Text not found."); return;
     }
+    searchSelection.current = found.selection;
+    setMatchCurrent(findTextOccurrences(text, findText)
+      .indexOf(found.selection.start) + 1);
     editor.current.focus();
     editor.current.setSelectionRange(found.selection.start, found.selection.end);
     const status = found.wrapped ? "Match selected after wrapping to the start."
@@ -141,6 +160,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
 
   function replaceSelection(): void {
     if (!findText || !editor.current || !active || readOnly) return;
+    setMatchCurrent(0);
     const { selectionStart: start, selectionEnd: end } = editor.current;
     session.setSelection({ start, end });
     const result = session.replaceSelection(findText, replaceText);
@@ -167,6 +187,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
 
   function replaceAll(): void {
     if (!findText || !active || readOnly) return;
+    setMatchCurrent(0);
     const matches = session.replaceAll(findText, replaceText)?.replacements ?? 0;
     if (!matches) { setFindStatus("Text not found."); onMessage("Text not found."); return; }
     const replaced = session.getSnapshot();
@@ -207,6 +228,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
       readOnly={readOnly} onEdit={(rows) => session.edit(writeCsvSource(rows))}
       onSave={onSave}
       onFocusChange={onTableFocus}
+      onManualPositionChange={() => { if (findOpen) setMatchCurrent(0); }}
       onFind={() => { onReturnFocus(document.activeElement as HTMLElement | null);
         openFind("find", document.activeElement as HTMLElement | null); }} />}
     {!showTable && <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}
@@ -217,6 +239,8 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
       onSelect={(event) => {
         const selection = { start: event.currentTarget.selectionStart,
           end: event.currentTarget.selectionEnd };
+        if (findOpen && (selection.start !== searchSelection.current?.start
+          || selection.end !== searchSelection.current?.end)) setMatchCurrent(0);
         if (working && (selection.start !== working.selection.start
             || selection.end !== working.selection.end)) session.setSelection(selection);
       }}
@@ -232,7 +256,12 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
           onClick={closeFind}>×</button></div>
       <div className="modeless-dialog-body">
       <label>Find<input ref={findInput} value={findText}
-        onChange={(event) => { setFindText(event.target.value); setFindStatus(""); }} /></label>
+        onChange={(event) => { setFindText(event.target.value); setFindStatus("");
+          setMatchCurrent(0); searchSelection.current = null; }}
+        onKeyDown={(event) => { if (event.key === "Enter") {
+          event.preventDefault(); findNext(); } }} /></label>
+      {findText && <span className="find-match-count" role="status" aria-live="polite"
+        aria-label="Find matches">{matchCurrent} / {matchTotal}</span>}
       {!showTable && <label>Replace with<input ref={replaceInput} value={replaceText}
         onChange={(event) => setReplaceText(event.target.value)} /></label>}
       <div className="dialog-actions"><button type="button" disabled={!findText}

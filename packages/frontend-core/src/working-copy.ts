@@ -67,6 +67,19 @@ interface WorkingState {
 
 const EMPTY: EmptyWorkingCopySnapshot = Object.freeze({ kind: "empty" });
 
+/** Finds fixed, nonoverlapping, case-sensitive occurrences in text order. */
+export function findTextOccurrences(text: string, query: string): number[] {
+  const starts: number[] = [];
+  if (!query) return starts;
+  for (let from = 0; from <= text.length - query.length;) {
+    const start = text.indexOf(query, from);
+    if (start < 0) break;
+    starts.push(start);
+    from = start + query.length;
+  }
+  return starts;
+}
+
 /** Owns local text semantics while a DocumentSession owns its lifetime. */
 export class WorkingCopy {
   private state: WorkingState | null = null;
@@ -232,10 +245,11 @@ export class WorkingCopy {
   findNext(query: string): WorkingCopyFindResult {
     const state = this.requireReady();
     if (!query) return Object.freeze({ status: "empty" });
-    let start = state.text.indexOf(query, state.selection.end);
-    const wrapped = start < 0 && state.text.indexOf(query) >= 0;
-    if (start < 0) start = state.text.indexOf(query);
-    if (start < 0) return Object.freeze({ status: "not-found" });
+    const occurrences = findTextOccurrences(state.text, query);
+    if (!occurrences.length) return Object.freeze({ status: "not-found" });
+    const next = occurrences.find((start) => start >= state.selection.end);
+    const wrapped = next === undefined;
+    const start = next ?? occurrences[0];
     state.selection = Object.freeze({ start, end: start + query.length });
     this.publish();
     return Object.freeze({ status: "selected", wrapped, selection: state.selection });

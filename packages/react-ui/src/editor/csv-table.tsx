@@ -5,8 +5,28 @@ import type { CsvTableCommand } from "../shell/shell-commands.ts";
 /** Controls exposed for table commands, Find, and focus restoration. */
 export interface CsvTableHandle {
   focus(): void;
-  findNext(query: string): "found" | "wrapped" | "missing";
+  findNext(query: string): TableFindResult;
   runCommand(command: CsvTableCommand): void;
+}
+
+/** The selected cell's place in the table's row-major result list. */
+export interface TableFindResult {
+  status: "found" | "wrapped" | "missing";
+  current: number;
+  row?: number;
+  column?: number;
+}
+
+/** Finds matching saved cells, including headings, in table order. */
+export function tableMatches(rows: string[][], query: string): number[] {
+  if (!query) return [];
+  const needle = query.toLocaleLowerCase();
+  const columns = rows[0]?.length ?? 0;
+  const matches: number[] = [];
+  rows.forEach((values, row) => values.forEach((value, column) => {
+    if (value.toLocaleLowerCase().includes(needle)) matches.push(row * columns + column);
+  }));
+  return matches;
 }
 
 interface CsvTableProps {
@@ -17,6 +37,7 @@ interface CsvTableProps {
   ref?: React.Ref<CsvTableHandle>;
   onFind(): void;
   onFocusChange?(focus: { row: number; column: number }): void;
+  onManualPositionChange?(): void;
 }
 
 interface CellDraft { row: number; column: number; value: string }
@@ -27,9 +48,10 @@ const sortCollator = new Intl.Collator("en", { sensitivity: "accent", numeric: f
 
 /** Presents CSV headings and values as one keyboard-navigable, editable table. */
 export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
-  onFind, onFocusChange }: CsvTableProps): React.ReactElement {
+  onFind, onFocusChange, onManualPositionChange }: CsvTableProps): React.ReactElement {
   const scroll = useRef<HTMLDivElement>(null);
   const focusPending = useRef(false);
+  const searchRevealPending = useRef(false);
   const input = useRef<HTMLTextAreaElement>(null);
   const focusDraftPending = useRef(false);
   const draftRef = useRef<CellDraft | null>(null);
@@ -64,6 +86,24 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       focusDraftPending.current = false;
       return;
     }
+    if (searchRevealPending.current) {
+      const target = cellAt(row, column);
+      if (target && scroll.current) {
+        searchRevealPending.current = false;
+        const viewport = scroll.current.getBoundingClientRect();
+        const bounds = target.getBoundingClientRect();
+        if (bounds.left < viewport.left) scroll.current.scrollLeft += bounds.left - viewport.left;
+        else if (bounds.right > viewport.right) {
+          scroll.current.scrollLeft += bounds.right - viewport.right;
+        }
+        const dialog = scroll.current.closest('.editor-surface')
+          ?.querySelector('.modeless-dialog')?.getBoundingClientRect();
+        if (dialog && bounds.right > dialog.left && bounds.left < dialog.right
+          && bounds.bottom > dialog.top && bounds.top < dialog.bottom) {
+          scroll.current.scrollTop += bounds.bottom - dialog.top + 8;
+        }
+      }
+    }
     if (!focusPending.current) return;
     if (position.row > rows.length) return;
     const target = cellAt(position.row, column);
@@ -94,7 +134,9 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
   }
 
   function reveal(nextRow: number): void {
-    if (nextRow < windowStart || nextRow >= windowEnd) {
+    if (nextRow === 0 && scroll.current) scroll.current.scrollTop = 0;
+    if (nextRow > 0 && (nextRow < firstVisibleRow
+      || nextRow >= firstVisibleRow + visibleRows)) {
       const start = Math.max(1, nextRow - Math.floor(visibleRows / 2));
       setFirstVisibleRow(start);
       if (scroll.current) scroll.current.scrollTop = Math.max(0, (start - 1) * rowHeight);
@@ -103,12 +145,15 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
 
   function move(nextRow: number, nextColumn: number,
     lastRow = readOnly ? rows.length - 1 : rows.length,
-    lastColumn = columns - 1): void {
+    lastColumn = columns - 1, focusTarget = true): void {
     const targetRow = Math.max(0, Math.min(lastRow, nextRow));
     const targetColumn = Math.max(0, Math.min(lastColumn, nextColumn));
-    focusPending.current = true;
+    focusPending.current = focusTarget;
+    searchRevealPending.current = !focusTarget;
     reveal(targetRow);
     setPosition({ row: targetRow, column: targetColumn });
+    onFocusChange?.({ row: targetRow, column: targetColumn });
+    if (focusTarget) onManualPositionChange?.();
   }
 
   function setCellDraft(next: CellDraft | null): void {
@@ -205,20 +250,19 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     return <span className="csv-cell-preview">{value}</span>;
   }
 
-  function findNext(query: string): "found" | "wrapped" | "missing" {
-    const needle = query.toLocaleLowerCase();
-    const size = rows.length * columns;
+  function findNext(query: string): TableFindResult {
+    const matches = tableMatches(rows, query);
     const current = row * columns + column;
-    for (let offset = 1; offset <= size; offset += 1) {
-      const index = (current + offset) % size;
-      const nextRow = Math.floor(index / columns);
-      const nextColumn = index % columns;
-      if (rows[nextRow][nextColumn].toLocaleLowerCase().includes(needle)) {
-        move(nextRow, nextColumn);
-        return index <= current ? "wrapped" : "found";
-      }
-    }
-    return "missing";
+    if (!matches.length) return { status: "missing", current: 0 };
+    const index = matches.findIndex((match) => match > current);
+    const nextIndex = index < 0 ? 0 : index;
+    const next = matches[nextIndex];
+    const nextRow = Math.floor(next / columns);
+    const nextColumn = next % columns;
+    move(nextRow, nextColumn, readOnly ? rows.length - 1 : rows.length,
+      columns - 1, false);
+    return { status: index < 0 ? "wrapped" : "found",
+      current: nextIndex + 1, row: nextRow, column: nextColumn };
   }
 
   function runCommand(command: CsvTableCommand): void {
@@ -353,6 +397,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
     const cell = (event.target as HTMLElement).closest<HTMLElement>("[data-row][data-column]");
     if (cell && scroll.current?.contains(cell)) {
       onFocusChange?.({ row: Number(cell.dataset.row), column: Number(cell.dataset.column) });
+      onManualPositionChange?.();
     }
   }}>
     <div ref={scroll} className="csv-table-scroll"
@@ -363,6 +408,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
         <thead><tr aria-rowindex={1}>
         {rows[0].map((heading, index) => <th scope="col" key={index}
           data-row="0" data-column={index} tabIndex={row === 0 && column === index ? 0 : -1}
+          data-current-cell={row === 0 && column === index ? "true" : undefined}
           onClick={(event) => click(event, 0, index)}
           onDoubleClick={(event) => doubleClick(event, 0, index)}
           onKeyDown={keyDown} onCopy={copy}>
@@ -375,6 +421,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
           return <tr key={rowIndex} aria-rowindex={rowIndex + 1}>
           {values.map((value, columnIndex) => <td key={columnIndex}
             data-row={rowIndex} data-column={columnIndex}
+            data-current-cell={row === rowIndex && column === columnIndex ? "true" : undefined}
             tabIndex={row === rowIndex && column === columnIndex ? 0 : -1}
             onClick={(event) => click(event, rowIndex, columnIndex)}
             onDoubleClick={(event) => doubleClick(event, rowIndex, columnIndex)}
@@ -402,7 +449,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
       </tbody></table>
     </div>
     <div className="csv-focused-value" aria-live="polite">
-      <span>Focused value (row {row === 0 ? "heading" : row}, column {column + 1})</span>
+      <span>Current value (row {row === 0 ? "heading" : row}, column {column + 1})</span>
       <pre>{rows[row]?.[column] ?? ""}</pre>
     </div>
   </div>;

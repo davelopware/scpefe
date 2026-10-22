@@ -38,6 +38,11 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .csv-table th:focus, .csv-table td:focus { z-index: 2;
   outline: 3px solid #145da0; outline-offset: -3px; background: #e8f3ff; }
 .csv-table td:focus { position: relative; }
+.csv-table [data-current-cell="true"] { z-index: 2;
+  box-shadow: inset 0 0 0 3px #b05b00; background: #fff0d6; }
+.csv-table td[data-current-cell="true"] { position: relative; }
+.csv-table [data-current-cell="true"]:focus { box-shadow: inset 0 0 0 3px #b05b00;
+  outline: 3px solid #145da0; outline-offset: -6px; }
 .csv-cell-preview { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .csv-table .csv-cell-editor { display: block; flex: none; width: 100%; height: auto;
   min-height: 1.5rem; max-height: 7rem;
@@ -62,6 +67,10 @@ kbd { margin-left: 2rem; font: inherit; color: inherit; }
 .modeless-dialog-body { min-height: 0; overflow-y: auto; display: grid;
   grid-template-columns: minmax(7rem, 1fr) minmax(7rem, 1fr); gap: .6rem; padding: .75rem; }
 .modeless-dialog .dialog-actions, .modeless-dialog .modeless-status { grid-column: 1 / -1; }
+.find-match-count { align-self: end; justify-self: end; font-variant-numeric: tabular-nums;
+  color: CanvasText; font-weight: 600; }
+.editor-surface:has(.csv-table) .modeless-dialog { top: auto; bottom: .75rem; }
+.editor-surface:has(.csv-table) .csv-table-scroll { padding-bottom: 18rem; }
 .modeless-dialog .dialog-actions { margin-top: 0; }
 .modeless-status { min-height: 1.4em; margin: 0; color: GrayText; }
 .status-bar { min-height: 1.8rem; display: flex; gap: 1.5rem; padding: .25rem .65rem;
