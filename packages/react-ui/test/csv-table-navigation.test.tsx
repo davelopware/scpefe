@@ -226,6 +226,96 @@ test("CSV table cell drafts commit, navigate, cancel, and serialize as one value
   assert.equal(cell(dom, 0, 1).textContent, "name", "read-only cells stay unchanged");
 });
 
+test("new CSV heading is ready to type and an untouched insertion row stays out of source", async (t) => {
+  const { dom, root } = mounted(t);
+  let saved = '""';
+  let edits = 0;
+  const table = createRef();
+  function Harness() {
+    const [rows, setRows] = useState(parseCsvSource(saved).rows);
+    return <CsvTable ref={table} rows={rows} readOnly={false} onFind={() => {}}
+      onEdit={(next) => { edits += 1; saved = writeCsvSource(next); setRows(next); }} />;
+  }
+  await act(async () => root.render(<Harness />));
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const user = userEvent.setup({ document: dom.window.document });
+  let input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(dom.window.document.activeElement, input, "blank first heading is editing");
+  assert.equal(input.getAttribute("aria-label"), "Edit heading, column 1");
+  await act(async () => table.current.focus());
+  assert.equal(dom.window.document.activeElement, input,
+    "creation flow focus restoration preserves the open heading editor");
+  await act(async () => user.type(input, "name"));
+  await key(dom, input, "Enter");
+  assert.deepEqual(parseCsvSource(saved).rows, [["name"]]);
+  assert.equal(dom.window.document.activeElement, cell(dom, 1, 0),
+    "Enter reaches the insertion row from the heading");
+  await key(dom, cell(dom, 1, 0), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(dom.window.document.activeElement, input);
+  await key(dom, input, "Enter");
+  assert.equal(edits, 1, "leaving an empty insertion draft makes no edit");
+  assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+  await key(dom, cell(dom, 1, 0), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.type(input, "Ada"));
+  await key(dom, input, "Enter");
+  assert.deepEqual(parseCsvSource(saved).rows, [["name"], ["Ada"]]);
+  assert.equal(dom.window.document.activeElement, cell(dom, 2, 0),
+    "Enter advances to the fresh insertion row");
+  assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+  assert.equal(dom.window.document.querySelectorAll(".csv-table tbody tr").length, 2,
+    "one real row and one placeholder are rendered");
+});
+
+test("Tab reaches insertion cells while saved empty rows remain distinct", async (t) => {
+  const { dom, root } = mounted(t);
+  let saved = writeCsvSource([["a", "b"], ["", ""]]);
+  let edits = 0;
+  function Harness({ readOnly = false }) {
+    const [rows, setRows] = useState(parseCsvSource(saved).rows);
+    return <CsvTable rows={rows} readOnly={readOnly} onFind={() => {}}
+      onEdit={(next) => { edits += 1; saved = writeCsvSource(next); setRows(next); }} />;
+  }
+  await act(async () => root.render(<Harness />));
+  assert.equal(cell(dom, 1, 0)?.closest("tr")?.classList.contains("csv-insertion-placeholder"),
+    false, "saved empty data row remains a real row");
+  await act(async () => cell(dom, 1, 1).click());
+  await key(dom, cell(dom, 1, 1), "Tab");
+  assert.equal(dom.window.document.activeElement, cell(dom, 2, 0));
+  await key(dom, cell(dom, 2, 0), "Tab");
+  assert.equal(dom.window.document.activeElement, cell(dom, 2, 1));
+  assert.equal(edits, 0, "traversal creates no data");
+  await key(dom, cell(dom, 2, 1), "Enter");
+  let input = dom.window.document.querySelector(".csv-cell-editor");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const user = userEvent.setup({ document: dom.window.document });
+  await act(async () => user.type(input, "new"));
+  await key(dom, input, "Tab");
+  assert.deepEqual(parseCsvSource(saved).rows, [["a", "b"], ["", ""], ["", "new"]]);
+  assert.equal(dom.window.document.activeElement, cell(dom, 3, 0),
+    "Tab advances to a fresh placeholder after inserting");
+  await act(async () => cell(dom, 2, 1).click());
+  await key(dom, cell(dom, 2, 1), "Delete");
+  assert.deepEqual(parseCsvSource(saved).rows, [["a", "b"], ["", ""], ["", ""]],
+    "clearing an existing row retains it");
+  const reopened = parseCsvSource(saved);
+  await act(async () => root.render(<CsvTable rows={reopened.rows} readOnly
+    onFind={() => {}} />));
+  assert.equal(cell(dom, 2, 0)?.closest("tr")?.classList.contains("csv-insertion-placeholder"),
+    false, "reopened empty data remains distinct");
+  assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+  const clipboard = new Map();
+  const copy = new dom.window.Event("copy", { bubbles: true, cancelable: true });
+  Object.defineProperty(copy, "clipboardData", { value: {
+    setData: (type, data) => clipboard.set(type, data) } });
+  await act(async () => cell(dom, 0, 0).click());
+  await act(async () => cell(dom, 0, 0).dispatchEvent(copy));
+  assert.equal(clipboard.get("text/plain"), "a");
+  assert.equal(dom.window.document.activeElement, cell(dom, 0, 0));
+  assert.equal(edits, 2, "read-only focus and copy create no rows");
+});
+
 test("cell editing keeps Find and Save shortcuts available and saves the current draft", async (t) => {
   const { dom, root } = mounted(t);
   const initial = writeCsvSource([["heading"], ["before"]]);
