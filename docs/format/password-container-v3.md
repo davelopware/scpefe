@@ -75,7 +75,9 @@ metadata-only changes. Its AAD is the exact 72-byte header followed by the
 complete slot table. Its plaintext is
 `document-id[16] || content-type[1] || payload-cbor`.
 The document ID is independently random. The content type is required immutable
-encrypted shared metadata: `0` is Plain Text. Unknown values and containers
+encrypted shared metadata: `0` is Plain Text and `1` is CSV source. CSV source
+is UTF-8 text with LF line endings, a heading row, and equally wide data rows;
+every published content state must parse as CSV. Unknown values and containers
 without this field are unsupported; unreleased earlier containers are not
 migrated. The text remains in the revision graph's content body. All slot
 records and semantic fields are therefore authenticated together; changing a

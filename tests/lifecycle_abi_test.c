@@ -1,6 +1,7 @@
 #include "scpefe/scpefe.h"
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -66,7 +67,7 @@ int main(void)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
     CHECK(container == NULL);
     create.document.content = "first line";
-    create.document.struct_size = sizeof(create.document) - 1;
+    create.document.struct_size = offsetof(scpefe_new_document_v1, content_type) - 1;
     CHECK(scpefe_container_create(context, &create, &container)
         == SCPEFE_STATUS_INVALID_ARGUMENT);
     create.document.struct_size = sizeof(create.document);

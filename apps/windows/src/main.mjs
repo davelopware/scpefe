@@ -246,17 +246,22 @@ if (hasInstanceLock) app.whenReady().then(async () => {
     lifecycleHost.service.removeSlot(validateSlotId(slotId)));
   safeIpcMain.handle("document:export-plaintext", async (_event, request) => {
     const validated = validatePlaintextExportRequest(request);
+    const csv = lifecycleHost.service.active?.opened.contentType === "csv";
     const warning = await dialog.showMessageBox(window, { type: "warning",
-      title: "Export unprotected plaintext?",
+      title: csv ? "Export unprotected CSV?" : "Export unprotected plaintext?",
       message: "The exported copy will not be password protected.",
       detail: "It contains only the current text, but may persist in backups or storage history.",
-      buttons: ["Cancel", "Export plaintext…"], defaultId: 0, cancelId: 0, noLink: true });
+      buttons: ["Cancel", csv ? "Export CSV…" : "Export plaintext…"],
+      defaultId: 0, cancelId: 0, noLink: true });
     if (warning.response !== 1) return null;
-    const chosen = await dialog.showSaveDialog(window, { title: "Export unprotected plaintext",
-      filters: [{ name: "Plain text", extensions: ["txt"] }],
+    const chosen = await dialog.showSaveDialog(window, { title: csv
+      ? "Export unprotected CSV" : "Export unprotected plaintext",
+      filters: [csv ? { name: "CSV", extensions: ["csv"] }
+        : { name: "Plain text", extensions: ["txt"] }],
       properties: ["createDirectory", "showOverwriteConfirmation"] });
     return chosen.canceled || !chosen.filePath ? null
-      : lifecycleHost.service.exportPlaintext(chosen.filePath, validated);
+      : lifecycleHost.service.exportPlaintext(chosen.filePath,
+        csv ? { ...validated, lineEndings: "lf" } : validated);
   });
 
   registerWindowFocusProtection({ window, powerMonitor,

@@ -26,6 +26,7 @@ export type LeaseOperation = "edit" | "recovery" | "divergence";
 export type LeaseDecision = { decisionRequired: "lease-takeover"; operation: LeaseOperation;
   holderName: string; authorization: string; reason?: "master" };
 export type DocumentOpened = { content: string; readOnly: boolean; canEdit: boolean;
+  contentType?: "plain-text" | "csv";
   publicationState: PublicationState; recovery?: Recovery; lease?: Lease;
   targetName?: string;
   canAddPasswords?: boolean; canRemovePasswords?: boolean; invitationRequired?: false;

@@ -14,7 +14,8 @@ export type CreationFormRequest = {
   ownerPasswordConfirmation: string;
   recoveryPassword: string;
   recoveryPasswordConfirmation: string;
-  content: "";
+  content: "" | '""';
+  contentType?: "plain-text" | "csv";
   understandsIrrecoverable: true;
   storedRecoverySeparately: boolean;
 };
@@ -107,6 +108,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
   const [errorDiagnostic, setErrorDiagnostic] = useState<Diagnostic | null>(null);
   const [invalidField, setInvalidField] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [contentType, setContentType] = useState<"plain-text" | "csv">("plain-text");
   const [generating, setGenerating] = useState<"owner" | "recovery" | null>(null);
   const generationToken = useRef(0);
   const ownerConfirmationRef = useRef<HTMLInputElement>(null);
@@ -191,7 +193,7 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
         ownerPasswordConfirmation: ownerConfirmation,
         recoveryPassword: recoveryAssessment?.password ?? "",
         recoveryPasswordConfirmation: recoveryConfirmation,
-        content: "", understandsIrrecoverable,
+        content: contentType === "csv" ? '""' : "", contentType, understandsIrrecoverable,
         storedRecoverySeparately: hasRecovery && storedRecoverySeparately });
     } catch (submissionError) {
       const source = submissionError instanceof Error ? submissionError.message : "";
@@ -263,6 +265,11 @@ export function CreationSecurityDialog({ onCreate, onCancel, returnFocus }:
       onGenerate: () => { void generate("owner"); },
       generating: Boolean(generating) || submitting,
       onToggleConfirmation: () => passwords.toggle("ownerConfirmation") }),
+    h("label", null, "Content type", h("select", { value: contentType,
+      onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
+        setContentType(event.currentTarget.value === "csv" ? "csv" : "plain-text") },
+      h("option", { value: "plain-text" }, "Plain Text"),
+      h("option", { value: "csv" }, "CSV"))),
     h(PasswordConfirmationFields, { kind: "recovery",
       label: "Independent recovery password (strongly recommended)",
       confirmationLabel: "Confirm recovery password", revealed: passwords.visible("recovery"),

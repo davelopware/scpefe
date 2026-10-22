@@ -36,6 +36,7 @@ constexpr std::size_t header_size = 72, record_size = 110, tag_size = 16;
 // The encrypted shared metadata starts with a document ID and required content type.
 constexpr std::size_t document_id_size = 16, content_type_size = 1;
 constexpr std::uint8_t plain_text_content_type = 0;
+constexpr std::uint8_t csv_content_type = 1;
 constexpr std::size_t wrapper_plain_size = 50;
 constexpr std::array<std::uint8_t, 8> magic{'S','C','P','E','F','E',0,3};
 constexpr std::array<char, 8> payload_context{'S','C','P','S','N','A','P','1'};
@@ -85,7 +86,7 @@ ContainerError graph_error(format::RevisionError error)
 std::vector<std::uint8_t> RevisedV3Container::create(
     std::string_view profile_name, std::string_view profile_email,
     std::string_view device_name, std::string_view content,
-    std::uint64_t timestamp_ms, const std::uint8_t *owner_password,
+    std::uint8_t content_type, std::uint64_t timestamp_ms, const std::uint8_t *owner_password,
     std::size_t owner_password_size, const std::uint8_t *recovery_password,
     std::size_t recovery_password_size, const core::EncryptionService &encryption)
 {
@@ -173,7 +174,7 @@ std::vector<std::uint8_t> RevisedV3Container::create(
         throw ContainerFailure{ContainerError::crypto_error};
     secrets.plaintext.reserve(document_id.size() + content_type_size + graph.size());
     secrets.plaintext.insert(secrets.plaintext.end(), document_id.begin(), document_id.end());
-    secrets.plaintext.push_back(plain_text_content_type);
+    secrets.plaintext.push_back(content_type);
     secrets.plaintext.insert(secrets.plaintext.end(), graph.begin(), graph.end());
     unsigned long long written = 0;
     if (crypto_aead_xchacha20poly1305_ietf_encrypt(result.data() + aad_size,
@@ -264,7 +265,7 @@ UnlockedContainerData RevisedV3Container::unlock(const std::uint8_t *bytes,
     if (written != secrets.plaintext.size() || written < document_id_size + content_type_size)
         throw ContainerFailure{ContainerError::malformed_container};
     const auto content_type = secrets.plaintext[document_id_size];
-    if (content_type != plain_text_content_type)
+    if (content_type != plain_text_content_type && content_type != csv_content_type)
         throw ContainerFailure{ContainerError::unsupported_format};
     format::RevisionGraph graph;
     try {

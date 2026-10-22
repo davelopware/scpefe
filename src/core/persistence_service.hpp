@@ -17,10 +17,11 @@ class PersistenceService {
 public:
     /* Permits bounded parsing substitution in context tests. */
     virtual ~PersistenceService() = default;
-    /* Serializes a revised-v3 New baseline and encrypts its initial envelope. */
+    /* Serializes and encrypts a typed revised-v3 New baseline. */
     virtual std::vector<std::uint8_t> create_revised_document(
         std::string_view profile_name, std::string_view profile_email,
         std::string_view device_name, std::string_view content,
+        std::uint8_t content_type,
         std::uint64_t timestamp_ms, const std::uint8_t *owner_password,
         std::size_t owner_password_size, const std::uint8_t *recovery_password,
         std::size_t recovery_password_size,

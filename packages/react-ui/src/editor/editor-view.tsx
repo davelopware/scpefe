@@ -2,6 +2,7 @@ import React, { useEffect, useImperativeHandle, useRef, useState,
   type KeyboardEvent } from "react";
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource,
   WorkingCopySelection } from "@scpefe/frontend-core";
+import { parseCsvSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 
 /** Editing commands needed by the shared document workspace. */
@@ -41,6 +42,9 @@ export function EditorView({ session, active, locked, blocked, onMessage,
   const working = snapshot.kind === "read-only" || snapshot.kind === "edit"
     ? snapshot.working : null;
   const text = working?.text ?? "";
+  const csv = (snapshot.kind === "read-only" || snapshot.kind === "edit")
+    && snapshot.document.contentType === "csv";
+  const csvParse = csv ? parseCsvSource(text) : null;
   const readOnly = snapshot.kind !== "edit" || !snapshot.commands.write;
   const editor = useRef<HTMLTextAreaElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
@@ -167,7 +171,19 @@ export function EditorView({ session, active, locked, blocked, onMessage,
     {!active && <p className="editor-placeholder" role="note">
       {locked ? "Document locked. Use Security → Unlock to continue."
         : "No document. Use File → New or File → Open."}</p>}
-    <textarea ref={editor} aria-label="Document text" value={active && !blocked ? text : ""}
+    {csv && csvParse && !csvParse.valid && active && !blocked &&
+      <div id="csv-source-error" className="csv-parse-error" role="alert">
+        CSV source error at line {csvParse.line}, column {csvParse.column}: {csvParse.message}
+        <button type="button" onClick={() => {
+          editor.current?.focus();
+          editor.current?.setSelectionRange(csvParse.offset,
+            Math.min(csvParse.offset + 1, text.length));
+        }}>Go to error</button>
+      </div>}
+    <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}
+      aria-invalid={csv && csvParse?.valid === false ? true : undefined}
+      aria-describedby={csv && csvParse?.valid === false ? "csv-source-error" : undefined}
+      value={active && !blocked ? text : ""}
       disabled={!active} readOnly={!active || readOnly}
       onSelect={(event) => {
         const selection = { start: event.currentTarget.selectionStart,

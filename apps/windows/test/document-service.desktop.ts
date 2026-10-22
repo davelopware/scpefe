@@ -2301,8 +2301,9 @@ test("tampered publication bytes never overwrite the target and can be discarded
   };
   const native = {
     openDocument: (bytes) => ({ content: bytes.toString().startsWith("saved:")
-      ? bytes.toString().slice(6) : "base", readOnly: true, canEdit: true,
-    documentId: "fa".repeat(16), baseRevision: "fb".repeat(32),
+      ? bytes.toString().slice(6) : "base", contentType: "csv",
+    readOnly: true, canEdit: true, documentId: "fa".repeat(16),
+    baseRevision: "fb".repeat(32),
     journalKey: Buffer.alloc(32, 29) }),
     saveDocument: (_bytes, _password, input) => Buffer.from(`saved:${input.content}`),
   };
@@ -2323,6 +2324,10 @@ test("tampered publication bytes never overwrite the target and can be discarded
   const discarded = await service.discardPendingPublication();
   assert.equal(discarded.publicationState, "target-published");
   assert.equal(discarded.content, "base");
+  assert.equal(discarded.contentType, "csv");
+  assert.equal(service.active.opened.contentType, "csv");
+  await assert.rejects(service.exportPlaintext(path.join(directory, "invalid.csv"),
+    { content: "a,b\nc", lineEndings: "lf" }), /Invalid CSV at line 2/);
   assert.equal(await fs.readFile(pending.publication.transactionFile, "utf8"),
     "tampered transaction");
 });

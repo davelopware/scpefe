@@ -4,6 +4,7 @@ import { WorkingCopy, type ReadyWorkingCopySnapshot, type WorkingCopyFindResult,
 /** Host-validated document data required for frontend lifecycle projection. */
 export interface SessionDocument {
   readonly content: string;
+  readonly contentType?: "plain-text" | "csv";
   readonly readOnly: boolean;
   readonly targetName?: string;
   readonly provisional?: true;
