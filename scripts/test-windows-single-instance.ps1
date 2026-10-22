@@ -115,6 +115,24 @@ try {
             -ErrorAction SilentlyContinue)
         Write-Host "Startup diagnostic: child-count=$($Children.Count) " `
             "child-names=$(($Children | ForEach-Object { $_.Name }) -join ',')"
+        if ($ResponsivePrimary.MainWindowTitle -eq "Error" -and $ResponsivePrimary.MainWindowHandle) {
+            try {
+                Add-Type -AssemblyName UIAutomationClient
+                $Window = [System.Windows.Automation.AutomationElement]::FromHandle(
+                    $ResponsivePrimary.MainWindowHandle)
+                $Controls = $Window.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.Condition]::TrueCondition)
+                for ($Index = 0; $Index -lt [Math]::Min($Controls.Count, 12); $Index += 1) {
+                    $Name = [string]$Controls[$Index].Current.Name
+                    if ($Name) {
+                        Write-Host "Startup error control: $($Name.Substring(0, [Math]::Min($Name.Length, 1200)))"
+                    }
+                }
+            } catch {
+                Write-Host "Startup diagnostic: error-window-inspection-failed=$($_.Exception.GetType().Name)"
+            }
+        }
         foreach ($Event in $Events) {
             $Target = if ($Event.PSObject.Properties["target"]) { $Event.target } else { "none" }
             Write-Host "Startup diagnostic event=$($Event.event) target=$Target"
