@@ -8,12 +8,18 @@ on:
         required: true
         default: false
         type: boolean
+      diagnostic_artifact_run_id:
+        description: Temporary diagnostic package run ID; bypasses the rebuild
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - codex/windows-preview-build
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -35,17 +41,29 @@ jobs:
         shell: powershell
         run: .\scripts\build-windows-preview.ps1
       - name: Build unsigned manual-testing preview (automated tests skipped)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true && inputs.diagnostic_artifact_run_id == '' }}
         shell: powershell
         run: .\scripts\build-windows-preview.ps1 -SkipTests
       - name: Retain temporary packaged startup diagnostic
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true && inputs.diagnostic_artifact_run_id == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: SCPEFE-startup-diagnostic
           path: apps/windows/release/SCPEFE-win32-x64.zip
           if-no-files-found: error
           retention-days: 2
+      - name: Download temporary packaged startup diagnostic
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true && inputs.diagnostic_artifact_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: SCPEFE-startup-diagnostic
+          run-id: ${{ inputs.diagnostic_artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: apps/windows/release
+      - name: Expand temporary packaged startup diagnostic
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true && inputs.diagnostic_artifact_run_id != '' }}
+        shell: powershell
+        run: Expand-Archive -Path .\apps\windows\release\SCPEFE-win32-x64.zip -DestinationPath .\apps\windows\release
       - name: Test packaged single-instance lifecycle
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
         shell: powershell
