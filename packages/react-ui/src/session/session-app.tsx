@@ -4,7 +4,7 @@ import { DocumentSession, type WorkingCopyJournalHost } from "@scpefe/frontend-c
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
-import { createShellCommands, isCsvStructureCommand,
+import { createShellCommands, isCsvTableCommand,
   type ShellCommand } from "../shell/shell-commands.ts";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
 import { DialogSuspensionContext, FocusedDialog } from "../dialogs/focused-dialog.tsx";
@@ -244,8 +244,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       editorView.current?.reset();
       setTableFocus(null);
       setCsvView("table");
-    } else if (isCsvStructureCommand(command)) {
-      editorView.current?.runTableStructure(command);
+    } else if (isCsvTableCommand(command)) {
+      editorView.current?.runTableCommand(command);
     } else if (command === "export") {
       shellDialogs.current?.showExport();
     } else if (command === "passwords" || command === "profile"
