@@ -4,7 +4,8 @@ import { DocumentSession, type WorkingCopyJournalHost } from "@scpefe/frontend-c
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
-import { createShellCommands, type ShellCommand } from "../shell/shell-commands.ts";
+import { createShellCommands, isCsvStructureCommand,
+  type ShellCommand } from "../shell/shell-commands.ts";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
 import { DialogSuspensionContext, FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
@@ -113,6 +114,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
   const [csvView, setCsvView] = useState<"source" | "table">("table");
+  const [tableFocus, setTableFocus] = useState<{ row: number; column: number } | null>(null);
   const [dialog, setDialogState] = useState<DialogName>(null);
   const [activityDialog, setActivityDialog] = useState(false);
   useEffect(() => {
@@ -173,6 +175,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       setEditorAdoption(adopted.adoption);
     }
     setCsvView("table");
+    setTableFocus(null);
     editorView.current?.reset();
     if (result.recovery) {
       const source = [result.recovery.authorName, result.recovery.deviceName]
@@ -208,7 +211,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
       modalBusy: modalBusy.current, activityAvailable: Boolean(revisionActivityHost),
-      csvView }),
+      csvView, tableFocus }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -231,9 +234,13 @@ export function SharedApp({ sessionHost, journalTransport, events,
       session.clearHistory();
       editorView.current?.reset();
       setCsvView("source");
+      setTableFocus(null);
     } else if (command === "show-table") {
       editorView.current?.reset();
+      setTableFocus(null);
       setCsvView("table");
+    } else if (isCsvStructureCommand(command)) {
+      editorView.current?.runTableStructure(command);
     } else if (command === "export") {
       shellDialogs.current?.showExport();
     } else if (command === "passwords" || command === "profile"
@@ -392,6 +399,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
     <EditorView ref={editorView} session={session} active={activeDocument}
       locked={lockedDocument} blocked={modalBusy.current} csvView={csvView}
       onMessage={setMessage}
+      onTableFocus={(focus) => setTableFocus((current) =>
+        current?.row === focus.row && current.column === focus.column ? current : focus)}
       onSave={() => { void shellCommands.invoke("save"); }}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
     <StatusBar session={session} active={activeDocument} commands={shellCommands}
