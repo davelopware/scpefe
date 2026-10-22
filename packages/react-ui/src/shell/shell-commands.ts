@@ -76,6 +76,7 @@ export function createShellCommands<Doc extends SessionDocument>({ session, fact
       case "redo": return active && !table && commands?.redo === true;
       case "show-csv-source": return csv && table;
       case "show-table": return csv && !table
+        && snapshot.publication?.state !== "conflict"
         && parseCsvSource(snapshot.working.text).valid;
       case "add-row-above": case "delete-row":
         return structure && focus!.row > 0 && focus!.row < parsed!.rows.length;

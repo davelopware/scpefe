@@ -32,7 +32,8 @@ interface Context {
 interface Native {
   createContainerContext(): Context;
   inspectDocument(bytes: Buffer, password: string): {
-    content: string; baseRevision: string; canEdit: boolean; slotId: string;
+    content: string; contentType: "plain-text" | "csv";
+    baseRevision: string; canEdit: boolean; slotId: string;
   };
 }
 
@@ -204,6 +205,84 @@ test("Windows publishes a revised merge through its recovery journal", {
   const reopened = await restarted.openDocument(target, password);
   assert.equal(reopened.recovery?.content, "later unsaved\n");
   assert.deepEqual(reopened.recovery?.cursor, { start: 5, end: 5 });
+});
+
+test("CSV divergence restores source repair and publishes rectangular content with merge ancestry", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  assert.ok(native);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-csv-merge-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  const profilePath = path.join(directory, "profile.json");
+  await fs.writeFile(profilePath, JSON.stringify(profile));
+  const owner = native.createContainerContext();
+  const base = owner.create({ ...input("name,value\nbase,1", 1),
+    contentType: "csv", ownerPassword: password });
+  owner.close();
+  const local = branch(base, "name,value\nlocal,1", 2);
+  const current = branch(base, "name,value\ncurrent,1", 3);
+  await fs.writeFile(target, current);
+  const options = { native, fs, profilePath,
+    journalDirectory: path.join(directory, "journals"),
+    witnessDirectory: path.join(directory, "witnesses"),
+    checkpointIdleMs: 1,
+    publicationCapabilities: { sameFilesystemTransaction: true,
+      replacementGuarantee: "atomic-replace" } };
+  const service = new DocumentService(options);
+  const openedBase = native.inspectDocument(base, password) as unknown as {
+    documentId: string; journalKey: Buffer; baseRevision: string };
+  const localHead = native.inspectDocument(local, password).baseRevision;
+  const currentHead = native.inspectDocument(current, password).baseRevision;
+  let record = await service.publications.prepare({
+    documentId: openedBase.documentId, journalKey: openedBase.journalKey,
+    target, base, candidate: local, text: "name,value\nlocal,1",
+    cursor: { start: 0, end: 0 }, baseRevision: openedBase.baseRevision,
+  });
+  record = await service.publications.markDiverged(
+    openedBase.documentId, openedBase.journalKey, record);
+  assert.equal((await service.openDocument(target, password)).contentType, "csv");
+  const draft = await service.beginDivergenceResolution();
+  assert.equal(draft.hasConflicts, true);
+  assert.match(draft.content, /^<<<<<<< local/m);
+  await assert.rejects(service.saveDivergenceResolution(draft.content),
+    /every conflict marker/);
+  // A single-column marker block is valid CSV syntax until conflict rules reject it.
+  await assert.rejects(service.saveDivergenceResolution(
+    "<<<<<<< local\nlocal\n=======\ncurrent\n>>>>>>> current"),
+  /every conflict marker/);
+  service.updateWorkingCopy({ content: "name,value\npartial",
+    cursor: { start: 17, end: 17 } });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await service.flushChain;
+  const restarted = new DocumentService(options);
+  const reopened = await restarted.openDocument(target, password);
+  assert.equal(reopened.contentType, "csv");
+  assert.equal(reopened.content, "name,value\npartial");
+  assert.equal(reopened.publicationState, "conflict");
+  assert.equal(draft.ancestorRevision, openedBase.baseRevision);
+  assert.equal(draft.localRevision, localHead);
+  assert.equal(draft.currentRevision, currentHead);
+  await assert.rejects(service.saveDivergenceResolution("name,value\npartial"),
+    /Invalid CSV/);
+  await service.saveDivergenceResolution("name,value\nresolved,2");
+  const merged = await fs.readFile(target);
+  const saved = native.inspectDocument(merged, password);
+  assert.equal(saved.contentType, "csv");
+  assert.equal(saved.content, "name,value\nresolved,2");
+  const history = native.createContainerContext();
+  try {
+    history.open(merged);
+    history.unlock(password);
+    const rows = history.historyPage(0, 20).items;
+    const merge = rows.find((item) => item.revisionId === saved.baseRevision);
+    assert.deepEqual(merge?.mergeSources, [currentHead]);
+    assert.ok(rows.some((item) => item.revisionId === localHead));
+    assert.ok(rows.some((item) => item.revisionId === currentHead
+      && item.foreign && item.resolvedBy === saved.baseRevision));
+  } finally { history.close(); }
+  assert.equal(await service.journals.read(openedBase.documentId,
+    openedBase.journalKey), null);
 });
 
 test("Windows merge distinguishes demotion from removal of an editor slot", {

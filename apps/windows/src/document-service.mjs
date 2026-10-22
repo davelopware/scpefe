@@ -1338,11 +1338,11 @@ export class DocumentService {
       throw new Error("Begin divergence resolution before saving");
     }
     let canonical = canonicalizeDocumentText(content);
-    if (active.opened.contentType === "csv")
-      canonical = canonicalizeDocumentText(serializeCsvSource(canonical));
     if (hasConflictMarkers(canonical)) {
       throw new Error("Resolve every conflict marker before saving the merge");
     }
+    if (active.opened.contentType === "csv")
+      canonical = canonicalizeDocumentText(serializeCsvSource(canonical));
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     this.#cancelCheckpoint();
