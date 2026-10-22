@@ -2,7 +2,7 @@ import React, { useEffect, useImperativeHandle, useRef, useState,
   type KeyboardEvent } from "react";
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource,
   WorkingCopySelection } from "@scpefe/frontend-core";
-import { parseCsvSource } from "@scpefe/frontend-core";
+import { parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { CsvTable, type CsvTableHandle } from "./csv-table.tsx";
 
@@ -200,6 +200,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
         }}>Go to error</button>
       </div>}
     {showTable && active && !blocked && <CsvTable ref={table} rows={csvParse.rows}
+      readOnly={readOnly} onEdit={(rows) => session.edit(writeCsvSource(rows))}
       onFind={() => { onReturnFocus(document.activeElement as HTMLElement | null);
         openFind("find", document.activeElement as HTMLElement | null); }} />}
     {!showTable && <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}

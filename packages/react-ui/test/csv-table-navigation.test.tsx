@@ -1,11 +1,12 @@
 // @ts-nocheck -- mounted DOM fixture checks keyboard and clipboard behavior.
 import assert from "node:assert/strict";
 import test from "node:test";
-import React, { act, createRef } from "react";
+import React, { act, createRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { CsvTable } from "../src/editor/csv-table.tsx";
 import { EditorView } from "../src/editor/editor-view.tsx";
+import { parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
 
 function mounted(t) {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",
@@ -113,6 +114,15 @@ test("CSV cells navigate, copy complete values, and Find searches headings and r
     setData: (type, data) => clipboard.set(type, data) } });
   await act(async () => cell(dom, 1, 1).dispatchEvent(editCopy));
   assert.equal(clipboard.get("text/plain"), value);
+  let edited = null;
+  session.edit = (source) => { edited = source; return true; };
+  await key(dom, cell(dom, 1, 1), "Enter");
+  const cellInput = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(cellInput));
+  await act(async () => user.type(cellInput, "changed"));
+  await key(dom, cellInput, "Enter");
+  assert.equal(parseCsvSource(edited).rows[1][1], "changed",
+    "table edits reach the session as CSV working-copy text");
 });
 
 test("a 1,000 by 30 table renders and navigates to its last value", async (t) => {
@@ -139,4 +149,69 @@ test("a 1,000 by 30 table renders and navigates to its last value", async (t) =>
   await key(dom, cell(dom, 999, 29), "Tab");
   assert.equal(dom.window.document.activeElement === cell(dom, 999, 29), true,
     "navigation clamps at the last value");
+});
+
+test("CSV table cell drafts commit, navigate, cancel, and serialize as one value", async (t) => {
+  const { dom, root } = mounted(t);
+  let saved = writeCsvSource([["name", "name"], ["old", "right"], ["last", "end"]]);
+  function Harness({ readOnly = false }) {
+    const [rows, setRows] = useState(parseCsvSource(saved).rows);
+    return <CsvTable rows={rows} readOnly={readOnly} onFind={() => {}}
+      onEdit={(next) => { saved = writeCsvSource(next); setRows(next); }} />;
+  }
+  await act(async () => root.render(<Harness />));
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const user = userEvent.setup({ document: dom.window.document });
+  await act(async () => cell(dom, 0, 0).click());
+  await key(dom, cell(dom, 0, 0), "Enter");
+  let input = dom.window.document.querySelector(".csv-cell-editor");
+  assert.equal(dom.window.document.activeElement, input);
+  await act(async () => user.clear(input));
+  await key(dom, input, "Enter");
+  assert.equal(cell(dom, 0, 0).textContent, "", "blank heading commits");
+  assert.equal(dom.window.document.activeElement, cell(dom, 1, 0), "Enter moves down");
+  assert.deepEqual(parseCsvSource(saved).rows[0], ["", "name"]);
+
+  await key(dom, cell(dom, 1, 0), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(input));
+  await act(async () => user.paste('comma,\tline\nbreak"quoted'));
+  assert.equal(dom.window.document.querySelectorAll(".csv-cell-editor").length, 1,
+    "multiline paste stays in one cell");
+  await key(dom, input, "Tab");
+  assert.equal(dom.window.document.activeElement, cell(dom, 1, 1), "Tab moves right");
+  assert.equal(parseCsvSource(saved).rows[1][0], 'comma,\tline\nbreak"quoted');
+  await key(dom, cell(dom, 1, 1), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(input));
+  await act(async () => user.type(input, "next{Shift>}{Enter}{/Shift}line"));
+  await key(dom, input, "Tab");
+  assert.equal(parseCsvSource(saved).rows[1][1], "next\nline");
+  assert.equal(dom.window.document.activeElement, cell(dom, 2, 0), "Tab wraps");
+
+  await act(async () => cell(dom, 2, 0).dispatchEvent(new dom.window.MouseEvent("dblclick",
+    { bubbles: true, cancelable: true })));
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(input));
+  await act(async () => user.type(input, "discard"));
+  await key(dom, input, "Escape");
+  assert.equal(cell(dom, 2, 0).textContent, "last", "Escape cancels");
+  await key(dom, cell(dom, 2, 0), "Enter");
+  input = dom.window.document.querySelector(".csv-cell-editor");
+  await act(async () => user.clear(input));
+  await act(async () => user.type(input, "name"));
+  await act(async () => cell(dom, 2, 1).click());
+  assert.equal(parseCsvSource(saved).rows[2][0], "name", "click away commits");
+  await key(dom, cell(dom, 2, 1), "Delete");
+  assert.equal(parseCsvSource(saved).rows[2][1], "", "Delete clears");
+  await act(async () => user.type(cell(dom, 2, 1), "ignored"));
+  assert.equal(parseCsvSource(saved).rows[2][1], "", "typing outside edit does nothing");
+
+  const reopened = parseCsvSource(saved);
+  assert.equal(reopened.valid, true);
+  await act(async () => root.render(<CsvTable rows={reopened.rows} readOnly onFind={() => {}} />));
+  await key(dom, cell(dom, 0, 1), "Enter");
+  await key(dom, cell(dom, 0, 1), "Delete");
+  assert.equal(dom.window.document.querySelector(".csv-cell-editor"), null);
+  assert.equal(cell(dom, 0, 1).textContent, "name", "read-only cells stay unchanged");
 });

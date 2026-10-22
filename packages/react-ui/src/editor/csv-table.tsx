@@ -9,17 +9,25 @@ export interface CsvTableHandle {
 
 interface CsvTableProps {
   rows: string[][];
+  readOnly?: boolean;
+  onEdit?(rows: string[][]): void;
   ref?: React.Ref<CsvTableHandle>;
   onFind(): void;
 }
 
+interface CellDraft { row: number; column: number; value: string }
+
 const rowHeight = 36;
 const overscan = 4;
 
-/** Presents CSV headings and values as one keyboard-navigable, read-only table. */
-export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactElement {
+/** Presents CSV headings and values as one keyboard-navigable, editable table. */
+export function CsvTable({ rows, readOnly = true, onEdit, ref, onFind }: CsvTableProps): React.ReactElement {
   const scroll = useRef<HTMLDivElement>(null);
   const focusPending = useRef(false);
+  const input = useRef<HTMLTextAreaElement>(null);
+  const focusDraftPending = useRef(false);
+  const draftRef = useRef<CellDraft | null>(null);
+  const [draft, setDraft] = useState<CellDraft | null>(null);
   const [position, setPosition] = useState({ row: 0, column: 0 });
   const [firstVisibleRow, setFirstVisibleRow] = useState(1);
   const [visibleRows, setVisibleRows] = useState(20);
@@ -31,6 +39,12 @@ export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactEleme
     firstVisibleRow + visibleRows + overscan);
 
   useLayoutEffect(() => {
+    if (focusDraftPending.current && input.current) {
+      input.current.focus();
+      input.current.select();
+      focusDraftPending.current = false;
+      return;
+    }
     if (!focusPending.current) return;
     const target = cellAt(row, column);
     if (!target) return;
@@ -71,6 +85,70 @@ export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactEleme
     setPosition({ row: targetRow, column: targetColumn });
   }
 
+  function setCellDraft(next: CellDraft | null): void {
+    draftRef.current = next;
+    setDraft(next);
+  }
+
+  function beginEdit(nextRow: number, nextColumn: number): void {
+    if (readOnly || !onEdit) return;
+    focusDraftPending.current = true;
+    setPosition({ row: nextRow, column: nextColumn });
+    setCellDraft({ row: nextRow, column: nextColumn, value: rows[nextRow][nextColumn] });
+  }
+
+  function commitEdit(nextRow?: number, nextColumn?: number): void {
+    const current = draftRef.current;
+    if (!current) return;
+    setCellDraft(null);
+    if (!readOnly && current.value !== rows[current.row][current.column]) {
+      const updated = rows.map((values) => [...values]);
+      updated[current.row][current.column] = current.value;
+      onEdit?.(updated);
+    }
+    if (nextRow !== undefined && nextColumn !== undefined) move(nextRow, nextColumn);
+  }
+
+  function editKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    event.stopPropagation();
+    if ((event.ctrlKey || event.metaKey) && ["z", "y"].includes(event.key.toLowerCase())) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      const current = draftRef.current;
+      setCellDraft(null);
+      if (current) move(current.row, current.column);
+    } else if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      const current = draftRef.current;
+      if (current) commitEdit(current.row + 1, current.column);
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      const current = draftRef.current;
+      if (current) {
+        const index = current.row * columns + current.column + (event.shiftKey ? -1 : 1);
+        const bounded = Math.max(0, Math.min(rows.length * columns - 1, index));
+        commitEdit(Math.floor(bounded / columns), bounded % columns);
+      }
+    }
+  }
+
+  function cellContent(value: string, cellRow: number, cellColumn: number): React.ReactNode {
+    if (draft?.row === cellRow && draft.column === cellColumn) {
+      return <textarea ref={input} className="csv-cell-editor" aria-label={
+        `Edit ${cellRow === 0 ? "heading" : `row ${cellRow}`}, column ${cellColumn + 1}`}
+        value={draft.value} onChange={(event) => setCellDraft({ ...draft,
+          value: event.target.value.replace(/\r\n?/g, "\n") })}
+        onKeyDown={editKeyDown} onBlur={() => commitEdit()}
+        onClick={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onCopy={(event) => event.stopPropagation()} />;
+    }
+    return <span className="csv-cell-preview">{value}</span>;
+  }
+
   function findNext(query: string): "found" | "wrapped" | "missing" {
     const needle = query.toLocaleLowerCase();
     const size = rows.length * columns;
@@ -101,6 +179,20 @@ export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactEleme
       event.preventDefault(); onFind(); return;
     }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      beginEdit(row, column);
+      return;
+    }
+    if (event.key === "Delete" && !readOnly && onEdit) {
+      event.preventDefault();
+      if (rows[row][column] !== "") {
+        const updated = rows.map((values) => [...values]);
+        updated[row][column] = "";
+        onEdit(updated);
+      }
+      return;
+    }
     let nextRow = row;
     let nextColumn = column;
     switch (event.key) {
@@ -135,6 +227,12 @@ export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactEleme
     move(nextRow, nextColumn);
   }
 
+  function doubleClick(event: MouseEvent<HTMLTableCellElement>, nextRow: number,
+    nextColumn: number): void {
+    event.preventDefault();
+    beginEdit(nextRow, nextColumn);
+  }
+
   return <div className="csv-table-workspace">
     <div ref={scroll} className="csv-table-scroll"
       onScroll={(event) => setFirstVisibleRow(Math.max(1,
@@ -144,8 +242,10 @@ export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactEleme
         <thead><tr aria-rowindex={1}>
         {rows[0].map((heading, index) => <th scope="col" key={index}
           data-row="0" data-column={index} tabIndex={row === 0 && column === index ? 0 : -1}
-          onClick={(event) => click(event, 0, index)} onKeyDown={keyDown} onCopy={copy}>
-          <span className="csv-cell-preview">{heading}</span></th>)}
+          onClick={(event) => click(event, 0, index)}
+          onDoubleClick={(event) => doubleClick(event, 0, index)}
+          onKeyDown={keyDown} onCopy={copy}>
+          {cellContent(heading, 0, index)}</th>)}
       </tr></thead><tbody>
         {windowStart > 1 && <tr className="csv-spacer-row" aria-hidden="true">
           <td colSpan={columns} style={{ height: (windowStart - 1) * rowHeight }} /></tr>}
@@ -156,8 +256,9 @@ export function CsvTable({ rows, ref, onFind }: CsvTableProps): React.ReactEleme
             data-row={rowIndex} data-column={columnIndex}
             tabIndex={row === rowIndex && column === columnIndex ? 0 : -1}
             onClick={(event) => click(event, rowIndex, columnIndex)}
+            onDoubleClick={(event) => doubleClick(event, rowIndex, columnIndex)}
             onKeyDown={keyDown} onCopy={copy}>
-            <span className="csv-cell-preview">{value}</span></td>)}
+            {cellContent(value, rowIndex, columnIndex)}</td>)}
           </tr>;
         })}
         {windowEnd < rows.length && <tr className="csv-spacer-row" aria-hidden="true">
