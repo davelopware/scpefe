@@ -4,6 +4,7 @@
 #include "document/merge_save.hpp"
 #include "format/revision_limits.hpp"
 #include "format/text_validation.hpp"
+#include "format/csv_source.hpp"
 #include "security/password_strength.hpp"
 
 #include <algorithm>
@@ -42,7 +43,8 @@ Container::Container(const ContainerStateManagerService &state_manager,
 
 std::vector<std::uint8_t> Container::create_document(std::string_view profile_name,
     std::string_view profile_email, std::string_view device_name,
-    std::string_view content, std::uint64_t timestamp_ms,
+    std::string_view content, std::uint8_t content_type,
+    std::uint64_t timestamp_ms,
     const std::uint8_t *owner_password, std::size_t owner_password_size,
     const std::uint8_t *recovery_password, std::size_t recovery_password_size) const
 {
@@ -59,7 +61,7 @@ std::vector<std::uint8_t> Container::create_document(std::string_view profile_na
             recovery_password_size) != security::PasswordPolicyAssessment::accepted))
         throw ContainerFailure{ContainerError::weak_password};
     return persistence_.create_revised_document(profile_name, profile_email,
-        device_name, content, timestamp_ms, owner_password, owner_password_size,
+        device_name, content, content_type, timestamp_ms, owner_password, owner_password_size,
         recovery_password, recovery_password_size, encryption_);
 }
 
@@ -94,7 +96,8 @@ const UnlockedContainerData &Container::unlock_document(
     const auto &source = authenticating_target ? target_bytes_ : committed_bytes_;
     auto decoded = persistence_.unlock_revised_envelope(source.data(), source.size(),
         password, password_size, format::RevisionLimits::defaults());
-    if (document_id_ && decoded.document_id != *document_id_)
+    if (document_id_ && (decoded.document_id != *document_id_
+        || (unlocked_ && decoded.content_type != unlocked_->content_type)))
         throw ContainerFailure{ContainerError::malformed_container};
     if (authenticating_target && state_.target_access
         && (decoded.slot_id != state_.target_access->slot_id
@@ -115,6 +118,8 @@ const UnlockedContainerData &Container::unlock_document(
         const auto content = decoded.revision_graph->reconstruct(
             decoded.revision_graph->content_head());
         if (!content) throw ContainerFailure{ContainerError::malformed_container};
+        if (decoded.content_type == 1 && !format::valid_csv_source(*content))
+            throw ContainerFailure{ContainerError::malformed_container};
         content_clear_ = *content;
         unlocked_.emplace(std::move(decoded));
     }
@@ -142,7 +147,8 @@ TransitionResult Container::apply_target_document(
     persistence_.validate_revised_envelope(target_bytes, target_size);
     auto decoded = persistence_.unlock_revised_envelope(target_bytes, target_size,
         password, password_size, format::RevisionLimits::defaults());
-    if (decoded.document_id != *document_id_) {
+    if (decoded.document_id != *document_id_
+        || (unlocked_ && decoded.content_type != unlocked_->content_type)) {
         throw format::MergeFailure{format::MergeProblem::unrelated_target};
     }
     if (unlocked_ && decoded.work_journal_key != unlocked_->work_journal_key)
@@ -229,6 +235,8 @@ void Container::submit_content(std::string_view content)
     if (content.size() > format::RevisionLimits::defaults().max_text_bytes())
         throw ContainerFailure{ContainerError::limit_exceeded};
     if (!format::valid_canonical_document_text(content.data(), content.size()))
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (unlocked_->content_type == 1 && !format::valid_csv_source(content))
         throw ContainerFailure{ContainerError::invalid_argument};
     content_clear_ = std::string(content);
     ++content_generation_;
@@ -404,6 +412,9 @@ TransitionResult Container::prepare_save(std::uint64_t operation_id, bool regula
     if (unlocked_->must_be_changed)
         throw ContainerFailure{ContainerError::invalid_argument};
     if (!password || password_size == 0)
+        throw ContainerFailure{ContainerError::invalid_argument};
+    if (!discard && unlocked_->content_type == 1
+        && !format::valid_csv_source(*content_clear_))
         throw ContainerFailure{ContainerError::invalid_argument};
     ContainerCandidate proposed;
     proposed.operation_id = operation_id;

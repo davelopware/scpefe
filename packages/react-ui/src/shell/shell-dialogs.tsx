@@ -63,6 +63,8 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
   ref?: React.Ref<ShellDialogsHandle>;
 }): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
+  const csvExport = (snapshot.kind === "read-only" || snapshot.kind === "edit")
+    && snapshot.document.contentType === "csv";
   const externalOpen = snapshot.externalOpen;
   const [profile, setProfile] = useState<Profile | null>(null);
   const [clientSettings, setClientSettings] = useState<ClientSettings>({
@@ -260,20 +262,21 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
 
   async function exportPlaintext() {
     setExportError("");
-    const outcome = await session.exportPlaintext(lineEndings);
+    const outcome = await session.exportPlaintext(csvExport ? "lf" : lineEndings);
+    const label = csvExport ? "CSV" : "Plaintext";
     if (outcome.status === "export") {
       setMessage(outcome.outcomePending
-        ? (outcome.exported ? "Plaintext exported; activity outcome pending publication."
-          : "Plaintext export failed; activity outcome pending publication.")
-        : outcome.exported ? "Unprotected plaintext exported."
+        ? (outcome.exported ? `${label} exported; activity outcome pending publication.`
+          : `${label} export failed; activity outcome pending publication.`)
+        : outcome.exported ? `Unprotected ${csvExport ? "CSV" : "plaintext"} exported.`
           : outcome.canceled
-            ? "Plaintext export canceled; the document and destination are unchanged."
-            : "Plaintext export failed; check the destination.");
+            ? `${label} export canceled; the document and destination are unchanged.`
+            : `${label} export failed; check the destination.`);
       onDialog(null);
     } else if (outcome.status === "failed") {
       const value = catalogText(outcome.code);
       setExportError(value);
-      setMessage(`Plaintext export failed; the document and destination are unchanged: ${value}`);
+      setMessage(`${label} export failed; the document and destination are unchanged: ${value}`);
       requestAnimationFrame(() => exportAction.current?.focus());
     }
   }
@@ -334,14 +337,14 @@ export function ShellDialogs({ session, presentation, host, completion, dialog, 
         }}>Cancel</button><button>{dialog === "unlock" ? "Unlock" : "Open"}</button>
         </div></form></FocusedDialog>}
     {dialog === "export" && active && <FocusedDialog returnFocus={returnFocus}
-      title="Export plaintext" close={closeShellDialog}>
+      title={csvExport ? "Export CSV" : "Export plaintext"} close={closeShellDialog}>
       <p className="warning"><strong>Not password protected:</strong> the exported text may persist in backups or storage history.</p>
-      <label>Line endings<select value={lineEndings}
+      {!csvExport && <label>Line endings<select value={lineEndings}
         onChange={(event) => setLineEndings(event.target.value as "lf" | "native")}>
-        <option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label>
+        <option value="lf">Canonical LF</option><option value="native">Platform native</option></select></label>}
       {exportError && <p className="dialog-error" role="alert">{exportError}</p>}
       <div className="dialog-actions"><button onClick={closeShellDialog}>Cancel</button>
         <button ref={exportAction} onClick={() => void exportPlaintext()}>
-          Export current text…</button></div></FocusedDialog>}
+          {csvExport ? "Export CSV…" : "Export current text…"}</button></div></FocusedDialog>}
   </>;
 }

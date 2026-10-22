@@ -10,3 +10,6 @@ for (const state of ["s5", "s6", "s7", "s8", "s9"]) {
     test(lifecycleCaseName(origin), (t) => runMountedLock(t, origin));
   }
 }
+
+test("L-S6-E pending publication tolerates slow edit lease publication", (t) =>
+  runMountedLock(t, "s6-exit", null, { leasePublicationDelayMs: 5_200 }));

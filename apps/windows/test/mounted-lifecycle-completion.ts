@@ -1,7 +1,7 @@
 /** The renderer side of the mounted lifecycle completion boundary. */
 export interface RendererLifecycleBoundary {
   readonly pendingCount?: number;
-  waitForIdle(): Promise<void>;
+  waitForIdle(options?: { timeoutMs?: number }): Promise<void>;
 }
 
 /* Waits for the whole mounted lifecycle boundary, including host work. */
@@ -44,21 +44,21 @@ export class MountedLifecycleCompletion {
       }, timeoutMs);
     });
     try {
-      await Promise.race([this.#waitUntilIdle(), expired]);
+      await Promise.race([this.#waitUntilIdle(timeoutMs), expired]);
     } finally {
       if (timeout) clearTimeout(timeout);
     }
   }
 
-  async #waitUntilIdle(): Promise<void> {
+  async #waitUntilIdle(timeoutMs: number): Promise<void> {
     while (true) {
       const version = this.version;
       await Promise.all([
-        this.renderer.waitForIdle(),
+        this.renderer.waitForIdle({ timeoutMs }),
         Promise.allSettled([...this.pending.keys()]),
       ]);
       await new Promise((resolve) => setImmediate(resolve));
-      await this.renderer.waitForIdle();
+      await this.renderer.waitForIdle({ timeoutMs });
       if (this.version === version && this.pending.size === 0) return;
     }
   }

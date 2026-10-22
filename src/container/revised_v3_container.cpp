@@ -33,6 +33,10 @@ namespace scpefe::container {
 namespace {
 
 constexpr std::size_t header_size = 72, record_size = 110, tag_size = 16;
+// The encrypted shared metadata starts with a document ID and required content type.
+constexpr std::size_t document_id_size = 16, content_type_size = 1;
+constexpr std::uint8_t plain_text_content_type = 0;
+constexpr std::uint8_t csv_content_type = 1;
 constexpr std::size_t wrapper_plain_size = 50;
 constexpr std::array<std::uint8_t, 8> magic{'S','C','P','E','F','E',0,3};
 constexpr std::array<char, 8> payload_context{'S','C','P','S','N','A','P','1'};
@@ -82,7 +86,7 @@ ContainerError graph_error(format::RevisionError error)
 std::vector<std::uint8_t> RevisedV3Container::create(
     std::string_view profile_name, std::string_view profile_email,
     std::string_view device_name, std::string_view content,
-    std::uint64_t timestamp_ms, const std::uint8_t *owner_password,
+    std::uint8_t content_type, std::uint64_t timestamp_ms, const std::uint8_t *owner_password,
     std::size_t owner_password_size, const std::uint8_t *recovery_password,
     std::size_t recovery_password_size, const core::EncryptionService &encryption)
 {
@@ -117,7 +121,8 @@ std::vector<std::uint8_t> RevisedV3Container::create(
         device_name, content, timestamp_ms);
     const std::size_t count = recovery ? 2 : 1;
     const std::size_t aad_size = header_size + count * record_size;
-    const std::size_t encrypted_size = document_id.size() + graph.size() + tag_size;
+    const std::size_t encrypted_size = document_id.size() + content_type_size
+        + graph.size() + tag_size;
     if (aad_size + encrypted_size > 33u * 1024u * 1024u)
         throw ContainerFailure{ContainerError::limit_exceeded};
     std::vector<std::uint8_t> result(aad_size + encrypted_size);
@@ -167,8 +172,9 @@ std::vector<std::uint8_t> RevisedV3Container::create(
     if (crypto_kdf_derive_from_key(secrets.payload.data(), secrets.payload.size(),
         1, payload_context.data(), secrets.document.data()) != 0)
         throw ContainerFailure{ContainerError::crypto_error};
-    secrets.plaintext.reserve(document_id.size() + graph.size());
+    secrets.plaintext.reserve(document_id.size() + content_type_size + graph.size());
     secrets.plaintext.insert(secrets.plaintext.end(), document_id.begin(), document_id.end());
+    secrets.plaintext.push_back(content_type);
     secrets.plaintext.insert(secrets.plaintext.end(), graph.begin(), graph.end());
     unsigned long long written = 0;
     if (crypto_aead_xchacha20poly1305_ietf_encrypt(result.data() + aad_size,
@@ -193,7 +199,7 @@ void RevisedV3Container::validate_structure(const std::uint8_t *bytes, std::size
     if (slots < 1 || slots > 9) throw ContainerFailure{ContainerError::malformed_container};
     const auto records_end = header_size + record_size * slots;
     const auto payload = read_le(bytes + 64, 8);
-    if (size < records_end || payload < 33 || payload > size - records_end
+    if (size < records_end || payload < 34 || payload > size - records_end
         || payload != size - records_end)
         throw ContainerFailure{ContainerError::malformed_container};
     for (std::size_t i = 0; i < slots; ++i) {
@@ -256,12 +262,16 @@ UnlockedContainerData RevisedV3Container::unlock(const std::uint8_t *bytes,
         &written, nullptr, bytes + aad_size, encrypted_size, bytes, aad_size,
         bytes + 40, secrets.payload.data()) != 0)
         throw ContainerFailure{ContainerError::authentication_failed};
-    if (written != secrets.plaintext.size() || written < 17)
+    if (written != secrets.plaintext.size() || written < document_id_size + content_type_size)
         throw ContainerFailure{ContainerError::malformed_container};
+    const auto content_type = secrets.plaintext[document_id_size];
+    if (content_type != plain_text_content_type && content_type != csv_content_type)
+        throw ContainerFailure{ContainerError::unsupported_format};
     format::RevisionGraph graph;
     try {
-        graph = format::RevisionGraph::decode(secrets.plaintext.data() + 16,
-            secrets.plaintext.size() - 16, limits);
+        graph = format::RevisionGraph::decode(
+            secrets.plaintext.data() + document_id_size + content_type_size,
+            secrets.plaintext.size() - document_id_size - content_type_size, limits);
     } catch (const format::RevisionFailure &failure) {
         throw ContainerFailure{graph_error(failure.error)};
     }
@@ -274,6 +284,7 @@ UnlockedContainerData RevisedV3Container::unlock(const std::uint8_t *bytes,
         throw ContainerFailure{ContainerError::malformed_container};
     UnlockedContainerData result;
     std::copy_n(secrets.plaintext.data(), result.document_id.size(), result.document_id.begin());
+    result.content_type = content_type;
     result.slot_id = active.id;
     result.permissions = active.permissions;
     result.must_be_changed = secrets.slot[49] != 0 || active.must_be_changed;
@@ -354,10 +365,12 @@ std::vector<std::uint8_t> RevisedV3Container::replace_graph(
     if (crypto_kdf_derive_from_key(secrets.payload.data(), secrets.payload.size(),
         1, payload_context.data(), secrets.document.data()) != 0)
         throw ContainerFailure{ContainerError::crypto_error};
-    secrets.plaintext.resize(authenticated.document_id.size() + graph_size);
+    secrets.plaintext.resize(authenticated.document_id.size() + content_type_size + graph_size);
     std::copy(authenticated.document_id.begin(), authenticated.document_id.end(),
         secrets.plaintext.begin());
-    std::copy_n(graph, graph_size, secrets.plaintext.begin() + 16);
+    secrets.plaintext[document_id_size] = authenticated.content_type;
+    std::copy_n(graph, graph_size,
+        secrets.plaintext.begin() + document_id_size + content_type_size);
     const auto encrypted_size = secrets.plaintext.size() + tag_size;
     if (aad_size + encrypted_size > 33u * 1024u * 1024u)
         throw ContainerFailure{ContainerError::limit_exceeded};
@@ -425,7 +438,8 @@ std::vector<std::uint8_t> RevisedV3Container::replace_slots(
     }
     if (!matched) throw ContainerFailure{ContainerError::authentication_failed};
     const std::size_t aad_size = header_size + count * record_size;
-    const std::size_t encrypted_size = 16 + graph_size + tag_size;
+    const std::size_t encrypted_size = document_id_size + content_type_size
+        + graph_size + tag_size;
     if (aad_size + encrypted_size > 33u * 1024u * 1024u)
         throw ContainerFailure{ContainerError::limit_exceeded};
     std::vector<std::uint8_t> result(aad_size + encrypted_size);
@@ -476,10 +490,12 @@ std::vector<std::uint8_t> RevisedV3Container::replace_slots(
     if (crypto_kdf_derive_from_key(secrets.payload.data(), secrets.payload.size(),
         1, payload_context.data(), secrets.document.data()) != 0)
         throw ContainerFailure{ContainerError::crypto_error};
-    secrets.plaintext.resize(16 + graph_size);
+    secrets.plaintext.resize(document_id_size + content_type_size + graph_size);
     std::copy(authenticated.document_id.begin(), authenticated.document_id.end(),
         secrets.plaintext.begin());
-    std::copy_n(graph_bytes, graph_size, secrets.plaintext.begin() + 16);
+    secrets.plaintext[document_id_size] = authenticated.content_type;
+    std::copy_n(graph_bytes, graph_size,
+        secrets.plaintext.begin() + document_id_size + content_type_size);
     unsigned long long written = 0;
     if (crypto_aead_xchacha20poly1305_ietf_encrypt(result.data() + aad_size,
         &written, secrets.plaintext.data(), secrets.plaintext.size(),

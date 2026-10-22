@@ -141,6 +141,26 @@ int main(int argc, char **argv)
     CHECK(scpefe_container_close(container) == SCPEFE_STATUS_OK);
     free(encrypted);
     {
+        const char *unsupported[] = {
+            "invalid/envelope-missing-content-type.hex",
+            "invalid/envelope-unknown-content-type.hex"};
+        size_t i;
+        auth.bytes = password;
+        auth.bytes_size = sizeof(password) - 1;
+        for (i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i) {
+            uint8_t *bad = NULL;
+            size_t bad_size = 0;
+            CHECK(load(argv[1], unsupported[i], &bad, &bad_size) == 0);
+            open.bytes = bad;
+            open.bytes_size = bad_size;
+            CHECK(scpefe_container_open(context, &open, &container) == SCPEFE_STATUS_OK);
+            CHECK(scpefe_container_unlock(container, &auth)
+                == SCPEFE_STATUS_UNSUPPORTED_FORMAT);
+            CHECK(scpefe_container_close(container) == SCPEFE_STATUS_OK);
+            free(bad);
+        }
+    }
+    {
         const char *invalid[] = {"invalid/envelope-slot-count-zero.hex",
             "invalid/envelope-payload-length-overflow.hex",
             "invalid/envelope-wrapper-length.hex"};

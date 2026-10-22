@@ -1,9 +1,16 @@
 import { WorkingCopy, type ReadyWorkingCopySnapshot, type WorkingCopyFindResult,
   type WorkingCopyJournalHost, type WorkingCopySelection } from "./working-copy.ts";
+import { parseCsvSource } from "./csv-source.mjs";
+
+/** Detects unresolved source conflict lines before a CSV parser can treat them as cells. */
+function hasConflictMarkers(content: string): boolean {
+  return /^(?:<<<<<<<.*|=======.*|>>>>>>>.*)$/m.test(content);
+}
 
 /** Host-validated document data required for frontend lifecycle projection. */
 export interface SessionDocument {
   readonly content: string;
+  readonly contentType?: "plain-text" | "csv";
   readonly readOnly: boolean;
   readonly targetName?: string;
   readonly provisional?: true;
@@ -1496,6 +1503,14 @@ export class DocumentSession<Doc extends SessionDocument,
       && this.workingCopy?.redo() === true;
   }
 
+  /** Begins a fresh presentation-specific Undo/Redo interval for an open document. */
+  clearHistory(): boolean {
+    if ((this.snapshot.kind !== "edit" && this.snapshot.kind !== "read-only")
+      || !this.workingCopy) return false;
+    this.workingCopy.clearHistory();
+    return true;
+  }
+
   findNext(query: string): WorkingCopyFindResult | null {
     if (this.snapshot.kind !== "edit" && this.snapshot.kind !== "read-only") return null;
     return this.workingCopy?.findNext(query) ?? null;
@@ -2110,7 +2125,10 @@ export class DocumentSession<Doc extends SessionDocument,
       redo: !document.readOnly && !document.recovery && !document.headMismatch
         && !document.unreadableJournal && pending !== "compaction" && working.canRedo,
       save: !document.readOnly && !document.recovery && !document.headMismatch
-        && !document.unreadableJournal && working.dirty && pending === undefined,
+        && !document.unreadableJournal && working.dirty && pending === undefined
+        && (document.contentType !== "csv" || (parseCsvSource(working.text).valid
+          && !(this.publicationState === "conflict"
+            && hasConflictMarkers(working.text)))),
       backup: !working.dirty && this.publicationState === "target-published"
         && !document.provisional && !document.recovery && !document.headMismatch
         && !document.activityOutcomePending

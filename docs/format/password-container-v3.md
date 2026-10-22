@@ -32,7 +32,7 @@ permissions, document identity, lease, content, and history are encrypted.
 | 32 | 4 | slot count, `1..9` |
 | 36 | 4 | payload AEAD `1` (XChaCha20-Poly1305-IETF) |
 | 40 | 24 | fresh payload nonce |
-| 64 | 8 | payload ciphertext length, at least `33` |
+| 64 | 8 | payload ciphertext length, at least `34` |
 | 72 | `110 * slot count` | ordered slot records |
 | `72 + 110 * slot count` | payload ciphertext length | encrypted payload, including its 16-byte tag |
 
@@ -72,10 +72,16 @@ The payload key is the 32-byte Libsodium `crypto_kdf` subkey with ID 1 and exact
 8-byte context `SCPSNAP1` from the random 32-byte document key. The payload
 uses a fresh 24-byte nonce on **every** rewrite, including slot, lease, and
 metadata-only changes. Its AAD is the exact 72-byte header followed by the
-complete slot table. Its plaintext is `document-id[16] || payload-cbor`.
-The document ID is independently random. All slot records and semantic fields
-are therefore authenticated together; changing a wrapper requires reencrypting
-the payload even if the revision graph is unchanged. Authenticated decryption
+complete slot table. Its plaintext is
+`document-id[16] || content-type[1] || payload-cbor`.
+The document ID is independently random. The content type is required immutable
+encrypted shared metadata: `0` is Plain Text and `1` is CSV source. CSV source
+is UTF-8 text with LF line endings, a heading row, and equally wide data rows;
+every published content state must parse as CSV. Unknown values and containers
+without this field are unsupported; unreleased earlier containers are not
+migrated. The text remains in the revision graph's content body. All slot
+records and semantic fields are therefore authenticated together; changing a
+wrapper requires reencrypting the payload even if the revision graph is unchanged. Authenticated decryption
 and complete CBOR/graph validation precede exposure of semantic values. Wrong
 password or tag yields only authentication failure. Key and password bytes are
 never diagnostic output.

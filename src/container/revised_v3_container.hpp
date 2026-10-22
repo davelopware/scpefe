@@ -17,10 +17,11 @@ class RevisedV3Container {
 public:
     /* Maximum encrypted image accepted before authentication. */
     static constexpr std::size_t max_container_bytes() { return 33u * 1024u * 1024u; }
-    /* Creates one encrypted revised-v3 baseline with owner and optional recovery. */
+    /* Creates an encrypted baseline with immutable content type and owner access. */
     static std::vector<std::uint8_t> create(std::string_view profile_name,
         std::string_view profile_email, std::string_view device_name,
-        std::string_view content, std::uint64_t timestamp_ms,
+        std::string_view content, std::uint8_t content_type,
+        std::uint64_t timestamp_ms,
         const std::uint8_t *owner_password, std::size_t owner_password_size,
         const std::uint8_t *recovery_password, std::size_t recovery_password_size,
         const core::EncryptionService &encryption);

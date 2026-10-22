@@ -20,9 +20,36 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .menu [role="menu"] button:disabled { color: GrayText; }
 .menu hr { border: 0; border-top: 1px solid GrayText; margin: .25rem; }
 kbd { margin-left: 2rem; font: inherit; color: inherit; }
-.editor-surface { position: relative; min-height: 0; background: Canvas; }
-.editor-surface textarea { display: block; width: 100%; height: 100%; min-height: 0; resize: none; border: 0;
+.editor-surface { position: relative; display: flex; flex-direction: column; min-height: 0; background: Canvas; }
+.editor-surface textarea { display: block; flex: 1; width: 100%; height: 100%; min-height: 0; resize: none; border: 0;
   padding: .85rem 1rem; color: CanvasText; background: Canvas; font: 16px/1.5 Consolas, monospace; }
+.editor-surface textarea[aria-invalid="true"] { box-shadow: inset 0 0 0 2px #9b1c1c; }
+.csv-parse-error { display: flex; align-items: center; gap: .75rem; padding: .4rem .75rem;
+  color: #9b1c1c; background: #fff1f0; font-weight: 600; }
+.csv-table-workspace { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.csv-table-scroll { flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: .85rem 1rem; }
+.csv-table { border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.csv-table th, .csv-table td { box-sizing: border-box; width: 12rem; max-width: 12rem;
+  padding: .55rem .7rem; border-right: 1px solid #aab0b7; border-bottom: 1px solid #aab0b7;
+  text-align: left; vertical-align: top; cursor: default; }
+.csv-table thead tr, .csv-table tbody tr:not(.csv-spacer-row):not(.csv-insertion-placeholder) { height: 36px; }
+.csv-table .csv-spacer-row td { padding: 0; border: 0; }
+.csv-table th { position: sticky; top: 0; z-index: 1; background: #f1f3f5; font-weight: 650; }
+.csv-table th:focus, .csv-table td:focus { z-index: 2;
+  outline: 3px solid #145da0; outline-offset: -3px; background: #e8f3ff; }
+.csv-table td:focus { position: relative; }
+.csv-cell-preview { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.csv-table .csv-cell-editor { display: block; flex: none; width: 100%; height: auto;
+  min-height: 1.5rem; max-height: 7rem;
+  resize: vertical; padding: 0; border: 0; outline: 0; background: transparent;
+  color: inherit; font: inherit; white-space: pre-wrap; }
+.csv-focused-value { flex: none; max-height: 9rem; overflow: auto; padding: .45rem 1rem;
+  border-top: 1px solid #aab0b7; background: #f8fafc; }
+.csv-focused-value span { font-weight: 600; }
+.csv-focused-value pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 14px/1.4 Consolas, monospace; }
+.csv-table .csv-insertion-placeholder td { border: 2px dashed #6386a8;
+  color: #355b7d; background: #f4f8fc; font-style: italic; }
 .editor-surface textarea:disabled { color: GrayText; background: Canvas; }
 .editor-placeholder { position: absolute; inset: 1rem auto auto 1rem; z-index: 1; margin: 0;
   color: GrayText; pointer-events: none; }

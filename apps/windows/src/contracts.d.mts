@@ -4,7 +4,8 @@ export function validateCreateFormRequest(value: unknown): {
   ownerPasswordConfirmation: string;
   recoveryPassword: string;
   recoveryPasswordConfirmation: string;
-  content: "";
+  content: "" | '""';
+  contentType?: "plain-text" | "csv";
   understandsIrrecoverable: true;
   storedRecoverySeparately: boolean;
 };

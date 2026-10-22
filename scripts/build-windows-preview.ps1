@@ -176,6 +176,17 @@ New-Item -ItemType Directory -Force $AppRoot | Out-Null
 Copy-Item (Join-Path $WindowsRoot "package.json") $AppRoot
 Copy-Item (Join-Path $WindowsRoot "src"), (Join-Path $WindowsRoot "dist"), $NativeRoot `
     -Destination $AppRoot -Recurse -Force
+$PackagedCsvRoot = Join-Path $PackageRoot "packages\frontend-core\src"
+New-Item -ItemType Directory -Force $PackagedCsvRoot | Out-Null
+Copy-Item (Join-Path $RepositoryRoot "packages\frontend-core\src\csv-source.mjs") `
+    $PackagedCsvRoot
+
+# Import from the relocated package so missing production ESM dependencies fail
+# during packaging instead of opening an Electron error dialog on first launch.
+$PackagedContracts = Join-Path $AppRoot "src\contracts.mjs"
+Invoke-Checked "node" @("--input-type=module", "-e",
+    "await import((await import('node:url')).pathToFileURL(process.argv[1]).href)",
+    $PackagedContracts)
 
 if (-not $SkipTests) {
     $PreviousRunAsNode = $env:ELECTRON_RUN_AS_NODE

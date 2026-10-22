@@ -23,7 +23,8 @@ std::vector<std::uint8_t> MergeSave::create_revised(
     auto local = container::RevisedV3Container::unlock(local_container,
         local_size, local_password, local_password_size, limits);
     if (target.document_id != local.document_id
-        || target.work_journal_key != local.work_journal_key)
+        || target.work_journal_key != local.work_journal_key
+        || target.content_type != local.content_type)
         throw format::MergeFailure{format::MergeProblem::unrelated_target};
     if (target.slot_id != local.slot_id)
         throw format::MergeFailure{format::MergeProblem::revoked_access};

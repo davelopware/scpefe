@@ -2,7 +2,10 @@ import React, { useEffect, useImperativeHandle, useRef, useState,
   type KeyboardEvent } from "react";
 import type { DocumentSessionSnapshot, SessionDocument, SnapshotSource,
   WorkingCopySelection } from "@scpefe/frontend-core";
+import { parseCsvSource, writeCsvSource } from "@scpefe/frontend-core";
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
+import { CsvTable, type CsvTableHandle } from "./csv-table.tsx";
+import type { CsvStructureCommand } from "../shell/shell-commands.ts";
 
 /** Editing commands needed by the shared document workspace. */
 export interface EditorSession extends SnapshotSource<DocumentSessionSnapshot<SessionDocument>> {
@@ -22,6 +25,7 @@ export interface EditorViewHandle {
   openFind(mode: "find" | "replace", returnFocus?: HTMLElement | null): void;
   reset(): void;
   focus(): void;
+  runTableStructure(command: CsvStructureCommand): void;
 }
 
 interface EditorViewProps {
@@ -29,20 +33,28 @@ interface EditorViewProps {
   active: boolean;
   locked: boolean;
   blocked: boolean;
+  csvView: "source" | "table";
   onMessage(message: string): void;
   onReturnFocus(element: HTMLElement | null): void;
+  onSave?(): void;
+  onTableFocus?(focus: { row: number; column: number }): void;
   ref?: React.Ref<EditorViewHandle>;
 }
 
 /** Presents the working copy and owns modeless search state for one adoption. */
-export function EditorView({ session, active, locked, blocked, onMessage,
-  onReturnFocus, ref }: EditorViewProps): React.ReactElement {
+export function EditorView({ session, active, locked, blocked, csvView, onMessage,
+  onReturnFocus, onSave, onTableFocus, ref }: EditorViewProps): React.ReactElement {
   const snapshot = useSessionSnapshot(session);
   const working = snapshot.kind === "read-only" || snapshot.kind === "edit"
     ? snapshot.working : null;
   const text = working?.text ?? "";
+  const csv = (snapshot.kind === "read-only" || snapshot.kind === "edit")
+    && snapshot.document.contentType === "csv";
+  const csvParse = csv ? parseCsvSource(text) : null;
+  const showTable = csv && csvView === "table" && csvParse?.valid === true;
   const readOnly = snapshot.kind !== "edit" || !snapshot.commands.write;
   const editor = useRef<HTMLTextAreaElement>(null);
+  const table = useRef<CsvTableHandle>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const findReturnFocus = useRef<HTMLElement | null>(null);
@@ -78,14 +90,17 @@ export function EditorView({ session, active, locked, blocked, onMessage,
     findReturnFocus.current = returnFocus?.isConnected
       ? returnFocus : document.activeElement as HTMLElement | null;
     setFindOpen(true);
-    requestAnimationFrame(() => (mode === "replace"
+    requestAnimationFrame(() => (mode === "replace" && !showTable
       ? replaceInput.current : findInput.current)?.focus());
   }
 
   function closeFind(): void {
     setFindOpen(false);
-    requestAnimationFrame(() => (findReturnFocus.current?.isConnected
-      ? findReturnFocus.current : editor.current)?.focus());
+    requestAnimationFrame(() => {
+      if (showTable) table.current?.focus();
+      else if (findReturnFocus.current?.isConnected) findReturnFocus.current.focus();
+      else editor.current?.focus();
+    });
   }
 
   function reset(): void {
@@ -95,9 +110,21 @@ export function EditorView({ session, active, locked, blocked, onMessage,
   }
 
   useImperativeHandle(ref, () => ({ openFind, reset,
-    focus: () => editor.current?.focus() }), [active]);
+    focus: () => { if (showTable) table.current?.focus(); else editor.current?.focus(); },
+    runTableStructure: (command) => { if (showTable) table.current?.runStructure(command); } }));
 
   function findNext(): void {
+    if (showTable) {
+      if (!findText) { setFindStatus("Enter text to find."); return; }
+      const result = table.current?.findNext(findText);
+      if (!result || result === "missing") {
+        setFindStatus("Text not found."); onMessage("Text not found."); return;
+      }
+      const status = result === "wrapped" ? "Match focused after wrapping to the start."
+        : "Match focused.";
+      setFindStatus(status); onMessage(status);
+      return;
+    }
     if (!findText || !editor.current) { setFindStatus("Enter text to find."); return; }
     session.setSelection({ start: editor.current.selectionStart,
       end: editor.current.selectionEnd });
@@ -167,7 +194,25 @@ export function EditorView({ session, active, locked, blocked, onMessage,
     {!active && <p className="editor-placeholder" role="note">
       {locked ? "Document locked. Use Security → Unlock to continue."
         : "No document. Use File → New or File → Open."}</p>}
-    <textarea ref={editor} aria-label="Document text" value={active && !blocked ? text : ""}
+    {csv && csvView === "source" && csvParse && !csvParse.valid && active && !blocked &&
+      <div id="csv-source-error" className="csv-parse-error" role="alert">
+        CSV source error at line {csvParse.line}, column {csvParse.column}: {csvParse.message}
+        <button type="button" onClick={() => {
+          editor.current?.focus();
+          editor.current?.setSelectionRange(csvParse.offset,
+            Math.min(csvParse.offset + 1, text.length));
+        }}>Go to error</button>
+      </div>}
+    {showTable && active && !blocked && <CsvTable ref={table} rows={csvParse.rows}
+      readOnly={readOnly} onEdit={(rows) => session.edit(writeCsvSource(rows))}
+      onSave={onSave}
+      onFocusChange={onTableFocus}
+      onFind={() => { onReturnFocus(document.activeElement as HTMLElement | null);
+        openFind("find", document.activeElement as HTMLElement | null); }} />}
+    {!showTable && <textarea ref={editor} aria-label={csv ? "CSV source" : "Document text"}
+      aria-invalid={csv && csvParse?.valid === false ? true : undefined}
+      aria-describedby={csv && csvParse?.valid === false ? "csv-source-error" : undefined}
+      value={active && !blocked ? text : ""}
       disabled={!active} readOnly={!active || readOnly}
       onSelect={(event) => {
         const selection = { start: event.currentTarget.selectionStart,
@@ -176,23 +221,25 @@ export function EditorView({ session, active, locked, blocked, onMessage,
             || selection.end !== working.selection.end)) session.setSelection(selection);
       }}
       onKeyDown={editorKeyDown} onChange={(event) => session.edit(event.target.value,
-        { start: event.target.selectionStart, end: event.target.selectionEnd })} />
+        { start: event.target.selectionStart, end: event.target.selectionEnd })} />}
     {findOpen && active && !blocked && <section className="modeless-dialog" role="dialog"
       aria-modal="false" aria-labelledby="find-replace-title" onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); closeFind(); }
-      }}><div className="app-dialog-header"><h2 id="find-replace-title">Find and replace</h2>
-        <button type="button" className="dialog-close" aria-label="Close Find and replace"
+      }}><div className="app-dialog-header"><h2 id="find-replace-title">
+        {showTable ? "Find" : "Find and replace"}</h2>
+        <button type="button" className="dialog-close"
+          aria-label={showTable ? "Close Find" : "Close Find and replace"}
           onClick={closeFind}>×</button></div>
       <div className="modeless-dialog-body">
       <label>Find<input ref={findInput} value={findText}
         onChange={(event) => { setFindText(event.target.value); setFindStatus(""); }} /></label>
-      <label>Replace with<input ref={replaceInput} value={replaceText}
-        onChange={(event) => setReplaceText(event.target.value)} /></label>
+      {!showTable && <label>Replace with<input ref={replaceInput} value={replaceText}
+        onChange={(event) => setReplaceText(event.target.value)} /></label>}
       <div className="dialog-actions"><button type="button" disabled={!findText}
         onClick={findNext}>Find next</button>
-        <button type="button" disabled={readOnly || !findText}
+        <button type="button" disabled={showTable || readOnly || !findText}
           onClick={replaceSelection}>Replace</button>
-        <button type="button" disabled={readOnly || !findText}
+        <button type="button" disabled={showTable || readOnly || !findText}
           onClick={replaceAll}>Replace all</button>
         <button type="button" onClick={closeFind}>Close</button></div>
       <p className="modeless-status" role="status" aria-live="polite">{findStatus}</p></div>

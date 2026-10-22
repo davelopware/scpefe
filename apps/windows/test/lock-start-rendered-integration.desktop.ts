@@ -17,15 +17,16 @@ import { MountedLifecycleCompletion } from "./mounted-lifecycle-completion.ts";
 
 const capabilities = Object.freeze({ sameFilesystemTransaction: true,
   replacementGuarantee: "atomic-replace" });
+let mountedScenarioSequence = 0;
 
-export async function runMountedLock(t, origin, nativeOverride = null) {
-  try { await runMountedLockScenario(t, origin, nativeOverride); }
+export async function runMountedLock(t, origin, nativeOverride = null, options = {}) {
+  try { await runMountedLockScenario(t, origin, nativeOverride, options); }
   catch (error) { scenarioFailures.set(t, error); throw error; }
 }
 
 const scenarioFailures = new WeakMap();
 
-async function runMountedLockScenario(t, origin, nativeOverride = null) {
+async function runMountedLockScenario(t, origin, nativeOverride = null, options = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `scpefe-mounted-${origin}-`));
   let teardown = () => fs.rm(directory,
     { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
@@ -74,7 +75,13 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   let postAuthorizationFaultTarget = null;
   let postAuthorizationFaultArmed = false;
   const otherReadEntered = new Promise((resolve) => { otherReadStarted = resolve; });
+  let delayedCandidateRead = false;
+  let delayedLeasePublication = false;
   const serviceFs = { ...fs, async readFile(file, ...args) {
+    if (file === otherTarget && options.candidateReadDelayMs && !delayedCandidateRead) {
+      delayedCandidateRead = true;
+      await new Promise((resolve) => setTimeout(resolve, options.candidateReadDelayMs));
+    }
     if (holdInitialRead && file === target) {
       initialReadStarted();
       await initialReadReleased;
@@ -92,6 +99,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     }
     return fs.readFile(file, ...args);
   }, async link(source, destination) {
+    if (destination === newTarget && options.candidateLinkDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.candidateLinkDelayMs));
+    }
     if (holdNewLink && destination === newTarget) {
       newLinkStarted();
       await new Promise((resolve) => { releaseNewLink = resolve; });
@@ -110,6 +120,11 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     if (publicationUnavailable && destination === target) {
       const error = new Error("injected publication target unavailable");
       error.code = "EACCES"; throw error;
+    }
+    if (destination === target && options.leasePublicationDelayMs
+        && !delayedLeasePublication) {
+      delayedLeasePublication = true;
+      await new Promise((resolve) => setTimeout(resolve, options.leasePublicationDelayMs));
     }
     if (holdMaintenance && destination === target) {
       maintenanceStarted();
@@ -509,7 +524,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   const assets = await fs.readdir(new URL("../dist/assets/", import.meta.url));
   const script = assets.find((entry) => /^index-.*\.js$/.test(entry));
   const rendererUrl = new URL(`../dist/assets/${script}`, import.meta.url);
-  await import(`${rendererUrl.href}?real-lock-${origin}`);
+  await import(`${rendererUrl.href}?real-lock-${origin}-${++mountedScenarioSequence}`);
   mountedCompletion.renderer = dom.window[
     Symbol.for("scpefe.renderer.lifecycle-completion")];
   const ui = await import("@testing-library/dom");
@@ -531,7 +546,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
   const awaitLifecycleCompletion = async (label) => {
     assert.equal(typeof mountedCompletion?.waitForIdle, "function",
       `mounted lifecycle completion is available for ${label}`);
-    await mountedCompletion.waitForIdle({ timeoutMs: 5_000 });
+    // Windows edit-lease publication can outlast the renderer's default 5 s guard.
+    await mountedCompletion.waitForIdle({ timeoutMs: 15_000 });
   };
   const awaitHarnessPhase = async (phase, label) => {
     let phaseTimeout;
@@ -1081,6 +1097,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
     await user.click(ui.getByLabelText(creation,
       "I understand that lost passwords cannot be recovered."));
     await user.click(ui.getByRole(creation, "button", { name: "Create" }));
+    await awaitHarnessPhase(protectionRequestObserved,
+      "New protection request after candidate creation");
     const decision = await ui.findByRole(document.body, "dialog", { name: /before New/ });
     assert.equal(ui.queryByRole(document.body, "dialog", { name: "Secure new document" }) === null, true,
       "the interrupted form is not actionable during protection");
@@ -1472,6 +1490,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null) {
       const opened = await ui.findByRole(document.body, "dialog", { name: "Open document" });
       await user.type(ui.getByLabelText(opened, "Password"), "password words");
       await user.click(ui.getByRole(opened, "button", { name: "Open" }));
+      await awaitHarnessPhase(protectionRequestObserved,
+        "dirty Open protection request after candidate authentication");
     } else {
       await host.setReady(); request = host.enqueueExternal({ target: otherTarget,
         source: "second-instance" });

@@ -109,7 +109,7 @@ def encrypt(key: bytes, nonce: bytes, plain: bytes, aad: bytes) -> bytes:
     return cipher.raw[:written.value]
 
 
-def container(clear: bytes) -> bytes:
+def container(clear: bytes, content_type: bytes = b"\x00") -> bytes:
     sodium = ctypes.CDLL("libsodium.so.23")
     assert sodium.sodium_init() >= 0
     salt, slot_nonce, payload_nonce = bytes(range(80, 96)), bytes(range(96, 120)), bytes(range(120, 144))
@@ -118,7 +118,7 @@ def container(clear: bytes) -> bytes:
                                 ctypes.c_ulonglong(len(PASSWORD)), salt,
                                 ctypes.c_ulonglong(2), ctypes.c_size_t(67108864), 2) == 0
     header = (b"SCPEFE\0\x03" + struct.pack("<IIQQII", 3, 2, 2, 67108864, 1, 1)
-              + payload_nonce + struct.pack("<Q", 16 + len(clear) + 16))
+              + payload_nonce + struct.pack("<Q", 16 + len(content_type) + len(clear) + 16))
     assert len(header) == 72
     slot_aad = b"SCPEFE-slot-v3" + header[:32] + header[36:40] + salt + slot_nonce
     wrapped = encrypt(derived.raw, slot_nonce, KEY + SID + b"\x07\x00", slot_aad)
@@ -127,7 +127,7 @@ def container(clear: bytes) -> bytes:
     subkey = ctypes.create_string_buffer(32)
     assert sodium.crypto_kdf_derive_from_key(subkey, ctypes.c_size_t(32),
                                              ctypes.c_ulonglong(1), b"SCPSNAP1", KEY) == 0
-    encrypted = encrypt(subkey.raw, payload_nonce, DID + clear, header + slot)
+    encrypted = encrypt(subkey.raw, payload_nonce, DID + content_type + clear, header + slot)
     return header + slot + encrypted
 
 
@@ -251,6 +251,12 @@ def main():
     rows.append({**write("invalid/pruned-without-anchor", cbor(payload([prune_base, no_anchor, event, compact], compact[1], change[1]))), "expect": "reject missing reconstruction checkpoint"})
     rows.append({**write("invalid/unknown-required-feature", cbor(payload([base], features=[999]))), "expect": "reject unknown required feature"})
     valid_container = container(cbor(base_payload))
+    rows.append({**write("invalid/envelope-missing-content-type",
+        container(cbor(base_payload), b"")),
+        "expect": "reject authenticated development container without required content type"})
+    rows.append({**write("invalid/envelope-unknown-content-type",
+        container(cbor(base_payload), b"\xff")),
+        "expect": "reject authenticated unknown content type"})
     for name, offset, replacement, expected in [
         ("slot-count-zero", 32, struct.pack("<I", 0), "reject slot count bound before KDF"),
         ("payload-length-overflow", 64, b"\xff" * 8, "reject length arithmetic before KDF"),

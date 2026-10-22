@@ -215,6 +215,14 @@ export class WorkingCopy {
 
   redo(): boolean { return this.moveHistory(1); }
 
+  /** Starts a new local Undo/Redo history without changing text or save state. */
+  clearHistory(): void {
+    const state = this.requireReady();
+    state.history = [state.text];
+    state.index = 0;
+    this.publish();
+  }
+
   setSelection(selection: WorkingCopySelection): void {
     const state = this.requireReady();
     state.selection = this.normalizedSelection(state.text, selection);

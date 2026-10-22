@@ -4,7 +4,8 @@ import { DocumentSession, type WorkingCopyJournalHost } from "@scpefe/frontend-c
 import { useSessionSnapshot } from "../use-session-snapshot.ts";
 import { MenuBar } from "../shell/menu-bar.tsx";
 import { StatusBar } from "../shell/status-bar.tsx";
-import { createShellCommands, type ShellCommand } from "../shell/shell-commands.ts";
+import { createShellCommands, isCsvStructureCommand,
+  type ShellCommand } from "../shell/shell-commands.ts";
 import { ShellDialogs, type ShellDialogsHandle } from "../shell/shell-dialogs.tsx";
 import { DialogSuspensionContext, FocusedDialog } from "../dialogs/focused-dialog.tsx";
 import { DialogHost, type DialogHostHandle } from "../dialogs/dialog-host.tsx";
@@ -102,6 +103,10 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const dirty = working?.dirty ?? false;
   const publicationResolving = sessionSnapshot.kind === "read-only"
     || sessionSnapshot.kind === "edit" ? sessionSnapshot.publication.resolving : false;
+  const csvRepair = (sessionSnapshot.kind === "read-only"
+    || sessionSnapshot.kind === "edit")
+    && sessionSnapshot.document.contentType === "csv"
+    && sessionSnapshot.publication.state === "conflict";
   useEffect(() => () => {
     presentationMounted.current = false;
     presentation.dispose();
@@ -112,6 +117,9 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const [, refreshPresentation] = useState(0);
   const [profileReady, setProfileReady] = useState(false);
   const [editorAdoption, setEditorAdoption] = useState(0);
+  const [csvView, setCsvView] = useState<"source" | "table">("table");
+  const effectiveCsvView = csvRepair ? "source" : csvView;
+  const [tableFocus, setTableFocus] = useState<{ row: number; column: number } | null>(null);
   const [dialog, setDialogState] = useState<DialogName>(null);
   const [activityDialog, setActivityDialog] = useState(false);
   useEffect(() => {
@@ -171,6 +179,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
     if (adopted.kind === "read-only" || adopted.kind === "edit") {
       setEditorAdoption(adopted.adoption);
     }
+    setCsvView("table");
+    setTableFocus(null);
     editorView.current?.reset();
     if (result.recovery) {
       const source = [result.recovery.authorName, result.recovery.deviceName]
@@ -205,7 +215,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
   const shellCommands = createShellCommands({ session,
     facts: () => ({ activeAdoption: activeDocument && (sessionSnapshot.kind === "read-only"
       || sessionSnapshot.kind === "edit") ? sessionSnapshot.adoption : null, profileReady,
-      modalBusy: modalBusy.current, activityAvailable: Boolean(revisionActivityHost) }),
+      modalBusy: modalBusy.current, activityAvailable: Boolean(revisionActivityHost),
+      csvView: effectiveCsvView, tableFocus }),
     run: runCommand,
     track: (operation) => rendererLifecycleCompletion.track(operation),
   });
@@ -224,6 +235,17 @@ export function SharedApp({ sessionHost, journalTransport, events,
     } else if (command === "find" || command === "replace") {
       editorView.current?.openFind(command,
         returnFocus?.isConnected ? returnFocus : document.activeElement as HTMLElement | null);
+    } else if (command === "show-csv-source") {
+      session.clearHistory();
+      editorView.current?.reset();
+      setCsvView("source");
+      setTableFocus(null);
+    } else if (command === "show-table") {
+      editorView.current?.reset();
+      setTableFocus(null);
+      setCsvView("table");
+    } else if (isCsvStructureCommand(command)) {
+      editorView.current?.runTableStructure(command);
     } else if (command === "export") {
       shellDialogs.current?.showExport();
     } else if (command === "passwords" || command === "profile"
@@ -305,6 +327,7 @@ export function SharedApp({ sessionHost, journalTransport, events,
       if (closed) session.closed();
       else session.lockStarted();
       setEditorAdoption(0);
+      setCsvView("table");
       editorView.current?.reset();
       shellDialogs.current?.reset();
       securityDialogs.current?.reset();
@@ -379,7 +402,11 @@ export function SharedApp({ sessionHost, journalTransport, events,
   return <main className="app-shell"><div className="shell-chrome">
     <MenuBar snapshot={sessionSnapshot} commands={shellCommands} />
     <EditorView ref={editorView} session={session} active={activeDocument}
-      locked={lockedDocument} blocked={modalBusy.current} onMessage={setMessage}
+      locked={lockedDocument} blocked={modalBusy.current} csvView={effectiveCsvView}
+      onMessage={setMessage}
+      onTableFocus={(focus) => setTableFocus((current) =>
+        current?.row === focus.row && current.column === focus.column ? current : focus)}
+      onSave={() => { void shellCommands.invoke("save"); }}
       onReturnFocus={(element) => { dialogReturnFocus.current = element; }} />
     <StatusBar session={session} active={activeDocument} commands={shellCommands}
       message={presentation.statusMessage(message)}

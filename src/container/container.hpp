@@ -68,10 +68,11 @@ public:
     Container(const ContainerStateManagerService &state_manager,
         const core::PasswordService &password, const core::EncryptionService &encryption,
         const core::PersistenceService &persistence, const core::HistoryService &history);
-    /* Prepares an encrypted revised-v3 baseline using this context's services. */
+    /* Prepares an encrypted baseline with its immutable document content type. */
     std::vector<std::uint8_t> create_document(std::string_view profile_name,
         std::string_view profile_email, std::string_view device_name,
-        std::string_view content, std::uint64_t timestamp_ms,
+        std::string_view content, std::uint8_t content_type,
+        std::uint64_t timestamp_ms,
         const std::uint8_t *owner_password, std::size_t owner_password_size,
         const std::uint8_t *recovery_password, std::size_t recovery_password_size) const;
     /* Opens a validated revised-v3 document envelope. */

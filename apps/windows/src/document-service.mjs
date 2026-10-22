@@ -6,6 +6,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
   validateBackupResult, validateCompactionResult, validatePublicationResult,
   validateSaveResult, validateRevisionActivityPage,
   validateWorkingCopy, validateClientSettings } from "./contracts.mjs";
+import { serializeCsvSource } from "../../../packages/frontend-core/src/csv-source.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
 import { CandidatePublication } from "./candidate-publication.mjs";
@@ -1336,10 +1337,12 @@ export class DocumentService {
         || !active.pendingRecord.merge) {
       throw new Error("Begin divergence resolution before saving");
     }
-    const canonical = canonicalizeDocumentText(content);
+    let canonical = canonicalizeDocumentText(content);
     if (hasConflictMarkers(canonical)) {
       throw new Error("Resolve every conflict marker before saving the merge");
     }
+    if (active.opened.contentType === "csv")
+      canonical = canonicalizeDocumentText(serializeCsvSource(canonical));
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     this.#cancelCheckpoint();
@@ -1462,6 +1465,7 @@ export class DocumentService {
     active.working = null;
     active.dirty = false;
     active.opened = validateOpenedDocument({ content: active.targetContent,
+      ...(active.opened.contentType ? { contentType: active.opened.contentType } : {}),
       readOnly: true, canEdit: active.headMismatch ? false : active.slotCanEdit,
       publicationState: "target-published",
       ...(active.opened.lease ? { lease: active.opened.lease } : {}),
@@ -1803,7 +1807,11 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     const source = active.working;
-    const canonical = canonicalizeDocumentText(source.content);
+    let canonical = canonicalizeDocumentText(source.content);
+    if (active.opened.contentType === "csv") {
+      try { canonical = canonicalizeDocumentText(serializeCsvSource(canonical)); }
+      catch { return Object.freeze({ published: false }); }
+    }
     const mergeAncestor = this.#regularSaveMergeAncestor(active, profile);
     await this.#flushActive(active);
     let published;
@@ -1920,7 +1928,9 @@ export class DocumentService {
     }
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
-    const canonical = canonicalizeDocumentText(content);
+    let canonical = canonicalizeDocumentText(content);
+    if (this.active.opened.contentType === "csv")
+      canonical = canonicalizeDocumentText(serializeCsvSource(canonical));
     this.#cancelCheckpoint();
     await this.flushChain.catch(() => {});
     const active = this.active;
@@ -2045,9 +2055,12 @@ export class DocumentService {
       throw new TypeError("A valid plaintext export target is required");
     }
     const validated = validatePlaintextExportRequest(request);
-    const content = validated.lineEndings === "native"
-      ? validated.content.replace(/\n/g, this.nativeLineEnding)
-      : validated.content;
+    const csvContent = this.active.opened.contentType === "csv"
+      ? canonicalizeDocumentText(serializeCsvSource(validated.content)) : validated.content;
+    const content = this.active.opened.contentType !== "csv"
+      && validated.lineEndings === "native"
+      ? csvContent.replace(/\n/g, this.nativeLineEnding)
+      : csvContent;
     const plaintext = Buffer.from(content, "utf8");
     // The attempt publication replaces the target inode; retain aliases to its prior inode.
     let destinationError = null;

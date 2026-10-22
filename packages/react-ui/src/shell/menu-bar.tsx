@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { DocumentSessionSnapshot, SessionDocument } from "@scpefe/frontend-core";
-import type { ShellCommand, ShellCommands } from "./shell-commands.ts";
+import { isCsvStructureCommand, type ShellCommand,
+  type ShellCommands } from "./shell-commands.ts";
 
 const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | null>]> = [
   ["File", [["new", "New", "Ctrl+N"], ["open", "Open…", "Ctrl+O"], null,
@@ -22,6 +23,17 @@ const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | nu
 export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
   snapshot: DocumentSessionSnapshot<Doc>;
   commands: ShellCommands<Doc> }) {
+  const csv = (snapshot.kind === "read-only" || snapshot.kind === "edit")
+    && snapshot.document.contentType === "csv";
+  const visibleMenus = csv ? [menuDefinitions[0], menuDefinitions[1],
+    ["Table", [["show-csv-source", "Show CSV Source"],
+      ["show-table", "Show Table"], null,
+      ["add-row-above", "Add Row Above"], ["add-row-below", "Add Row Below"],
+      ["delete-row", "Delete Row"], null,
+      ["add-column-left", "Add Column Left"],
+      ["add-column-right", "Add Column Right"],
+      ["delete-column", "Delete Column"]]] as typeof menuDefinitions[number],
+    ...menuDefinitions.slice(2)] : menuDefinitions;
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || (!event.ctrlKey && !event.metaKey)
@@ -63,16 +75,16 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
     const accessKey = (event: globalThis.KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey
         || document.querySelector(".shell-chrome")?.hasAttribute("inert")) return;
-      const match = menuDefinitions.find(([name]) =>
+      const match = visibleMenus.find(([name]) =>
         name[0].toLowerCase() === event.key.toLowerCase());
       if (!match) return;
       event.preventDefault(); openMenu(match[0]);
     };
     window.addEventListener("keydown", accessKey);
     return () => window.removeEventListener("keydown", accessKey);
-  }, []);
+  }, [csv]);
   return <nav className="menu-bar" role="menubar" aria-label="Application menu" ref={bar}>
-    {menuDefinitions.map(([name, items], menuIndex) => <div className="menu" key={name}>
+    {visibleMenus.map(([name, items], menuIndex) => <div className="menu" key={name}>
       <button type="button" role="menuitem" aria-label={name} aria-haspopup="menu"
         aria-expanded={open === name} ref={(node) => { triggers.current[name] = node; }}
         onClick={() => open === name ? setOpen(null) : openMenu(name)}
@@ -81,8 +93,8 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
             event.preventDefault(); openMenu(name);
           } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
             event.preventDefault();
-            const offset = event.key === "ArrowRight" ? 1 : menuDefinitions.length - 1;
-            const next = menuDefinitions[(menuIndex + offset) % menuDefinitions.length][0];
+            const offset = event.key === "ArrowRight" ? 1 : visibleMenus.length - 1;
+            const next = visibleMenus[(menuIndex + offset) % visibleMenus.length][0];
             if (open !== null) { setOpen(next); focusFirst(next); }
             triggers.current[next]?.focus();
           }
@@ -94,8 +106,8 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
           }
           if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
             event.preventDefault();
-            const offset = event.key === "ArrowRight" ? 1 : menuDefinitions.length - 1;
-            const next = menuDefinitions[(menuIndex + offset) % menuDefinitions.length][0];
+            const offset = event.key === "ArrowRight" ? 1 : visibleMenus.length - 1;
+            const next = visibleMenus[(menuIndex + offset) % visibleMenus.length][0];
             setOpen(next); triggers.current[next]?.focus(); focusFirst(next); return;
           }
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -111,12 +123,15 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
           : <button key={item[0]} type="button" role="menuitem"
             disabled={!commands.available(item[0])} onClick={() => {
               const returnFocus = triggers.current[name];
-              returnFocus?.focus(); setOpen(null);
+              const structure = isCsvStructureCommand(item[0]);
+              if (!structure) returnFocus?.focus();
+              setOpen(null);
               if (returnFocus) void commands.invoke(item[0], { returnFocus,
                 observedSnapshot: snapshot });
-              requestAnimationFrame(() => {
+              if (!structure) requestAnimationFrame(() => {
                 if (!document.querySelector('[role="dialog"]')) triggers.current[name]?.focus();
               });
-            }}><span>{item[1]}</span>{item[2] && <kbd>{item[2]}</kbd>}</button>)}</div>}
+            }}><span>{csv && item[0] === "export" ? "Export CSV…" : item[1]}</span>
+            {item[2] && <kbd>{item[2]}</kbd>}</button>)}</div>}
     </div>)}</nav>;
 }
