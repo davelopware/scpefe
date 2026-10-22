@@ -105,11 +105,12 @@ try {
             @($Events | Where-Object { $_.event -eq "presented" }).Count -ge 1
         }
     } catch {
-        $Events = Read-Events $ResponsiveSmoke
+        $Events = @(Read-Events $ResponsiveSmoke)
         $ExitCode = if ($ResponsivePrimary.HasExited) { $ResponsivePrimary.ExitCode } else { "running" }
         Write-Host "Startup diagnostic: exit-code=$ExitCode event-count=$($Events.Count)"
         foreach ($Event in $Events) {
-            Write-Host "Startup diagnostic event=$($Event.event) target=$($Event.target)"
+            $Target = if ($Event.PSObject.Properties["target"]) { $Event.target } else { "none" }
+            Write-Host "Startup diagnostic event=$($Event.event) target=$Target"
         }
         throw
     }
