@@ -17,6 +17,7 @@ set(SCPEFE_PORTABLE_FORMAT_SOURCES
     src/format/blake2b.cpp
     src/format/cbor_reader.cpp
     src/format/cbor_writer.cpp
+    src/format/clear_buffer_on_exit.cpp
     src/format/diagnostic_json_writer.cpp
     src/format/revision_limits.cpp
     src/format/revision_graph.cpp
@@ -215,6 +216,13 @@ if(BUILD_TESTING)
                     $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>
                     $<TARGET_FILE:scpefe_diagnostic_delegation>)
             set_tests_properties(scpefe.diagnostic-delegation PROPERTIES TIMEOUT 15)
+            add_library(scpefe_password_interrupt_race SHARED tests/password_interrupt_race.c)
+            target_link_libraries(scpefe_password_interrupt_race PRIVATE ${CMAKE_DL_LIBS})
+            add_test(NAME scpefe.password-prompt-interruption
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
+                    $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>
+                    --interrupt-race $<TARGET_FILE:scpefe_password_interrupt_race>)
+            set_tests_properties(scpefe.password-prompt-interruption PROPERTIES TIMEOUT 15)
         endif()
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 

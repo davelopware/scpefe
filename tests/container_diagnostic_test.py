@@ -81,7 +81,7 @@ def api(library, data, password=PASSWORD, include=False, limit=None, change=None
     return output.value
 
 
-def interactive(executable, path, expected):
+def interactive(executable, path, expected, race_library=None):
     if os.name != "posix":
         return  # POSIX PTY mechanics are unavailable on Windows.
     import fcntl
@@ -91,7 +91,7 @@ def interactive(executable, path, expected):
     import termios
     import time
 
-    for interrupt in (False, True):
+    for interrupt in ((True,) if race_library else (False, True)):
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
 
@@ -103,23 +103,25 @@ def interactive(executable, path, expected):
         try:
             process = subprocess.Popen([executable, "inspect", str(path)], stdin=slave,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       preexec_fn=terminal)
+                                       preexec_fn=terminal, env=dict(os.environ, LD_PRELOAD=race_library)
+                                       if race_library else None)
             terminal_output = b""
             deadline = time.monotonic() + 10
             while b"Password: " not in terminal_output:
                 assert time.monotonic() < deadline, "terminal prompt did not appear"
                 if select.select([master], [], [], .1)[0]:
                     terminal_output += os.read(master, 4096)
-            hidden = termios.tcgetattr(slave)
-            assert not hidden[3] & (termios.ECHO | termios.ECHONL)
+            if not race_library:
+                hidden = termios.tcgetattr(slave)
+                assert not hidden[3] & (termios.ECHO | termios.ECHONL)
             arguments = Path(f"/proc/{process.pid}/cmdline")
             if arguments.exists():
                 assert PASSWORD not in arguments.read_bytes()
-            if interrupt:
+            if interrupt and not race_library:
                 process.send_signal(signal.SIGINT)
-            else:
+            elif not interrupt:
                 os.write(master, PASSWORD + b"\n")
-            stdout, stderr = process.communicate(timeout=15)
+            stdout, stderr = process.communicate(timeout=2 if race_library else 15)
             while select.select([master], [], [], .05)[0]:
                 terminal_output += os.read(master, 4096)
             assert PASSWORD not in terminal_output + stdout + stderr
@@ -141,6 +143,12 @@ def interactive(executable, path, expected):
 def main():
     executable, root, library_path = sys.argv[1:4]
     root = Path(root)
+    if len(sys.argv) == 6 and sys.argv[4] == "--interrupt-race":
+        with tempfile.TemporaryDirectory(prefix="scpefe-interruption-") as directory:
+            path = Path(directory) / "document.scpefe"
+            path.write_bytes(vector(root, "valid/baseline-container"))
+            interactive(executable, path, None, race_library=sys.argv[5])
+        return
     if len(sys.argv) == 5:
         with tempfile.TemporaryDirectory(prefix="scpefe-delegation-") as directory:
             path = Path(directory) / "opaque.scpefe"

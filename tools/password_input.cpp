@@ -9,6 +9,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <termios.h>
+#include <sys/select.h>
 #include <unistd.h>
 #endif
 
@@ -80,9 +81,9 @@ scpefe_status PasswordInput::read(bool from_stdin)
     std::array<struct sigaction, 4> previous{};
     sigset_t signal_set{}, previous_mask{};
     if (!from_stdin) {
-        descriptor = open("/dev/tty", O_RDWR | O_CLOEXEC);
+        descriptor = open("/dev/tty", O_RDWR | O_CLOEXEC | O_NONBLOCK);
         if (descriptor < 0) return SCPEFE_STATUS_HOST_ERROR;
-        if (tcgetattr(descriptor, &original) != 0) {
+        if (descriptor >= FD_SETSIZE || tcgetattr(descriptor, &original) != 0) {
             close(descriptor);
             return SCPEFE_STATUS_HOST_ERROR;
         }
@@ -107,7 +108,6 @@ scpefe_status PasswordInput::read(bool from_stdin)
             close(descriptor);
             return SCPEFE_STATUS_HOST_ERROR;
         }
-        sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
         const char prompt[] = "Password: ";
         if (write(descriptor, prompt, sizeof(prompt) - 1) < 0) interrupted = SIGINT;
     }
@@ -118,7 +118,19 @@ scpefe_status PasswordInput::read(bool from_stdin)
         const int count = _read(0, bytes_.data() + size_, 1);
 #else
         if (!from_stdin && interrupted) { status = SCPEFE_STATUS_HOST_ERROR; break; }
+        if (!from_stdin) {
+            fd_set ready;
+            FD_ZERO(&ready);
+            FD_SET(descriptor, &ready);
+            // Signals stay blocked between the flag check and the read.
+            // pselect atomically unmasks them while waiting for terminal input.
+            const auto available = pselect(descriptor + 1, &ready, nullptr,
+                nullptr, nullptr, &previous_mask);
+            if (available < 0 && errno == EINTR) continue;
+            if (available < 0) { status = SCPEFE_STATUS_HOST_ERROR; break; }
+        }
         const auto count = ::read(descriptor, bytes_.data() + size_, 1);
+        if (!from_stdin && count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (count < 0 && errno == EINTR && (from_stdin || !interrupted)) continue;
 #endif
         if (count < 0) { status = SCPEFE_STATUS_HOST_ERROR; break; }

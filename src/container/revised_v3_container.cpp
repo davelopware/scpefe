@@ -5,6 +5,7 @@
 #include "format/revision_error.hpp"
 #include "format/diagnostic_json_writer.hpp"
 #include "format/csv_source.hpp"
+#include "format/clear_buffer_on_exit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -331,8 +332,8 @@ std::string RevisedV3Container::diagnostic_json(const std::uint8_t *bytes,
     // Apply the same immutable content-type constraint as a document session.
     if (data.content_type == csv_content_type) {
         auto text = graph.reconstruct(graph.content_head());
+        const format::ClearBufferOnExit clear_text(text);
         const bool valid = text && format::valid_csv_source(*text);
-        if (text && !text->empty()) sodium_memzero(text->data(), text->size());
         if (!valid) throw ContainerFailure{ContainerError::malformed_container};
     }
     format::DiagnosticJsonWriter json;

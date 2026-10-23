@@ -5,6 +5,7 @@
 #include "format/cbor_writer.hpp"
 #include "format/diagnostic_json_writer.hpp"
 #include "format/clear_memory.hpp"
+#include "format/clear_buffer_on_exit.hpp"
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 
@@ -26,6 +27,7 @@ namespace {
 RevisionId digest(std::string_view prefix, const std::uint8_t *data, std::size_t size)
 {
     std::vector<std::uint8_t> input;
+    const ClearBufferOnExit clear_input(input);
     input.reserve(prefix.size() + size);
     input.insert(input.end(), prefix.begin(), prefix.end());
     input.insert(input.end(), data, data + size);
@@ -266,7 +268,8 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
     record.body_length = reader.unsigned_integer();
     if (record.body_length > limits.max_text_bytes()) limited();
     if (record.storage == 1 || record.storage == 3) {
-        const auto bytes = reader.bytes(0, limits.max_text_bytes());
+        auto bytes = reader.bytes(0, limits.max_text_bytes());
+        const ClearBufferOnExit clear_bytes(bytes);
         if (bytes.size() != record.body_length) malformed();
         record.body_text.assign(bytes.begin(), bytes.end());
         if (!valid_canonical_document_text(record.body_text.data(), record.body_text.size())) malformed();
@@ -278,12 +281,14 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
             const auto fields = reader.array(7);
             const auto type = reader.unsigned_integer();
             RevisionRecord::Segment segment{};
+            const ClearBufferOnExit clear_segment(segment.text);
             if (type == 0 && fields == 3) {
                 segment.start = reader.unsigned_integer();
                 segment.count = reader.unsigned_integer();
                 if (segment.count == 0) malformed();
             } else if (type == 1 && fields == 2) {
-                const auto bytes = reader.bytes(0, limits.max_text_bytes());
+                auto bytes = reader.bytes(0, limits.max_text_bytes());
+                const ClearBufferOnExit clear_bytes(bytes);
                 if (bytes.empty()) malformed();
                 segment.insert = true;
                 segment.text.assign(bytes.begin(), bytes.end());
@@ -291,7 +296,7 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
             } else unsupported();
             if (segment.count > record.body_length - inserted) malformed();
             inserted += segment.count;
-            record.segments.push_back(std::move(segment));
+            record.segments.push_back(segment);
         }
         if (inserted != record.body_length) malformed();
     }
@@ -356,13 +361,17 @@ std::optional<std::string> reconstruct_at(const std::vector<RevisionRecord> &rec
         anchor = static_cast<std::size_t>(parent - records.begin());
     }
     std::string text = records[anchor].body_text;
+    const ClearBufferOnExit clear_text(text);
     for (std::size_t i = anchor + 1; i <= index; ++i) {
         const auto &record = records[i];
         if (record.foreign || record.kind == 2) continue;
-        if (record.storage == 1 || record.storage == 3) { text = record.body_text; continue; }
+        if (record.storage == 1 || record.storage == 3) {
+            clear_text.clear(); text = record.body_text; continue;
+        }
         if (record.storage == 4) return std::nullopt;
         if (record.storage != 2) malformed();
         std::string next;
+        const ClearBufferOnExit clear_next(next);
         next.reserve(static_cast<std::size_t>(record.body_length));
         for (const auto &segment : record.segments) {
             if (segment.insert) next += segment.text;
@@ -379,13 +388,15 @@ std::optional<std::string> reconstruct_at(const std::vector<RevisionRecord> &rec
         if (digest(content_prefix, reinterpret_cast<const std::uint8_t *>(text.data()),
             text.size()) != record.content_hash) malformed();
     }
-    return text;
+    // Return an independent value so the scope guard always clears the source.
+    return std::optional<std::string>(std::in_place, text);
 }
 
 std::string apply_delta(const RevisionRecord &record, const std::string &source,
     const RevisionLimits &limits)
 {
     std::string next;
+    const ClearBufferOnExit clear_next(next);
     next.reserve(static_cast<std::size_t>(record.body_length));
     for (const auto &segment : record.segments) {
         if (segment.insert) next += segment.text;
@@ -398,7 +409,7 @@ std::string apply_delta(const RevisionRecord &record, const std::string &source,
     }
     if (next.size() != record.body_length || next.size() > limits.max_text_bytes()
         || !valid_canonical_document_text(next.data(), next.size())) malformed();
-    return next;
+    return std::string(next);
 }
 
 void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head,
@@ -480,14 +491,19 @@ void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head
     // A single forward pass validates every retained body. Pruned history has
     // no clear text until a later materialized checkpoint restores the line.
     std::optional<std::string> current;
+    const ClearBufferOnExit clear_current(current);
     for (std::size_t i = 0; i < records.size(); ++i) {
         auto &r = records[i];
         if (r.foreign) continue;
         if (r.kind == 2) { r.text_available = current.has_value(); continue; }
-        if (r.storage == 4) { current.reset(); continue; }
-        if (r.storage == 1 || r.storage == 3) current = r.body_text;
-        else if (r.storage == 2 && current) current = apply_delta(r, *current, limits);
-        else malformed();
+        if (r.storage == 4) { clear_current.clear(); current.reset(); continue; }
+        if (r.storage == 1 || r.storage == 3) {
+            clear_current.clear(); current = r.body_text;
+        } else if (r.storage == 2 && current) {
+            auto next = apply_delta(r, *current, limits);
+            const ClearBufferOnExit clear_next(next);
+            clear_current.clear(); current = next;
+        } else malformed();
         if (digest(content_prefix, reinterpret_cast<const std::uint8_t *>(current->data()),
             current->size()) != r.content_hash) malformed();
         r.text_available = true;
@@ -1200,18 +1216,20 @@ std::vector<std::uint8_t> RevisionGraph::append_event(
     return encoded;
 }
 
+RevisionRecord::~RevisionRecord()
+{
+    const auto clear = [](auto &value) { clear_memory(value.data(), value.size()); };
+    clear(body_text); clear(body_cbor); clear(record_cbor);
+    clear(immutable_cbor); clear(event_details_cbor);
+    clear(actor_name); clear(actor_email); clear(client_name); clear(client_email);
+    clear(device); clear(event_type); clear(event_detail);
+    for (auto &segment : segments) clear(segment.text);
+}
+
 RevisionGraph::~RevisionGraph()
 {
     const auto clear = [](auto &value) { clear_memory(value.data(), value.size()); };
     clear(encoded_);
-    for (auto &record : records_) {
-        clear(record.body_text); clear(record.body_cbor); clear(record.record_cbor);
-        clear(record.immutable_cbor); clear(record.event_details_cbor);
-        clear(record.actor_name); clear(record.actor_email);
-        clear(record.client_name); clear(record.client_email); clear(record.device);
-        clear(record.event_type); clear(record.event_detail);
-        for (auto &segment : record.segments) clear(segment.text);
-    }
     for (auto &slot : slots_) { clear(slot.name); clear(slot.email); }
     clear(lease_.holder_name); clear(lease_.holder_email); clear(lease_.device);
 }
@@ -1299,13 +1317,9 @@ void RevisionGraph::write_diagnostic_json(DiagnosticJsonWriter &json,
         else json.raw("null");
         if (include_content && !r.foreign && r.kind != 2) {
             auto text = reconstruct(r.id);
+            const ClearBufferOnExit clear_text(text);
             if (text) {
-                try { json.raw(",\"content\":"); json.string(text->data(), text->size()); }
-                catch (...) {
-                    clear_memory(text->data(), text->size());
-                    throw;
-                }
-                clear_memory(text->data(), text->size());
+                json.raw(",\"content\":"); json.string(text->data(), text->size());
             }
         }
         json.raw("}");

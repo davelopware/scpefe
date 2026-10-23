@@ -46,6 +46,14 @@ struct RevisionLease {
 
 /* One authenticated v3 record, including immutable attribution and current storage. */
 struct RevisionRecord {
+    /* Creates an empty record for authenticated decoding. */
+    RevisionRecord() = default;
+    /* Copies a record, keeping source bytes live for secure destruction. */
+    RevisionRecord(const RevisionRecord &) = default;
+    /* Copies record fields into an existing history value. */
+    RevisionRecord &operator=(const RevisionRecord &) = default;
+    /* Wipes decrypted record bodies, including partially decoded records. */
+    ~RevisionRecord();
     /* A byte-copy or insertion segment of an original delta. */
     struct Segment {
         bool insert{};
