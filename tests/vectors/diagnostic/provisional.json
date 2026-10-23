@@ -1,0 +1,132 @@
+{
+  "status": "ok",
+  "diagnostic_version": 1,
+  "envelope": {
+    "format_version": 3,
+    "header_bytes": 72,
+    "container_bytes": 967,
+    "slot_count": 1,
+    "slot_record_bytes": 110,
+    "wrapped_slot_bytes": 66,
+    "payload_ciphertext_bytes": 785,
+    "kdf": {
+      "algorithm": "Argon2id",
+      "version": 19,
+      "algorithm_id": 2,
+      "opslimit": 2,
+      "memlimit_bytes": 67108864,
+      "salt_bytes": 16
+    },
+    "aead": {
+      "algorithm": "XChaCha20-Poly1305-IETF",
+      "algorithm_id": 1,
+      "nonce_bytes": 24,
+      "tag_bytes": 16
+    },
+    "hash": "BLAKE2b-256"
+  },
+  "document_id": "101112131415161718191a1b1c1d1e1f",
+  "content_type": "plain_text",
+  "authenticated_slot_id": "000102030405060708090a0b0c0d0e0f",
+  "password_slots": [
+    {
+      "index": 0,
+      "id": "000102030405060708090a0b0c0d0e0f",
+      "management_id": "404142434445464748494a4b4c4d4e4f",
+      "role": "owner",
+      "permissions": {
+        "can_edit": true,
+        "can_add_passwords": true,
+        "can_remove_passwords": true
+      },
+      "must_be_changed": false,
+      "effective_must_be_changed": false,
+      "name": "Alice",
+      "email": "alice@example.test"
+    }
+  ],
+  "screen_lock": "client_local",
+  "editing_lease": {
+    "active": false,
+    "session_id": "00000000000000000000000000000000",
+    "heartbeat_counter": 0,
+    "holder_utc_ms": 0,
+    "duration_ms": 600000,
+    "holder_name": "",
+    "holder_email": "",
+    "device": ""
+  },
+  "revision_graph": {
+    "schema": "container-v3",
+    "format_version": 1,
+    "validation": "valid",
+    "head": "2ccd17018ac8bb648d10de00944e2bbe203ad758d07604d04466cf6970dcbfbd",
+    "content_head": "2ccd17018ac8bb648d10de00944e2bbe203ad758d07604d04466cf6970dcbfbd",
+    "record_count": 2,
+    "encoded_bytes": 752,
+    "required_features": [],
+    "extension_bytes": 0,
+    "revisions": [
+      {
+        "id": "80d8ce42674619a85dd9e9fb173aec0f6a4a3d5bc4125155a54a336b240d9008",
+        "kind": 0,
+        "storage": 1,
+        "actor_name": "Alice",
+        "actor_email": "alice@example.test",
+        "actor_slot_id": "000102030405060708090a0b0c0d0e0f",
+        "client_name": "Alice",
+        "client_email": "alice@example.test",
+        "device": "test-device",
+        "timestamp_ms": 1700000000000,
+        "provisional": false,
+        "manually_sealed": true,
+        "foreign": false,
+        "text_available": true,
+        "previous_head": null,
+        "content_parent": null,
+        "merge_sources": [],
+        "resolved_by": null,
+        "content_hash": "7c7752daa05fe6191c29e6eea5e807587d3154774c6de85ac805a50ab3ce25d8",
+        "body_digest": "f613c6692afa5ff10c1b28b541aeba46fc8efe97fb5e54b28aa99d2b307ecdab",
+        "record_bytes": 220,
+        "body_bytes": 10,
+        "event_type": "",
+        "event_detail": "",
+        "affected_slot_id": null,
+        "activity_status": null,
+        "compaction_cutoff": null,
+        "retained_deltas": null
+      },
+      {
+        "id": "2ccd17018ac8bb648d10de00944e2bbe203ad758d07604d04466cf6970dcbfbd",
+        "kind": 1,
+        "storage": 2,
+        "actor_name": "Alice",
+        "actor_email": "alice@example.test",
+        "actor_slot_id": "000102030405060708090a0b0c0d0e0f",
+        "client_name": "Alice",
+        "client_email": "alice@example.test",
+        "device": "test-device",
+        "timestamp_ms": 1700000000001,
+        "provisional": true,
+        "manually_sealed": false,
+        "foreign": false,
+        "text_available": true,
+        "previous_head": "80d8ce42674619a85dd9e9fb173aec0f6a4a3d5bc4125155a54a336b240d9008",
+        "content_parent": "80d8ce42674619a85dd9e9fb173aec0f6a4a3d5bc4125155a54a336b240d9008",
+        "merge_sources": [],
+        "resolved_by": null,
+        "content_hash": "c2ceb29d9b97c45606b7c87a5b0f40c5b5363e0dde3ffb2a739c093a26cba3b0",
+        "body_digest": "b89e0c043e1e8c7695fe94edc399a207c64d1af37796dd5ea07a6a8431e2abdc",
+        "record_bytes": 298,
+        "body_bytes": 16,
+        "event_type": "",
+        "event_detail": "",
+        "affected_slot_id": null,
+        "activity_status": null,
+        "compaction_cutoff": null,
+        "retained_deltas": null
+      }
+    ]
+  }
+}

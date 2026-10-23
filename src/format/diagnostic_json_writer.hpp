@@ -11,6 +11,8 @@ class DiagnosticJsonWriter {
 public:
     /* Maximum diagnostic JSON bytes, excluding the caller's terminating NUL. */
     static constexpr std::size_t max_output_bytes = 32u * 1024u * 1024u;
+    /* Wipes any retained output, including incomplete content on failure. */
+    ~DiagnosticJsonWriter();
     /* Appends trusted JSON syntax or already-encoded content. */
     void raw(const std::string &value);
     /* Appends one JSON syntax character. */
@@ -24,7 +26,7 @@ public:
 
 private:
     /* Rejects any append that would exceed the diagnostic output contract. */
-    void ensure_room(std::size_t additional) const;
+    void ensure_room(std::size_t additional);
     std::string output_;
 };
 

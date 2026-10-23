@@ -19,6 +19,11 @@ rows; the native stateful C ABI test authenticates the saved checkpoint envelope
 | --- | --- |
 | `valid/baseline-payload.hex` | Minimal saved history, baseline only; text `alpha\n`. |
 | `valid/baseline-container.hex` | Authenticate envelope and decrypt to the baseline payload. |
+| `valid/csv-container.hex` | Authenticate the CSV content type with valid one-column source. |
+| `valid/provisional-container.hex` | Authenticate a provisional delta following a sealed baseline. |
+| `valid/multi-slot-container.hex` | Owner, invitation, view-only and recovery slots, Unicode display identity, and an active editing lease. Extra test passwords are `invitation test password`, `reader test password`, and `recovery test password`. |
+| `valid/wrapper-claim-container.hex` | Same metadata, but the reader wrapper requires a password change despite its cleared metadata flag. |
+| `valid/foreign-merge-container.hex` | Authenticate a canonical merge with a metadata-only foreign branch. |
 | `valid/delta-event.hex` | Apply byte-copy/insert delta; event advances head without changing content head. |
 | `valid/pruned-checkpoint.hex` | Baseline body unavailable; original IDs unchanged; checkpoint at existing delta ID reconstructs `alpha\nbeta\n`. |
 | `valid/pruned-checkpoint-container.hex` | Authenticated saved history with unavailable baseline body and reconstructable checkpoint. |
@@ -39,6 +44,7 @@ rows; the native stateful C ABI test authenticates the saved checkpoint envelope
 | `invalid/orphan-foreign.hex` | Reject imported metadata omitted from the resolving merge's source links. |
 | `invalid/compaction-count.hex` | Reject a compaction event whose retained-delta count disagrees with the canonical line. |
 | `invalid/unknown-required-feature.hex` | Reject unknown mandatory feature 999. |
+| `invalid/*-container.hex` | Authenticated envelopes around dangling-parent, incorrect-revision-id, reconstruction-hash and unknown-required-feature graph failures, plus authenticated invalid CSV source. |
 | `invalid/envelope-slot-count-zero.hex` | Reject slot count 0 before KDF. |
 | `invalid/envelope-payload-length-overflow.hex` | Reject impossible total length before KDF. |
 | `invalid/envelope-wrapper-length.hex` | Reject wrapper length 65 before KDF. |

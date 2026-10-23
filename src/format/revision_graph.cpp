@@ -4,6 +4,7 @@
 #include "format/cbor_reader.hpp"
 #include "format/cbor_writer.hpp"
 #include "format/diagnostic_json_writer.hpp"
+#include "format/clear_memory.hpp"
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 
@@ -161,6 +162,9 @@ RevisionLease parse_lease(CborReader &reader)
 struct EventFacts {
     std::optional<RevisionId> cutoff;
     std::optional<std::uint64_t> count;
+    std::optional<std::array<std::uint8_t, 16>> affected_slot;
+    std::optional<std::uint8_t> activity_status;
+    std::string detail;
 };
 
 EventFacts parse_event_details(CborReader &reader)
@@ -170,11 +174,16 @@ EventFacts parse_event_details(CborReader &reader)
     std::uint64_t previous = 0;
     for (std::size_t i = 0; i < count; ++i) {
         switch (next_key(reader, previous)) {
-        case 1: (void)read_slot(reader); break;
+        case 1: facts.affected_slot = read_slot(reader); break;
         case 2: facts.cutoff = read_id(reader); break;
         case 3: facts.count = reader.unsigned_integer(); break;
-        case 4: if (reader.unsigned_integer() > 2) malformed(); break;
-        case 5: (void)reader.text(); break;
+        case 4: {
+            const auto status = reader.unsigned_integer();
+            if (status > 2) malformed();
+            facts.activity_status = static_cast<std::uint8_t>(status);
+            break;
+        }
+        case 5: facts.detail = reader.text(); break;
         default: unsupported();
         }
     }
@@ -243,6 +252,9 @@ void parse_immutable(CborReader &reader, const std::uint8_t *encoded,
     if (record.event_type == "compaction" && (!event_facts.cutoff || !event_facts.count)) malformed();
     record.compaction_cutoff = event_facts.cutoff;
     record.retained_deltas = event_facts.count;
+    record.affected_slot = event_facts.affected_slot;
+    record.activity_status = event_facts.activity_status;
+    record.event_detail = std::move(event_facts.detail);
     if (digest(id_prefix, encoded + begin, reader.position() - begin) != record.id) malformed();
     record.immutable_cbor.assign(encoded + begin, encoded + reader.position());
 }
@@ -1188,7 +1200,31 @@ std::vector<std::uint8_t> RevisionGraph::append_event(
     return encoded;
 }
 
+RevisionGraph::~RevisionGraph()
+{
+    const auto clear = [](auto &value) { clear_memory(value.data(), value.size()); };
+    clear(encoded_);
+    for (auto &record : records_) {
+        clear(record.body_text); clear(record.body_cbor); clear(record.record_cbor);
+        clear(record.immutable_cbor); clear(record.event_details_cbor);
+        clear(record.actor_name); clear(record.actor_email);
+        clear(record.client_name); clear(record.client_email); clear(record.device);
+        clear(record.event_type); clear(record.event_detail);
+        for (auto &segment : record.segments) clear(segment.text);
+    }
+    for (auto &slot : slots_) { clear(slot.name); clear(slot.email); }
+    clear(lease_.holder_name); clear(lease_.holder_email); clear(lease_.device);
+}
+
 std::string RevisionGraph::diagnostic_json(bool include_content) const
+{
+    DiagnosticJsonWriter json;
+    write_diagnostic_json(json, include_content);
+    return json.take_output();
+}
+
+void RevisionGraph::write_diagnostic_json(DiagnosticJsonWriter &json,
+    bool include_content) const
 {
     if (include_content) {
         // A tiny copy delta can repeat a large text in every displayed record.
@@ -1202,12 +1238,14 @@ std::string RevisionGraph::diagnostic_json(bool include_content) const
             minimum_content_bytes += static_cast<std::size_t>(record.body_length);
         }
     }
-    DiagnosticJsonWriter json;
-    json.raw("{\"schema\":\"container-v3\",\"head\":");
+    json.raw("{\"schema\":\"container-v3\",\"format_version\":1,\"validation\":\"valid\",\"head\":");
     json.hex(head_.data(), head_.size());
     json.raw(",\"content_head\":");
     json.hex(content_head_.data(), content_head_.size());
-    json.raw(",\"revisions\":[");
+    json.raw(",\"record_count\":" + std::to_string(records_.size())
+        + ",\"encoded_bytes\":" + std::to_string(encoded_.size())
+        + ",\"required_features\":[],\"extension_bytes\":" + std::to_string(field_ranges_[9].second)
+        + ",\"revisions\":[");
     for (std::size_t i = 0; i < records_.size(); ++i) {
         const auto &r = records_[i];
         if (i) json.character(',');
@@ -1216,14 +1254,63 @@ std::string RevisionGraph::diagnostic_json(bool include_content) const
             + ",\"storage\":" + std::to_string(r.storage));
         json.raw(",\"actor_name\":"); json.string(r.actor_name.data(), r.actor_name.size());
         json.raw(",\"actor_email\":"); json.string(r.actor_email.data(), r.actor_email.size());
+        json.raw(",\"actor_slot_id\":"); json.hex(r.actor_slot.data(), r.actor_slot.size());
+        json.raw(",\"client_name\":"); json.string(r.client_name.data(), r.client_name.size());
+        json.raw(",\"client_email\":"); json.string(r.client_email.data(), r.client_email.size());
+        json.raw(",\"device\":"); json.string(r.device.data(), r.device.size());
+        json.raw(",\"timestamp_ms\":" + std::to_string(r.timestamp_ms));
+        json.raw(",\"provisional\":"); json.raw(r.provisional ? "true" : "false");
+        json.raw(",\"manually_sealed\":"); json.raw(r.provisional ? "false" : "true");
+        json.raw(",\"foreign\":"); json.raw(r.foreign ? "true" : "false");
+        json.raw(",\"text_available\":"); json.raw(r.text_available ? "true" : "false");
+        json.raw(",\"previous_head\":");
+        if (r.previous) json.hex(r.previous->data(), r.previous->size());
+        else json.raw("null");
+        json.raw(",\"content_parent\":");
+        if (r.content_parent) json.hex(r.content_parent->data(), r.content_parent->size());
+        else json.raw("null");
+        json.raw(",\"merge_sources\":[");
+        for (std::size_t j = 0; j < r.merge_sources.size(); ++j) {
+            if (j) json.character(',');
+            json.hex(r.merge_sources[j].data(), r.merge_sources[j].size());
+        }
+        json.raw("],\"resolved_by\":");
+        if (r.resolved_by) json.hex(r.resolved_by->data(), r.resolved_by->size());
+        else json.raw("null");
+        json.raw(",\"content_hash\":"); json.hex(r.content_hash.data(), r.content_hash.size());
+        json.raw(",\"body_digest\":");
+        if (r.has_body_digest) json.hex(r.body_digest.data(), r.body_digest.size());
+        else json.raw("null");
+        json.raw(",\"record_bytes\":" + std::to_string(r.record_cbor.size())
+            + ",\"body_bytes\":" + std::to_string(r.body_cbor.size()));
+        json.raw(",\"event_type\":"); json.string(r.event_type.data(), r.event_type.size());
+        json.raw(",\"event_detail\":"); json.string(r.event_detail.data(), r.event_detail.size());
+        json.raw(",\"affected_slot_id\":");
+        if (r.affected_slot) json.hex(r.affected_slot->data(), r.affected_slot->size());
+        else json.raw("null");
+        json.raw(",\"activity_status\":");
+        if (r.activity_status) json.raw(std::to_string(*r.activity_status));
+        else json.raw("null");
+        json.raw(",\"compaction_cutoff\":");
+        if (r.compaction_cutoff) json.hex(r.compaction_cutoff->data(), r.compaction_cutoff->size());
+        else json.raw("null");
+        json.raw(",\"retained_deltas\":");
+        if (r.retained_deltas) json.raw(std::to_string(*r.retained_deltas));
+        else json.raw("null");
         if (include_content && !r.foreign && r.kind != 2) {
-            const auto text = reconstruct(r.id);
-            if (text) { json.raw(",\"content\":"); json.string(text->data(), text->size()); }
+            auto text = reconstruct(r.id);
+            if (text) {
+                try { json.raw(",\"content\":"); json.string(text->data(), text->size()); }
+                catch (...) {
+                    clear_memory(text->data(), text->size());
+                    throw;
+                }
+                clear_memory(text->data(), text->size());
+            }
         }
         json.raw("}");
     }
     json.raw("]}");
-    return json.take_output();
 }
 
 } // namespace scpefe::format

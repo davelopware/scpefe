@@ -34,6 +34,7 @@ else()
         ${SCPEFE_PORTABLE_FORMAT_SOURCES}
         src/abi/password_policy_abi.cpp
         src/abi/context_abi.cpp
+        src/abi/container_diagnostic_abi.cpp
         src/container/container.cpp
         src/container/container_state.cpp
         src/container/password_slots.cpp
@@ -156,6 +157,7 @@ endif()
 if(NOT EMSCRIPTEN)
     add_executable(scpefe_diagnostic
         tools/scpefe_diagnostic.cpp
+        tools/password_input.cpp
     )
     target_compile_features(scpefe_diagnostic PRIVATE cxx_std_20)
     target_link_libraries(scpefe_diagnostic PRIVATE SCPEFE::scpefe)
@@ -199,6 +201,21 @@ if(BUILD_TESTING)
             COMMAND scpefe_revision_graph_conformance "${SCPEFE_CONFORMANCE_ROOT}")
     else()
         add_executable(scpefe_context_test tests/context_test.c)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME scpefe.container-diagnostic
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
+                $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>)
+        set_tests_properties(scpefe.container-diagnostic PROPERTIES TIMEOUT 90)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_library(scpefe_diagnostic_delegation SHARED tests/diagnostic_delegation.c)
+            target_include_directories(scpefe_diagnostic_delegation PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include)
+            add_test(NAME scpefe.diagnostic-delegation
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
+                    $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>
+                    $<TARGET_FILE:scpefe_diagnostic_delegation>)
+            set_tests_properties(scpefe.diagnostic-delegation PROPERTIES TIMEOUT 15)
+        endif()
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_lifecycle_abi_test tests/lifecycle_abi_test.c)

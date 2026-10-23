@@ -12,10 +12,40 @@
     "expect": "accept with test password; same payload"
   },
   {
+    "path": "valid/csv-container.hex",
+    "bytes": 669,
+    "sha256": "90c8731786c132c39400f5bb15276b9680593288d11ed559b95c12c199e34b53",
+    "expect": "authenticate CSV content type with valid one-column source"
+  },
+  {
+    "path": "invalid/csv-container.hex",
+    "bytes": 677,
+    "sha256": "53c534feaea38356a61201168d654193920a869d4906cae1e28af85f7dcb21e9",
+    "expect": "authenticate envelope and graph then reject malformed CSV source"
+  },
+  {
     "path": "valid/delta-event.hex",
     "bytes": 981,
     "sha256": "b721e24cd91735e2b840aa32251b092de113d7e2888810564279249807efeccc",
     "expect": "accept; head event, content head delta; text alpha\\nbeta\\n"
+  },
+  {
+    "path": "valid/provisional-container.hex",
+    "bytes": 967,
+    "sha256": "b9c7d0b29a58c15b67b20bd037fe3bb5b2792bdd6be4136c823d409230f2092a",
+    "expect": "authenticate provisional delta; not manually sealed"
+  },
+  {
+    "path": "valid/multi-slot-container.hex",
+    "bytes": 1224,
+    "sha256": "d4472e0ba7f58104f521084cd2612f73c232fef5d421850d8837f79e34473319",
+    "expect": "authenticate owner, invitation, view-only or recovery; active editing lease"
+  },
+  {
+    "path": "valid/wrapper-claim-container.hex",
+    "bytes": 1224,
+    "sha256": "d592adcdf59033c94a960ff9ee454f33b40e9c29880df6209e6c257df3c68a46",
+    "expect": "authenticated wrapper claim cannot be cleared by metadata"
   },
   {
     "path": "valid/pruned-checkpoint.hex",
@@ -46,6 +76,12 @@
     "bytes": 1398,
     "sha256": "6640226832f26faa2f874134d26e640cf5362aae29774e4a2bdd1b57c8d4e486",
     "expect": "accept; foreign metadata only with original ID and resolved-by merge; canonical merge text reconstructs"
+  },
+  {
+    "path": "valid/foreign-merge-container.hex",
+    "bytes": 1613,
+    "sha256": "dfab0f5940b786ceec730bf1051f6103cf66645f4f38230612786ed40f04d092",
+    "expect": "authenticate canonical merge and metadata-only foreign branch"
   },
   {
     "path": "invalid/orphan-foreign.hex",
@@ -160,5 +196,29 @@
     "bytes": 669,
     "sha256": "3200d8d0bbc41bfb17e793c54cde112a801968a385be6cedaf56d39f1be76596",
     "expect": "reject unsupported wrapper length before KDF"
+  },
+  {
+    "path": "invalid/dangling-parent-container.hex",
+    "bytes": 965,
+    "sha256": "23b19e3ecd3ac0a6db5404c2c7cfb5bcaba354e2df6360516f68051950ffd5e3",
+    "expect": "authenticate envelope then reject dangling-parent"
+  },
+  {
+    "path": "invalid/incorrect-revision-id-container.hex",
+    "bytes": 965,
+    "sha256": "c0e9a9050f86d20a1a8238557914a9b05feed51a9e80b7d62cb301b3500ed2f2",
+    "expect": "authenticate envelope then reject incorrect-revision-id"
+  },
+  {
+    "path": "invalid/reconstruction-hash-container.hex",
+    "bytes": 965,
+    "sha256": "2d8524e43458d23624c14c69134bd64c876906e59077247ede1ea42b5e334c7f",
+    "expect": "authenticate envelope then reject reconstruction-hash"
+  },
+  {
+    "path": "invalid/unknown-required-feature-container.hex",
+    "bytes": 672,
+    "sha256": "e1e2377298876e28158953e1a26a2c71287ebb96323289ec6f04dd7bff26c1e4",
+    "expect": "authenticate envelope then reject unknown-required-feature"
   }
 ]

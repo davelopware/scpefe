@@ -3,6 +3,8 @@
 #include "container/container_error.hpp"
 #include "core/encryption_service.hpp"
 #include "format/revision_error.hpp"
+#include "format/diagnostic_json_writer.hpp"
+#include "format/csv_source.hpp"
 
 #include <algorithm>
 #include <array>
@@ -318,6 +320,74 @@ UnlockedContainerData RevisedV3Container::unlock(const std::uint8_t *bytes,
         throw ContainerFailure{ContainerError::crypto_error};
     result.revision_graph.emplace(std::move(graph));
     return result;
+}
+
+std::string RevisedV3Container::diagnostic_json(const std::uint8_t *bytes,
+    std::size_t size, const std::uint8_t *password, std::size_t password_size,
+    const format::RevisionLimits &limits, bool include_content)
+{
+    const auto data = unlock(bytes, size, password, password_size, limits);
+    const auto &graph = *data.revision_graph;
+    // Apply the same immutable content-type constraint as a document session.
+    if (data.content_type == csv_content_type) {
+        auto text = graph.reconstruct(graph.content_head());
+        const bool valid = text && format::valid_csv_source(*text);
+        if (text && !text->empty()) sodium_memzero(text->data(), text->size());
+        if (!valid) throw ContainerFailure{ContainerError::malformed_container};
+    }
+    format::DiagnosticJsonWriter json;
+    const auto string = [&](const std::string &value) {
+        json.string(value.data(), value.size());
+    };
+    const auto boolean = [&](bool value) { json.raw(value ? "true" : "false"); };
+    json.raw("{\"status\":\"ok\",\"diagnostic_version\":1,\"envelope\":{\"format_version\":3"
+        ",\"header_bytes\":72,\"container_bytes\":" + std::to_string(size)
+        + ",\"slot_count\":" + std::to_string(graph.slots().size())
+        + ",\"slot_record_bytes\":110,\"wrapped_slot_bytes\":66,\"payload_ciphertext_bytes\":"
+        + std::to_string(read_le(bytes + 64, 8))
+        + ",\"kdf\":{\"algorithm\":\"Argon2id\",\"version\":19,\"algorithm_id\":2"
+        ",\"opslimit\":2,\"memlimit_bytes\":67108864,\"salt_bytes\":16}"
+        ",\"aead\":{\"algorithm\":\"XChaCha20-Poly1305-IETF\",\"algorithm_id\":1"
+        ",\"nonce_bytes\":24,\"tag_bytes\":16},\"hash\":\"BLAKE2b-256\"},\"document_id\":");
+    json.hex(data.document_id.data(), data.document_id.size());
+    json.raw(",\"content_type\":");
+    json.raw(data.content_type == csv_content_type ? "\"csv\"" : "\"plain_text\"");
+    json.raw(",\"authenticated_slot_id\":"); json.hex(data.slot_id.data(), data.slot_id.size());
+    json.raw(",\"password_slots\":[");
+    for (std::size_t i = 0; i < graph.slots().size(); ++i) {
+        const auto &slot = graph.slots()[i];
+        if (i) json.character(',');
+        json.raw("{\"index\":" + std::to_string(i) + ",\"id\":");
+        json.hex(slot.id.data(), slot.id.size());
+        json.raw(",\"management_id\":"); json.hex(slot.management_id.data(), slot.management_id.size());
+        json.raw(",\"role\":");
+        json.raw(slot.role == 0 ? "\"owner\"" : slot.role == 2 ? "\"recovery\"" : "\"ordinary\"");
+        json.raw(",\"permissions\":{\"can_edit\":"); boolean((slot.permissions & 1u) != 0);
+        json.raw(",\"can_add_passwords\":"); boolean((slot.permissions & 2u) != 0);
+        json.raw(",\"can_remove_passwords\":"); boolean((slot.permissions & 4u) != 0);
+        json.raw("},\"must_be_changed\":"); boolean(slot.must_be_changed);
+        json.raw(",\"effective_must_be_changed\":");
+        if (slot.id == data.slot_id) boolean(data.must_be_changed);
+        else if (slot.must_be_changed) boolean(true);
+        else if (slot.role != 1) boolean(false);
+        else json.raw("null"); // Other passwords' wrapper claim flags remain encrypted.
+        json.raw(",\"name\":"); string(slot.name);
+        json.raw(",\"email\":"); string(slot.email);
+        json.character('}');
+    }
+    const auto &lease = graph.lease();
+    json.raw("],\"screen_lock\":\"client_local\",\"editing_lease\":{\"active\":"); boolean(lease.active);
+    json.raw(",\"session_id\":"); json.hex(lease.session_id.data(), lease.session_id.size());
+    json.raw(",\"heartbeat_counter\":" + std::to_string(lease.heartbeat_counter)
+        + ",\"holder_utc_ms\":" + std::to_string(lease.holder_utc_ms)
+        + ",\"duration_ms\":" + std::to_string(lease.duration_ms));
+    json.raw(",\"holder_name\":"); string(lease.holder_name);
+    json.raw(",\"holder_email\":"); string(lease.holder_email);
+    json.raw(",\"device\":"); string(lease.device);
+    json.raw("},\"revision_graph\":");
+    graph.write_diagnostic_json(json, include_content);
+    json.character('}');
+    return json.take_output();
 }
 
 std::vector<std::uint8_t> RevisedV3Container::replace_graph(

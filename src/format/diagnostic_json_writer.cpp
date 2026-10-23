@@ -1,14 +1,28 @@
 #include "format/diagnostic_json_writer.hpp"
 #include "format/revision_error.hpp"
+#include "format/clear_memory.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace scpefe::format {
 
-void DiagnosticJsonWriter::ensure_room(std::size_t additional) const
+DiagnosticJsonWriter::~DiagnosticJsonWriter()
+{
+    clear_memory(output_.data(), output_.size());
+}
+
+void DiagnosticJsonWriter::ensure_room(std::size_t additional)
 {
     if (additional > max_output_bytes - output_.size())
         throw RevisionFailure{RevisionError::limit_exceeded};
+    if (output_.size() + additional <= output_.capacity()) return;
+    std::string grown;
+    const auto required = output_.size() + additional;
+    grown.reserve(std::max(required, std::min(max_output_bytes, output_.capacity() * 2)));
+    grown.assign(output_);
+    clear_memory(output_.data(), output_.size());
+    output_.swap(grown);
 }
 
 void DiagnosticJsonWriter::raw(const std::string &value)
@@ -40,7 +54,7 @@ void DiagnosticJsonWriter::string(const char *data, std::size_t size)
             throw RevisionFailure{RevisionError::limit_exceeded};
         encoded_size += additional;
     }
-    output_.reserve(output_.size() + encoded_size);
+    ensure_room(encoded_size);
     output_.push_back('"');
     for (std::size_t index = 0; index < size; ++index) {
         const unsigned char value = static_cast<unsigned char>(data[index]);
@@ -71,7 +85,7 @@ void DiagnosticJsonWriter::hex(const std::uint8_t *data, std::size_t size)
     ensure_room(2);
     if (size > (max_output_bytes - output_.size() - 2) / 2)
         throw RevisionFailure{RevisionError::limit_exceeded};
-    output_.reserve(output_.size() + 2 + size * 2);
+    ensure_room(2 + size * 2);
     output_.push_back('"');
     for (std::size_t index = 0; index < size; ++index) {
         output_.push_back(hex_digits[data[index] >> 4u]);

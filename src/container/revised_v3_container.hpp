@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -31,6 +32,10 @@ public:
     static UnlockedContainerData unlock(const std::uint8_t *bytes, std::size_t size,
         const std::uint8_t *password, std::size_t password_size,
         const format::RevisionLimits &limits);
+    /* Serializes bounded metadata only after full envelope and graph authentication. */
+    static std::string diagnostic_json(const std::uint8_t *bytes, std::size_t size,
+        const std::uint8_t *password, std::size_t password_size,
+        const format::RevisionLimits &limits, bool include_content);
     /* Reencrypts one validated graph with the authenticated document key and fresh nonce. */
     static std::vector<std::uint8_t> replace_graph(const std::uint8_t *bytes,
         std::size_t size, const std::uint8_t *password, std::size_t password_size,

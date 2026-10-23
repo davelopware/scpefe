@@ -1,4 +1,5 @@
 #include "scpefe/scpefe.h"
+#include "password_input.hpp"
 
 #include <cstdint>
 #include <fstream>
@@ -127,11 +128,56 @@ int report_revision(const char *path, bool include_content)
     return 0;
 }
 
+int report_error(scpefe_status status)
+{
+    std::cerr << "{\"status\":\"error\",\"code\":" << status << "}\n";
+    return 1;
+}
+
+int report_container(const char *path, bool include_content, bool password_stdin)
+{
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) return report_error(SCPEFE_STATUS_HOST_ERROR);
+    const auto size = input.tellg();
+    if (size < 0) return report_error(SCPEFE_STATUS_HOST_ERROR);
+    if (static_cast<std::uintmax_t>(size) > SCPEFE_DIAGNOSTIC_MAX_CONTAINER_BYTES)
+        return report_error(SCPEFE_STATUS_LIMIT_EXCEEDED);
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char *>(bytes.data()), size))
+        return report_error(SCPEFE_STATUS_HOST_ERROR);
+    if (input.peek() != std::char_traits<char>::eof())
+        return report_error(SCPEFE_STATUS_LIMIT_EXCEEDED);
+    PasswordInput password;
+    auto status = password.read(password_stdin);
+    if (status != SCPEFE_STATUS_OK) return report_error(status);
+    scpefe_revision_limits_v1 limits{};
+    limits.struct_size = sizeof(limits);
+    status = scpefe_revision_limits_default(&limits);
+    if (status != SCPEFE_STATUS_OK) return report_error(status);
+    const scpefe_container_diagnostic_v1 request{sizeof(request), SCPEFE_ABI_VERSION,
+        bytes.data(), bytes.size(), password.data(), password.size(), &limits,
+        include_content ? 1 : 0};
+    std::size_t json_size = 0;
+    status = scpefe_container_diagnostic_json(&request, nullptr, 0, &json_size);
+    if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) return report_error(status);
+    std::vector<char> json(json_size + 1);
+    status = scpefe_container_diagnostic_json(&request, json.data(), json.size(), &json_size);
+    password.clear();
+    if (status == SCPEFE_STATUS_OK) std::cout.write(json.data(), json_size) << '\n';
+    volatile char *clear = json.data();
+    for (std::size_t i = 0; i < json.size(); ++i) clear[i] = 0;
+    return status != SCPEFE_STATUS_OK ? report_error(status)
+        : std::cout ? 0 : report_error(SCPEFE_STATUS_HOST_ERROR);
+}
+
 void print_usage(const char *program)
 {
     std::cerr << "Usage: " << program << " <health|version>\n"
               << "       " << program
               << " revision <cbor-path> [--include-content]\n";
+    std::cerr << "       " << program
+              << " inspect <scpefe-path> [--password-stdin] [--include-content]\n";
 }
 
 } // namespace
@@ -144,6 +190,19 @@ int main(int argc, char **argv)
     }
 
     const std::string_view operation{argv[1]};
+    if (operation == "inspect") {
+        if (argc < 3) return report_error(SCPEFE_STATUS_INVALID_ARGUMENT);
+        bool include_content = false, password_stdin = false;
+        for (int i = 3; i < argc; ++i) {
+            const std::string_view flag{argv[i]};
+            if (flag == "--include-content" && !include_content) include_content = true;
+            else if (flag == "--password-stdin" && !password_stdin) password_stdin = true;
+            else return report_error(SCPEFE_STATUS_INVALID_ARGUMENT);
+        }
+        try { return report_container(argv[2], include_content, password_stdin); }
+        catch (const std::bad_alloc &) { return report_error(SCPEFE_STATUS_OUT_OF_MEMORY); }
+        catch (...) { return report_error(SCPEFE_STATUS_HOST_ERROR); }
+    }
     if (operation == "health") {
         if (argc != 2) {
             print_usage(argv[0]);
