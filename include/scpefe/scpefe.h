@@ -524,6 +524,22 @@ typedef struct scpefe_revision_limits_v1 {
     size_t max_parent_count;
 } scpefe_revision_limits_v1;
 
+#define SCPEFE_DIAGNOSTIC_MAX_CONTAINER_BYTES (33u * 1024u * 1024u)
+
+/* Borrowed inputs for read-only authenticated container inspection. Limits
+ * apply to the decrypted graph; the envelope has a separate 33 MiB hard cap.
+ * Password bytes are used only during the call. include_content must be 0 or 1. */
+typedef struct scpefe_container_diagnostic_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *bytes;
+    size_t bytes_size;
+    const uint8_t *password;
+    size_t password_size;
+    const scpefe_revision_limits_v1 *limits;
+    int include_content;
+} scpefe_container_diagnostic_v1;
+
 /* Borrowed metadata spans remain valid until their owning page is destroyed. */
 typedef struct scpefe_revision_metadata_v1 {
     uint32_t struct_size;
@@ -773,6 +789,15 @@ SCPEFE_API scpefe_status scpefe_revision_limits_default(
     scpefe_revision_limits_v1 *limits
 );
 
+/* Authenticates and validates a complete container before writing deterministic
+ * two-space-indented UTF-8 JSON plus NUL. No output is written on failure or a size probe.
+ * output_size excludes NUL, is zero on errors, and reports required bytes on
+ * BUFFER_TOO_SMALL (capacity must exceed output_size). Output is capped at
+ * 32 MiB. The caller owns and must clear any returned sensitive JSON. */
+SCPEFE_API scpefe_status scpefe_container_diagnostic_json(
+    const scpefe_container_diagnostic_v1 *request,
+    char *output, size_t output_capacity, size_t *output_size);
+
 /* Validates a decrypted and already authenticated v3 payload into an owned graph. */
 SCPEFE_API scpefe_status scpefe_revision_graph_decode(
     const uint8_t *payload, size_t payload_size,
@@ -851,7 +876,7 @@ SCPEFE_API void scpefe_decoded_snapshot_revision_destroy(
     scpefe_decoded_snapshot_revision *revision
 );
 
-/* Decodes with the same common-core parser and writes UTF-8 JSON plus NUL. */
+/* Decodes with the common-core parser and writes indented UTF-8 JSON plus NUL. */
 SCPEFE_API scpefe_status scpefe_snapshot_revision_diagnostic_json(
     const uint8_t *encoded,
     size_t encoded_size,

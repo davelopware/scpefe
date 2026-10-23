@@ -13,6 +13,9 @@
 
 namespace scpefe::format {
 
+/* Receives bounded, escaped diagnostic output. */
+class DiagnosticJsonWriter;
+
 using RevisionId = std::array<std::uint8_t, 32>;
 
 /* Names a merge condition requiring a distinct host or user decision. */
@@ -43,6 +46,14 @@ struct RevisionLease {
 
 /* One authenticated v3 record, including immutable attribution and current storage. */
 struct RevisionRecord {
+    /* Creates an empty record for authenticated decoding. */
+    RevisionRecord() = default;
+    /* Copies a record, keeping source bytes live for secure destruction. */
+    RevisionRecord(const RevisionRecord &) = default;
+    /* Copies record fields into an existing history value. */
+    RevisionRecord &operator=(const RevisionRecord &) = default;
+    /* Wipes decrypted record bodies, including partially decoded records. */
+    ~RevisionRecord();
     /* A byte-copy or insertion segment of an original delta. */
     struct Segment {
         bool insert{};
@@ -63,6 +74,8 @@ struct RevisionRecord {
     std::optional<RevisionId> resolved_by;
     std::optional<RevisionId> compaction_cutoff;
     std::optional<std::uint64_t> retained_deltas;
+    std::optional<std::array<std::uint8_t, 16>> affected_slot;
+    std::optional<std::uint8_t> activity_status;
     std::string body_text;
     std::vector<std::uint8_t> body_cbor;
     std::vector<Segment> segments;
@@ -75,6 +88,18 @@ struct RevisionRecord {
 /* Validates and owns one deterministic v3 payload and its canonical history. */
 class RevisionGraph {
 public:
+    /* Creates an empty graph for bounded decoding. */
+    RevisionGraph() = default;
+    /* Copies a validated graph for independent session operations. */
+    RevisionGraph(const RevisionGraph &) = default;
+    /* Copies a graph into an existing session value. */
+    RevisionGraph &operator=(const RevisionGraph &) = default;
+    /* Transfers graph ownership without allocating. */
+    RevisionGraph(RevisionGraph &&) noexcept = default;
+    /* Transfers a graph into an existing session value without allocating. */
+    RevisionGraph &operator=(RevisionGraph &&) noexcept = default;
+    /* Wipes retained decrypted encodings, bodies, and identities before release. */
+    ~RevisionGraph();
     /* Encodes one attributed baseline and ordered initial slot metadata. */
     static std::vector<std::uint8_t> create_baseline(const RevisionSlot &owner,
         const std::optional<RevisionSlot> &recovery, std::string_view device,
@@ -135,6 +160,8 @@ public:
         std::string_view device, std::uint64_t timestamp_ms) const;
     /* Returns a redacted JSON summary unless clear text is explicitly requested. */
     std::string diagnostic_json(bool include_content) const;
+    /* Appends validated graph metadata to a shared bounded JSON writer. */
+    void write_diagnostic_json(DiagnosticJsonWriter &json, bool include_content) const;
 
 private:
     /* Encodes the common immutable event and preserves its content head. */

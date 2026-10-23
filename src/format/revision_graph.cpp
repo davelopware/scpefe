@@ -4,6 +4,8 @@
 #include "format/cbor_reader.hpp"
 #include "format/cbor_writer.hpp"
 #include "format/diagnostic_json_writer.hpp"
+#include "format/clear_memory.hpp"
+#include "format/clear_buffer_on_exit.hpp"
 #include "format/revision_error.hpp"
 #include "format/text_validation.hpp"
 
@@ -25,6 +27,7 @@ namespace {
 RevisionId digest(std::string_view prefix, const std::uint8_t *data, std::size_t size)
 {
     std::vector<std::uint8_t> input;
+    const ClearBufferOnExit clear_input(input);
     input.reserve(prefix.size() + size);
     input.insert(input.end(), prefix.begin(), prefix.end());
     input.insert(input.end(), data, data + size);
@@ -161,6 +164,9 @@ RevisionLease parse_lease(CborReader &reader)
 struct EventFacts {
     std::optional<RevisionId> cutoff;
     std::optional<std::uint64_t> count;
+    std::optional<std::array<std::uint8_t, 16>> affected_slot;
+    std::optional<std::uint8_t> activity_status;
+    std::string detail;
 };
 
 EventFacts parse_event_details(CborReader &reader)
@@ -170,11 +176,16 @@ EventFacts parse_event_details(CborReader &reader)
     std::uint64_t previous = 0;
     for (std::size_t i = 0; i < count; ++i) {
         switch (next_key(reader, previous)) {
-        case 1: (void)read_slot(reader); break;
+        case 1: facts.affected_slot = read_slot(reader); break;
         case 2: facts.cutoff = read_id(reader); break;
         case 3: facts.count = reader.unsigned_integer(); break;
-        case 4: if (reader.unsigned_integer() > 2) malformed(); break;
-        case 5: (void)reader.text(); break;
+        case 4: {
+            const auto status = reader.unsigned_integer();
+            if (status > 2) malformed();
+            facts.activity_status = static_cast<std::uint8_t>(status);
+            break;
+        }
+        case 5: facts.detail = reader.text(); break;
         default: unsupported();
         }
     }
@@ -243,6 +254,9 @@ void parse_immutable(CborReader &reader, const std::uint8_t *encoded,
     if (record.event_type == "compaction" && (!event_facts.cutoff || !event_facts.count)) malformed();
     record.compaction_cutoff = event_facts.cutoff;
     record.retained_deltas = event_facts.count;
+    record.affected_slot = event_facts.affected_slot;
+    record.activity_status = event_facts.activity_status;
+    record.event_detail = std::move(event_facts.detail);
     if (digest(id_prefix, encoded + begin, reader.position() - begin) != record.id) malformed();
     record.immutable_cbor.assign(encoded + begin, encoded + reader.position());
 }
@@ -254,7 +268,8 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
     record.body_length = reader.unsigned_integer();
     if (record.body_length > limits.max_text_bytes()) limited();
     if (record.storage == 1 || record.storage == 3) {
-        const auto bytes = reader.bytes(0, limits.max_text_bytes());
+        auto bytes = reader.bytes(0, limits.max_text_bytes());
+        const ClearBufferOnExit clear_bytes(bytes);
         if (bytes.size() != record.body_length) malformed();
         record.body_text.assign(bytes.begin(), bytes.end());
         if (!valid_canonical_document_text(record.body_text.data(), record.body_text.size())) malformed();
@@ -266,12 +281,14 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
             const auto fields = reader.array(7);
             const auto type = reader.unsigned_integer();
             RevisionRecord::Segment segment{};
+            const ClearBufferOnExit clear_segment(segment.text);
             if (type == 0 && fields == 3) {
                 segment.start = reader.unsigned_integer();
                 segment.count = reader.unsigned_integer();
                 if (segment.count == 0) malformed();
             } else if (type == 1 && fields == 2) {
-                const auto bytes = reader.bytes(0, limits.max_text_bytes());
+                auto bytes = reader.bytes(0, limits.max_text_bytes());
+                const ClearBufferOnExit clear_bytes(bytes);
                 if (bytes.empty()) malformed();
                 segment.insert = true;
                 segment.text.assign(bytes.begin(), bytes.end());
@@ -279,7 +296,7 @@ void parse_body(CborReader &reader, RevisionRecord &record, const RevisionLimits
             } else unsupported();
             if (segment.count > record.body_length - inserted) malformed();
             inserted += segment.count;
-            record.segments.push_back(std::move(segment));
+            record.segments.push_back(segment);
         }
         if (inserted != record.body_length) malformed();
     }
@@ -344,13 +361,17 @@ std::optional<std::string> reconstruct_at(const std::vector<RevisionRecord> &rec
         anchor = static_cast<std::size_t>(parent - records.begin());
     }
     std::string text = records[anchor].body_text;
+    const ClearBufferOnExit clear_text(text);
     for (std::size_t i = anchor + 1; i <= index; ++i) {
         const auto &record = records[i];
         if (record.foreign || record.kind == 2) continue;
-        if (record.storage == 1 || record.storage == 3) { text = record.body_text; continue; }
+        if (record.storage == 1 || record.storage == 3) {
+            clear_text.clear(); text = record.body_text; continue;
+        }
         if (record.storage == 4) return std::nullopt;
         if (record.storage != 2) malformed();
         std::string next;
+        const ClearBufferOnExit clear_next(next);
         next.reserve(static_cast<std::size_t>(record.body_length));
         for (const auto &segment : record.segments) {
             if (segment.insert) next += segment.text;
@@ -367,13 +388,15 @@ std::optional<std::string> reconstruct_at(const std::vector<RevisionRecord> &rec
         if (digest(content_prefix, reinterpret_cast<const std::uint8_t *>(text.data()),
             text.size()) != record.content_hash) malformed();
     }
-    return text;
+    // Return an independent value so the scope guard always clears the source.
+    return std::optional<std::string>(std::in_place, text);
 }
 
 std::string apply_delta(const RevisionRecord &record, const std::string &source,
     const RevisionLimits &limits)
 {
     std::string next;
+    const ClearBufferOnExit clear_next(next);
     next.reserve(static_cast<std::size_t>(record.body_length));
     for (const auto &segment : record.segments) {
         if (segment.insert) next += segment.text;
@@ -386,7 +409,7 @@ std::string apply_delta(const RevisionRecord &record, const std::string &source,
     }
     if (next.size() != record.body_length || next.size() > limits.max_text_bytes()
         || !valid_canonical_document_text(next.data(), next.size())) malformed();
-    return next;
+    return std::string(next);
 }
 
 void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head,
@@ -468,14 +491,19 @@ void validate_graph(std::vector<RevisionRecord> &records, const RevisionId &head
     // A single forward pass validates every retained body. Pruned history has
     // no clear text until a later materialized checkpoint restores the line.
     std::optional<std::string> current;
+    const ClearBufferOnExit clear_current(current);
     for (std::size_t i = 0; i < records.size(); ++i) {
         auto &r = records[i];
         if (r.foreign) continue;
         if (r.kind == 2) { r.text_available = current.has_value(); continue; }
-        if (r.storage == 4) { current.reset(); continue; }
-        if (r.storage == 1 || r.storage == 3) current = r.body_text;
-        else if (r.storage == 2 && current) current = apply_delta(r, *current, limits);
-        else malformed();
+        if (r.storage == 4) { clear_current.clear(); current.reset(); continue; }
+        if (r.storage == 1 || r.storage == 3) {
+            clear_current.clear(); current = r.body_text;
+        } else if (r.storage == 2 && current) {
+            auto next = apply_delta(r, *current, limits);
+            const ClearBufferOnExit clear_next(next);
+            clear_current.clear(); current = next;
+        } else malformed();
         if (digest(content_prefix, reinterpret_cast<const std::uint8_t *>(current->data()),
             current->size()) != r.content_hash) malformed();
         r.text_available = true;
@@ -1188,7 +1216,33 @@ std::vector<std::uint8_t> RevisionGraph::append_event(
     return encoded;
 }
 
+RevisionRecord::~RevisionRecord()
+{
+    const auto clear = [](auto &value) { clear_memory(value.data(), value.size()); };
+    clear(body_text); clear(body_cbor); clear(record_cbor);
+    clear(immutable_cbor); clear(event_details_cbor);
+    clear(actor_name); clear(actor_email); clear(client_name); clear(client_email);
+    clear(device); clear(event_type); clear(event_detail);
+    for (auto &segment : segments) clear(segment.text);
+}
+
+RevisionGraph::~RevisionGraph()
+{
+    const auto clear = [](auto &value) { clear_memory(value.data(), value.size()); };
+    clear(encoded_);
+    for (auto &slot : slots_) { clear(slot.name); clear(slot.email); }
+    clear(lease_.holder_name); clear(lease_.holder_email); clear(lease_.device);
+}
+
 std::string RevisionGraph::diagnostic_json(bool include_content) const
+{
+    DiagnosticJsonWriter json;
+    write_diagnostic_json(json, include_content);
+    return json.take_output();
+}
+
+void RevisionGraph::write_diagnostic_json(DiagnosticJsonWriter &json,
+    bool include_content) const
 {
     if (include_content) {
         // A tiny copy delta can repeat a large text in every displayed record.
@@ -1202,12 +1256,14 @@ std::string RevisionGraph::diagnostic_json(bool include_content) const
             minimum_content_bytes += static_cast<std::size_t>(record.body_length);
         }
     }
-    DiagnosticJsonWriter json;
-    json.raw("{\"schema\":\"container-v3\",\"head\":");
+    json.raw("{\"schema\":\"container-v3\",\"format_version\":1,\"validation\":\"valid\",\"head\":");
     json.hex(head_.data(), head_.size());
     json.raw(",\"content_head\":");
     json.hex(content_head_.data(), content_head_.size());
-    json.raw(",\"revisions\":[");
+    json.raw(",\"record_count\":" + std::to_string(records_.size())
+        + ",\"encoded_bytes\":" + std::to_string(encoded_.size())
+        + ",\"required_features\":[],\"extension_bytes\":" + std::to_string(field_ranges_[9].second)
+        + ",\"revisions\":[");
     for (std::size_t i = 0; i < records_.size(); ++i) {
         const auto &r = records_[i];
         if (i) json.character(',');
@@ -1216,14 +1272,59 @@ std::string RevisionGraph::diagnostic_json(bool include_content) const
             + ",\"storage\":" + std::to_string(r.storage));
         json.raw(",\"actor_name\":"); json.string(r.actor_name.data(), r.actor_name.size());
         json.raw(",\"actor_email\":"); json.string(r.actor_email.data(), r.actor_email.size());
+        json.raw(",\"actor_slot_id\":"); json.hex(r.actor_slot.data(), r.actor_slot.size());
+        json.raw(",\"client_name\":"); json.string(r.client_name.data(), r.client_name.size());
+        json.raw(",\"client_email\":"); json.string(r.client_email.data(), r.client_email.size());
+        json.raw(",\"device\":"); json.string(r.device.data(), r.device.size());
+        json.raw(",\"timestamp_ms\":" + std::to_string(r.timestamp_ms));
+        json.raw(",\"provisional\":"); json.raw(r.provisional ? "true" : "false");
+        json.raw(",\"manually_sealed\":"); json.raw(r.provisional ? "false" : "true");
+        json.raw(",\"foreign\":"); json.raw(r.foreign ? "true" : "false");
+        json.raw(",\"text_available\":"); json.raw(r.text_available ? "true" : "false");
+        json.raw(",\"previous_head\":");
+        if (r.previous) json.hex(r.previous->data(), r.previous->size());
+        else json.raw("null");
+        json.raw(",\"content_parent\":");
+        if (r.content_parent) json.hex(r.content_parent->data(), r.content_parent->size());
+        else json.raw("null");
+        json.raw(",\"merge_sources\":[");
+        for (std::size_t j = 0; j < r.merge_sources.size(); ++j) {
+            if (j) json.character(',');
+            json.hex(r.merge_sources[j].data(), r.merge_sources[j].size());
+        }
+        json.raw("],\"resolved_by\":");
+        if (r.resolved_by) json.hex(r.resolved_by->data(), r.resolved_by->size());
+        else json.raw("null");
+        json.raw(",\"content_hash\":"); json.hex(r.content_hash.data(), r.content_hash.size());
+        json.raw(",\"body_digest\":");
+        if (r.has_body_digest) json.hex(r.body_digest.data(), r.body_digest.size());
+        else json.raw("null");
+        json.raw(",\"record_bytes\":" + std::to_string(r.record_cbor.size())
+            + ",\"body_bytes\":" + std::to_string(r.body_cbor.size()));
+        json.raw(",\"event_type\":"); json.string(r.event_type.data(), r.event_type.size());
+        json.raw(",\"event_detail\":"); json.string(r.event_detail.data(), r.event_detail.size());
+        json.raw(",\"affected_slot_id\":");
+        if (r.affected_slot) json.hex(r.affected_slot->data(), r.affected_slot->size());
+        else json.raw("null");
+        json.raw(",\"activity_status\":");
+        if (r.activity_status) json.raw(std::to_string(*r.activity_status));
+        else json.raw("null");
+        json.raw(",\"compaction_cutoff\":");
+        if (r.compaction_cutoff) json.hex(r.compaction_cutoff->data(), r.compaction_cutoff->size());
+        else json.raw("null");
+        json.raw(",\"retained_deltas\":");
+        if (r.retained_deltas) json.raw(std::to_string(*r.retained_deltas));
+        else json.raw("null");
         if (include_content && !r.foreign && r.kind != 2) {
-            const auto text = reconstruct(r.id);
-            if (text) { json.raw(",\"content\":"); json.string(text->data(), text->size()); }
+            auto text = reconstruct(r.id);
+            const ClearBufferOnExit clear_text(text);
+            if (text) {
+                json.raw(",\"content\":"); json.string(text->data(), text->size());
+            }
         }
         json.raw("}");
     }
     json.raw("]}");
-    return json.take_output();
 }
 
 } // namespace scpefe::format

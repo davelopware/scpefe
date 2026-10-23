@@ -285,10 +285,10 @@ static int emits_readable_diagnostic_json(void)
     CHECK(scpefe_snapshot_revision_diagnostic_json(
         encoded, encoded_size, &limits, 0, json, json_size + 1, &json_size
     ) == SCPEFE_STATUS_OK);
-    CHECK(strstr(json, "\"format_version\":1") != NULL);
-    CHECK(strstr(json, "\"slot_identity_name\":\"Ada Lovelace\"") != NULL);
-    CHECK(strstr(json, "\"client_profile_name\":\"Augusta Ada King\"") != NULL);
-    CHECK(strstr(json, "\"codec\":\"none\"") != NULL);
+    CHECK(strstr(json, "{\n  \"format_version\": 1,") != NULL);
+    CHECK(strstr(json, "\"slot_identity_name\": \"Ada Lovelace\"") != NULL);
+    CHECK(strstr(json, "\"client_profile_name\": \"Augusta Ada King\"") != NULL);
+    CHECK(strstr(json, "\"codec\": \"none\"") != NULL);
     CHECK(strstr(json, "\"content\":") == NULL);
 
     free(json);
@@ -301,7 +301,7 @@ static int emits_readable_diagnostic_json(void)
     CHECK(scpefe_snapshot_revision_diagnostic_json(
         encoded, encoded_size, &limits, 1, json, json_size + 1, &json_size
     ) == SCPEFE_STATUS_OK);
-    CHECK(strstr(json, "\"content\":\"first line\\nsecond line\"") != NULL);
+    CHECK(strstr(json, "\"content\": \"first line\\nsecond line\"") != NULL);
 
     free(json);
     free(encoded);

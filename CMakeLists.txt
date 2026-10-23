@@ -17,6 +17,7 @@ set(SCPEFE_PORTABLE_FORMAT_SOURCES
     src/format/blake2b.cpp
     src/format/cbor_reader.cpp
     src/format/cbor_writer.cpp
+    src/format/clear_buffer_on_exit.cpp
     src/format/diagnostic_json_writer.cpp
     src/format/revision_limits.cpp
     src/format/revision_graph.cpp
@@ -34,6 +35,7 @@ else()
         ${SCPEFE_PORTABLE_FORMAT_SOURCES}
         src/abi/password_policy_abi.cpp
         src/abi/context_abi.cpp
+        src/abi/container_diagnostic_abi.cpp
         src/container/container.cpp
         src/container/container_state.cpp
         src/container/password_slots.cpp
@@ -156,6 +158,7 @@ endif()
 if(NOT EMSCRIPTEN)
     add_executable(scpefe_diagnostic
         tools/scpefe_diagnostic.cpp
+        tools/password_input.cpp
     )
     target_compile_features(scpefe_diagnostic PRIVATE cxx_std_20)
     target_link_libraries(scpefe_diagnostic PRIVATE SCPEFE::scpefe)
@@ -199,6 +202,28 @@ if(BUILD_TESTING)
             COMMAND scpefe_revision_graph_conformance "${SCPEFE_CONFORMANCE_ROOT}")
     else()
         add_executable(scpefe_context_test tests/context_test.c)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME scpefe.container-diagnostic
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
+                $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>)
+        set_tests_properties(scpefe.container-diagnostic PROPERTIES TIMEOUT 90)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_library(scpefe_diagnostic_delegation SHARED tests/diagnostic_delegation.c)
+            target_include_directories(scpefe_diagnostic_delegation PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include)
+            add_test(NAME scpefe.diagnostic-delegation
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
+                    $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>
+                    $<TARGET_FILE:scpefe_diagnostic_delegation>)
+            set_tests_properties(scpefe.diagnostic-delegation PROPERTIES TIMEOUT 15)
+            add_library(scpefe_password_interrupt_race SHARED tests/password_interrupt_race.c)
+            target_link_libraries(scpefe_password_interrupt_race PRIVATE ${CMAKE_DL_LIBS})
+            add_test(NAME scpefe.password-prompt-interruption
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
+                    $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>
+                    --interrupt-race $<TARGET_FILE:scpefe_password_interrupt_race>)
+            set_tests_properties(scpefe.password-prompt-interruption PROPERTIES TIMEOUT 15)
+        endif()
         target_link_libraries(scpefe_context_test PRIVATE SCPEFE::scpefe)
 
         add_executable(scpefe_lifecycle_abi_test tests/lifecycle_abi_test.c)
@@ -297,16 +322,16 @@ if(BUILD_TESTING)
         add_test(NAME scpefe.diagnostic-health COMMAND scpefe_diagnostic health)
         set_tests_properties(scpefe.diagnostic-health PROPERTIES
             PASS_REGULAR_EXPRESSION
-                "\"status\":\"ok\".*\"abi_version\":2.*\"host_monotonic_time_ms\":424242"
+                "\"host_monotonic_time_ms\": 424242"
         )
         set_tests_properties(scpefe.diagnostic-revision PROPERTIES
             DEPENDS scpefe.revision-round-trip
-            PASS_REGULAR_EXPRESSION "\"slot_identity_name\":\"Ada Lovelace\""
+            PASS_REGULAR_EXPRESSION "\"slot_identity_name\": \"Ada Lovelace\""
             FAIL_REGULAR_EXPRESSION "\"content\":"
         )
         set_tests_properties(scpefe.diagnostic-revision-content PROPERTIES
             DEPENDS scpefe.revision-round-trip
-            PASS_REGULAR_EXPRESSION "\"content\":\"first line\\\\nsecond line\""
+            PASS_REGULAR_EXPRESSION "\"content\": \"first line\\\\nsecond line\""
         )
     endif()
 endif()

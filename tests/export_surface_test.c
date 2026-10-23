@@ -49,6 +49,7 @@ int main(int argc, char **argv)
         "scpefe_context_health",
         "scpefe_container_create",
         "scpefe_container_open",
+        "scpefe_container_diagnostic_json",
         "scpefe_container_unlock",
         "scpefe_container_read",
         "scpefe_container_prepare_save",

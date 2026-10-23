@@ -48,11 +48,50 @@ encrypted container.
 
 The common core also creates and unlocks the initial self-contained,
 single-owner password container through byte-span C APIs. Passwords are never
-accepted as command-line arguments. The milestone envelope is documented in
+accepted as command-line arguments. The original milestone envelope is documented in
 [docs/format/password-container-v1.md](docs/format/password-container-v1.md).
 Its CC0 valid and invalid interoperability vectors live under
 [`tests/vectors/draft-v1`](tests/vectors/draft-v1/README.md) and are executed
 through the public common-core APIs by the native test suite.
+
+To inspect a complete encrypted container with the current core, use:
+
+```bash
+./build/scpefe-diagnostic inspect document.scpefe
+secret-provider | ./build/scpefe-diagnostic inspect document.scpefe --password-stdin
+./build/scpefe-diagnostic inspect document.scpefe --include-content
+```
+
+`inspect` is a read-only developer operation. By default it reads a password
+from the controlling terminal without echo (the Windows console on Windows).
+`--password-stdin` explicitly reads one UTF-8 line from standard input for
+automation; LF and CRLF endings are removed, and a final line without LF is
+accepted. Passwords are limited to 4096 bytes and are never accepted in arguments.
+
+The CLI delegates authentication, graph validation, and JSON generation to
+`scpefe_container_diagnostic_json`, a public versioned common-core API. It reads
+the same revised-v3 containers as the current document API; obsolete development
+v1/v2 envelopes are rejected. Success writes one JSON object to stdout containing
+envelope algorithms and sizes, document ID and content type, slot identities and
+permissions, editing lease, heads, revision links, attribution, hashes, and graph
+validation. Reports use two-space indentation for readability. Failure returns nonzero, writes a safe `{"status":"error","code":N}`
+object to stderr, and leaves stdout empty. Numeric codes are `scpefe_status` values.
+Input and output are bounded; callers of the C API can supply graph resource limits.
+
+Document text is omitted by default. **`--include-content` emits authenticated
+historical text wherever still reconstructable**, which can expose earlier text
+as well as the current content. Diagnostic metadata also contains personal
+identities. Treat captured output accordingly. Password and temporary decrypted
+buffers are cleared on completion as far as the platform permits. See the
+[JSON contract](docs/format/container-diagnostic-json-v1.md) for field and omission rules.
+
+For a standalone Windows x64 preview, run
+`scripts\build-windows-diagnostic-preview.ps1` on Windows with CMake, Visual C++,
+Python 3.12 and vcpkg installed. It builds and tests the native tool, bundles its
+DLLs and usage notes, then tests the extracted ZIP with a clean runtime path.
+The **Windows diagnostic preview** GitHub Actions workflow publishes the same
+unsigned package as `scpefe-diagnostic-win-x64-unsigned`; it contains
+`scpefe-diagnostic-win-x64.zip` and its SHA-256 checksum.
 
 ## WebAssembly conformance build
 
@@ -79,8 +118,9 @@ local profile, publishing a new encrypted document, reopening it read-only, and
 explicitly entering edit mode for a manual save. The sandboxed renderer sees
 only validated preload operations; container bytes, native bindings, filesystem
 paths, and publication remain in the Electron host. New desktop documents use
-the [mutable v3 envelope](docs/format/password-container-v3.md); the core also
-reads v2 documents and the draft v1 vectors.
+the [mutable v3 envelope](docs/format/password-container-v3.md), which is the
+current native document reader's supported envelope. The separate snapshot
+format APIs still read the draft v1 revision vectors.
 
 Build the Node-API bridge alongside the native library by supplying the header
 directory from the Node/Electron SDK used for packaging:

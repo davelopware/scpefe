@@ -109,26 +109,31 @@ def encrypt(key: bytes, nonce: bytes, plain: bytes, aad: bytes) -> bytes:
     return cipher.raw[:written.value]
 
 
-def container(clear: bytes, content_type: bytes = b"\x00") -> bytes:
+def container(clear: bytes, content_type: bytes = b"\x00", slots=None) -> bytes:
     sodium = ctypes.CDLL("libsodium.so.23")
     assert sodium.sodium_init() >= 0
-    salt, slot_nonce, payload_nonce = bytes(range(80, 96)), bytes(range(96, 120)), bytes(range(120, 144))
-    derived = ctypes.create_string_buffer(32)
-    assert sodium.crypto_pwhash(derived, ctypes.c_ulonglong(32), PASSWORD,
-                                ctypes.c_ulonglong(len(PASSWORD)), salt,
-                                ctypes.c_ulonglong(2), ctypes.c_size_t(67108864), 2) == 0
-    header = (b"SCPEFE\0\x03" + struct.pack("<IIQQII", 3, 2, 2, 67108864, 1, 1)
+    slots = slots or [(SID, 7, False, PASSWORD)]
+    payload_nonce = bytes(range(120, 144))
+    header = (b"SCPEFE\0\x03" + struct.pack("<IIQQII", 3, 2, 2, 67108864, len(slots), 1)
               + payload_nonce + struct.pack("<Q", 16 + len(content_type) + len(clear) + 16))
     assert len(header) == 72
-    slot_aad = b"SCPEFE-slot-v3" + header[:32] + header[36:40] + salt + slot_nonce
-    wrapped = encrypt(derived.raw, slot_nonce, KEY + SID + b"\x07\x00", slot_aad)
-    assert len(wrapped) == 66
-    slot = salt + slot_nonce + struct.pack("<I", 66) + wrapped
+    slot_table = b""
+    for index, (slot_id, permissions, claim, password) in enumerate(slots):
+        salt = bytes(v + index for v in range(80, 96))
+        slot_nonce = bytes(v + index for v in range(96, 120))
+        derived = ctypes.create_string_buffer(32)
+        assert sodium.crypto_pwhash(derived, ctypes.c_ulonglong(32), password,
+                                    ctypes.c_ulonglong(len(password)), salt,
+                                    ctypes.c_ulonglong(2), ctypes.c_size_t(67108864), 2) == 0
+        slot_aad = b"SCPEFE-slot-v3" + header[:32] + header[36:40] + salt + slot_nonce
+        wrapped = encrypt(derived.raw, slot_nonce, KEY + slot_id + bytes([permissions, claim]), slot_aad)
+        assert len(wrapped) == 66
+        slot_table += salt + slot_nonce + struct.pack("<I", 66) + wrapped
     subkey = ctypes.create_string_buffer(32)
     assert sodium.crypto_kdf_derive_from_key(subkey, ctypes.c_size_t(32),
                                              ctypes.c_ulonglong(1), b"SCPSNAP1", KEY) == 0
-    encrypted = encrypt(subkey.raw, payload_nonce, DID + content_type + clear, header + slot)
-    return header + slot + encrypted
+    encrypted = encrypt(subkey.raw, payload_nonce, DID + content_type + clear, header + slot_table)
+    return header + slot_table + encrypted
 
 
 def write(name: str, data: bytes) -> dict:
@@ -147,6 +152,13 @@ def main():
     base_payload = payload([base])
     rows.append({**write("valid/baseline-payload", cbor(base_payload)), "expect": "accept; text alpha\\n"})
     rows.append({**write("valid/baseline-container", container(cbor(base_payload))), "expect": "accept with test password; same payload"})
+    rows.append({**write("valid/csv-container", container(cbor(base_payload), b"\x01")),
+        "expect": "authenticate CSV content type with valid one-column source"})
+    invalid_csv_text = b'"unterminated\n'
+    invalid_csv_body = [0, len(invalid_csv_text), invalid_csv_text]
+    invalid_csv_base = record(metadata(0, invalid_csv_text, body=invalid_csv_body), 1, invalid_csv_body)
+    rows.append({**write("invalid/csv-container", container(cbor(payload([invalid_csv_base])), b"\x01")),
+        "expect": "authenticate envelope and graph then reject malformed CSV source"})
 
     new_text = b"alpha\nbeta\n"
     delta = [0, len(new_text), [[0, 0, 6], [1, b"beta\n"]]]
@@ -154,6 +166,28 @@ def main():
     event = record(metadata(2, new_text, change[1], event=("backup-attempted", {4: 0})), 0)
     chain = payload([base, change, event], event[1], change[1])
     rows.append({**write("valid/delta-event", cbor(chain)), "expect": "accept; head event, content head delta; text alpha\\nbeta\\n"})
+    provisional = payload([base, {**change, 5: True}], change[1], change[1])
+    rows.append({**write("valid/provisional-container", container(cbor(provisional))),
+        "expect": "authenticate provisional delta; not manually sealed"})
+    multi_slot = payload([base])
+    extra_slots = [
+        {1: bytes(range(160, 176)), 2: 1, 3: True, 4: 1, 5: bytes(range(208, 224)),
+         6: "Invitation", 7: ""},
+        {1: bytes(range(176, 192)), 2: 0, 3: False, 4: 1, 5: bytes(range(224, 240)),
+         6: "Zoë \"Reader\"", 7: "reader@example.test"},
+        {1: bytes(range(192, 208)), 2: 7, 3: False, 4: 2, 5: bytes(range(240, 256)),
+         6: "", 7: ""}]
+    multi_slot[2].extend(extra_slots)
+    multi_slot[4] = {1: True, 2: bytes(range(144, 160)), 3: 12, 4: 1700000000100,
+                     5: 600000, 6: "Alice", 7: "alice@example.test", 8: "test-device"}
+    wrappers = [(SID, 7, False, PASSWORD)] + [
+        (slot[1], slot[2], slot[3], password) for slot, password in zip(extra_slots,
+            [b"invitation test password", b"reader test password", b"recovery test password"])]
+    rows.append({**write("valid/multi-slot-container", container(cbor(multi_slot), slots=wrappers)),
+        "expect": "authenticate owner, invitation, view-only or recovery; active editing lease"})
+    wrappers[2] = (extra_slots[1][1], 0, True, b"reader test password")
+    rows.append({**write("valid/wrapper-claim-container", container(cbor(multi_slot), slots=wrappers)),
+        "expect": "authenticated wrapper claim cannot be cleared by metadata"})
     prune_base = {**base, 3: 4}
     prune_base.pop(4)
     checkpoint = {**change, 3: 3, 4: [0, len(new_text), new_text]}
@@ -204,6 +238,8 @@ def main():
     imported = record(remote_meta, 5, resolved_by=merge[1], foreign=True)
     foreign_payload = payload([base, change, imported, merge], merge[1], merge[1])
     rows.append({**write("valid/foreign-merge", cbor(foreign_payload)), "expect": "accept; foreign metadata only with original ID and resolved-by merge; canonical merge text reconstructs"})
+    rows.append({**write("valid/foreign-merge-container", container(cbor(foreign_payload))),
+        "expect": "authenticate canonical merge and metadata-only foreign branch"})
 
     orphan_merge_meta = {**merge_meta, 4: []}
     orphan_merge = record(orphan_merge_meta, 2, merge_delta)
@@ -264,6 +300,11 @@ def main():
         altered = bytearray(valid_container)
         altered[offset:offset + len(replacement)] = replacement
         rows.append({**write("invalid/envelope-" + name, bytes(altered)), "expect": expected})
+    for name in ["dangling-parent", "incorrect-revision-id", "reconstruction-hash", "unknown-required-feature"]:
+        lines = (ROOT / ("invalid/" + name + ".hex")).read_text().splitlines()
+        invalid_payload = bytes.fromhex("".join(line.split("#")[0] for line in lines))
+        rows.append({**write("invalid/" + name + "-container", container(invalid_payload)),
+            "expect": "authenticate envelope then reject " + name})
     (ROOT / "manifest.json").write_text(json.dumps(rows, indent=2) + "\n")
 
 
