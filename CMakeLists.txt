@@ -260,6 +260,10 @@ if(BUILD_TESTING)
     else()
         add_executable(scpefe_context_test tests/context_test.c)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME scpefe.windows-diagnostic-preview-policy
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_diagnostic_preview_test.py)
+        set_tests_properties(scpefe.windows-diagnostic-preview-policy PROPERTIES
+            TIMEOUT 30 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         add_test(NAME scpefe.diagnostic-licenses
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostic_licenses_test.py
                 $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} "${SCPEFE_SODIUM_LICENSE_FILE}")
