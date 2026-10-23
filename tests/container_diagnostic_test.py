@@ -182,7 +182,12 @@ def main():
             expected = json.loads((root / "tests/vectors/diagnostic" / (name + ".json")).read_text())
             golden = json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode()
             # Exact bytes freeze ordering, field names, escaping and omission rules.
-            assert result.stdout == golden + b"\n", name
+            assert result.stdout == golden + b"\n", (name, {
+                "json_matches": json.loads(result.stdout) == expected,
+                "has_crlf_terminator": result.stdout.endswith(b"\r\n"),
+                "expected_bytes": len(golden) + 1,
+                "actual_bytes": len(result.stdout),
+            })
             assert api(library, data) == golden, name
             assert b'"content":' not in golden
             assert b"alpha" not in golden and b"beta" not in golden

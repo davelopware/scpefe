@@ -2,12 +2,18 @@
 #include "password_input.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace {
 
@@ -184,6 +190,11 @@ void print_usage(const char *program)
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    // Preserve the core's JSON bytes and LF terminator when stdout is redirected.
+    if (_setmode(_fileno(stdout), _O_BINARY) == -1)
+        return report_error(SCPEFE_STATUS_HOST_ERROR);
+#endif
     if (argc < 2) {
         print_usage(argv[0]);
         return 2;
