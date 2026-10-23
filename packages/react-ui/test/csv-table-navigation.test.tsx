@@ -220,10 +220,11 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
 
 test("table Find reveals matches below the sticky heading and clear of the dialog", async (t) => {
   const { dom, root } = mounted(t);
-  const rows = Array.from({ length: 16 }, (_, row) => [
-    `row ${row}`, row === 2 ? 'STICKY-TARGET' : `value ${row}`,
-    `other ${row}`, row === 12 ? 'DIALOG-TARGET' : `last ${row}`]);
-  rows[0] = ['Name', 'Note', 'Extra', 'Far right'];
+  const rows = Array.from({ length: 16 }, (_, row) =>
+    Array.from({ length: 8 }, (_, column) => row === 2 && column === 1
+      ? 'STICKY-TARGET' : row === 12 && column === 7
+        ? 'DIALOG-TARGET' : `row ${row}, column ${column + 1}`));
+  rows[0] = ['Name', 'Note', 'Extra', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Far right'];
   const text = writeCsvSource(rows);
   const snapshot = { kind: 'read-only', document: { content: text, contentType: 'csv' },
     working: { text, selection: { start: 0, end: 0 } }, commands: { write: false } };
@@ -237,21 +238,23 @@ test("table Find reveals matches below the sticky heading and clear of the dialo
   await act(async () => view.current.openFind('find', cell(dom, 0, 0)));
   const document = dom.window.document;
   const scroll = document.querySelector('.csv-table-scroll');
-  const heading = document.querySelector('.csv-table thead');
+  const headingSection = document.querySelector('.csv-table thead');
+  const heading = document.querySelector('.csv-table th');
   const dialog = document.querySelector('.modeless-dialog');
   const bounds = (left, top, right, bottom) => ({ left, top, right, bottom,
     width: right - left, height: bottom - top });
   scroll.getBoundingClientRect = () => bounds(0, 31, 920, 616);
-  heading.getBoundingClientRect = () => bounds(452, 43, 891, 79);
+  headingSection.getBoundingClientRect = () => bounds(14, -8, 890, 28);
+  heading.getBoundingClientRect = () => bounds(14, 43, 233, 79);
   dialog.getBoundingClientRect = () => bounds(434, 470, 910, 650);
   const nearHeading = cell(dom, 2, 1);
   nearHeading.getBoundingClientRect = () =>
     bounds(452 - scroll.scrollLeft, 115 - scroll.scrollTop,
       891 - scroll.scrollLeft, 151 - scroll.scrollTop);
-  const underDialog = cell(dom, 12, 3);
+  const underDialog = cell(dom, 12, 7);
   underDialog.getBoundingClientRect = () =>
-    bounds(1000 - scroll.scrollLeft, 500 - scroll.scrollTop,
-      1300 - scroll.scrollLeft, 536 - scroll.scrollTop);
+    bounds(1350 - scroll.scrollLeft, 500 - scroll.scrollTop,
+      1542 - scroll.scrollLeft, 536 - scroll.scrollTop);
   const userEvent = (await import('@testing-library/user-event')).default;
   const user = userEvent.setup({ document });
   const input = document.querySelector('input');
@@ -275,6 +278,8 @@ test("table Find reveals matches below the sticky heading and clear of the dialo
   await key(dom, input, 'Enter');
   assert.equal(underDialog.getAttribute('data-current-cell'), 'true');
   assert.ok(scroll.scrollLeft > 0, 'the far-right match is scrolled horizontally into view');
+  assert.ok(underDialog.getBoundingClientRect().right <= scroll.getBoundingClientRect().right,
+    'the entire far-right match is inside the visible scroller');
   assert.ok(underDialog.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
     'the match remains clear of the dialog after horizontal scrolling');
 });

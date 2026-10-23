@@ -98,7 +98,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
         }
         // Horizontal scrolling can move a cell beneath the modeless dialog.
         bounds = target.getBoundingClientRect();
-        const heading = scroll.current.querySelector('thead')?.getBoundingClientRect();
+        const heading = scroll.current.querySelector('thead th')?.getBoundingClientRect();
         let visibleTop = Math.max(viewport.top + 8,
           row === 0 ? viewport.top + 8 : (heading?.bottom ?? viewport.top) + 8);
         let visibleBottom = viewport.bottom - 8;

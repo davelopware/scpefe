@@ -5,7 +5,9 @@ button, input, select, textarea { font: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid Highlight; outline-offset: 1px;
 }
-.app-shell { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.app-shell { width: 100%; height: 100%; display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
 .shell-chrome { display: contents; }
 .menu-bar { display: flex; min-height: 2.25rem; padding: 0 .35rem; border-bottom: 1px solid #8c939b;
   background: #f3f3f3; z-index: 5; }
@@ -20,7 +22,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .menu [role="menu"] button:disabled { color: GrayText; }
 .menu hr { border: 0; border-top: 1px solid GrayText; margin: .25rem; }
 kbd { margin-left: 2rem; font: inherit; color: inherit; }
-.editor-surface { position: relative; display: flex; flex-direction: column; min-height: 0; background: Canvas; }
+.editor-surface { position: relative; display: flex; flex-direction: column;
+  min-height: 0; min-width: 0; overflow: hidden; background: Canvas; }
 .editor-surface textarea { display: block; flex: 1; width: 100%; height: 100%; min-height: 0; resize: none; border: 0;
   padding: .85rem 1rem; color: CanvasText; background: Canvas; font: 16px/1.5 Consolas, monospace; }
 .editor-surface textarea[aria-invalid="true"] { box-shadow: inset 0 0 0 2px #9b1c1c; }
