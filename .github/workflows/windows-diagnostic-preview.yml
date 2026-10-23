@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       PYTHONUTF8: "1"
     steps:
@@ -23,12 +23,27 @@ jobs:
       - name: Build, test and package standalone diagnostic tool
         shell: powershell
         run: .\scripts\build-windows-diagnostic-preview.ps1
-      - name: Upload standalone diagnostic preview
+      - name: Upload validated single-EXE diagnostic preview
+        id: preview
         uses: actions/upload-artifact@v4
         with:
           name: scpefe-diagnostic-win-x64-unsigned
           path: |
-            build/windows-diagnostic-preview/scpefe-diagnostic-win-x64.zip
-            build/windows-diagnostic-preview/scpefe-diagnostic-win-x64.zip.sha256
+            build/windows-diagnostic-preview/package/scpefe-diagnostic-win-x64/scpefe-diagnostic.exe
+            build/windows-diagnostic-preview/package/scpefe-diagnostic-win-x64/scpefe-diagnostic.exe.sha256
+            build/windows-diagnostic-preview/package/scpefe-diagnostic-win-x64/preview-manifest.json
+            build/windows-diagnostic-preview/package/scpefe-diagnostic-win-x64/README.txt
           if-no-files-found: error
           retention-days: 14
+      - name: Download published diagnostic preview for independent checksum verification
+        uses: actions/download-artifact@v4
+        with:
+          name: scpefe-diagnostic-win-x64-unsigned
+          path: ${{ runner.temp }}/downloaded-diagnostic-preview
+      - name: Verify downloaded EXE matches the validated source and checksum
+        shell: powershell
+        run: |
+          python .\tests\windows_diagnostic_preview.py --verify-download "$env:RUNNER_TEMP\downloaded-diagnostic-preview" --source-commit "$env:GITHUB_SHA" --validated-manifest .\build\windows-diagnostic-preview\package\scpefe-diagnostic-win-x64\preview-manifest.json
+          if ($LASTEXITCODE -ne 0) { throw "Downloaded preview verification failed." }
+          "Validated unsigned single-EXE preview: ${{ steps.preview.outputs.artifact-url }}" >> $env:GITHUB_STEP_SUMMARY
+          "Source commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY

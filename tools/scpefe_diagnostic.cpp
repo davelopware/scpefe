@@ -1,5 +1,6 @@
 #include "scpefe/scpefe.h"
 #include "password_input.hpp"
+#include "diagnostic_licenses.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -173,7 +174,7 @@ int report_container(const char *path, bool include_content, bool password_stdin
 
 void print_usage(const char *program)
 {
-    std::cerr << "Usage: " << program << " <health|version>\n"
+    std::cerr << "Usage: " << program << " <health|version|licenses>\n"
               << "       " << program
               << " revision <cbor-path> [--include-content]\n";
     std::cerr << "       " << program
@@ -195,6 +196,14 @@ int main(int argc, char **argv)
     }
 
     const std::string_view operation{argv[1]};
+    if (operation == "licenses") {
+        if (argc != 2) {
+            print_usage(argv[0]);
+            return 2;
+        }
+        std::cout << diagnostic_licenses();
+        return std::cout ? 0 : report_error(SCPEFE_STATUS_HOST_ERROR);
+    }
     if (operation == "inspect") {
         if (argc < 3) return report_error(SCPEFE_STATUS_INVALID_ARGUMENT);
         bool include_content = false, password_stdin = false;

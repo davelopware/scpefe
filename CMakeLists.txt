@@ -10,6 +10,10 @@ project(
 include(CTest)
 
 option(SCPEFE_BUILD_NODE_ADDON "Build the Electron Node-API bridge" OFF)
+option(SCPEFE_STATIC_DIAGNOSTIC "Link the Windows diagnostic with a static core, sodium and CRT" OFF)
+if(SCPEFE_STATIC_DIAGNOSTIC AND (NOT WIN32 OR NOT MSVC OR EMSCRIPTEN))
+    message(FATAL_ERROR "SCPEFE_STATIC_DIAGNOSTIC requires native Windows with MSVC")
+endif()
 
 set(SCPEFE_PORTABLE_FORMAT_SOURCES
     src/abi/revision_abi.cpp
@@ -161,7 +165,60 @@ if(NOT EMSCRIPTEN)
         tools/password_input.cpp
     )
     target_compile_features(scpefe_diagnostic PRIVATE cxx_std_20)
-    target_link_libraries(scpefe_diagnostic PRIVATE SCPEFE::scpefe)
+    if(SCPEFE_STATIC_DIAGNOSTIC)
+        set(SODIUM_STATIC_LIBRARY "" CACHE FILEPATH "The /MT static libsodium library")
+        if(NOT EXISTS "${SODIUM_STATIC_LIBRARY}")
+            message(FATAL_ERROR "Set SODIUM_STATIC_LIBRARY to x64-windows-static/libs/libsodium.lib")
+        endif()
+        # Use exactly the shared core's implementation and public C ABI. The
+        # shared target and Electron keep their existing runtime and linkage.
+        get_target_property(SCPEFE_NATIVE_SOURCES scpefe SOURCES)
+        add_library(scpefe_diagnostic_core STATIC ${SCPEFE_NATIVE_SOURCES})
+        target_compile_features(scpefe_diagnostic_core PUBLIC cxx_std_20)
+        target_compile_definitions(scpefe_diagnostic_core PUBLIC SCPEFE_STATIC_API
+            PRIVATE $<TARGET_PROPERTY:scpefe,COMPILE_DEFINITIONS>)
+        target_include_directories(scpefe_diagnostic_core
+            PRIVATE $<TARGET_PROPERTY:scpefe,INCLUDE_DIRECTORIES>
+            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_compile_options(scpefe_diagnostic_core PRIVATE /W4 /permissive-)
+        target_link_libraries(scpefe_diagnostic_core PRIVATE "${SODIUM_STATIC_LIBRARY}" advapi32)
+        set_target_properties(scpefe_diagnostic_core scpefe_diagnostic PROPERTIES
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+            CXX_EXTENSIONS OFF)
+        target_link_libraries(scpefe_diagnostic PRIVATE scpefe_diagnostic_core)
+    else()
+        target_link_libraries(scpefe_diagnostic PRIVATE SCPEFE::scpefe)
+    endif()
+
+    # Read maintained notices at configure time, rather than copying licence
+    # prose into C++ or depending on files beside the executable at runtime.
+    find_file(SCPEFE_SODIUM_LICENSE_FILE NAMES copyright LICENSE LICENSE.txt
+        HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/libsodium"
+        PATHS /usr/share/doc/libsodium23 /usr/local/share/doc/libsodium
+        DOC "Licence notice supplied with the linked libsodium installation"
+        NO_DEFAULT_PATH REQUIRED)
+    set(SCPEFE_DIAGNOSTIC_LICENSES "SCPEFE\n=======\n")
+    foreach(SCPEFE_NOTICE IN ITEMS "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            "${SCPEFE_SODIUM_LICENSE_FILE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zxcvbn-c/LICENSE.txt")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SCPEFE_NOTICE}")
+        file(READ "${SCPEFE_NOTICE}" SCPEFE_NOTICE_TEXT)
+        string(APPEND SCPEFE_DIAGNOSTIC_LICENSES "${SCPEFE_NOTICE_TEXT}")
+        if(SCPEFE_NOTICE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+            string(APPEND SCPEFE_DIAGNOSTIC_LICENSES "\nlibsodium\n=========\n")
+        elseif(SCPEFE_NOTICE STREQUAL "${SCPEFE_SODIUM_LICENSE_FILE}")
+            string(APPEND SCPEFE_DIAGNOSTIC_LICENSES "\nzxcvbn-c\n========\n")
+        endif()
+    endforeach()
+    # A byte array avoids MSVC's per-string and concatenated-string size limits
+    # while retaining the complete notices (including non-ASCII characters).
+    string(REPLACE "\r\n" "\n" SCPEFE_DIAGNOSTIC_LICENSES "${SCPEFE_DIAGNOSTIC_LICENSES}")
+    string(HEX "${SCPEFE_DIAGNOSTIC_LICENSES}" SCPEFE_DIAGNOSTIC_LICENSE_BYTES)
+    string(REGEX REPLACE "(..)" "0x\\1,\n" SCPEFE_DIAGNOSTIC_LICENSE_BYTES "${SCPEFE_DIAGNOSTIC_LICENSE_BYTES}")
+    configure_file(tools/diagnostic_licenses.cpp.in
+        generated/diagnostic_licenses.cpp @ONLY)
+    target_sources(scpefe_diagnostic PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated/diagnostic_licenses.cpp)
+    target_include_directories(scpefe_diagnostic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
     set_target_properties(scpefe_diagnostic PROPERTIES
         CXX_EXTENSIONS OFF
         OUTPUT_NAME scpefe-diagnostic
@@ -203,6 +260,13 @@ if(BUILD_TESTING)
     else()
         add_executable(scpefe_context_test tests/context_test.c)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME scpefe.windows-diagnostic-preview-policy
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_diagnostic_preview_test.py)
+        set_tests_properties(scpefe.windows-diagnostic-preview-policy PROPERTIES
+            TIMEOUT 30 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        add_test(NAME scpefe.diagnostic-licenses
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostic_licenses_test.py
+                $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} "${SCPEFE_SODIUM_LICENSE_FILE}")
         add_test(NAME scpefe.container-diagnostic
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/container_diagnostic_test.py
                 $<TARGET_FILE:scpefe_diagnostic> ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:scpefe>)

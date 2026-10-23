@@ -4,7 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(_WIN32)
+#if defined(SCPEFE_STATIC_API)
+#    define SCPEFE_API
+#elif defined(_WIN32)
 #    if defined(SCPEFE_BUILDING_LIBRARY)
 #        define SCPEFE_API __declspec(dllexport)
 #    else
