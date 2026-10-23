@@ -199,7 +199,7 @@ def validate(executable, repository, sodium_notice, dumpbin, source_commit, outp
                 assert invoke(command).stdout == result.stdout
                 if command == "health":
                     assert report["status"] == "ok" and report["host_monotonic_time_ms"] == 424242
-            result = invoke("--licenses")
+            result = invoke("licenses")
             assert result.stdout == expected_notices and result.stderr == b""
             path = inputs / "snapshot.cbor"
             path.write_bytes(vector(repository, "../draft-v1/valid/snapshot-revision"))

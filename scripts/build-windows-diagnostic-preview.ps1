@@ -109,7 +109,7 @@ Open PowerShell in the executable's folder, then run:
 
   .\scpefe-diagnostic.exe health
   .\scpefe-diagnostic.exe version
-  .\scpefe-diagnostic.exe --licenses
+  .\scpefe-diagnostic.exe licenses
   .\scpefe-diagnostic.exe inspect "C:\path\document.scpefe"
 
 The password prompt hides your input. Never put a password in arguments.
@@ -121,7 +121,7 @@ Redirect JSON to a file if desired:
   .\scpefe-diagnostic.exe inspect "C:\path\document.scpefe" > diagnostic.json
 
 This tool reads supported revised-v3 containers and does not modify them.
-Licence notices are embedded and available through --licenses.
+Licence notices are embedded and available through licenses.
 preview-manifest.json identifies the exact source commit, validation result,
 allowed system imports and validated EXE SHA-256. This developer preview is unsigned.
 The downloadable checksum is for the EXE itself, not the GitHub artifact ZIP.

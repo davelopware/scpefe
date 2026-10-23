@@ -174,7 +174,7 @@ int report_container(const char *path, bool include_content, bool password_stdin
 
 void print_usage(const char *program)
 {
-    std::cerr << "Usage: " << program << " <health|version|--licenses>\n"
+    std::cerr << "Usage: " << program << " <health|version|licenses>\n"
               << "       " << program
               << " revision <cbor-path> [--include-content]\n";
     std::cerr << "       " << program
@@ -196,7 +196,7 @@ int main(int argc, char **argv)
     }
 
     const std::string_view operation{argv[1]};
-    if (operation == "--licenses") {
+    if (operation == "licenses") {
         if (argc != 2) {
             print_usage(argv[0]);
             return 2;

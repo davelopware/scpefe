@@ -27,7 +27,7 @@ ctest --test-dir build --output-on-failure
 ./build/scpefe-diagnostic health
 ```
 
-Builds embed the project and third-party licence notices for `--licenses`.
+Builds embed the project and third-party licence notices for `licenses`.
 CMake discovers the installed libsodium notice; pass
 `-DSCPEFE_SODIUM_LICENSE_FILE=/path/to/libsodium/copyright` if your package stores
 it elsewhere. The notice must belong to the libsodium version you link.
@@ -106,14 +106,14 @@ imports and SHA-256 of the validated EXE. Verify the EXE before copying or runni
 $expected = (Get-Content .\scpefe-diagnostic.exe.sha256).Split(' ')[0]
 $actual = (Get-FileHash .\scpefe-diagnostic.exe -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw "EXE checksum mismatch" }
-.\scpefe-diagnostic.exe --licenses
+.\scpefe-diagnostic.exe licenses
 .\scpefe-diagnostic.exe inspect "C:\path\document.scpefe"
 ```
 
 The interactive prompt hides the password. Automation supplies one UTF-8 password
 line through standard input with `--password-stdin`; never put a password in
 arguments. Document content is omitted unless you add `--include-content`.
-`--licenses` displays the embedded project and third-party notices without
+`licenses` displays the embedded project and third-party notices without
 requiring any licence files beside the EXE.
 
 To build the same downloadable preview on Windows with the prerequisites below,
@@ -133,7 +133,7 @@ vcpkg checkout, set `VCPKG_ROOT` and run:
 
 ```powershell
 .\scripts\test-windows-static-diagnostic.ps1
-.\build\windows-static-diagnostic\Release\scpefe-diagnostic.exe --licenses
+.\build\windows-static-diagnostic\Release\scpefe-diagnostic.exe licenses
 ```
 
 The script installs both `libsodium:x64-windows` and
@@ -149,7 +149,7 @@ The validated executable is
 copied alone and needs only supported Windows system components and your input
 container at runtime. Build and test tools are not runtime dependencies. Licence
 notices are compiled from the maintained project, zxcvbn-c and installed libsodium
-notices and are available through `--licenses` with no companion files.
+notices and are available through `licenses` with no companion files.
 
 Validation rejects application and Visual C++ runtime DLL imports, copies only
 the EXE into an isolated directory, clears the development runtime path, and
