@@ -62,12 +62,12 @@ int report_health()
     }
 
     std::cout
-        << "{\"status\":\"ok\""
-        << ",\"abi_version\":" << health.abi_version
-        << ",\"library_version\":\"" << health.library_version_major << '.'
+        << "{\n  \"status\": \"ok\""
+        << ",\n  \"abi_version\": " << health.abi_version
+        << ",\n  \"library_version\": \"" << health.library_version_major << '.'
         << health.library_version_minor << '.' << health.library_version_patch << '"'
-        << ",\"host_monotonic_time_ms\":" << health.host_monotonic_time_ms
-        << "}\n";
+        << ",\n  \"host_monotonic_time_ms\": " << health.host_monotonic_time_ms
+        << "\n}\n";
     return 0;
 }
 
@@ -136,7 +136,7 @@ int report_revision(const char *path, bool include_content)
 
 int report_error(scpefe_status status)
 {
-    std::cerr << "{\"status\":\"error\",\"code\":" << status << "}\n";
+    std::cerr << "{\n  \"status\": \"error\",\n  \"code\": " << status << "\n}\n";
     return 1;
 }
 
@@ -226,9 +226,9 @@ int main(int argc, char **argv)
             print_usage(argv[0]);
             return 2;
         }
-        std::cout << "{\"abi_version\":" << scpefe_abi_version()
-                  << ",\"library_version\":\"" << scpefe_library_version()
-                  << "\"}\n";
+        std::cout << "{\n  \"abi_version\": " << scpefe_abi_version()
+                  << ",\n  \"library_version\": \"" << scpefe_library_version()
+                  << "\"\n}\n";
         return 0;
     }
     if (operation == "revision" && (argc == 3 || argc == 4)) {

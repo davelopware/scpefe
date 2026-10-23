@@ -32,7 +32,7 @@ public:
     static UnlockedContainerData unlock(const std::uint8_t *bytes, std::size_t size,
         const std::uint8_t *password, std::size_t password_size,
         const format::RevisionLimits &limits);
-    /* Serializes bounded metadata only after full envelope and graph authentication. */
+    /* Serializes indented metadata only after full envelope and graph authentication. */
     static std::string diagnostic_json(const std::uint8_t *bytes, std::size_t size,
         const std::uint8_t *password, std::size_t password_size,
         const format::RevisionLimits &limits, bool include_content);

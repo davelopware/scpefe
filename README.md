@@ -74,7 +74,7 @@ the same revised-v3 containers as the current document API; obsolete development
 v1/v2 envelopes are rejected. Success writes one JSON object to stdout containing
 envelope algorithms and sizes, document ID and content type, slot identities and
 permissions, editing lease, heads, revision links, attribution, hashes, and graph
-validation. Failure returns nonzero, writes a safe `{"status":"error","code":N}`
+validation. Reports use two-space indentation for readability. Failure returns nonzero, writes a safe `{"status":"error","code":N}`
 object to stderr, and leaves stdout empty. Numeric codes are `scpefe_status` values.
 Input and output are bounded; callers of the C API can supply graph resource limits.
 

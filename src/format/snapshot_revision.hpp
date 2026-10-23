@@ -27,7 +27,7 @@ public:
 
     /* Encodes the revision as deterministic CBOR. */
     std::vector<std::uint8_t> encode() const;
-    /* Renders readable diagnostic JSON, optionally including document text. */
+    /* Renders two-space-indented diagnostic JSON, optionally including document text. */
     std::string diagnostic_json(bool include_content) const;
     /* Returns the owned semantic values. */
     const SnapshotRevisionData &data() const { return data_; }

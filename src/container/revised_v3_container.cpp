@@ -388,7 +388,7 @@ std::string RevisedV3Container::diagnostic_json(const std::uint8_t *bytes,
     json.raw("},\"revision_graph\":");
     graph.write_diagnostic_json(json, include_content);
     json.character('}');
-    return json.take_output();
+    return json.take_pretty_output();
 }
 
 std::vector<std::uint8_t> RevisedV3Container::replace_graph(

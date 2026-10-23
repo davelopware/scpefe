@@ -480,7 +480,7 @@ std::string SnapshotRevision::diagnostic_json(bool include_content) const
         json.raw(",\"content\":"); json.string(data_.content.data(), data_.content.size());
     }
     json.raw("}}");
-    return json.take_output();
+    return json.take_pretty_output();
 }
 
 } // namespace scpefe::format

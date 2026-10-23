@@ -143,6 +143,14 @@ def interactive(executable, path, expected, race_library=None):
 def main():
     executable, root, library_path = sys.argv[1:4]
     root = Path(root)
+    for operation in ("health", "version"):
+        result = subprocess.run([executable, operation], capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        assert result.stdout == json.dumps(report, indent=2).encode() + b"\n"
+        assert report["abi_version"] == 2
+        if operation == "health":
+            assert report["status"] == "ok" and report["host_monotonic_time_ms"] == 424242
     if len(sys.argv) == 6 and sys.argv[4] == "--interrupt-race":
         with tempfile.TemporaryDirectory(prefix="scpefe-interruption-") as directory:
             path = Path(directory) / "document.scpefe"
@@ -180,7 +188,7 @@ def main():
             result = cli(executable, path)
             assert result.returncode == 0, result.stderr
             expected = json.loads((root / "tests/vectors/diagnostic" / (name + ".json")).read_text())
-            golden = json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode()
+            golden = json.dumps(expected, ensure_ascii=False, indent=2).encode()
             # Exact bytes freeze ordering, field names, escaping and omission rules.
             assert result.stdout == golden + b"\n", (name, {
                 "json_matches": json.loads(result.stdout) == expected,

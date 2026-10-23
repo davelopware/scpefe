@@ -13,7 +13,7 @@ records and graph links, reconstructs and verifies retained content hashes, and
 checks the content type before serializing any semantic output. The report
 does not prove that the inspected replica is the newest one.
 
-Success is compact UTF-8 JSON followed by a newline in the CLI. Field order is
+Success is UTF-8 JSON with two-space indentation, followed by a newline in the CLI. Field order is
 deterministic; identifiers and hashes use lowercase hexadecimal. Golden files
 under `tests/vectors/diagnostic` freeze representative reports and their order.
 There are no raw CBOR, ciphertext, password, key, or KDF intermediate fields.
@@ -53,7 +53,7 @@ errors set `output_size` to zero. Probes authenticate and validate too.
 
 Encrypted input has a 33 MiB hard cap. Decrypted graph allocation and structural
 limits come from the request; output has a separate 32 MiB hard cap, including
-escaped/expanded historical content but excluding NUL. Limit failures emit no
+indentation and escaped/expanded historical content but excluding NUL. Limit failures emit no
 partial output. Callers own returned JSON and should clear sensitive output
 buffers when finished. The core and CLI clear their owned password, decrypted
 graph, and diagnostic buffers on completion; OS terminal/pipe buffers and

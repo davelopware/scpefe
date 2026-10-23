@@ -99,4 +99,59 @@ std::string DiagnosticJsonWriter::take_output()
     return std::move(output_);
 }
 
+std::string DiagnosticJsonWriter::take_pretty_output()
+{
+    DiagnosticJsonWriter pretty;
+    std::size_t depth = 0;
+    bool in_string = false, escaped = false;
+    const auto new_line = [&] {
+        if (depth > max_output_bytes / 2)
+            throw RevisionFailure{RevisionError::limit_exceeded};
+        pretty.character('\n');
+        pretty.raw(std::string(depth * 2, ' '));
+    };
+    // This only formats trusted JSON already produced by this writer. Strings,
+    // including escaped quotes, punctuation and UTF-8 bytes, stay byte-identical.
+    for (std::size_t i = 0; i < output_.size(); ++i) {
+        const char value = output_[i];
+        if (in_string) {
+            pretty.character(value);
+            if (escaped) escaped = false;
+            else if (value == '\\') escaped = true;
+            else if (value == '"') in_string = false;
+            continue;
+        }
+        switch (value) {
+        case '"':
+            in_string = true;
+            pretty.character(value);
+            break;
+        case '{':
+        case '[':
+            pretty.character(value);
+            ++depth;
+            if (i + 1 < output_.size() && output_[i + 1] != (value == '{' ? '}' : ']'))
+                new_line();
+            break;
+        case '}':
+        case ']':
+            if (depth == 0) throw RevisionFailure{RevisionError::invalid_argument};
+            --depth;
+            if (i > 0 && output_[i - 1] != (value == '}' ? '{' : '[')) new_line();
+            pretty.character(value);
+            break;
+        case ',':
+            pretty.character(value);
+            new_line();
+            break;
+        case ':': pretty.raw(": "); break;
+        default: pretty.character(value); break;
+        }
+    }
+    auto result = pretty.take_output();
+    clear_memory(output_.data(), output_.size());
+    output_.clear();
+    return result;
+}
+
 } // namespace scpefe::format

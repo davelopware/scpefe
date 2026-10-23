@@ -790,7 +790,7 @@ SCPEFE_API scpefe_status scpefe_revision_limits_default(
 );
 
 /* Authenticates and validates a complete container before writing deterministic
- * UTF-8 JSON plus NUL. No output is written on failure or a size probe.
+ * two-space-indented UTF-8 JSON plus NUL. No output is written on failure or a size probe.
  * output_size excludes NUL, is zero on errors, and reports required bytes on
  * BUFFER_TOO_SMALL (capacity must exceed output_size). Output is capped at
  * 32 MiB. The caller owns and must clear any returned sensitive JSON. */
@@ -876,7 +876,7 @@ SCPEFE_API void scpefe_decoded_snapshot_revision_destroy(
     scpefe_decoded_snapshot_revision *revision
 );
 
-/* Decodes with the same common-core parser and writes UTF-8 JSON plus NUL. */
+/* Decodes with the common-core parser and writes indented UTF-8 JSON plus NUL. */
 SCPEFE_API scpefe_status scpefe_snapshot_revision_diagnostic_json(
     const uint8_t *encoded,
     size_t encoded_size,

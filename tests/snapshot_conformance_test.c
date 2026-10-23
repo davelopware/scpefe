@@ -139,7 +139,7 @@ int main(int argc, char **argv)
         valid.data, valid.size, &limits, 1, diagnostic, diagnostic_size,
         &diagnostic_size
     ) == SCPEFE_STATUS_OK);
-    CHECK(strstr(diagnostic, "\"content\":\"first line\\nsecond line\"") != NULL);
+    CHECK(strstr(diagnostic, "\"content\": \"first line\\nsecond line\"") != NULL);
     scpefe_decoded_snapshot_revision_destroy(decoded);
     decoded = NULL;
 
