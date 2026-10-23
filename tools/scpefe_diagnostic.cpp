@@ -31,6 +31,13 @@ scpefe_status read_monotonic_time(void *instance_data, std::uint64_t *time_ms)
     *time_ms = host->monotonic_time_ms;
     return SCPEFE_STATUS_OK;
 }
+
+int report_error(scpefe_status status)
+{
+    std::cerr << "{\n  \"status\": \"error\",\n  \"code\": " << status << "\n}\n";
+    return 1;
+}
+
 int report_health()
 {
     deterministic_host host{424242};
@@ -47,8 +54,7 @@ int report_health()
         &context
     );
     if (create_status != SCPEFE_STATUS_OK) {
-        std::cerr << "{\"status\":\"error\",\"code\":" << create_status << "}\n";
-        return 1;
+        return report_error(create_status);
     }
 
     scpefe_health_info_v1 health{};
@@ -57,8 +63,7 @@ int report_health()
     scpefe_context_destroy(context);
 
     if (health_status != SCPEFE_STATUS_OK) {
-        std::cerr << "{\"status\":\"error\",\"code\":" << health_status << "}\n";
-        return 1;
+        return report_error(health_status);
     }
 
     std::cout
@@ -75,23 +80,20 @@ int report_revision(const char *path, bool include_content)
 {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
-        std::cerr << "{\"status\":\"error\",\"message\":\"cannot open input\"}\n";
+        std::cerr << "{\n  \"status\": \"error\",\n  \"message\": \"cannot open input\"\n}\n";
         return 1;
     }
     scpefe_revision_limits_v1 limits{};
     limits.struct_size = sizeof(limits);
     scpefe_status status = scpefe_revision_limits_default(&limits);
     if (status != SCPEFE_STATUS_OK) {
-        std::cerr << "{\"status\":\"error\",\"code\":" << status << "}\n";
-        return 1;
+        return report_error(status);
     }
     input.seekg(0, std::ios::end);
     const std::streamoff input_size = input.tellg();
     if (input_size < 0
         || static_cast<std::uintmax_t>(input_size) > limits.max_input_bytes) {
-        std::cerr << "{\"status\":\"error\",\"code\":"
-                  << SCPEFE_STATUS_LIMIT_EXCEEDED << "}\n";
-        return 1;
+        return report_error(SCPEFE_STATUS_LIMIT_EXCEEDED);
     }
     input.seekg(0, std::ios::beg);
     const std::vector<char> input_chars{
@@ -113,8 +115,7 @@ int report_revision(const char *path, bool include_content)
         &json_size
     );
     if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL) {
-        std::cerr << "{\"status\":\"error\",\"code\":" << status << "}\n";
-        return 1;
+        return report_error(status);
     }
     std::vector<char> json(json_size + 1);
     status = scpefe_snapshot_revision_diagnostic_json(
@@ -127,17 +128,10 @@ int report_revision(const char *path, bool include_content)
         &json_size
     );
     if (status != SCPEFE_STATUS_OK) {
-        std::cerr << "{\"status\":\"error\",\"code\":" << status << "}\n";
-        return 1;
+        return report_error(status);
     }
     std::cout << json.data() << '\n';
     return 0;
-}
-
-int report_error(scpefe_status status)
-{
-    std::cerr << "{\n  \"status\": \"error\",\n  \"code\": " << status << "\n}\n";
-    return 1;
 }
 
 int report_container(const char *path, bool include_content, bool password_stdin)

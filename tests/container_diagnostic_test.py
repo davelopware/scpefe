@@ -46,6 +46,8 @@ def safe_error(result, code):
     assert result.returncode != 0
     assert result.stdout == b"", result.stdout[:200]
     assert json.loads(result.stderr) == {"status": "error", "code": code}, result.stderr
+    assert result.stderr.replace(b"\r\n", b"\n") == json.dumps(
+        {"status": "error", "code": code}, indent=2).encode() + b"\n"
 
 
 def api(library, data, password=PASSWORD, include=False, limit=None, change=None,
@@ -182,6 +184,13 @@ def main():
                                                        c.c_size_t, c.POINTER(c.c_size_t)]
     with tempfile.TemporaryDirectory(prefix="scpefe-diagnostic-") as directory:
         path = Path(directory) / "document.scpefe"
+        missing = subprocess.run([executable, "revision", str(path)], capture_output=True, timeout=10)
+        assert missing.returncode != 0 and missing.stdout == b""
+        assert missing.stderr.replace(b"\r\n", b"\n") == json.dumps({
+            "status": "error", "message": "cannot open input"}, indent=2).encode() + b"\n"
+        path.write_bytes(b"\x00")
+        malformed = subprocess.run([executable, "revision", str(path)], capture_output=True, timeout=10)
+        safe_error(malformed, 6)
         for name in ("baseline", "pruned-checkpoint", "foreign-merge", "provisional", "multi-slot"):
             data = vector(root, "valid/" + name + "-container")
             path.write_bytes(data)
