@@ -27,6 +27,11 @@ ctest --test-dir build --output-on-failure
 ./build/scpefe-diagnostic health
 ```
 
+Builds embed the project and third-party licence notices for `--licenses`.
+CMake discovers the installed libsodium notice; pass
+`-DSCPEFE_SODIUM_LICENSE_FILE=/path/to/libsodium/copyright` if your package stores
+it elsewhere. The notice must belong to the libsodium version you link.
+
 The health operation crosses the public, versioned C ABI. Its clock value comes
 from a deterministic in-memory host adapter registered with that CLI's explicit
 SCPEFE context.
@@ -92,6 +97,39 @@ DLLs and usage notes, then tests the extracted ZIP with a clean runtime path.
 The **Windows diagnostic preview** GitHub Actions workflow publishes the same
 unsigned package as `scpefe-diagnostic-win-x64-unsigned`; it contains
 `scpefe-diagnostic-win-x64.zip` and its SHA-256 checksum.
+
+## Single-EXE Windows diagnostic build
+
+On Windows x64 with Visual C++ (MSVC), CMake, Python 3.12 and a bootstrapped
+vcpkg checkout, set `VCPKG_ROOT` and run:
+
+```powershell
+.\scripts\test-windows-static-diagnostic.ps1
+.\build\windows-static-diagnostic\Release\scpefe-diagnostic.exe --licenses
+```
+
+The script installs both `libsodium:x64-windows` and
+`libsodium:x64-windows-static`, configures `SCPEFE_STATIC_DIAGNOSTIC=ON` with
+the static library's path and licence notice, builds Release, and runs the
+native suite. The diagnostic uses the same public C ABI and source code as
+`libscpefe`, with the core, libsodium and release C/C++ runtime (`/MT`) linked
+inside the EXE. Other targets retain the normal shared-library build and runtime,
+including the default Electron bridge configuration.
+
+The validated executable is
+`build\windows-static-diagnostic\Release\scpefe-diagnostic.exe`. It can be
+copied alone and needs only supported Windows system components and your input
+container at runtime. Build and test tools are not runtime dependencies. Licence
+notices are compiled from the maintained project, zxcvbn-c and installed libsodium
+notices and are available through `--licenses` with no companion files.
+
+Validation rejects application and Visual C++ runtime DLL imports, copies only
+the EXE into an isolated directory, clears the development runtime path, and
+exercises health, version, revision and authenticated inspection against the
+shared core's ABI and diagnostic golden vectors. Wrong passwords, malformed
+containers, explicit content inclusion and privacy rules use the same regression
+checks as the shared build. The Windows diagnostic preview workflow runs this
+gate as well as its existing shared-library package checks.
 
 ## WebAssembly conformance build
 
