@@ -17,7 +17,7 @@ export interface TableFindResult {
   column?: number;
 }
 
-/** Finds matching saved cells, including headings, in table order. */
+/** Finds matching current table cells, including headings, in table order. */
 export function tableMatches(rows: string[][], query: string): number[] {
   if (!query) return [];
   const needle = query.toLocaleLowerCase();
