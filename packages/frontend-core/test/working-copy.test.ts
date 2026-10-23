@@ -196,6 +196,17 @@ test("find wraps from the selection and replace commands update text in one edit
   assert.equal(journal.calls.length, 2);
 });
 
+test("find visits only fixed nonoverlapping occurrences from arbitrary cursors", () => {
+  const copy = new WorkingCopy(new ControlledJournal());
+  copy.adoptOpen("aaaaa");
+  copy.setSelection({ start: 1, end: 1 });
+  assert.deepEqual(copy.findNext("aa"), { status: "selected", wrapped: false,
+    selection: { start: 2, end: 4 } });
+  copy.setSelection({ start: 3, end: 3 });
+  assert.deepEqual(copy.findNext("aa"), { status: "selected", wrapped: true,
+    selection: { start: 0, end: 2 } });
+});
+
 test("provisional saves invalidate the baseline and selections stay within text", () => {
   const copy = new WorkingCopy(new ControlledJournal());
   copy.adoptOpen("same");

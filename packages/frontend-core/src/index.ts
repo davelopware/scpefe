@@ -11,7 +11,7 @@ export function isSnapshotSource(value: unknown): value is SnapshotSource<unknow
     && "subscribe" in value && typeof value.subscribe === "function";
 }
 
-export { WorkingCopy } from "./working-copy.ts";
+export { WorkingCopy, findTextOccurrences } from "./working-copy.ts";
 export { DocumentSession } from "./document-session.ts";
 export type { DocumentSessionHost, DocumentSessionOutcome, DocumentSessionSnapshot,
   SessionAttention, SessionCommands, SessionDocument, SessionEditAttention,

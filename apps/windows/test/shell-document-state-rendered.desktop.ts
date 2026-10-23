@@ -206,7 +206,8 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.deepEqual([editor.selectionStart, editor.selectionEnd], [18, 22]);
   await user.click(ui.getByRole(findDialog, "button", { name: "Find next" }));
   assert.deepEqual([editor.selectionStart, editor.selectionEnd], [6, 10]);
-  assert.match(ui.getByRole(findDialog, "status").textContent, /wrapping/);
+  assert.match(ui.getByRole(findDialog, "status", { name: "Find status" }).textContent,
+    /wrapping/);
   editor.focus(); await user.keyboard("{Control>}h{/Control}");
   assert.equal(document.activeElement === replaceInput, true,
     "Ctrl+H focuses Replace with even when mutation is read-only");
@@ -259,7 +260,8 @@ test("mounted shell presents truthful document states, history, failures, and se
   assert.deepEqual(journalPayload(), {
     content: "first row\nsecond row", cursor: { start: 20, end: 20 },
   }, "the end cursor crosses the working-copy boundary");
-  assert.match(ui.getByRole(findDialog, "status").textContent, /1 match replaced/);
+  assert.match(ui.getByRole(findDialog, "status", { name: "Find status" }).textContent,
+    /1 match replaced/);
   editor.focus(); await user.keyboard("{Control>}z{/Control}");
   assert.equal(editor.value, "first row\nsecond line");
   assert.deepEqual(journalPayload(), {

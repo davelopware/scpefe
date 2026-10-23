@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { DocumentSessionSnapshot, SessionDocument } from "@scpefe/frontend-core";
-import { isCsvStructureCommand, type ShellCommand,
+import { isCsvTableCommand, type ShellCommand,
   type ShellCommands } from "./shell-commands.ts";
 
 const menuDefinitions: Array<[string, Array<[ShellCommand, string, string?] | null>]> = [
@@ -32,7 +32,8 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
       ["delete-row", "Delete Row"], null,
       ["add-column-left", "Add Column Left"],
       ["add-column-right", "Add Column Right"],
-      ["delete-column", "Delete Column"]]] as typeof menuDefinitions[number],
+      ["delete-column", "Delete Column"], null,
+      ["sort-asc", "Sort Asc"], ["sort-desc", "Sort Desc"]]] as typeof menuDefinitions[number],
     ...menuDefinitions.slice(2)] : menuDefinitions;
   useEffect(() => {
     const shortcut = (event: globalThis.KeyboardEvent) => {
@@ -123,12 +124,12 @@ export function MenuBar<Doc extends SessionDocument>({ snapshot, commands }: {
           : <button key={item[0]} type="button" role="menuitem"
             disabled={!commands.available(item[0])} onClick={() => {
               const returnFocus = triggers.current[name];
-              const structure = isCsvStructureCommand(item[0]);
-              if (!structure) returnFocus?.focus();
+              const tableCommand = isCsvTableCommand(item[0]);
+              if (!tableCommand) returnFocus?.focus();
               setOpen(null);
               if (returnFocus) void commands.invoke(item[0], { returnFocus,
                 observedSnapshot: snapshot });
-              if (!structure) requestAnimationFrame(() => {
+              if (!tableCommand) requestAnimationFrame(() => {
                 if (!document.querySelector('[role="dialog"]')) triggers.current[name]?.focus();
               });
             }}><span>{csv && item[0] === "export" ? "Export CSV…" : item[1]}</span>
