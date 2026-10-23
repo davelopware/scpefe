@@ -271,7 +271,8 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
         <button type="button" disabled={showTable || readOnly || !findText}
           onClick={replaceAll}>Replace all</button>
         <button type="button" onClick={closeFind}>Close</button></div>
-      <p className="modeless-status" role="status" aria-live="polite">{findStatus}</p></div>
+      <p className="modeless-status" role="status" aria-live="polite"
+        aria-label="Find status">{findStatus}</p></div>
     </section>}
   </section>;
 }
