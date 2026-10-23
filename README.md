@@ -85,6 +85,14 @@ identities. Treat captured output accordingly. Password and temporary decrypted
 buffers are cleared on completion as far as the platform permits. See the
 [JSON contract](docs/format/container-diagnostic-json-v1.md) for field and omission rules.
 
+For a standalone Windows x64 preview, run
+`scripts\build-windows-diagnostic-preview.ps1` on Windows with CMake, Visual C++,
+Python 3.12 and vcpkg installed. It builds and tests the native tool, bundles its
+DLLs and usage notes, then tests the extracted ZIP with a clean runtime path.
+The **Windows diagnostic preview** GitHub Actions workflow publishes the same
+unsigned package as `scpefe-diagnostic-win-x64-unsigned`; it contains
+`scpefe-diagnostic-win-x64.zip` and its SHA-256 checksum.
+
 ## WebAssembly conformance build
 
 The platform-neutral snapshot format is also compiled with Emscripten and run
