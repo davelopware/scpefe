@@ -86,9 +86,19 @@ test('text Find counts canonical matches, resets on cursor and content changes, 
     assert.equal(dom.window.document.activeElement === editor, true);
     assert.deepEqual([editor.selectionStart, editor.selectionEnd], [0, 2]);
     assert.equal(count(), '1 / 2');
+    assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+      'Match selected.');
     await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
     assert.deepEqual([editor.selectionStart, editor.selectionEnd], [2, 4]);
     assert.equal(count(), '2 / 2');
+    assert.equal(dom.window.document.activeElement === editor, true);
+    await act(async () => find.focus());
+    await act(async () => find.dispatchEvent(new dom.window.KeyboardEvent('keydown',
+      { key: 'Enter', bubbles: true, cancelable: true })));
+    assert.deepEqual([editor.selectionStart, editor.selectionEnd], [0, 2]);
+    assert.equal(count(), '1 / 2');
+    assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+      'Match selected after wrapping to the start.');
     await act(async () => { editor.setSelectionRange(1, 1);
       dom.window.document.dispatchEvent(new dom.window.Event('selectionchange'));
       editor.dispatchEvent(new dom.window.Event('select', { bubbles: true })); });
@@ -104,6 +114,12 @@ test('text Find counts canonical matches, resets on cursor and content changes, 
     await act(async () => user.clear(find));
     await act(async () => user.type(find, 'missing'));
     assert.equal(count(), '0 / 0');
+    await act(async () => find.dispatchEvent(new dom.window.KeyboardEvent('keydown',
+      { key: 'Enter', bubbles: true, cancelable: true })));
+    assert.equal(count(), '0 / 0');
+    assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+      'Text not found.');
+    assert.equal(dom.window.document.activeElement === find, true);
     await act(async () => user.clear(find));
     await act(async () => user.type(find, 'aa'));
     await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
@@ -138,4 +154,15 @@ test('text Find counts canonical matches, resets on cursor and content changes, 
     assert.equal(dom.window.document.activeElement === editor, true);
     assert.deepEqual([editor.selectionStart, editor.selectionEnd], [0, 2]);
     assert.equal(count(), '1 / 2');
+    assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+      'Match selected after wrapping to the start.');
+    await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
+    assert.equal(dom.window.document.activeElement === editor, true);
+    assert.deepEqual([editor.selectionStart, editor.selectionEnd], [4, 6]);
+    assert.equal(count(), '2 / 2');
+    await act(async () => find.focus());
+    await act(async () => find.dispatchEvent(new dom.window.KeyboardEvent('keydown',
+      { key: 'Escape', bubbles: true, cancelable: true })));
+    assert.equal(dom.window.document.querySelector('[role="dialog"]'), null);
+    assert.equal(dom.window.document.activeElement === editor, true);
   });

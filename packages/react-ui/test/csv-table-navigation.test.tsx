@@ -195,14 +195,22 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   await key(dom, input, 'Enter');
   assert.equal(count(), '2 / 3');
   assert.equal(cell(dom, 1, 0).getAttribute('data-current-cell'), 'true');
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Match selected in row 1, column 1.');
   assert.equal(dom.window.document.querySelector('.csv-focused-value pre')?.textContent,
     'MATCH match');
-  await key(dom, input, 'Enter');
+  await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
   assert.equal(count(), '3 / 3');
   assert.equal(cell(dom, 2, 1).getAttribute('data-current-cell'), 'true');
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Match selected in row 2, column 2.');
   await key(dom, input, 'Enter');
   assert.equal(count(), '1 / 3');
   assert.equal(cell(dom, 0, 0).getAttribute('data-current-cell'), 'true');
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Match selected in heading, column 1 after wrapping to the start.');
   await act(async () => cell(dom, 2, 0).click());
   assert.equal(count(), '0 / 3');
   await act(async () => input.focus());
@@ -213,9 +221,15 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   assert.equal(count(), '0 / 0');
   await key(dom, input, 'Enter');
   assert.equal(count(), '0 / 0');
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Text not found.');
   await act(async () => user.type(input, '{Control>}a{/Control}{Backspace}'));
   assert.equal(input.value, '');
   assert.equal(count(), undefined);
+  await key(dom, input, 'Escape');
+  assert.equal(dom.window.document.querySelector('[role="dialog"]'), null);
+  assert.equal(dom.window.document.activeElement === cell(dom, 2, 1), true);
 });
 
 test("table Find reveals matches below the sticky heading and clear of the dialog", async (t) => {
