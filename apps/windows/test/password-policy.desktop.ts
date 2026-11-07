@@ -26,11 +26,18 @@ test("all new-password workflows expose the shared policy and live authoritative
     const { cleanup, render, within } = await import("@testing-library/react");
     const { assessProposedPassword, PasswordPolicyStatus } = await import(
       "../src/password-policy.ts");
-    t.after(() => {
-      cleanup(); dom.window.close();
-      for (const [key, descriptor] of prior) {
-        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-        else delete globalThis[key];
+    t.after(async () => {
+      try {
+        cleanup();
+        // React's passive effects use setImmediate; keep JSDOM installed until
+        // callbacks already queued by rendering and unmounting have run.
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        dom.window.close();
+        for (const [key, descriptor] of prior) {
+          if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+          else delete globalThis[key];
+        }
       }
     });
 
@@ -119,4 +126,6 @@ test("all new-password workflows expose the shared policy and live authoritative
     queuedCallbacks[0]();
     assert.equal(assessmentCalls, 0,
       "a callback already dispatched before cancellation cannot assess after unmount");
+    setImmediate(() => assert.equal(globalThis.window === dom.window, true,
+      "queued renderer work retains its JSDOM window through teardown"));
   });
