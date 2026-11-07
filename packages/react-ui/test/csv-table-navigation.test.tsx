@@ -108,6 +108,7 @@ test("CSV cells navigate, copy complete values, and Find searches headings and r
   assert.equal(dom.window.document.activeElement === input, true,
     "Find keeps keyboard focus in its field");
   assert.equal(cell(dom, 0, 1).getAttribute('data-current-cell'), 'true');
+  assert.equal(cell(dom, 0, 1).getAttribute('aria-current'), 'true');
   assert.equal(dom.window.document.querySelector('.find-match-count')?.textContent, '1 / 1');
   await act(async () => user.clear(input));
   await act(async () => user.type(input, "value"));
@@ -116,6 +117,8 @@ test("CSV cells navigate, copy complete values, and Find searches headings and r
   assert.equal(dom.window.document.activeElement === input, true);
   assert.equal(cell(dom, 1, 1).getAttribute('data-current-cell'), 'true',
     "Find searches the complete multiline data value");
+  assert.equal(cell(dom, 0, 1).hasAttribute('aria-current'), false);
+  assert.equal(cell(dom, 1, 1).getAttribute('aria-current'), 'true');
   assert.equal(dom.window.document.querySelector('.csv-focused-value pre')?.textContent, value);
   assert.equal(dom.window.document.querySelectorAll(".dialog-actions button:disabled").length,
     2, "Replace actions stay disabled in table view");
@@ -224,6 +227,9 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   assert.equal(dom.window.document.activeElement === input, true);
   assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
     'Text not found.');
+  await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
+  assert.equal(dom.window.document.activeElement === input, true,
+    'button search with no match restores Find input focus');
   await act(async () => user.type(input, '{Control>}a{/Control}{Backspace}'));
   assert.equal(input.value, '');
   assert.equal(count(), undefined);
@@ -297,6 +303,72 @@ test("table Find reveals matches below the sticky heading and clear of the dialo
   assert.ok(underDialog.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
     'the match remains clear of the dialog after horizontal scrolling');
 });
+
+for (const mode of ['read-only', 'edit']) {
+  test(`table Find reveals a distant result and restores navigation in ${mode} mode`,
+    async (t) => {
+      const { dom, root } = mounted(t);
+      const rows = Array.from({ length: 100 }, (_, row) =>
+        Array.from({ length: 8 }, (_, column) => row === 90 && column === 7
+          ? 'DISTANT-MATCH' : `r${row}c${column}`));
+      const text = writeCsvSource(rows);
+      const snapshot = { kind: mode, document: { content: text, contentType: 'csv' },
+        working: { text, selection: { start: 0, end: 0 } },
+        commands: { write: mode === 'edit' } };
+      const session = { subscribe: () => () => {}, getSnapshot: () => snapshot,
+        edit: () => false, setSelection: () => false, undo: () => false, redo: () => false,
+        findNext: () => null, replaceSelection: () => null, replaceAll: () => null };
+      const view = createRef();
+      let tablePosition = null;
+      await act(async () => root.render(<EditorView ref={view} session={session} active
+        locked={false} blocked={false} csvView="table" onMessage={() => {}}
+        onTableFocus={(position) => { tablePosition = position; }}
+        onReturnFocus={() => {}} />));
+      await act(async () => view.current.openFind('find', cell(dom, 0, 0)));
+      const document = dom.window.document;
+      const scroll = document.querySelector('.csv-table-scroll');
+      const dialog = document.querySelector('.modeless-dialog');
+      Object.defineProperty(scroll, 'clientHeight', { value: 576 });
+      const bounds = (left, top, right, bottom) => ({ left, top, right, bottom,
+        width: right - left, height: bottom - top });
+      scroll.getBoundingClientRect = () => bounds(0, 31, 920, 616);
+      document.querySelector('.csv-table th').getBoundingClientRect =
+        () => bounds(14, 43, 206, 79);
+      dialog.getBoundingClientRect = () => bounds(434, 470, 910, 650);
+      const originalBounds = dom.window.HTMLElement.prototype.getBoundingClientRect;
+      t.after(() => {
+        dom.window.HTMLElement.prototype.getBoundingClientRect = originalBounds;
+      });
+      dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+        if (this.dataset?.row === '90' && this.dataset?.column === '7') {
+          const top = 700 - (scroll.scrollTop - 2844);
+          const left = 1358 - scroll.scrollLeft;
+          return bounds(left, top, left + 192, top + 36);
+        }
+        return originalBounds.call(this);
+      };
+      const input = document.querySelector('.modeless-dialog input');
+      const userEvent = (await import('@testing-library/user-event')).default;
+      const user = userEvent.setup({ document });
+      await act(async () => user.type(input, 'DISTANT-MATCH'));
+      await key(dom, input, 'Enter');
+      const match = cell(dom, 90, 7);
+      assert.equal(match?.getAttribute('aria-current'), 'true');
+      assert.equal(document.activeElement === input, true);
+      assert.equal(document.querySelector('.csv-focused-value pre')?.textContent,
+        'DISTANT-MATCH');
+      assert.deepEqual(tablePosition, { row: 90, column: 7 });
+      assert.ok(scroll.scrollLeft > 0, 'distant column is revealed');
+      assert.ok(match.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
+        'distant row is revealed above the dialog');
+      await act(async () => document.querySelector('.dialog-actions button').click());
+      assert.equal(document.activeElement === input, true, 'Find next retains input focus');
+      await act(async () => document.querySelector('.dialog-actions button:last-child').click());
+      assert.equal(document.activeElement === match, true);
+      await key(dom, match, 'ArrowLeft');
+      assert.equal(document.activeElement === cell(dom, 90, 6), true);
+    });
+}
 
 test("CSV table cell drafts commit, navigate, cancel, and serialize as one value", async (t) => {
   const { dom, root } = mounted(t);
