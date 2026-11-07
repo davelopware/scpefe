@@ -195,6 +195,8 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   await act(async () => user.type(input, 'MaTcH'));
   const count = () => dom.window.document.querySelector('.find-match-count')?.textContent;
   assert.equal(count(), '0 / 3');
+  assert.equal(dom.window.document.querySelector('[role="status"][aria-label="Find matches"]')
+    ?.getAttribute('aria-live'), 'polite');
   await key(dom, input, 'Enter');
   assert.equal(count(), '2 / 3');
   assert.equal(cell(dom, 1, 0).getAttribute('data-current-cell'), 'true');
@@ -220,6 +222,11 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   await key(dom, input, 'Enter');
   assert.equal(count(), '3 / 3');
   await act(async () => user.clear(input));
+  await act(async () => user.type(input, 'MATCH'));
+  assert.equal(count(), '0 / 3', 'changing the query resets the selected result');
+  await key(dom, input, 'Enter');
+  assert.equal(count(), '1 / 3', 'the next search still starts after the table position');
+  await act(async () => user.clear(input));
   await act(async () => user.type(input, 'missing'));
   assert.equal(count(), '0 / 0');
   await key(dom, input, 'Enter');
@@ -227,6 +234,8 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   assert.equal(dom.window.document.activeElement === input, true);
   assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
     'Text not found.');
+  assert.equal(dom.window.document.querySelector('[role="status"][aria-label="Find status"]')
+    ?.getAttribute('aria-live'), 'polite');
   await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
   assert.equal(dom.window.document.activeElement === input, true,
     'button search with no match restores Find input focus');
@@ -235,7 +244,7 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   assert.equal(count(), undefined);
   await key(dom, input, 'Escape');
   assert.equal(dom.window.document.querySelector('[role="dialog"]'), null);
-  assert.equal(dom.window.document.activeElement === cell(dom, 2, 1), true);
+  assert.equal(dom.window.document.activeElement === cell(dom, 0, 0), true);
 });
 
 test("table Find reveals matches below the sticky heading and clear of the dialog", async (t) => {
@@ -351,7 +360,12 @@ for (const mode of ['read-only', 'edit']) {
       const userEvent = (await import('@testing-library/user-event')).default;
       const user = userEvent.setup({ document });
       await act(async () => user.type(input, 'DISTANT-MATCH'));
+      const count = () => document.querySelector('.find-match-count')?.textContent;
+      assert.equal(count(), '0 / 1', 'the unmounted row contributes to the live total');
+      assert.equal(document.querySelectorAll('.dialog-actions button:disabled').length, 2,
+        'Replace stays unavailable in both modes');
       await key(dom, input, 'Enter');
+      assert.equal(count(), '1 / 1');
       const match = cell(dom, 90, 7);
       assert.equal(match?.getAttribute('aria-current'), 'true');
       assert.equal(document.activeElement === input, true);
@@ -362,7 +376,18 @@ for (const mode of ['read-only', 'edit']) {
       assert.ok(match.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
         'distant row is revealed above the dialog');
       await act(async () => document.querySelector('.dialog-actions button').click());
+      assert.equal(count(), '1 / 1', 'wrapping keeps the one-based match position');
       assert.equal(document.activeElement === input, true, 'Find next retains input focus');
+      await act(async () => cell(dom, 90, 6).click());
+      assert.equal(count(), '0 / 1', 'manual table selection resets the current result');
+      await act(async () => input.focus());
+      await key(dom, input, 'Enter');
+      assert.equal(count(), '1 / 1', 'search resumes after the manually selected cell');
+      await act(async () => user.clear(input));
+      await act(async () => user.type(input, 'New row'));
+      assert.equal(count(), '0 / 0', 'the insertion placeholder is not a search result');
+      await act(async () => user.type(input, '{Control>}a{/Control}{Backspace}'));
+      assert.equal(count(), undefined, 'an empty query hides the counter');
       await act(async () => document.querySelector('.dialog-actions button:last-child').click());
       assert.equal(document.activeElement === match, true);
       await key(dom, match, 'ArrowLeft');
