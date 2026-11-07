@@ -883,3 +883,75 @@ test("Table sort compares trimmed English text and keeps stable ties and blank k
   assert.equal(parseCsvSource(saved).rows.length, 9,
     "heading and insertion placeholder stay outside the data row sort");
 });
+
+test("sorting through the editor reaches CSV source and the normal save command", async (t) => {
+  const { dom, root } = mounted(t);
+  const initial = writeCsvSource([["name", "name"], ["Zoe", "2"],
+    ["Ada", "10"], ["Bea", "1"]]);
+  let snapshot = { kind: "edit", adoption: 1,
+    document: { contentType: "csv" },
+    working: { text: initial, selection: { start: 0, end: 0 } },
+    commands: { write: true, save: true } };
+  const listeners = new Set();
+  const session = {
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    getSnapshot: () => snapshot,
+    edit: (text) => {
+      snapshot = { ...snapshot, working: { ...snapshot.working, text } };
+      for (const listener of listeners) listener();
+      return true;
+    },
+    setSelection: () => true, undo: () => false, redo: () => false,
+    findNext: () => null, replaceSelection: () => null, replaceAll: () => null,
+  };
+  const editor = createRef();
+  let saved = null;
+  function Harness() {
+    const current = useSyncExternalStore(session.subscribe, session.getSnapshot);
+    const [csvView, setCsvView] = useState("table");
+    const [focus, setFocus] = useState(null);
+    const commands = createShellCommands({ session, facts: () => ({
+      activeAdoption: 1, profileReady: true, modalBusy: false,
+      csvView, tableFocus: focus }),
+    run: (command) => {
+      if (command === "show-csv-source") setCsvView("source");
+      else if (command === "save") saved = session.getSnapshot().working.text;
+      else editor.current.runTableCommand(command);
+    }, track: async (operation) => { await operation(); } });
+    return <><MenuBar snapshot={current} commands={commands} />
+      <EditorView ref={editor} session={session} active locked={false} blocked={false}
+        csvView={csvView} onMessage={() => {}} onReturnFocus={() => {}}
+        onTableFocus={(next) => setFocus((previous) => previous?.row === next.row
+          && previous.column === next.column ? previous : next)} /></>;
+  }
+  await act(async () => root.render(<Harness />));
+  const menu = async (name) => act(async () =>
+    dom.window.document.querySelector(`button[aria-label="${name}"]`).click());
+  const action = (name, label) => [...dom.window.document.querySelectorAll(
+    `[role="menu"][aria-label="${name}"] button`)].find((button) =>
+    button.querySelector("span")?.textContent === label);
+
+  await act(async () => cell(dom, 0, 1).click());
+  await menu("Table");
+  assert.equal(action("Table", "Sort Asc")?.disabled, false);
+  await act(async () => action("Table", "Sort Asc").click());
+  const expected = writeCsvSource([["name", "name"], ["Bea", "1"],
+    ["Ada", "10"], ["Zoe", "2"]]);
+  assert.equal(snapshot.working.text, expected, "sort updates the session working copy");
+  assert.equal(cell(dom, 1, 0)?.textContent, "Bea", "the table shows sorted full rows");
+  assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+
+  await menu("Table");
+  assert.ok(action("Table", "Show CSV Source"), "source command is shown after sorting");
+  await act(async () => action("Table", "Show CSV Source").click());
+  assert.equal(dom.window.document.querySelector('textarea[aria-label="CSV source"]')?.value,
+    expected, "source view shows the same serialized row order");
+  await menu("Table");
+  assert.equal(action("Table", "Sort Asc")?.disabled, true, "source view disables sort");
+  await menu("Table");
+  await menu("File");
+  assert.ok(action("File", "Save"), "normal save command is shown");
+  await act(async () => action("File", "Save").click());
+  assert.equal(saved, expected, "normal Save submits the sorted working copy");
+  assert.equal(parseCsvSource(saved).valid, true);
+});
