@@ -27,6 +27,11 @@ ctest --test-dir build --output-on-failure
 ./build/scpefe-diagnostic health
 ```
 
+Builds embed the project and third-party licence notices for `licenses`.
+CMake discovers the installed libsodium notice; pass
+`-DSCPEFE_SODIUM_LICENSE_FILE=/path/to/libsodium/copyright` if your package stores
+it elsewhere. The notice must belong to the libsodium version you link.
+
 The health operation crosses the public, versioned C ABI. Its clock value comes
 from a deterministic in-memory host adapter registered with that CLI's explicit
 SCPEFE context.
@@ -85,13 +90,74 @@ identities. Treat captured output accordingly. Password and temporary decrypted
 buffers are cleared on completion as far as the platform permits. See the
 [JSON contract](docs/format/container-diagnostic-json-v1.md) for field and omission rules.
 
-For a standalone Windows x64 preview, run
-`scripts\build-windows-diagnostic-preview.ps1` on Windows with CMake, Visual C++,
-Python 3.12 and vcpkg installed. It builds and tests the native tool, bundles its
-DLLs and usage notes, then tests the extracted ZIP with a clean runtime path.
-The **Windows diagnostic preview** GitHub Actions workflow publishes the same
-unsigned package as `scpefe-diagnostic-win-x64-unsigned`; it contains
-`scpefe-diagnostic-win-x64.zip` and its SHA-256 checksum.
+The **Windows diagnostic preview** GitHub Actions workflow publishes
+`scpefe-diagnostic-win-x64-unsigned`. Download and extract that GitHub artifact,
+then copy **`scpefe-diagnostic.exe` alone** wherever you need it on Windows x64
+(Intel/AMD 64-bit). There is no installer or companion application DLL requirement;
+the common core, libsodium and C/C++ runtime are compiled into the executable.
+This developer preview is unsigned. Build tools and Python are not needed to run it.
+
+The artifact also contains `scpefe-diagnostic.exe.sha256`, `preview-manifest.json`
+and usage notes. These are verification information, not runtime dependencies.
+The manifest records the exact source commit, successful validation, system DLL
+imports and SHA-256 of the validated EXE. Verify the EXE before copying or running:
+
+```powershell
+$expected = (Get-Content .\scpefe-diagnostic.exe.sha256).Split(' ')[0]
+$actual = (Get-FileHash .\scpefe-diagnostic.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "EXE checksum mismatch" }
+.\scpefe-diagnostic.exe licenses
+.\scpefe-diagnostic.exe inspect "C:\path\document.scpefe"
+```
+
+The interactive prompt hides the password. Automation supplies one UTF-8 password
+line through standard input with `--password-stdin`; never put a password in
+arguments. Document content is omitted unless you add `--include-content`.
+`licenses` displays the embedded project and third-party notices without
+requiring any licence files beside the EXE.
+
+To build the same downloadable preview on Windows with the prerequisites below,
+run `scripts\build-windows-diagnostic-preview.ps1`. It preserves the default
+shared-library regression tests, builds/tests the static diagnostic, validates
+only the copied EXE outside development directories with a system-only PATH,
+empty working directory and private TEMP/TMP, and checks exact golden JSON,
+privacy, errors and unchanged inputs. Windows directory notifications catch even
+DLLs extracted and deleted during execution. Publication follows successful
+validation, and the workflow downloads the artifact again to verify that its EXE
+checksum and source commit match the validated manifest.
+
+## Single-EXE Windows diagnostic build
+
+On Windows x64 with Visual C++ (MSVC), CMake, Python 3.12 and a bootstrapped
+vcpkg checkout, set `VCPKG_ROOT` and run:
+
+```powershell
+.\scripts\test-windows-static-diagnostic.ps1
+.\build\windows-static-diagnostic\Release\scpefe-diagnostic.exe licenses
+```
+
+The script installs both `libsodium:x64-windows` and
+`libsodium:x64-windows-static`, configures `SCPEFE_STATIC_DIAGNOSTIC=ON` with
+the static library's path and licence notice, builds Release, and runs the
+native suite. The diagnostic uses the same public C ABI and source code as
+`libscpefe`, with the core, libsodium and release C/C++ runtime (`/MT`) linked
+inside the EXE. Other targets retain the normal shared-library build and runtime,
+including the default Electron bridge configuration.
+
+The validated executable is
+`build\windows-static-diagnostic\Release\scpefe-diagnostic.exe`. It can be
+copied alone and needs only supported Windows system components and your input
+container at runtime. Build and test tools are not runtime dependencies. Licence
+notices are compiled from the maintained project, zxcvbn-c and installed libsodium
+notices and are available through `licenses` with no companion files.
+
+Validation rejects application and Visual C++ runtime DLL imports, copies only
+the EXE into an isolated directory, clears the development runtime path, and
+exercises health, version, revision and authenticated inspection against the
+shared core's ABI and diagnostic golden vectors. Wrong passwords, malformed
+containers, explicit content inclusion and privacy rules use the same regression
+checks as the shared build. The Windows diagnostic preview workflow runs this
+gate alongside the default shared-library regression suite before packaging the EXE.
 
 ## WebAssembly conformance build
 

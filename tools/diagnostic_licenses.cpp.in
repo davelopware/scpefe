@@ -1,0 +1,7 @@
+#include "diagnostic_licenses.hpp"
+
+const char *diagnostic_licenses()
+{
+    static const unsigned char notices[] = {@SCPEFE_DIAGNOSTIC_LICENSE_BYTES@0};
+    return reinterpret_cast<const char *>(notices);
+}
