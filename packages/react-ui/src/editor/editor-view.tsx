@@ -70,7 +70,10 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
     ? tableMatches(csvParse.rows, findText).length
     : findTextOccurrences(text, findText).length : 0;
 
-  useEffect(() => { setMatchCurrent(0); }, [text, csvView]);
+  useEffect(() => {
+    setMatchCurrent(0);
+    searchSelection.current = null;
+  }, [text, csvView]);
 
   if (blocked && !wasBlocked.current && findOpen) {
     suspendedFindFocus.current = document.activeElement === replaceInput.current
@@ -161,6 +164,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
   function replaceSelection(): void {
     if (!findText || !editor.current || !active || readOnly) return;
     setMatchCurrent(0);
+    searchSelection.current = null;
     const { selectionStart: start, selectionEnd: end } = editor.current;
     session.setSelection({ start, end });
     const result = session.replaceSelection(findText, replaceText);
@@ -188,6 +192,7 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
   function replaceAll(): void {
     if (!findText || !active || readOnly) return;
     setMatchCurrent(0);
+    searchSelection.current = null;
     const matches = session.replaceAll(findText, replaceText)?.replacements ?? 0;
     if (!matches) { setFindStatus("Text not found."); onMessage("Text not found."); return; }
     const replaced = session.getSnapshot();
@@ -240,7 +245,10 @@ export function EditorView({ session, active, locked, blocked, csvView, onMessag
         const selection = { start: event.currentTarget.selectionStart,
           end: event.currentTarget.selectionEnd };
         if (findOpen && (selection.start !== searchSelection.current?.start
-          || selection.end !== searchSelection.current?.end)) setMatchCurrent(0);
+          || selection.end !== searchSelection.current?.end)) {
+          setMatchCurrent(0);
+          searchSelection.current = null;
+        }
         if (working && (selection.start !== working.selection.start
             || selection.end !== working.selection.end)) session.setSelection(selection);
       }}

@@ -609,9 +609,13 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
         { name: "Open requested document" });
       await user.click(ui.getByRole(opened, "button", { name: "Cancel" }));
     } else if (entry === "close") {
-      await command("File", /Close/); expectedState = "No document";
+      await command("File", /Close/);
+      await awaitLifecycleCompletion("direct document Close");
+      expectedState = "No document";
     } else if (entry === "exit") {
-      await command("File", "Exit"); await ui.waitFor(() => assert.equal(fakeWindow.closed, 1));
+      await command("File", "Exit");
+      await awaitLifecycleCompletion("direct application Exit");
+      assert.equal(fakeWindow.closed, 1);
     } else {
       const event = fakeWindow.close(); assert.equal(event.prevented, windowPrevented);
       if (windowPrevented) await fakeWindow.lastClose;
@@ -1131,6 +1135,9 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
     const entry = origin.slice(3);
     if (["new", "open", "external"].includes(entry)) {
       await driveSuccessfulReplacement(entry); return;
+    }
+    if (options.delayDirectRelease && ["close", "exit"].includes(entry)) {
+      delayPublicationOnce = true;
     }
     await driveDirect(entry, "Edit mode", origin.endsWith("window")); return;
   }
@@ -2133,5 +2140,9 @@ const primaryOrigins = ["inactivity", "lease-refresh-failed", "window-close", "e
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const origin of primaryOrigins) {
     test(lifecycleCaseName(origin), (t) => runMountedLock(t, origin));
+  }
+  for (const entry of ["close", "exit"]) {
+    test(`L-S2-${entry === "close" ? "C" : "E"} delayed clean edit release`,
+      (t) => runMountedLock(t, `s2-${entry}`, null, { delayDirectRelease: true }));
   }
 }

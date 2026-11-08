@@ -108,6 +108,7 @@ test("CSV cells navigate, copy complete values, and Find searches headings and r
   assert.equal(dom.window.document.activeElement === input, true,
     "Find keeps keyboard focus in its field");
   assert.equal(cell(dom, 0, 1).getAttribute('data-current-cell'), 'true');
+  assert.equal(cell(dom, 0, 1).getAttribute('aria-current'), 'true');
   assert.equal(dom.window.document.querySelector('.find-match-count')?.textContent, '1 / 1');
   await act(async () => user.clear(input));
   await act(async () => user.type(input, "value"));
@@ -116,6 +117,8 @@ test("CSV cells navigate, copy complete values, and Find searches headings and r
   assert.equal(dom.window.document.activeElement === input, true);
   assert.equal(cell(dom, 1, 1).getAttribute('data-current-cell'), 'true',
     "Find searches the complete multiline data value");
+  assert.equal(cell(dom, 0, 1).hasAttribute('aria-current'), false);
+  assert.equal(cell(dom, 1, 1).getAttribute('aria-current'), 'true');
   assert.equal(dom.window.document.querySelector('.csv-focused-value pre')?.textContent, value);
   assert.equal(dom.window.document.querySelectorAll(".dialog-actions button:disabled").length,
     2, "Replace actions stay disabled in table view");
@@ -192,30 +195,56 @@ test("table Find counts cells, wraps in table order, and resets after manual sel
   await act(async () => user.type(input, 'MaTcH'));
   const count = () => dom.window.document.querySelector('.find-match-count')?.textContent;
   assert.equal(count(), '0 / 3');
+  assert.equal(dom.window.document.querySelector('[role="status"][aria-label="Find matches"]')
+    ?.getAttribute('aria-live'), 'polite');
   await key(dom, input, 'Enter');
   assert.equal(count(), '2 / 3');
   assert.equal(cell(dom, 1, 0).getAttribute('data-current-cell'), 'true');
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Match selected in row 1, column 1.');
   assert.equal(dom.window.document.querySelector('.csv-focused-value pre')?.textContent,
     'MATCH match');
-  await key(dom, input, 'Enter');
+  await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
   assert.equal(count(), '3 / 3');
   assert.equal(cell(dom, 2, 1).getAttribute('data-current-cell'), 'true');
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Match selected in row 2, column 2.');
   await key(dom, input, 'Enter');
   assert.equal(count(), '1 / 3');
   assert.equal(cell(dom, 0, 0).getAttribute('data-current-cell'), 'true');
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Match selected in heading, column 1 after wrapping to the start.');
   await act(async () => cell(dom, 2, 0).click());
   assert.equal(count(), '0 / 3');
   await act(async () => input.focus());
   await key(dom, input, 'Enter');
   assert.equal(count(), '3 / 3');
   await act(async () => user.clear(input));
+  await act(async () => user.type(input, 'MATCH'));
+  assert.equal(count(), '0 / 3', 'changing the query resets the selected result');
+  await key(dom, input, 'Enter');
+  assert.equal(count(), '1 / 3', 'the next search still starts after the table position');
+  await act(async () => user.clear(input));
   await act(async () => user.type(input, 'missing'));
   assert.equal(count(), '0 / 0');
   await key(dom, input, 'Enter');
   assert.equal(count(), '0 / 0');
+  assert.equal(dom.window.document.activeElement === input, true);
+  assert.equal(dom.window.document.querySelector('.modeless-status')?.textContent,
+    'Text not found.');
+  assert.equal(dom.window.document.querySelector('[role="status"][aria-label="Find status"]')
+    ?.getAttribute('aria-live'), 'polite');
+  await act(async () => dom.window.document.querySelector('.dialog-actions button').click());
+  assert.equal(dom.window.document.activeElement === input, true,
+    'button search with no match restores Find input focus');
   await act(async () => user.type(input, '{Control>}a{/Control}{Backspace}'));
   assert.equal(input.value, '');
   assert.equal(count(), undefined);
+  await key(dom, input, 'Escape');
+  assert.equal(dom.window.document.querySelector('[role="dialog"]'), null);
+  assert.equal(dom.window.document.activeElement === cell(dom, 0, 0), true);
 });
 
 test("table Find reveals matches below the sticky heading and clear of the dialog", async (t) => {
@@ -283,6 +312,88 @@ test("table Find reveals matches below the sticky heading and clear of the dialo
   assert.ok(underDialog.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
     'the match remains clear of the dialog after horizontal scrolling');
 });
+
+for (const mode of ['read-only', 'edit']) {
+  test(`table Find reveals a distant result and restores navigation in ${mode} mode`,
+    async (t) => {
+      const { dom, root } = mounted(t);
+      const rows = Array.from({ length: 100 }, (_, row) =>
+        Array.from({ length: 8 }, (_, column) => row === 90 && column === 7
+          ? 'DISTANT-MATCH' : `r${row}c${column}`));
+      const text = writeCsvSource(rows);
+      const snapshot = { kind: mode, document: { content: text, contentType: 'csv' },
+        working: { text, selection: { start: 0, end: 0 } },
+        commands: { write: mode === 'edit' } };
+      const session = { subscribe: () => () => {}, getSnapshot: () => snapshot,
+        edit: () => false, setSelection: () => false, undo: () => false, redo: () => false,
+        findNext: () => null, replaceSelection: () => null, replaceAll: () => null };
+      const view = createRef();
+      let tablePosition = null;
+      await act(async () => root.render(<EditorView ref={view} session={session} active
+        locked={false} blocked={false} csvView="table" onMessage={() => {}}
+        onTableFocus={(position) => { tablePosition = position; }}
+        onReturnFocus={() => {}} />));
+      await act(async () => view.current.openFind('find', cell(dom, 0, 0)));
+      const document = dom.window.document;
+      const scroll = document.querySelector('.csv-table-scroll');
+      const dialog = document.querySelector('.modeless-dialog');
+      Object.defineProperty(scroll, 'clientHeight', { value: 576 });
+      const bounds = (left, top, right, bottom) => ({ left, top, right, bottom,
+        width: right - left, height: bottom - top });
+      scroll.getBoundingClientRect = () => bounds(0, 31, 920, 616);
+      document.querySelector('.csv-table th').getBoundingClientRect =
+        () => bounds(14, 43, 206, 79);
+      dialog.getBoundingClientRect = () => bounds(434, 470, 910, 650);
+      const originalBounds = dom.window.HTMLElement.prototype.getBoundingClientRect;
+      t.after(() => {
+        dom.window.HTMLElement.prototype.getBoundingClientRect = originalBounds;
+      });
+      dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+        if (this.dataset?.row === '90' && this.dataset?.column === '7') {
+          const top = 700 - (scroll.scrollTop - 2844);
+          const left = 1358 - scroll.scrollLeft;
+          return bounds(left, top, left + 192, top + 36);
+        }
+        return originalBounds.call(this);
+      };
+      const input = document.querySelector('.modeless-dialog input');
+      const userEvent = (await import('@testing-library/user-event')).default;
+      const user = userEvent.setup({ document });
+      await act(async () => user.type(input, 'DISTANT-MATCH'));
+      const count = () => document.querySelector('.find-match-count')?.textContent;
+      assert.equal(count(), '0 / 1', 'the unmounted row contributes to the live total');
+      assert.equal(document.querySelectorAll('.dialog-actions button:disabled').length, 2,
+        'Replace stays unavailable in both modes');
+      await key(dom, input, 'Enter');
+      assert.equal(count(), '1 / 1');
+      const match = cell(dom, 90, 7);
+      assert.equal(match?.getAttribute('aria-current'), 'true');
+      assert.equal(document.activeElement === input, true);
+      assert.equal(document.querySelector('.csv-focused-value pre')?.textContent,
+        'DISTANT-MATCH');
+      assert.deepEqual(tablePosition, { row: 90, column: 7 });
+      assert.ok(scroll.scrollLeft > 0, 'distant column is revealed');
+      assert.ok(match.getBoundingClientRect().bottom <= dialog.getBoundingClientRect().top,
+        'distant row is revealed above the dialog');
+      await act(async () => document.querySelector('.dialog-actions button').click());
+      assert.equal(count(), '1 / 1', 'wrapping keeps the one-based match position');
+      assert.equal(document.activeElement === input, true, 'Find next retains input focus');
+      await act(async () => cell(dom, 90, 6).click());
+      assert.equal(count(), '0 / 1', 'manual table selection resets the current result');
+      await act(async () => input.focus());
+      await key(dom, input, 'Enter');
+      assert.equal(count(), '1 / 1', 'search resumes after the manually selected cell');
+      await act(async () => user.clear(input));
+      await act(async () => user.type(input, 'New row'));
+      assert.equal(count(), '0 / 0', 'the insertion placeholder is not a search result');
+      await act(async () => user.type(input, '{Control>}a{/Control}{Backspace}'));
+      assert.equal(count(), undefined, 'an empty query hides the counter');
+      await act(async () => document.querySelector('.dialog-actions button:last-child').click());
+      assert.equal(document.activeElement === match, true);
+      await key(dom, match, 'ArrowLeft');
+      assert.equal(document.activeElement === cell(dom, 90, 6), true);
+    });
+}
 
 test("CSV table cell drafts commit, navigate, cancel, and serialize as one value", async (t) => {
   const { dom, root } = mounted(t);
@@ -771,4 +882,76 @@ test("Table sort compares trimmed English text and keeps stable ties and blank k
   assert.equal(parseCsvSource(saved).valid, true);
   assert.equal(parseCsvSource(saved).rows.length, 9,
     "heading and insertion placeholder stay outside the data row sort");
+});
+
+test("sorting through the editor reaches CSV source and the normal save command", async (t) => {
+  const { dom, root } = mounted(t);
+  const initial = writeCsvSource([["name", "name"], ["Zoe", "2"],
+    ["Ada", "10"], ["Bea", "1"]]);
+  let snapshot = { kind: "edit", adoption: 1,
+    document: { contentType: "csv" },
+    working: { text: initial, selection: { start: 0, end: 0 } },
+    commands: { write: true, save: true } };
+  const listeners = new Set();
+  const session = {
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    getSnapshot: () => snapshot,
+    edit: (text) => {
+      snapshot = { ...snapshot, working: { ...snapshot.working, text } };
+      for (const listener of listeners) listener();
+      return true;
+    },
+    setSelection: () => true, undo: () => false, redo: () => false,
+    findNext: () => null, replaceSelection: () => null, replaceAll: () => null,
+  };
+  const editor = createRef();
+  let saved = null;
+  function Harness() {
+    const current = useSyncExternalStore(session.subscribe, session.getSnapshot);
+    const [csvView, setCsvView] = useState("table");
+    const [focus, setFocus] = useState(null);
+    const commands = createShellCommands({ session, facts: () => ({
+      activeAdoption: 1, profileReady: true, modalBusy: false,
+      csvView, tableFocus: focus }),
+    run: (command) => {
+      if (command === "show-csv-source") setCsvView("source");
+      else if (command === "save") saved = session.getSnapshot().working.text;
+      else editor.current.runTableCommand(command);
+    }, track: async (operation) => { await operation(); } });
+    return <><MenuBar snapshot={current} commands={commands} />
+      <EditorView ref={editor} session={session} active locked={false} blocked={false}
+        csvView={csvView} onMessage={() => {}} onReturnFocus={() => {}}
+        onTableFocus={(next) => setFocus((previous) => previous?.row === next.row
+          && previous.column === next.column ? previous : next)} /></>;
+  }
+  await act(async () => root.render(<Harness />));
+  const menu = async (name) => act(async () =>
+    dom.window.document.querySelector(`button[aria-label="${name}"]`).click());
+  const action = (name, label) => [...dom.window.document.querySelectorAll(
+    `[role="menu"][aria-label="${name}"] button`)].find((button) =>
+    button.querySelector("span")?.textContent === label);
+
+  await act(async () => cell(dom, 0, 1).click());
+  await menu("Table");
+  assert.equal(action("Table", "Sort Asc")?.disabled, false);
+  await act(async () => action("Table", "Sort Asc").click());
+  const expected = writeCsvSource([["name", "name"], ["Bea", "1"],
+    ["Ada", "10"], ["Zoe", "2"]]);
+  assert.equal(snapshot.working.text, expected, "sort updates the session working copy");
+  assert.equal(cell(dom, 1, 0)?.textContent, "Bea", "the table shows sorted full rows");
+  assert.equal(dom.window.document.querySelectorAll(".csv-insertion-placeholder").length, 1);
+
+  await menu("Table");
+  assert.ok(action("Table", "Show CSV Source"), "source command is shown after sorting");
+  await act(async () => action("Table", "Show CSV Source").click());
+  assert.equal(dom.window.document.querySelector('textarea[aria-label="CSV source"]')?.value,
+    expected, "source view shows the same serialized row order");
+  await menu("Table");
+  assert.equal(action("Table", "Sort Asc")?.disabled, true, "source view disables sort");
+  await menu("Table");
+  await menu("File");
+  assert.ok(action("File", "Save"), "normal save command is shown");
+  await act(async () => action("File", "Save").click());
+  assert.equal(saved, expected, "normal Save submits the sorted working copy");
+  assert.equal(parseCsvSource(saved).valid, true);
 });

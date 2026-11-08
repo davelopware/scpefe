@@ -104,8 +104,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
         let visibleBottom = viewport.bottom - 8;
         const dialog = scroll.current.closest('.editor-surface')
           ?.querySelector('.modeless-dialog')?.getBoundingClientRect();
-        if (dialog && bounds.right > dialog.left && bounds.left < dialog.right
-          && bounds.bottom > dialog.top && bounds.top < dialog.bottom) {
+        if (dialog && bounds.right > dialog.left && bounds.left < dialog.right) {
           const above = dialog.top - 8 - visibleTop;
           const below = visibleBottom - dialog.bottom - 8;
           if (above >= bounds.height || above >= below) {
@@ -425,6 +424,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
         {rows[0].map((heading, index) => <th scope="col" key={index}
           data-row="0" data-column={index} tabIndex={row === 0 && column === index ? 0 : -1}
           data-current-cell={row === 0 && column === index ? "true" : undefined}
+          aria-current={row === 0 && column === index ? "true" : undefined}
           onClick={(event) => click(event, 0, index)}
           onDoubleClick={(event) => doubleClick(event, 0, index)}
           onKeyDown={keyDown} onCopy={copy}>
@@ -438,6 +438,7 @@ export function CsvTable({ rows, readOnly = true, onEdit, onSave, ref,
           {values.map((value, columnIndex) => <td key={columnIndex}
             data-row={rowIndex} data-column={columnIndex}
             data-current-cell={row === rowIndex && column === columnIndex ? "true" : undefined}
+            aria-current={row === rowIndex && column === columnIndex ? "true" : undefined}
             tabIndex={row === rowIndex && column === columnIndex ? 0 : -1}
             onClick={(event) => click(event, rowIndex, columnIndex)}
             onDoubleClick={(event) => doubleClick(event, rowIndex, columnIndex)}
