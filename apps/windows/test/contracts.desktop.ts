@@ -12,7 +12,21 @@ import { canonicalizeDocumentText, validateCreateFormRequest, validateCreateRequ
   validateInvitationCreateRequest, validateInvitationResult,
   validateInvitationClaimRequest,
   validateSlotPermissionsRequest, validateSlotId, validateRegularSaveResult,
-  validateSlotRemovalResult } from "../src/contracts.mjs";
+  validateSlotRemovalResult, validateLockStarted, validateLockResult,
+} from "../src/contracts.mjs";
+
+test("lock cause crosses the preload boundary as a bounded catalog code", () => {
+  assert.deepEqual(validateLockStarted({ causeCode: "LEASE_REFRESH_FAILED",
+    reason: "private raw error" }), { causeCode: "LEASE_REFRESH_FAILED" });
+  assert.deepEqual(validateLockResult({ locked: true, journalSaved: true,
+    warningCode: null, causeCode: "LEASE_REFRESH_FAILED",
+    reason: "private raw error" }), { locked: true, journalSaved: true,
+    warningCode: null, causeCode: "LEASE_REFRESH_FAILED" });
+  assert.throws(() => validateLockStarted({ causeCode: "PRIVATE_IO_ERROR" }),
+    /invalid lock-started event/);
+  assert.throws(() => validateLockResult({ locked: true, journalSaved: true,
+    warningCode: null, causeCode: "PRIVATE_IO_ERROR" }), /invalid lock result/);
+});
 
 test("requires the complete local profile", () => {
   assert.deepEqual(validateProfile({

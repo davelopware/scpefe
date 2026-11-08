@@ -23,6 +23,10 @@ const AUTOMATIC_LOCK_REASONS = Object.freeze([
   "inactivity", "lease-refresh-failed", "screen-lock", "app-lock",
 ]);
 
+function lockCauseCode(reason) {
+  return reason === "lease-refresh-failed" ? "LEASE_REFRESH_FAILED" : null;
+}
+
 /* Owns the production document session and every replacement/termination lifecycle boundary. */
 export class DocumentLifecycleHost {
   constructor({ ipc, window, serviceFactory, picker, closeWindow = () => window.close(),
@@ -75,7 +79,9 @@ export class DocumentLifecycleHost {
         else if (this.currentTarget) this.lockedTarget = this.currentTarget;
       },
       emitLocked: (result) => {
-        this.#emit("document:locked", result); this.rendererLockStarted = false;
+        this.#emit("document:locked", { ...result,
+          causeCode: lockCauseCode(result.reason) });
+        this.rendererLockStarted = false;
         void this.sendJournalSummary();
       } });
     this.externalLifecycle = new ExternalOpenLifecycle({ requests: this.externalRequests,
@@ -193,7 +199,7 @@ export class DocumentLifecycleHost {
         const staged = this.replacements?.hasStagedCandidate(created)
           && AUTOMATIC_LOCK_REASONS.includes(reason);
         if (reason !== "document-close" && (created === this.service || staged)) {
-          this.#beginServiceLock(created);
+          this.#beginServiceLock(created, reason);
         }
       },
       onLocked: (result) => {
@@ -219,13 +225,13 @@ export class DocumentLifecycleHost {
     return created;
   }
 
-  #beginServiceLock(created) {
+  #beginServiceLock(created, reason) {
     if (!created.active || this.lockStartedServices.has(created)) return false;
     this.lockStartedServices.add(created);
     if (!this.rendererLockStarted) {
       this.rendererLockStarted = true; this.generation.invalidate();
       this.protections?.cancelForLock(); this.leaseTakeovers.clear();
-      this.#emit("document:lock-started");
+      this.#emit("document:lock-started", { causeCode: lockCauseCode(reason) });
       void this.externalLifecycle?.cancelForLock().catch((error) =>
         this.#emit("document:journal-warning",
           safeEventCode(error, "document:open-external")));

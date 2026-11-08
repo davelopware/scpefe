@@ -15,9 +15,9 @@ export interface JournalTransportHost {
 /** Native lifecycle notifications consumed by the session presentation bridge. */
 export interface SessionEventsHost {
   activity(): Promise<unknown>;
-  onLockStarted?(listener: () => void): () => void;
+  onLockStarted?(listener: (result: { causeCode: "LEASE_REFRESH_FAILED" | null }) => void): () => void;
   onLocked(listener: (result: { locked: true; journalSaved: boolean;
-    warningCode: string | null }) => void): () => void;
+    warningCode: string | null; causeCode?: "LEASE_REFRESH_FAILED" | null }) => void): () => void;
   onJournalWarning(listener: (code: string, journalScope: string | null) => void): () => void;
   onRegularSave(listener: (result: { published: true; provisional: true;
     content: string; journalScope: string; revision: number }) => void): () => void;

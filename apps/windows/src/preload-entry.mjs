@@ -10,7 +10,8 @@ import { validateCreateFormRequest, validateCreationResult,
   validateLeaseDecisionResult, validateTakeoverRequest, validateDivergenceRequest,
   validateTakeoverCancellation,
   validateCompactionRequest,
-  canonicalizeDocumentText, validateWorkingCopy, validateLockResult,
+  canonicalizeDocumentText, validateWorkingCopy, validateLockStarted,
+  validateLockResult,
   validateClientSettings,
   validatePublicationResult, validateRecoveredWork, validateMergeDraft,
   validateUnresolvedJournalSummary, validateExternalOpenRequest,
@@ -242,7 +243,7 @@ contextBridge.exposeInMainWorld("scpefe", Object.freeze({
   lock: async () => validateLockResult(await ipcRenderer.invoke("document:lock")),
   onLockStarted: (listener) => {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
-    const handler = () => listener();
+    const handler = (_event, value) => listener(validateLockStarted(value));
     ipcRenderer.on("document:lock-started", handler);
     return () => ipcRenderer.removeListener("document:lock-started", handler);
   },

@@ -880,14 +880,24 @@ export function validateWorkingCopy(value) {
   ...(revision === undefined ? {} : { revision }) };
 }
 
+export function validateLockStarted(value) {
+  if (!value || typeof value !== "object"
+      || (value.causeCode !== null && value.causeCode !== "LEASE_REFRESH_FAILED")) {
+    throw new TypeError("host returned an invalid lock-started event");
+  }
+  return Object.freeze({ causeCode: value.causeCode });
+}
+
 export function validateLockResult(value) {
   if (!value || typeof value !== "object" || value.locked !== true
       || typeof value.journalSaved !== "boolean"
-      || (value.warningCode !== null && !isCatalogCode(value.warningCode))) {
+      || (value.warningCode !== null && !isCatalogCode(value.warningCode))
+      || (value.causeCode !== undefined && value.causeCode !== null
+        && value.causeCode !== "LEASE_REFRESH_FAILED")) {
     throw new TypeError("host returned an invalid lock result");
   }
   return Object.freeze({ locked: true, journalSaved: value.journalSaved,
-    warningCode: value.warningCode });
+    warningCode: value.warningCode, causeCode: value.causeCode ?? null });
 }
 
 export function validateRegularSaveResult(value) {
