@@ -543,8 +543,8 @@ export class DocumentService {
     let openedHere = false;
     try {
       if (sameImage && this.pendingNativeCandidate !== null) {
-        this.container.finishSave(this.pendingNativeCandidate, "definite-failure");
-        this.pendingNativeCandidate = null;
+        this.candidates.finishOnFailure(this.container,
+          this.pendingNativeCandidate, null);
         const suspended = this.suspendedLeases.get(nativeOpened.documentId);
         if (suspended?.release) {
           suspended.release.journalKey?.fill(0);
@@ -1761,21 +1761,16 @@ export class DocumentService {
       });
     } catch (error) {
       if (error?.code !== "TARGET_CHANGED") {
-        if (this.pendingNativeCandidate === suspended.release.operationId
-            && !error.publicationPrepared) {
-          this.candidates.finish(this.container, suspended.release.operationId,
-            "definite-failure");
-        }
+        this.candidates.finishOnFailure(this.container,
+          suspended.release.operationId, error);
         if (this.pendingNativeCandidate === null) {
           suspended.release.journalKey.fill(0);
           this.suspendedLeases.delete(documentId);
         }
         throw error;
       }
-      if (this.pendingNativeCandidate === suspended.release.operationId) {
-        this.candidates.finish(this.container, suspended.release.operationId,
-          "definite-failure");
-      }
+      this.candidates.finishOnFailure(this.container,
+        suspended.release.operationId, null);
       suspended.release.journalKey.fill(0);
       this.suspendedLeases.delete(documentId);
       return { released: false, changed: true };
@@ -1854,10 +1849,8 @@ export class DocumentService {
         }
       });
     } catch (error) {
-      if (this.pendingNativeCandidate !== null) {
-        this.#finishSaveCandidate(this.pendingNativeCandidate,
-          error.publicationPrepared ? "ambiguous" : "definite-failure");
-      }
+      this.candidates.finishOnFailure(this.container,
+        this.pendingNativeCandidate, error);
       if (error?.code === "REGULAR_SAVE_DIVERGED") {
         return this.#preserveRegularSaveConflict(
           active, profile, canonical, source.cursor, mergeAncestor);
@@ -1991,10 +1984,8 @@ export class DocumentService {
           this.native.inspectDocument(published, active.password));
       });
     } catch (error) {
-      if (this.pendingNativeCandidate !== null) {
-        this.#finishSaveCandidate(this.pendingNativeCandidate,
-          error.publicationPrepared ? "ambiguous" : "definite-failure");
-      }
+      this.candidates.finishOnFailure(this.container,
+        this.pendingNativeCandidate, error);
       if (error.publicationPrepared) {
         active.pendingPublication = true;
         active.pendingSubmittedVersion = submittedVersion;
@@ -2320,10 +2311,8 @@ export class DocumentService {
         }
       });
     } catch (error) {
-      if (this.pendingNativeCandidate !== null) {
-        this.#finishSaveCandidate(this.pendingNativeCandidate,
-          error.publicationPrepared ? "ambiguous" : "definite-failure");
-      }
+      this.candidates.finishOnFailure(this.container,
+        this.pendingNativeCandidate, error);
       if (error.publicationPrepared) {
         active.pendingPublication = true;
         active.unresolvedJournal = true;
@@ -2683,10 +2672,8 @@ export class DocumentService {
       active.baseContainer = Buffer.from(candidate.bytes);
       return this.container.authenticatedLease();
     } catch (error) {
-      if (this.pendingNativeCandidate === candidate.operationId) {
-        this.candidates.finish(this.container, candidate.operationId,
-          error.publicationPrepared ? "ambiguous" : "definite-failure");
-      }
+      this.candidates.finishOnFailure(this.container,
+        candidate.operationId, error);
       if (error.publicationPrepared) {
         active.pendingPublication = true;
         active.unresolvedJournal = true;
@@ -3084,10 +3071,8 @@ export class DocumentService {
       await this.exitEditMode();
       return active.opened;
     } catch (error) {
-      if (this.pendingNativeCandidate !== null) {
-        this.#finishSaveCandidate(this.pendingNativeCandidate,
-          error.publicationPrepared ? "ambiguous" : "definite-failure");
-      }
+      this.candidates.finishOnFailure(this.container,
+        this.pendingNativeCandidate, error);
       if (error.publicationPrepared) {
         active.pendingRecord = await this.journals.read(
           active.documentId, active.journalKey);
