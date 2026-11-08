@@ -529,12 +529,15 @@ export function validateOpenedDocument(value) {
         || value.recovery.cursor.start < 0
         || !Number.isSafeInteger(value.recovery.cursor.end)
         || value.recovery.cursor.end < value.recovery.cursor.start
-        || value.recovery.cursor.end > value.recovery.content.length) {
+        || value.recovery.cursor.end > value.recovery.content.length
+        || (value.recovery.baseMismatch !== undefined
+          && value.recovery.baseMismatch !== true)) {
       throw new TypeError("host returned invalid recovered work");
     }
     const recoveryContent = canonicalizeDocumentText(value.recovery.content);
     recovery = Object.freeze({ content: recoveryContent, state: "unsaved",
       updateTime: value.recovery.updateTime,
+      ...(value.recovery.baseMismatch === true ? { baseMismatch: true } : {}),
       ...(typeof value.recovery.authorName === "string" && value.recovery.authorName
         ? { authorName: requiredText(value.recovery.authorName, "recovery author") } : {}),
       ...(typeof value.recovery.deviceName === "string" && value.recovery.deviceName
@@ -604,6 +607,9 @@ export function validateOpenedDocument(value) {
   if (value.unreadableJournal !== undefined && value.unreadableJournal !== true) {
     throw new TypeError("host returned invalid unreadable journal decision");
   }
+  if (value.preservedJournal !== undefined && value.preservedJournal !== true) {
+    throw new TypeError("host returned invalid preserved journal guidance");
+  }
   if (value.activityOutcomePending !== undefined
       && typeof value.activityOutcomePending !== "boolean") {
     throw new TypeError("host returned invalid activity outcome status");
@@ -633,6 +639,7 @@ export function validateOpenedDocument(value) {
     ...(value.mustBeChanged !== undefined ? { invitationRequired } : {}),
     ...(lease ? { lease } : {}),
     ...(recovery ? { recovery } : {}),
+    ...(value.preservedJournal === true ? { preservedJournal: true } : {}),
     ...(value.unreadableJournal === true ? { unreadableJournal: true } : {}),
     ...(value.activityOutcomePending === true
       ? { activityOutcomePending: true } : {}),

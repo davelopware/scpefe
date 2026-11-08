@@ -197,7 +197,7 @@ export class DocumentService {
     active.profileMismatch = mismatch;
     const refreshed = { ...active.opened,
       readOnly: mismatch ? true : !active.editMode,
-      canEdit: mismatch || active.headMismatch
+      canEdit: mismatch || active.headMismatch || active.recoveryBaseMismatch
         ? false : active.slotCanEdit,
       ...(mismatch ? { profileMismatch: mismatch } : { profileMismatch: undefined }) };
     active.opened = active.editMode && !mismatch
@@ -436,8 +436,7 @@ export class DocumentService {
           this.onJournalWarning("PUBLICATION_CONFIRMATION_REQUIRED");
         }
       }
-      if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved"
-          && this.#journalBaseMatches(journal.baseRevision, nativeOpened)) {
+      if (!nativeOpened.opened.invitationRequired && journal?.state === "unsaved") {
         recovery = journal;
       }
       if (!nativeOpened.opened.invitationRequired && !nativeOpened.manuallySealed
@@ -462,6 +461,10 @@ export class DocumentService {
     }
     const targetOpened = nativeOpened.opened;
     const { headMismatch } = await this.#observeHead(target, nativeOpened);
+    const preservedJournal = headMismatch?.kind === "replacement"
+      && await this.journals.has(headMismatch.witnessedDocumentId);
+    const recoveryBaseMismatch = recovery !== null
+      && !this.#journalBaseMatches(recovery.baseRevision, nativeOpened);
     const profile = await this.loadProfile();
     const slotIdentityPresent = targetOpened.slotIdentityName !== undefined
       && targetOpened.slotIdentityEmail !== undefined;
@@ -477,12 +480,13 @@ export class DocumentService {
       ? nativeOpened.opened
       : validateOpenedDocument({ ...nativeOpened.opened,
         lease: nativeOpened.lease.active ? nativeOpened.lease : undefined,
-        canEdit: headMismatch || profileMismatch || unreadableJournal
+        canEdit: headMismatch || profileMismatch || unreadableJournal || recoveryBaseMismatch
           ? false : slotCanEdit,
         ...(pendingRecord?.publication.purpose !== "invitation-claim"
           ? (pendingRecord ? { content: pendingRecord.text } : {}) : {}),
         publicationState,
         ...(headMismatch ? { headMismatch } : {}),
+        ...(preservedJournal ? { preservedJournal: true } : {}),
         ...(profileMismatch ? { profileMismatch } : {}),
         ...(unreadableJournal ? { unreadableJournal: true } : {}),
         ...(pendingActivity ? { activityOutcomePending: true } : {}),
@@ -491,13 +495,14 @@ export class DocumentService {
         ...(recovery ? { recovery: { content: recovery.text,
           cursor: recovery.cursor, state: "unsaved",
           updateTime: recovery.updateTime,
+          ...(recoveryBaseMismatch ? { baseMismatch: true } : {}),
           ...(recovery.authorName ? { authorName: recovery.authorName } : {}),
           ...(recovery.deviceName ? { deviceName: recovery.deviceName } : {}) } } : {}) });
     this.#openActiveContainer(target, bytes, activePassword, nativeOpened);
     this.active = { target, password: activePassword, opened, editMode: false,
       documentId: nativeOpened.documentId, baseRevision: nativeOpened.baseRevision,
       revisionGraph: nativeOpened.revisionGraph, observation: this.#observation(nativeOpened),
-      slotCanEdit, headMismatch, profileMismatch,
+      slotCanEdit, headMismatch, profileMismatch, recoveryBaseMismatch,
       journalKey: Buffer.from(nativeOpened.journalKey), recovery,
       baseContainer: Buffer.from(bytes), targetContent: targetOpened.content,
       working: null, dirty: false, manuallySealed: nativeOpened.manuallySealed,
@@ -756,6 +761,9 @@ export class DocumentService {
     }
     if (active.profileMismatch) {
       throw new Error("Reconcile the password-slot identity before editing");
+    }
+    if (active.unresolvedJournal) {
+      throw new Error("Resolve the protected recovery journal before editing");
     }
     if (!active.opened.canEdit) {
       throw new Error("The active password slot does not permit editing");
@@ -1083,6 +1091,9 @@ export class DocumentService {
   async restoreRecoveredWork({ takeoverToken } = {}) {
     const active = this.active;
     if (!active?.recovery) throw new Error("No recovered work is available");
+    if (active.recoveryBaseMismatch) {
+      throw new Error("The protected draft belongs to a different authenticated head");
+    }
     if (active.pendingPublication) {
       throw new Error("Resolve the interrupted publication before editing");
     }
@@ -1106,11 +1117,12 @@ export class DocumentService {
 
   async discardRecoveredWork() {
     if (!this.active?.recovery) throw new Error("No recovered work is available");
-    if (!this.active.manuallySealed) {
+    if (!this.active.manuallySealed && !this.active.recoveryBaseMismatch) {
       return this.#discardProvisional(this.active);
     }
     await this.journals.clear(this.active.documentId);
     this.active.recovery = null;
+    this.active.recoveryBaseMismatch = false;
     this.active.unresolvedJournal = false;
     this.active.opened = validateOpenedDocument({ ...this.active.opened,
       recovery: undefined, readOnly: true,
@@ -1143,7 +1155,8 @@ export class DocumentService {
     active.opened = validateOpenedDocument({ ...active.opened,
       headMismatch: undefined, readOnly: true,
       canEdit: active.profileMismatch
-        || active.unreadableJournal ? false : active.slotCanEdit });
+        || active.unreadableJournal || active.recoveryBaseMismatch
+        ? false : active.slotCanEdit });
     return active.opened;
   }
 
@@ -3208,6 +3221,11 @@ export class DocumentService {
             active.pendingRecord?.publication.purpose))) return;
     const operation = this.#queueJournalOperation(async () => {
       const prior = await this.journals.read(active.documentId, active.journalKey);
+      if (active.recoveryBaseMismatch || (prior?.state === "unsaved"
+          && prior.baseRevision !== active.baseRevision
+          && prior.baseRevision !== active.recovery?.baseRevision)) {
+        throw new Error("A protected recovery journal has a different base");
+      }
       const record = prior?.publication
         && ["activity-attempt", "activity-outcome"].includes(
           prior.publication.purpose)

@@ -20,6 +20,7 @@ export interface SessionDocument {
   readonly activityOutcomePending?: true;
   readonly activityConfirmationRequired?: true;
   readonly recovery?: SessionRecoveryRecord;
+  readonly preservedJournal?: true;
   readonly headMismatch?: { readonly kind: "rollback" | "divergence"
     | "replacement" | "witness-error"; readonly title?: string;
     readonly explanation?: string; readonly editingBlocked?: true };
@@ -37,6 +38,7 @@ export interface SessionRecoveryRecord {
   readonly state: "unsaved";
   readonly updateTime: number;
   readonly cursor: WorkingCopySelection;
+  readonly baseMismatch?: true;
   readonly authorName?: string;
   readonly deviceName?: string;
 }
@@ -179,6 +181,7 @@ export interface SessionRecoveryAttention {
   readonly authorName?: string;
   readonly deviceName?: string;
   readonly canRestore: boolean;
+  readonly baseMismatch?: true;
   readonly failureCode?: SessionFailureCode;
 }
 
@@ -2145,6 +2148,7 @@ export class DocumentSession<Doc extends SessionDocument,
         && !working.dirty
         && pending === undefined,
       recoveryRestore: Boolean(document.recovery) && document.canEdit === true
+        && !document.recovery?.baseMismatch
         && !document.headMismatch && !document.profileMismatch
         && !document.unreadableJournal
         && this.publicationState === "target-published" && pending === undefined,
@@ -2181,6 +2185,7 @@ export class DocumentSession<Doc extends SessionDocument,
           ? { failureCode: this.unreadableFailureCode } : {}) })
       : document.recovery ? Object.freeze({ kind: "recovery-decision",
         updateTime: document.recovery.updateTime,
+        ...(document.recovery.baseMismatch ? { baseMismatch: true } : {}),
         ...(document.recovery.authorName
           ? { authorName: document.recovery.authorName } : {}),
         ...(document.recovery.deviceName

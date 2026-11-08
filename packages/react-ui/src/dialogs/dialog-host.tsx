@@ -152,6 +152,8 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
           : headDecision.mismatchKind === "divergence"
             ? "The authenticated head diverged from the last trusted observation."
             : "The previous head observation could not be verified."}</p>
+      {headDecision.mismatchKind === "replacement" && opened?.preservedJournal &&
+        <p>An encrypted recovery journal for the previous document is preserved locally. It cannot be applied to this different document. To review that draft, reopen an authenticated replica of the previous document.</p>}
       {headDecision.failureMessage && <p className="dialog-error" role="alert">
         {headDecision.failureMessage}</p>}
       <button disabled={snapshot.kind !== "read-only"
@@ -161,15 +163,19 @@ export function DialogHost({ session, visibleOpenedDialog, activeDocument, dialo
     {visibleOpenedDialog === "recovery" && activeDocument && recoveryDecision && <FocusedDialog
       returnFocus={returnFocus} title="Recovered work"
       initialFocus={focusIntent === "recovery-restore" ? recoveryRestoreAction : undefined}>
-      <p>Recovered work from {new Date(recoveryDecision.updateTime).toLocaleString()} is available as unsaved changes.</p>
+      {recoveryDecision.baseMismatch
+        ? <p>Unsaved work from {new Date(recoveryDecision.updateTime).toLocaleString()} belongs to an earlier authenticated head. Its encrypted journal is protected. Keep it by locking this document and reopen the original authenticated replica to review it, or explicitly discard the draft. Editing this target is blocked until you decide.</p>
+        : <p>Recovered work from {new Date(recoveryDecision.updateTime).toLocaleString()} is available as unsaved changes.</p>}
       {recoveryDecision.failureMessage && <p className="dialog-error" role="alert">
         {recoveryDecision.failureMessage}</p>}
-      <div className="dialog-actions"><button disabled={snapshot.kind !== "read-only"
+      <div className="dialog-actions">{recoveryDecision.baseMismatch &&
+        <button onClick={() => void onAction("lock")}>Keep journal and lock</button>}
+        <button disabled={snapshot.kind !== "read-only"
         && snapshot.kind !== "edit" || !snapshot.commands.recoveryDiscard}
         onClick={() => void onAction("discard-recovery")}>Discard recovered work</button>
-        <button ref={recoveryRestoreAction} disabled={snapshot.kind !== "read-only"
+        {!recoveryDecision.baseMismatch && <button ref={recoveryRestoreAction} disabled={snapshot.kind !== "read-only"
           && snapshot.kind !== "edit" || !snapshot.commands.recoveryRestore}
-          onClick={() => void onAction("restore-recovery")}>Restore unsaved work</button></div></FocusedDialog>}
+          onClick={() => void onAction("restore-recovery")}>Restore unsaved work</button>}</div></FocusedDialog>}
     {visibleOpenedDialog === "unreadable" && activeDocument && unreadableDecision
       && <FocusedDialog returnFocus={returnFocus}
         title="Unreadable recovery journal" close={() => void onAction("lock")}>

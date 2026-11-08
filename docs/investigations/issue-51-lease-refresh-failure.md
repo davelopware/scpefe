@@ -108,6 +108,27 @@ small bounded code such as `LEASE_REFRESH_FAILED` can be derived from the known
 lock reason in the host and validated at the preload boundary. The renderer
 should not infer a durable cause from a preceding asynchronous warning event.
 
+## Changed-head recovery follow-up
+
+Independent verification found that a changed target can leave an authenticated
+unsaved journal whose base revision differs from the authenticated reopened
+head. Previously, `openDocument` found that journal but omitted it from recovery;
+`enterEditMode` could then proceed, and a later checkpoint could replace the
+older encrypted draft. A descendant head does not require a witness decision,
+and accepting a divergence decision could reach the same state.
+
+The public-operation regression `changed authenticated head protects an older
+unsaved journal before editing` first failed because `opened.recovery` was
+missing. It now checks that the draft is presented as protected recovery,
+editing and restoration are blocked, keeping and locking retains the exact
+encrypted journal bytes, and explicit discard clears it. Separate regressions
+cover accepted divergence and replacement with another document ID. The latter
+keeps the previous document's journal encrypted and gives guidance to reopen an
+authenticated replica of that document; it never applies the draft to the
+replacement. A checkpoint also refuses to replace an unsaved journal with an
+incompatible base. The target's authenticated head, access and lease decisions
+remain authoritative throughout.
+
 Tests for the implementation should include mounted service→host→preload→React
 failure probes for target-read failure and changed image; assert the footer's
 accessible text at lock start and completion, secret clearing before delayed

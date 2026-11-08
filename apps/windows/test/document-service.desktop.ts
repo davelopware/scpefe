@@ -252,6 +252,60 @@ test("integrated native close | real DocumentService restart journal | Cancel th
       fixture.journalKey), null);
   });
 
+test("changed authenticated head protects an older unsaved journal before editing",
+  async (t) => {
+    const fixture = await compactionFixture(t, "scpefe-changed-head-journal-");
+    fixture.service.updateWorkingCopy({ content: "unsaved local draft",
+      cursor: { start: 7, end: 7 } });
+    await fixture.service.lock("lease-refresh-failed");
+    const journalPath = path.join(fixture.directory, "journals",
+      `${fixture.documentId}.work-journal`);
+    const originalJournal = await fs.readFile(journalPath);
+    await fs.writeFile(fixture.target, fixture.candidate);
+
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target,
+      "recovery or owner password");
+    assert.equal(opened.headMismatch, undefined,
+      "a descendant head need not trigger a witness decision");
+    assert.equal(opened.recovery?.content, "unsaved local draft",
+      "the old draft must remain discoverable after the target advances");
+    assert.equal(opened.recovery?.baseMismatch, true);
+    assert.equal(opened.canEdit, false);
+    await assert.rejects(restarted.enterEditMode(), /recover|journal/i);
+    await assert.rejects(restarted.restoreRecoveredWork(), /different authenticated head/);
+    assert.deepEqual(await fs.readFile(journalPath), originalJournal,
+      "opening and a blocked edit must preserve the encrypted journal bytes");
+    await restarted.lock("app-lock");
+    assert.deepEqual(await fs.readFile(journalPath), originalJournal,
+      "keeping and locking must leave the protected draft unchanged");
+    const resumed = new DocumentService(fixture.options);
+    assert.equal((await resumed.openDocument(fixture.target,
+      "recovery or owner password")).recovery?.baseMismatch, true);
+    const discarded = await resumed.discardRecoveredWork();
+    assert.equal(discarded.recovery, undefined);
+    assert.equal(discarded.canEdit, true);
+    await assert.rejects(fs.access(journalPath), (error) => error.code === "ENOENT");
+  });
+
+test("checkpoint refuses to replace a journal from another authenticated base",
+  async (t) => {
+    const fixture = await compactionFixture(t, "scpefe-checkpoint-base-guard-");
+    await fixture.service.journals.write(fixture.documentId, fixture.journalKey, {
+      text: "protected older draft", baseRevision: fixture.compactedHead,
+      target: fixture.target, state: "unsaved", updateTime: 1,
+      cursor: { start: 0, end: 0 } });
+    const journalPath = path.join(fixture.directory, "journals",
+      `${fixture.documentId}.work-journal`);
+    const original = await fs.readFile(journalPath);
+    fixture.service.updateWorkingCopy({ content: "newer working text",
+      cursor: { start: 0, end: 0 } });
+    const result = await fixture.service.lock("app-lock");
+    assert.equal(result.journalSaved, false);
+    assert.equal(result.warningCode, "LOCK_CHECKPOINT_FAILED");
+    assert.deepEqual(await fs.readFile(journalPath), original);
+  });
+
 test("requires a profile, publishes once, verifies, and reopens read-only", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-desktop-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -2891,10 +2945,63 @@ test("different document IDs are explained as target replacement", async (t) => 
   const first = new DocumentService(options);
   await first.openDocument(target, "password words");
   await first.lock();
+  await first.journals.write(documentId, Buffer.alloc(32, 5), {
+    text: "previous document draft", baseRevision: head,
+    target, state: "unsaved", updateTime: 1,
+    cursor: { start: 0, end: 0 } });
+  const oldJournal = path.join(directory, "work-journals",
+    `${documentId}.work-journal`);
+  const oldBytes = await fs.readFile(oldJournal);
   documentId = "22".repeat(16);
-  const opened = await new DocumentService(options).openDocument(target, "password words");
+  const replacement = new DocumentService(options);
+  const opened = await replacement.openDocument(target, "password words");
   assert.equal(opened.headMismatch.kind, "replacement");
   assert.match(opened.headMismatch.explanation, /permanent document ID differs/);
+  assert.equal(opened.preservedJournal, true);
+  assert.equal(opened.recovery, undefined,
+    "a journal for another document must never be applied to this one");
+  assert.deepEqual(await fs.readFile(oldJournal), oldBytes);
+  await replacement.acceptHeadMismatch();
+  assert.deepEqual(await fs.readFile(oldJournal), oldBytes);
+});
+
+test("accepting authenticated divergence still protects the older journal", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "scpefe-diverged-journal-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, "document.scpefe");
+  await fs.writeFile(target, "container");
+  const documentId = "41".repeat(16);
+  const oldHead = "42".repeat(32);
+  const newHead = "43".repeat(32);
+  const ancestor = "44".repeat(32);
+  let changed = false;
+  const options = { native: withLease({ openDocument: () => ({
+    content: changed ? "new branch" : "old branch", readOnly: true,
+    canEdit: true, documentId, baseRevision: changed ? newHead : oldHead,
+    revisionGraph: [{ revisionId: changed ? newHead : oldHead,
+      parentRevisionIds: [ancestor] },
+    { revisionId: ancestor, parentRevisionIds: [] }],
+    journalKey: Buffer.alloc(32, 0x45), manuallySealed: true }) }),
+  fs, publicationCapabilities, profilePath: await writeProfile(directory, "Ada", "Desk") };
+  const first = new DocumentService(options);
+  await first.openDocument(target, "password words");
+  await first.lock();
+  await first.journals.write(documentId, Buffer.alloc(32, 0x45), {
+    text: "old branch draft", baseRevision: oldHead, target,
+    state: "unsaved", updateTime: 1, cursor: { start: 0, end: 0 } });
+  const journalPath = path.join(directory, "work-journals",
+    `${documentId}.work-journal`);
+  const oldJournal = await fs.readFile(journalPath);
+  changed = true;
+  const restarted = new DocumentService(options);
+  const opened = await restarted.openDocument(target, "password words");
+  assert.equal(opened.headMismatch?.kind, "divergence");
+  assert.equal(opened.recovery?.baseMismatch, true);
+  const accepted = await restarted.acceptHeadMismatch();
+  assert.equal(accepted.headMismatch, undefined);
+  assert.equal(accepted.canEdit, false);
+  await assert.rejects(restarted.enterEditMode(), /recovered work/);
+  assert.deepEqual(await fs.readFile(journalPath), oldJournal);
 });
 
 function mergeContainer(content, head, graph) {
@@ -3703,6 +3810,36 @@ test("regular-save divergence remains restart-safe and accessible", async (t) =>
   assert.equal(opened.content, "local unsaved");
   assert.equal(restarted.active.pendingRecord.state, "conflict");
 });
+
+test("changed regular-save candidate remains a publication decision, not discardable recovery",
+  async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(),
+      "scpefe-regular-candidate-recovery-"));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const fixture = await regularPublicationFixture(directory);
+    fixture.service.publications.fs = new Proxy(fs, { get(target, property) {
+      if (property !== "rename") return target[property];
+      return async () => { throw new Error("injected crash before replace"); };
+    } });
+    await assert.rejects(fixture.service.regularSaveDocument(),
+      (error) => error.publicationPrepared === true);
+    const original = await fixture.service.journals.read(
+      fixture.service.active.documentId, fixture.service.active.journalKey);
+    assert.equal(original.state, "unsaved");
+    const remote = Buffer.from(JSON.stringify({ content: "remote", sealed: true,
+      parent: fixture.revisionId(fixture.initial) }));
+    await fs.writeFile(fixture.target, remote);
+
+    const restarted = new DocumentService(fixture.options);
+    const opened = await restarted.openDocument(fixture.target, "password words");
+    assert.equal(opened.publicationState, "conflict");
+    assert.equal(opened.recovery, undefined);
+    await assert.rejects(restarted.discardRecoveredWork(), /No recovered work/);
+    const pending = await restarted.journals.read(
+      restarted.active.documentId, restarted.active.journalKey);
+    assert.equal(pending.state, "conflict");
+    assert.equal(pending.publication.candidate, original.publication.candidate);
+  });
 
 test("regular-save conflict can enter resolution in the same session", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(),

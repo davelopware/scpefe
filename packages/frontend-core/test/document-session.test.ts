@@ -14,7 +14,8 @@ interface OpenedDocument {
   activityConfirmationRequired?: true;
   provisional?: true;
   recovery?: { content: string; state: "unsaved"; updateTime: number;
-    cursor: { start: number; end: number }; authorName?: string; deviceName?: string };
+    cursor: { start: number; end: number }; authorName?: string; deviceName?: string;
+    baseMismatch?: true };
   headMismatch?: { kind: "rollback" | "divergence" | "replacement" | "witness-error";
     title: string; explanation: string; editingBlocked: true };
   unreadableJournal?: true;
@@ -285,6 +286,23 @@ test("head and recovery evidence reveal one actionable decision at a time", asyn
   if (snapshot.kind !== "read-only") throw new Error("expected read-only");
   assert.equal(snapshot.attention?.kind, "recovery-decision");
   assert.equal(snapshot.commands.recoveryDiscard, true);
+  session.dispose();
+});
+
+test("a changed-base draft remains recovery attention without edit or restore authority", async () => {
+  const session = new DocumentSession(new Host(), new Journal());
+  session.adopt({ ...opened("new authenticated head"), canEdit: false,
+    recovery: { content: "older private draft", state: "unsaved",
+      updateTime: 1, cursor: { start: 0, end: 0 }, baseMismatch: true } });
+  const snapshot = session.getSnapshot();
+  if (snapshot.kind !== "read-only") throw new Error("expected read-only");
+  assert.equal(snapshot.attention?.kind, "recovery-decision");
+  assert.equal(snapshot.attention?.baseMismatch, true);
+  assert.equal(snapshot.commands.enterEdit, false);
+  assert.equal(snapshot.commands.recoveryRestore, false);
+  assert.equal(snapshot.commands.recoveryDiscard, true);
+  assert.deepEqual(await session.restoreRecovery(), { status: "unavailable" });
+  assert.deepEqual(await session.discardRecovery(), { status: "recovery-discarded" });
   session.dispose();
 });
 
