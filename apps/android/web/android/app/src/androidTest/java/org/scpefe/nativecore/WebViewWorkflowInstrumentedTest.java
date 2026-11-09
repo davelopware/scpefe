@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import android.os.SystemClock;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import android.os.ParcelFileDescriptor;
@@ -23,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -138,7 +140,11 @@ public final class WebViewWorkflowInstrumentedTest {
                 // The picker changed while selecting; the next loop checks its live state.
             }
         }
-        fail("System picker neither returned a document nor offered Open");
+        fail("System picker neither returned a document nor offered Open: package="
+            + device.getCurrentPackageName() + ", selected="
+            + device.hasObject(By.text(selected)) + ", fixture="
+            + device.hasObject(By.text("test.scpefe")) + ", roots="
+            + device.hasObject(By.descContains("Show roots")));
     }
 
     private static void setInput(ActivityScenario<MainActivity> scenario, String name,
@@ -547,10 +553,9 @@ public final class WebViewWorkflowInstrumentedTest {
 
     @Test public void createAndSaveAndroidDocumentForWindowsOpen() throws Exception {
         Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        Context test = InstrumentationRegistry.getInstrumentation().getContext();
-        File[] before = test.getFilesDir().listFiles(
-            (dir, name) -> name.startsWith("provider-created-")
-                && name.endsWith(".scpefe"));
+        SharedPreferences targets = target.getSharedPreferences("document-targets",
+            Context.MODE_PRIVATE);
+        Map<String, ?> before = targets.getAll();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
             menu(scenario, "File", "New");
@@ -571,20 +576,18 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
                 + ".textContent==='Clean'", 30_000);
-            File[] after = test.getFilesDir().listFiles(
-                (dir, name) -> name.startsWith("provider-created-")
-                    && name.endsWith(".scpefe"));
-            assertNotNull(after);
-            File created = null;
-            for (File candidate : after) {
-                boolean prior = false;
-                if (before != null) for (File previous : before)
-                    if (candidate.getName().equals(previous.getName())) prior = true;
-                if (!prior) { created = candidate; break; }
+            String created = null;
+            for (Map.Entry<String, ?> entry : targets.getAll().entrySet()) {
+                if (before.containsKey(entry.getKey())
+                        || !(entry.getValue() instanceof String)) continue;
+                Uri uri = Uri.parse((String)entry.getValue());
+                if (!TestDocumentsProvider.AUTHORITY.equals(uri.getAuthority())) continue;
+                String id = DocumentsContract.getDocumentId(uri);
+                if (id.startsWith("created-")) { created = id; break; }
             }
             assertNotNull("New provider document was not found", created);
             writeInterop(target, "interop-android-created",
-                Files.readAllBytes(created.toPath()), "Android created and saved\n");
+                readProvider(target, created), "Android created and saved\n");
             closeCleanDocument(scenario);
         }
     }
