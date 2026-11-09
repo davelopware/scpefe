@@ -3,6 +3,9 @@ package org.scpefe.nativecore;
 import static org.junit.Assert.*;
 
 import android.os.SystemClock;
+import android.content.Context;
+import android.net.Uri;
+import android.provider.DocumentsContract;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -13,6 +16,12 @@ import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
 import java.util.concurrent.CountDownLatch;
+import java.io.File;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -120,6 +129,214 @@ public final class WebViewWorkflowInstrumentedTest {
             + "\"]');if(!e)return false;Object.getOwnPropertyDescriptor("
             + "HTMLInputElement.prototype,'value').set.call(e,'" + value + "');"
             + "e.dispatchEvent(new Event('input',{bubbles:true}));return true})()");
+    }
+
+    private static void setDocumentText(ActivityScenario<MainActivity> scenario,
+            String value) throws Exception {
+        String escaped = org.json.JSONObject.quote(value);
+        assertEquals("true", eval(scenario, "(()=>{const e=document.querySelector("
+            + "'textarea[aria-label=\"Document text\"]');if(!e||e.readOnly)return false;"
+            + "Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')"
+            + ".set.call(e," + escaped + ");"
+            + "e.dispatchEvent(new Event('input',{bubbles:true}));return true})()"));
+    }
+
+    private static void openFixture(ActivityScenario<MainActivity> scenario,
+            UiDevice device, String password) throws Exception {
+        menu(scenario, "File", "Open…");
+        provider(device);
+        click(device, Pattern.compile("test\\.scpefe"));
+        finishOpenPicker(scenario, device);
+        setInput(scenario, "password", password);
+        eval(scenario, "document.querySelector('input[name=password]').form.requestSubmit()");
+        until(scenario, "!document.querySelector('input[name=password]')"
+            + "&&document.querySelector('textarea[aria-label=\"Document text\"]')",
+            20_000);
+    }
+
+    private static void openFixture(ActivityScenario<MainActivity> scenario,
+            UiDevice device) throws Exception { openFixture(scenario, device, WINDOWS); }
+
+    private static byte[] readAll(InputStream input) throws Exception {
+        try (InputStream source = input; java.io.ByteArrayOutputStream output =
+                new java.io.ByteArrayOutputStream()) {
+            byte[] chunk = new byte[8192];
+            for (int count; (count = source.read(chunk)) != -1;) {
+                output.write(chunk, 0, count);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private static void waitForChange(File file, byte[] before) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 15_000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (!Arrays.equals(before, Files.readAllBytes(file.toPath()))) return;
+            SystemClock.sleep(50);
+        }
+        fail("Native lease release did not finish before restart");
+    }
+
+    private static void waitForStableJournal(File journal) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 15_000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (journal.isFile() && !Files.readString(journal.toPath())
+                    .contains("bootstrap")) return;
+            SystemClock.sleep(50);
+        }
+        fail("Lease release did not restore the encrypted unsaved journal");
+    }
+
+    private static byte[] hexAsset(Context context, String path) throws Exception {
+        String encoded = new String(readAll(context.getAssets().open(path)),
+            StandardCharsets.US_ASCII).replaceAll("(?m)^#.*$", "")
+            .replaceAll("\\s", "");
+        assertEquals(0, encoded.length() % 2);
+        byte[] result = new byte[encoded.length() / 2];
+        for (int index = 0; index < result.length; index++) {
+            int high = Character.digit(encoded.charAt(index * 2), 16);
+            int low = Character.digit(encoded.charAt(index * 2 + 1), 16);
+            assertTrue(high >= 0 && low >= 0);
+            result[index] = (byte)((high << 4) | low);
+        }
+        return result;
+    }
+
+    @Test public void viewOnlySlotCannotAcquireNativeLease() throws Exception {
+        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        Context test = InstrumentationRegistry.getInstrumentation().getContext();
+        Uri fixtureUri = DocumentsContract.buildDocumentUri(
+            TestDocumentsProvider.AUTHORITY, TestDocumentsProvider.DOCUMENT_ID);
+        try (android.database.Cursor ignored = test.getContentResolver().query(
+                fixtureUri, null, null, null, null)) { assertNotNull(ignored); }
+        File fixture = new File(test.getFilesDir(), "provider-fixture.scpefe");
+        byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
+        Files.write(fixture.toPath(), hexAsset(test,
+            "vectors/multi-slot-container.hex"));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            until(scenario, "document.querySelector('input[name=name]')"
+                + "||document.querySelector('[aria-label=\"File\"]')", 15_000);
+            if ("true".equals(eval(scenario, "Boolean(document.querySelector('input[name=name]'))"))) {
+                setInput(scenario, "name", "Ada");
+                setInput(scenario, "email", "ada@example.org");
+                setInput(scenario, "deviceName", "Android emulator");
+                eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
+                until(scenario, "!document.querySelector('input[name=name]')", 10_000);
+            }
+            UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            openFixture(scenario, device, "reader test password");
+            assertEquals("true", eval(scenario,
+                "document.querySelector('[aria-label=\"Edit document contents\"]').disabled"));
+            eval(scenario, "window.__denied='pending';"
+                + "window.Capacitor.Plugins.Scpefe.enterEditMode()"
+                + ".then(()=>window.__denied='unexpected')"
+                + ".catch(e=>window.__denied=e.code)");
+            until(scenario, "window.__denied!=='pending'", 10_000);
+            assertEquals("\"EDIT_DENIED\"", eval(scenario, "window.__denied"));
+        } finally {
+            Files.write(fixture.toPath(), original);
+        }
+    }
+
+    @Test public void editCheckpointRestartRecoveryAndChangedTarget() throws Exception {
+        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        Context test = InstrumentationRegistry.getInstrumentation().getContext();
+        String documentId = new String(readAll(test.getAssets().open(
+            "windows/windows-document-id.txt")), StandardCharsets.UTF_8).trim();
+        File journalDirectory = new File(target.getFilesDir(), "work-journals");
+        File journal = new File(journalDirectory, documentId + ".work-journal");
+        Files.deleteIfExists(journal.toPath());
+        Uri fixtureUri = DocumentsContract.buildDocumentUri(
+            TestDocumentsProvider.AUTHORITY, TestDocumentsProvider.DOCUMENT_ID);
+        // Start the provider before replacing a fixture left by another test.
+        try (android.database.Cursor ignored = test.getContentResolver().query(
+                fixtureUri, null, null, null, null)) { assertNotNull(ignored); }
+        File fixture = new File(test.getFilesDir(), "provider-fixture.scpefe");
+        byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
+        Files.write(fixture.toPath(), original);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            until(scenario, "document.querySelector('input[name=name]')"
+                + "||document.querySelector('[aria-label=\"File\"]')", 15_000);
+            if ("true".equals(eval(scenario, "Boolean(document.querySelector('input[name=name]'))"))) {
+                setInput(scenario, "name", "Ada");
+                setInput(scenario, "email", "ada@example.org");
+                setInput(scenario, "deviceName", "Android emulator");
+                eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
+                until(scenario, "!document.querySelector('input[name=name]')", 10_000);
+            }
+            UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            openFixture(scenario, device);
+            assertEquals("\"alpha\\n\"", eval(scenario,
+                "document.querySelector('textarea[aria-label=\"Document text\"]').value"));
+            menu(scenario, "Edit", "Edit Contents");
+            until(scenario, "!document.querySelector('textarea[aria-label=\"Document text\"]')"
+                + ".readOnly", 20_000);
+            byte[] leased = Files.readAllBytes(fixture.toPath());
+            assertFalse(Arrays.equals(original, leased));
+
+            File hidden = new File(target.getFilesDir(), "work-journals-hidden-" +
+                System.nanoTime());
+            Files.move(journalDirectory.toPath(), hidden.toPath());
+            Files.write(journalDirectory.toPath(), new byte[] { 1 });
+            try {
+                setDocumentText(scenario, "alpha\nfailed draft\n");
+                until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                    + ".textContent.includes('needs attention')", 10_000);
+                assertFalse("Failed checkpoint was advertised as durable", journal.exists());
+            } finally {
+                Files.deleteIfExists(journalDirectory.toPath());
+                Files.move(hidden.toPath(), journalDirectory.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE);
+            }
+
+            setDocumentText(scenario, "alpha\nAndroid local draft\n");
+            until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                + ".textContent.includes('Checkpoint ready')", 10_000);
+            long deadline = SystemClock.uptimeMillis() + 10_000;
+            while (!journal.isFile() && SystemClock.uptimeMillis() < deadline)
+                SystemClock.sleep(50);
+            assertTrue("Encrypted checkpoint missing", journal.isFile());
+            String envelope = Files.readString(journal.toPath());
+            assertFalse(envelope.contains("Android local draft"));
+            assertFalse("Local checkpoint claimed target publication",
+                envelope.contains("bootstrap"));
+            assertArrayEquals("Checkpoint changed the selected document", leased,
+                Files.readAllBytes(fixture.toPath()));
+            String denied = eval(scenario, "(()=>{window.__lease='pending';"
+                + "window.Capacitor.Plugins.Scpefe.enterEditMode().then(() => "
+                + "window.__lease='unexpected').catch(e=>window.__lease=e.code);"
+                + "return true})()");
+            assertEquals("true", denied);
+            until(scenario, "window.__lease!=='pending'", 10_000);
+            assertEquals("\"LEASE_ACTIVE\"", eval(scenario, "window.__lease"));
+
+            scenario.recreate();
+            waitForChange(fixture, leased);
+            waitForStableJournal(journal);
+            until(scenario, "document.querySelector('[aria-label=\"Document state\"]')",
+                15_000);
+            openFixture(scenario, device);
+            until(scenario, "[...document.querySelectorAll('button')]"
+                + ".some(x=>x.textContent==='Restore unsaved work')", 15_000);
+            eval(scenario, "[...document.querySelectorAll('button')]"
+                + ".find(x=>x.textContent==='Restore unsaved work').click()");
+            until(scenario, "document.querySelector('textarea[aria-label=\"Document text\"]')"
+                + ".value==='alpha\\nAndroid local draft\\n'", 20_000);
+            assertEquals("false", eval(scenario,
+                "document.querySelector('textarea[aria-label=\"Document text\"]').readOnly"));
+
+            byte[] restoredLease = Files.readAllBytes(fixture.toPath());
+            scenario.recreate();
+            waitForChange(fixture, restoredLease);
+            waitForStableJournal(journal);
+            Files.write(fixture.toPath(), original);
+            openFixture(scenario, device);
+            until(scenario, "document.body.textContent.includes('earlier authenticated head')",
+                15_000);
+            assertEquals("false", eval(scenario,
+                "[...document.querySelectorAll('button')]"
+                + ".some(x=>x.textContent==='Restore unsaved work')"));
+        }
     }
 
     @Test public void profileCreateOpenWindowsAndRejectStaleSlowUnlock() throws Exception {

@@ -24,6 +24,10 @@ function fake(overrides: Partial<AndroidPluginContract> = {}): AndroidPluginCont
     lock: async () => ({ locked: true, journalSaved: true, warningCode: null }),
     closeDocument: async () => ({ closed: true }),
     getUnresolvedJournalSummary: async () => ({ total: 0, pendingPublications: 0 }),
+    enterEditMode: async () => ({ opened: { ...opened, readOnly: false, canEdit: true } }),
+    restoreRecoveredWork: async () => ({ opened: { ...opened, readOnly: false,
+      canEdit: true, recoveredUnsaved: true, cursor: { start: 0, end: 0 } } }),
+    updateWorkingCopy: async () => ({ accepted: true }),
     ...overrides,
   };
 }
@@ -74,4 +78,35 @@ test("native authentication failure remains a structured error", async () => {
   const host = createHost(fake({ openSelectedDocument: async () => { throw failure; } }));
   await assert.rejects(host.openSelectedDocument("wrong password"),
     (error: unknown) => (error as { code?: string }).code === "AUTHENTICATION_FAILED");
+});
+
+test("edit lease, checkpoint, and recovery use the shared working-copy shape", async () => {
+  let submitted: unknown;
+  const host = createHost(fake({
+    updateWorkingCopy: async ({ update }) => {
+      submitted = update; return { accepted: true }; },
+  }));
+  const editable = await host.enterEditMode();
+  if ("decisionRequired" in editable) throw new Error("Unexpected lease decision");
+  assert.equal(editable.readOnly, false);
+  assert.equal(editable.canEdit, true);
+  const scope = host.createJournalScope();
+  await host.updateWorkingCopy({ content: "draft\n", cursor: { start: 6, end: 6 },
+    journalScope: scope, revision: 1 });
+  assert.deepEqual(submitted, { content: "draft\n",
+    cursor: { start: 6, end: 6 }, journalScope: scope, revision: 1 });
+  const recovered = await host.restoreRecoveredWork();
+  if ("decisionRequired" in recovered) throw new Error("Unexpected lease decision");
+  assert.equal(recovered.recoveredUnsaved, true);
+  assert.equal(recovered.readOnly, false);
+  await assert.rejects(host.updateWorkingCopy({ content: "draft",
+    cursor: { start: -1, end: 0 }, journalScope: scope, revision: 2 }));
+});
+
+test("malformed native recovery is rejected before adoption", async () => {
+  const host = createHost(fake({ restoreRecoveredWork: async () => ({ opened: {
+    ...opened, readOnly: false, canEdit: true, recoveredUnsaved: true,
+    cursor: { start: 9, end: 10 },
+  } }) }));
+  await assert.rejects(host.restoreRecoveredWork(), /Invalid recovery/);
 });

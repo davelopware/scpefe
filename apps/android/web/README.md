@@ -1,4 +1,4 @@
-# Android WebView admission slice
+# Android WebView editing slice
 
 This Capacitor 7 app packages the shared `frontend-core` and React UI. Its
 `Scpefe` plugin calls the Android JNI core, SAF target adapter, and app-private
@@ -9,14 +9,19 @@ JNI copies are erased on return. No telemetry or app-initiated network permissio
 is requested. Android backup is disabled.
 
 The plugin uses a single worker for native operations. Picker, close, and lock
-invalidate earlier generations; a delayed unlock cannot replace a closed
-document. A debug-only delay in `unlockDocument` is used by the emulator test to
-check WebView responsiveness and stale completion handling.
+invalidate earlier generations. The core decides edit rights and owns the lease
+and submitted working text. Acquiring or releasing a lease publishes only
+authenticated lease metadata against an exact provider image. The shared
+frontend owns local edit history; each edit is submitted to the core and written
+to an AES-GCM app-private work journal before checkpoint acknowledgement.
 
 Create writes an encrypted pending-create journal before touching the provider.
 The exact candidate remains in that journal if provider publication is ambiguous.
-Only an exact reread clears it. Editing, save, and publication recovery UI belong
-to the next Android issues.
+Only an exact reread clears it. On an intentional Activity restart, a verified
+lease release leaves the encrypted unsaved journal for the next authenticated
+open. Recovery requires the same document ID, exact target image, revision head,
+and a free native lease. A local checkpoint does not publish document content;
+user save and broader process-death handling remain in later issues.
 
 From the repository root, with an already licensed API 35 Android SDK and NDK
 r27d, JDK 21, Gradle 8.13, and a running API 35 emulator:

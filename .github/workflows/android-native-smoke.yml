@@ -7,6 +7,7 @@ on:
       - codex/issue-180-provider-target
       - codex/issue-181-android-state
       - codex/issue-182-capacitor-webview
+      - codex/issue-183-android-edit
   pull_request:
     paths:
       - 'CMakeLists.txt'
@@ -103,7 +104,7 @@ jobs:
           if-no-files-found: warn
 
   webview-emulator:
-    if: github.ref == 'refs/heads/codex/issue-182-capacitor-webview' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/codex/issue-182-capacitor-webview' || github.ref == 'refs/heads/codex/issue-183-android-edit' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: windows-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 70
