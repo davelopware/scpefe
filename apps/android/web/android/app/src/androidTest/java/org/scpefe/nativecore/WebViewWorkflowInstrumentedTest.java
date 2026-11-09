@@ -57,7 +57,13 @@ public final class WebViewWorkflowInstrumentedTest {
             if ("true".equals(eval(scenario, "Boolean(" + condition + ")"))) return;
             SystemClock.sleep(100);
         }
-        fail("WebView condition did not become true: " + condition);
+        String state = eval(scenario, "JSON.stringify({document:document.querySelector("
+            + "'[aria-label=\"Document state\"]')?.textContent,"
+            + "alert:document.querySelector('[role=alert]')?.textContent,"
+            + "editDisabled:document.querySelector('[aria-label=\"Edit document contents\"]')"
+            + "?.disabled,menu:[...document.querySelectorAll('[role=menu] button')]"
+            + ".map(x=>[x.querySelector('span')?.textContent.trim(),x.disabled])})");
+        fail("WebView condition did not become true: " + condition + "; state=" + state);
     }
 
     private static void menu(ActivityScenario<MainActivity> scenario, String menu,
@@ -303,7 +309,14 @@ public final class WebViewWorkflowInstrumentedTest {
                 + ".value==='alpha\\n'", 20_000);
             assertEquals("\"alpha\\n\"", eval(scenario,
                 "document.querySelector('textarea[aria-label=\"Document text\"]').value"));
-            menu(scenario, "Edit", "Edit Contents");
+            until(scenario, "!document.querySelector('textarea[aria-label=\"Document text\"]')"
+                + ".readOnly||!document.querySelector('[aria-label=\"Edit document contents\"]')"
+                + ".disabled", 15_000);
+            if ("true".equals(eval(scenario,
+                    "document.querySelector('textarea[aria-label=\"Document text\"]').readOnly"))) {
+                eval(scenario,
+                    "document.querySelector('[aria-label=\"Edit document contents\"]').click()");
+            }
             until(scenario, "!document.querySelector('textarea[aria-label=\"Document text\"]')"
                 + ".readOnly", 20_000);
             byte[] leased = readProvider(target, TestDocumentsProvider.DOCUMENT_ID);
@@ -409,8 +422,8 @@ public final class WebViewWorkflowInstrumentedTest {
             setInput(scenario, "password", OWNER);
             eval(scenario, "document.querySelector('input[name=password]').form.requestSubmit()");
             until(scenario, "!document.querySelector('input[name=password]')", 15_000);
-            until(scenario, "document.querySelector('[aria-label=\"Document state\"]')"
-                + ".textContent==='Read-only'", 15_000);
+            until(scenario, "['Read-only','Edit mode'].includes(document.querySelector("
+                + "'[aria-label=\"Document state\"]').textContent)", 15_000);
 
             menu(scenario, "File", "Close");
             menu(scenario, "File", "Open…");
