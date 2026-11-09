@@ -131,6 +131,19 @@ public final class WebViewWorkflowInstrumentedTest {
             + "e.dispatchEvent(new Event('input',{bubbles:true}));return true})()");
     }
 
+    private static void ensureProfile(ActivityScenario<MainActivity> scenario)
+            throws Exception {
+        until(scenario, "document.querySelector('input[name=name]')"
+            + "||document.querySelector('[aria-label=\"File\"]')", 15_000);
+        if (!"true".equals(eval(scenario,
+                "Boolean(document.querySelector('input[name=name]'))"))) return;
+        setInput(scenario, "name", "Ada");
+        setInput(scenario, "email", "ada@example.org");
+        setInput(scenario, "deviceName", "Android emulator");
+        eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
+        until(scenario, "!document.querySelector('input[name=name]')", 10_000);
+    }
+
     private static void setDocumentText(ActivityScenario<MainActivity> scenario,
             String value) throws Exception {
         String escaped = org.json.JSONObject.quote(value);
@@ -180,7 +193,8 @@ public final class WebViewWorkflowInstrumentedTest {
     private static void waitForStableJournal(File journal) throws Exception {
         long deadline = SystemClock.uptimeMillis() + 15_000;
         while (SystemClock.uptimeMillis() < deadline) {
-            if (journal.isFile() && !Files.readString(journal.toPath())
+            if (journal.isFile() && !new String(Files.readAllBytes(journal.toPath()),
+                    StandardCharsets.UTF_8)
                     .contains("bootstrap")) return;
             SystemClock.sleep(50);
         }
@@ -203,7 +217,6 @@ public final class WebViewWorkflowInstrumentedTest {
     }
 
     @Test public void viewOnlySlotCannotAcquireNativeLease() throws Exception {
-        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
         Context test = InstrumentationRegistry.getInstrumentation().getContext();
         Uri fixtureUri = DocumentsContract.buildDocumentUri(
             TestDocumentsProvider.AUTHORITY, TestDocumentsProvider.DOCUMENT_ID);
@@ -214,15 +227,7 @@ public final class WebViewWorkflowInstrumentedTest {
         Files.write(fixture.toPath(), hexAsset(test,
             "vectors/multi-slot-container.hex"));
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            until(scenario, "document.querySelector('input[name=name]')"
-                + "||document.querySelector('[aria-label=\"File\"]')", 15_000);
-            if ("true".equals(eval(scenario, "Boolean(document.querySelector('input[name=name]'))"))) {
-                setInput(scenario, "name", "Ada");
-                setInput(scenario, "email", "ada@example.org");
-                setInput(scenario, "deviceName", "Android emulator");
-                eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
-                until(scenario, "!document.querySelector('input[name=name]')", 10_000);
-            }
+            ensureProfile(scenario);
             UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
             openFixture(scenario, device, "reader test password");
             assertEquals("true", eval(scenario,
@@ -255,15 +260,7 @@ public final class WebViewWorkflowInstrumentedTest {
         byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
         Files.write(fixture.toPath(), original);
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            until(scenario, "document.querySelector('input[name=name]')"
-                + "||document.querySelector('[aria-label=\"File\"]')", 15_000);
-            if ("true".equals(eval(scenario, "Boolean(document.querySelector('input[name=name]'))"))) {
-                setInput(scenario, "name", "Ada");
-                setInput(scenario, "email", "ada@example.org");
-                setInput(scenario, "deviceName", "Android emulator");
-                eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
-                until(scenario, "!document.querySelector('input[name=name]')", 10_000);
-            }
+            ensureProfile(scenario);
             UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
             openFixture(scenario, device);
             assertEquals("\"alpha\\n\"", eval(scenario,
@@ -296,7 +293,8 @@ public final class WebViewWorkflowInstrumentedTest {
             while (!journal.isFile() && SystemClock.uptimeMillis() < deadline)
                 SystemClock.sleep(50);
             assertTrue("Encrypted checkpoint missing", journal.isFile());
-            String envelope = Files.readString(journal.toPath());
+            String envelope = new String(Files.readAllBytes(journal.toPath()),
+                StandardCharsets.UTF_8);
             assertFalse(envelope.contains("Android local draft"));
             assertFalse("Local checkpoint claimed target publication",
                 envelope.contains("bootstrap"));
@@ -336,17 +334,15 @@ public final class WebViewWorkflowInstrumentedTest {
             assertEquals("false", eval(scenario,
                 "[...document.querySelectorAll('button')]"
                 + ".some(x=>x.textContent==='Restore unsaved work')"));
+        } finally {
+            Files.deleteIfExists(journal.toPath());
+            Files.write(fixture.toPath(), original);
         }
     }
 
     @Test public void profileCreateOpenWindowsAndRejectStaleSlowUnlock() throws Exception {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            until(scenario, "document.querySelector('input[name=name]')", 15_000);
-            setInput(scenario, "name", "Ada");
-            setInput(scenario, "email", "ada@example.org");
-            setInput(scenario, "deviceName", "Android emulator");
-            eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
-            until(scenario, "!document.querySelector('input[name=name]')", 10_000);
+            ensureProfile(scenario);
 
             menu(scenario, "File", "New");
             UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
