@@ -57,7 +57,7 @@ export type DocumentAttentionDecision =
     readonly errorMessage: string | null }
   | { readonly kind: "compaction-decision"; readonly failureMessage: string | null }
   | { readonly kind: "recovery-decision"; readonly updateTime: number;
-    readonly failureMessage: string | null }
+    readonly baseMismatch?: true; readonly failureMessage: string | null }
   | { readonly kind: "head-mismatch"; readonly mismatchKind: "rollback"
     | "divergence" | "replacement" | "witness-error";
     readonly failureMessage: string | null }
@@ -215,6 +215,7 @@ export class SessionPresentation {
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : attention?.kind === "recovery-decision"
         ? { kind: "recovery-decision" as const, updateTime: attention.updateTime,
+          ...(attention.baseMismatch ? { baseMismatch: true as const } : {}),
           failureMessage: attention.failureCode ? this.catalogText(attention.failureCode) : null }
       : attention?.kind === "head-mismatch"
         ? { kind: "head-mismatch" as const, mismatchKind: attention.mismatchKind,

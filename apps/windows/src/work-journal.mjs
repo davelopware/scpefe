@@ -178,6 +178,16 @@ export class WorkJournalStore {
     this.directory = directory;
   }
 
+  async has(documentId) {
+    try {
+      await this.fs.readFile(path.join(this.directory, journalName(documentId)));
+      return true;
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
   async read(documentId, key) {
     requireKey(key);
     let envelope;

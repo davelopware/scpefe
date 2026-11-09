@@ -121,6 +121,33 @@ test("attempt publication failure prevents the external backup action", {
       .update(Buffer.from(pending.publication.candidate, "base64")).digest("hex"));
 });
 
+test("definite attempt preparation failure releases the candidate and permits retry", {
+  skip: !native && "native addon path was not supplied",
+}, async (t) => {
+  const { directory, service, target, original } = await fixture(t);
+  const backup = path.join(directory, "retry.scpefe");
+  const write = service.journals.write.bind(service.journals);
+  service.journals.write = async (...args: Parameters<typeof write>) => {
+    if (args[2]?.publication?.purpose === "activity-attempt") {
+      throw new Error("attempt journal unavailable before preparation");
+    }
+    return write(...args);
+  };
+  await assert.rejects(service.backupDocument(backup),
+    /attempt journal unavailable before preparation/);
+  assert.deepEqual(await fs.readFile(target), original);
+  await assert.rejects(fs.readFile(backup), (error: unknown) =>
+    (error as NodeJS.ErrnoException).code === "ENOENT");
+  assert.equal(service.pendingNativeCandidate, null);
+  assert.equal(await service.journals.read(service.active.documentId,
+    service.active.journalKey), null);
+
+  service.journals.write = write;
+  assert.deepEqual(await service.backupDocument(backup), { backedUp: true });
+  assert.equal(native?.inspectDocument(await fs.readFile(target), password)
+    .historyEventType, "backup-succeeded");
+});
+
 test("restart recovers a replaced attempt candidate without running its host action", {
   skip: !native && "native addon path was not supplied",
 }, async (t) => {

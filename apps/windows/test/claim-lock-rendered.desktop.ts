@@ -44,7 +44,7 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
     const lockResult = { locked: true, journalSaved: true, warning: null };
     const hostLock = () => {
       disposedClaims += 1;
-      listeners.lockStarted();
+      listeners.lockStarted({ causeCode: null });
       listeners.locked(lockResult);
       return lockResult;
     };
@@ -149,7 +149,7 @@ test("mounted lock-start clears invitation secrets before a late claim can settl
       { name: "Replace password and claim identity" }));
     await ui.waitFor(() => assert.equal(claimCalls, 1));
     disposedClaims += 1;
-    listeners.lockStarted();
+    listeners.lockStarted({ causeCode: null });
     assert.equal(claim.password.value, "");
     assert.equal(claim.confirmation.value, "");
     assert.equal(claim.dialog.isConnected, false);

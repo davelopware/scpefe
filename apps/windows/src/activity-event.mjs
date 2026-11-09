@@ -95,10 +95,9 @@ export class ActivityEventWorkflow {
       return candidate;
     } catch (error) {
       if (this.host.pendingNativeCandidate === candidate.operationId) {
-        const prepared = Boolean(error.publicationPrepared);
-        this.host.candidates.finish(this.host.container, candidate.operationId,
-          prepared ? "ambiguous" : "definite-failure");
-        if (prepared) {
+        const { retained } = this.host.candidates.finishOnFailure(
+          this.host.container, candidate.operationId, error);
+        if (retained) {
           const record = await this.host.journals.read(
             active.documentId, active.journalKey);
           if (this.#isCurrent(active)) {

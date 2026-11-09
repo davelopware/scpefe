@@ -26,7 +26,7 @@ export const ERROR_CATALOG = Object.freeze({
   PUBLICATION_CONFIRMATION_REQUIRED: ["Interrupted publication needs confirmation; recovery data was preserved.", "Review the pending publication before continuing."],
   RECOVERY_READ_FAILED: ["Recovered work could not be read safely.", "The document remains protected; review recovery options."],
   REGULAR_SAVE_TARGET_UNAVAILABLE: ["The target is unavailable; regular save was skipped and work remains unsaved locally.", "Retry when the target is available."],
-  LEASE_REFRESH_FAILED: ["Editing lease refresh failed.", "The document was locked to protect the working copy."],
+  LEASE_REFRESH_FAILED: ["Editing lease refresh failed; the lease could not be verified, so the document was locked.", "Restore target access, unlock, inspect recovered work and the authenticated current target and lease, then resume editing only when allowed."],
   PUBLICATION_AUTH_CONFLICT: ["The target was replaced or failed authentication; the pending candidate was preserved as a conflict.", "Review the authenticated conflict before continuing."],
   PUBLICATION_PENDING_TARGET_UNAVAILABLE: ["The target is unavailable; the manual save remains pending locally.", "Retry publication when the target is available."],
   REGULAR_SAVE_CONFLICT: ["The target changed before regular save; unsaved work was preserved for divergence resolution.", "Resolve the authenticated conflict before continuing."],

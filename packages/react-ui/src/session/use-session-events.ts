@@ -11,7 +11,8 @@ type EventSession = SnapshotSource<DocumentSessionSnapshot<DocumentOpened>>
   & Pick<FullSession, "getSnapshot" | "observeRecoveryDiscovery"
     | "regularSavePublished" | "queueExternalOpen"
     | "stageProtection">;
-type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
+type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null;
+  causeCode?: "LEASE_REFRESH_FAILED" | null };
 
 /** Subscribes native lifecycle events and forwards only semantic presentation effects. */
 export function useSessionEvents({ session, presentation, events, shellHost, completion,
@@ -38,8 +39,8 @@ export function useSessionEvents({ session, presentation, events, shellHost, com
       .catch((error: unknown) => onMessage(safeRendererErrorMessage(error))));
   }, []);
   useEffect(() => {
-    const stopLockStarted = events.onLockStarted?.(() => onLocked({
-      locked: true, journalSaved: true, warningCode: null,
+    const stopLockStarted = events.onLockStarted?.((result) => onLocked({
+      locked: true, journalSaved: true, warningCode: null, causeCode: result.causeCode,
     })) ?? (() => {});
     const stopLocked = events.onLocked(onLocked);
     const stopWarning = events.onJournalWarning((code, scope) => {

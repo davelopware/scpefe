@@ -52,6 +52,19 @@ export class CandidatePublication {
     return { published, effects };
   }
 
+  // A caller may fail before it reaches publication (for example, while
+  // validating an operation-specific result). Settle only its own candidate;
+  // publication itself settles failures with journal evidence in #settle.
+  finishOnFailure(container, operationId, error) {
+    if (operationId === null || this.#pendingOperationId !== operationId) {
+      return { retained: false };
+    }
+    const retained = Boolean(error?.publicationPrepared);
+    this.finish(container, operationId,
+      retained ? "ambiguous" : "definite-failure");
+    return { retained };
+  }
+
   async #settle(container, prepared, operation) {
     if (this.#pendingOperationId !== prepared.operationId
         || !Buffer.isBuffer(prepared.bytes) || prepared.bytes.length === 0) {
@@ -80,8 +93,7 @@ export class CandidatePublication {
       } catch {
         failure.publicationPrepared = true;
       }
-      this.finish(container, prepared.operationId,
-        failure.publicationPrepared ? "ambiguous" : "definite-failure");
+      this.finishOnFailure(container, prepared.operationId, failure);
       throw failure;
     }
   }

@@ -334,7 +334,7 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
     journalDirectory: path.join(directory, "journals"),
     witnessDirectory: path.join(directory, "witnesses"),
     inactivityMs: origin === "inactivity" ? 1_500 : 999_999,
-    ...(origin === "lease-refresh-failed" ? { setTimer(callback, delay) {
+    ...(origin.startsWith("lease-refresh-") ? { setTimer(callback, delay) {
       const timer = { callback, delay, unref() {} }; timers.push(timer); return timer;
     }, clearTimer() {} } : {}), ...callbacks });
   const timers = []; const acks = [];
@@ -1081,7 +1081,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
   service = host.service;
   const originalLockStart = service.onLockStart;
   service.onLockStart = (value) => { assert.equal(value.reason,
-    origin.startsWith("s3-") || origin.startsWith("al-") || origin.startsWith("als-")
+    origin.startsWith("lease-refresh-") ? "lease-refresh-failed"
+    : origin.startsWith("s3-") || origin.startsWith("al-") || origin.startsWith("als-")
     ? "app-lock" : origin === "close" || origin.endsWith("-close")
       || origin.startsWith("dc-close-") || origin.startsWith("prc-close-")
       || origin.startsWith("rw-") || origin.startsWith("tw-") || origin.startsWith("tx-")
@@ -1980,14 +1981,26 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
   }
   let releaseJournal; let journalStarted;
   const journalWriting = new Promise((resolve) => { journalStarted = resolve; });
+  const journalDocumentId = service.active.documentId;
+  const journalKey = origin === "lease-refresh-changed-target"
+    ? Buffer.from(service.active.journalKey) : null;
   const write = service.journals.write.bind(service.journals);
   service.journals.write = async (...args) => { journalStarted();
-    await new Promise((resolve) => { releaseJournal = resolve; }); return write(...args); };
-  if (origin === "lease-refresh-failed") {
+    await new Promise((resolve) => { releaseJournal = resolve; });
+    if (origin === "lease-refresh-checkpoint-failed") {
+      throw new Error("injected final checkpoint failure");
+    }
+    return write(...args); };
+  if (origin.startsWith("lease-refresh-")) {
     service.fs = { ...fs, async readFile(file, ...args) {
-      if (file === target) throw new Error("lease provider failed");
+      if (file === target && origin !== "lease-refresh-changed-target") {
+        throw new Error("lease provider failed");
+      }
       return fs.readFile(file, ...args);
     } };
+    if (origin === "lease-refresh-changed-target") {
+      await fs.writeFile(target, "changed-target-container");
+    }
     const heartbeat = timers.find((timer) => timer.delay === 120_000);
     assert.ok(heartbeat, "actual edit session scheduled its lease heartbeat");
     heartbeat.callback();
@@ -1999,9 +2012,44 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
   assert.equal(ui.getByLabelText(document.body, "Document state").textContent, "Locked");
   assert.equal(service.active.working.content, "mounted secret plaintext",
     "backend cleanup is deliberately still awaiting the journal");
+  if (origin.startsWith("lease-refresh-")) {
+    const status = ui.getByRole(document.body, "status");
+    assert.match(status.textContent, /Editing lease refresh failed/i,
+      "the accessible footer retains the lease cause at lock start");
+    assert.match(status.textContent, /unlock/i);
+  }
   await journalWriting; releaseJournal();
   const result = await finished;
   assert.equal(result.locked, true); assert.equal(service.active, null);
+  if (origin.startsWith("lease-refresh-")) {
+    await waitScalar(() => emittedChannels.includes("document:locked"),
+      "lease failure lock completion notification");
+    const status = ui.getByRole(document.body, "status");
+    if (origin === "lease-refresh-checkpoint-failed") {
+      assert.equal(result.journalSaved, false);
+      assert.match(status.textContent, /Latest changes could not be checkpointed/i);
+      assert.doesNotMatch(status.textContent, /Editing lease refresh failed/i);
+    } else {
+      assert.equal(result.journalSaved, true);
+      assert.match(status.textContent, /Editing lease refresh failed/i,
+        "the accessible footer retains the lease cause after lock completion");
+      assert.match(status.textContent, /recovered work/i);
+      if (origin === "lease-refresh-changed-target") {
+        assert.equal((await fs.readFile(target, "utf8")).startsWith("changed-target"), true,
+          "lease failure does not overwrite a changed target");
+        let preserved;
+        try { preserved = await service.journals.read(journalDocumentId, journalKey); }
+        finally { journalKey.fill(0); }
+        assert.equal(preserved?.text, "mounted secret plaintext",
+          "the changed target leaves the encrypted local checkpoint intact");
+      } else {
+        service.fs = serviceFs;
+        const reopened = await service.openDocument(target, "password words");
+        assert.equal(reopened.recovery?.content, "mounted secret plaintext",
+          "a successful encrypted checkpoint is recoverable after target access returns");
+      }
+    }
+  }
 }
 
 export function lifecycleCaseName(origin) {
@@ -2130,7 +2178,8 @@ export function lifecycleCaseName(origin) {
                               : `mounted renderer wired to real DocumentService clears at ${origin} lock start`;
 }
 
-const primaryOrigins = ["inactivity", "lease-refresh-failed", "window-close", "external-open",
+const primaryOrigins = ["inactivity", "lease-refresh-read-failed",
+  "lease-refresh-changed-target", "lease-refresh-checkpoint-failed", "window-close", "external-open",
   "new", "new-approved", "open", "close", "exit", "s0-new", "s0-open", "s0-external",
   "s0-close", "s0-exit", "s0-window",
   ...["s1", "s2", "s3"].flatMap((state) => ["new", "open", "external", "close", "exit",

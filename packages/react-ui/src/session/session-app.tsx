@@ -28,7 +28,8 @@ function isDocumentOpened(value: Opened | null): value is DocumentOpened {
   return value !== null && value.invitationRequired !== true;
 }
 
-type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null };
+type LockResult = { locked: true; journalSaved: boolean; warningCode: string | null;
+  causeCode?: "LEASE_REFRESH_FAILED" | null };
 /** Small platform capabilities required to mount the shared session view. */
 export interface SharedAppProps {
   sessionHost: SessionHost;
@@ -333,7 +334,8 @@ export function SharedApp({ sessionHost, journalTransport, events,
       securityDialogs.current?.reset();
       creationFlow.current?.reset();
       setDialog(null);
-      setMessage(closed ? "" : result.warningCode ? catalogText(result.warningCode)
+      const code = result.warningCode ?? result.causeCode;
+      setMessage(closed ? "" : code ? catalogText(code)
         : "Document locked. Use Security → Unlock to continue.");
     });
     dialogReturnFocus.current = null;

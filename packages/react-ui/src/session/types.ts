@@ -1,7 +1,7 @@
 export type Profile = { name: string; email: string; deviceName: string };
 export type Cursor = { start: number; end: number };
 export type Recovery = { content: string; state: "unsaved"; updateTime: number; cursor: Cursor;
-  authorName?: string; deviceName?: string };
+  authorName?: string; deviceName?: string; baseMismatch?: true };
 export type Lease = { active: boolean; holderName: string; holderEmail: string;
   deviceName: string; holderUtcMs: number; durationMs: number };
 export type HeadMismatch = { kind: "rollback" | "divergence" | "replacement" | "witness-error";
@@ -35,6 +35,7 @@ export type DocumentOpened = { content: string; readOnly: boolean; canEdit: bool
   headMismatch?: HeadMismatch; profileMismatch?: ProfileMismatch;
   managedSlots?: ManagedSlot[]; provisional?: true;
   unreadableJournal?: true;
+  preservedJournal?: true;
   activityOutcomePending?: true;
   activityConfirmationRequired?: true;
 };

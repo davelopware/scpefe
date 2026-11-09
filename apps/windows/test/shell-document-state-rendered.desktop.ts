@@ -322,7 +322,7 @@ test("mounted shell presents truthful document states, history, failures, and se
   await user.click(ui.getByRole(passwordsDialog, "tab", { name: "Invite Collaborator" }));
   await user.type(ui.getByLabelText(passwordsDialog,
     "Temporary passphrase (leave blank to generate)"), "private draft words");
-  listeners.lockStarted();
+  listeners.lockStarted({ causeCode: null });
   assert.equal(passwordsDialog.isConnected, false,
     "lock start removes the mounted password dialog");
   await command("Security", "Unlock");
