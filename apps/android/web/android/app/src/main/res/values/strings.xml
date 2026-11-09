@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SCPEFE</string>
+    <string name="title_activity_main">SCPEFE</string>
+    <string name="package_name">org.scpefe.nativecore.smoke</string>
+    <string name="custom_url_scheme">org.scpefe.nativecore.smoke</string>
+</resources>

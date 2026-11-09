@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.io.File;
 import java.util.Arrays;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
@@ -110,7 +111,9 @@ public final class AndroidWorkJournals {
             if (publication != null) {
                 envelope.put("bootstrap", new JSONObject()
                     .put("targetHash", hex(sha256(target.getBytes(StandardCharsets.UTF_8))))
-                    .put("base", publication.getString("base")));
+                    .put(publication.optBoolean("creation", false) ? "createCandidate" : "base",
+                        publication.getString(publication.optBoolean("creation", false)
+                            ? "candidate" : "base")));
             }
             files.write(documentId + ".work-journal",
                 (envelope.toString() + "\n").getBytes(StandardCharsets.UTF_8));
@@ -125,6 +128,39 @@ public final class AndroidWorkJournals {
     public void clear(String documentId) throws IOException {
         if (!validDocumentId(documentId)) throw new IllegalArgumentException("document ID");
         java.nio.file.Files.deleteIfExists(files.file(documentId + ".work-journal").toPath());
+    }
+
+    /** Persists a new-document candidate before any provider write, with no false base image. */
+    public void writePendingCreate(String documentId, String target, byte[] key,
+            byte[] candidate, String text) throws IOException {
+        if (candidate == null || candidate.length == 0 || text == null) {
+            throw new IllegalArgumentException("candidate required");
+        }
+        byte[] id = new byte[16];
+        RANDOM.nextBytes(id);
+        try {
+            JSONObject publication = new JSONObject()
+                .put("target", target).put("id", hex(id))
+                .put("candidateHash", hex(sha256(candidate)))
+                .put("baseHash", hex(sha256(new byte[0])))
+                .put("kind", "host-target").put("stage", "prepared")
+                .put("creation", true).put("base", "")
+                .put("candidate", encode(candidate));
+            JSONObject record = new JSONObject().put("target", target)
+                .put("baseRevision", "0".repeat(64))
+                .put("updateTime", System.currentTimeMillis())
+                .put("text", text).put("state", "pending-publication")
+                .put("cursor", new JSONObject().put("start", 0).put("end", 0))
+                .put("publication", publication);
+            write(documentId, target, key, record);
+        } catch (JSONException error) { throw new IOException("pending create is invalid", error); }
+    }
+
+    /** Counts unresolved private records without exposing or decrypting their contents. */
+    public int unresolvedCount() {
+        File[] records = files.file("placeholder").getParentFile().listFiles(
+            (dir, name) -> name.matches("[0-9a-f]{32}\\.work-journal"));
+        return records == null ? 0 : records.length;
     }
 
     private static void requireIdentity(String documentId, String target, byte[] key) {
@@ -191,7 +227,10 @@ public final class AndroidWorkJournals {
                 }
                 byte[] base = decode(publication.getString("base"));
                 byte[] candidate = decode(publication.getString("candidate"));
-                if (base.length == 0 || candidate.length == 0
+                boolean creation = publication.optBoolean("creation", false);
+                if ((base.length == 0 && !creation) || candidate.length == 0
+                        || (creation && (!"pending-publication".equals(state)
+                            || !"0".repeat(64).equals(value.getString("baseRevision"))))
                         || !hex(sha256(base)).equals(publication.getString("baseHash"))
                         || !hex(sha256(candidate)).equals(publication.getString("candidateHash"))) {
                     throw new JSONException("candidate");

@@ -60,6 +60,33 @@ public final class PrivateStateInstrumentedTest {
                 .put("stage", "prepared").put("purpose", "regular-save"));
     }
 
+    @Test public void pendingCreateKeepsExactCandidateWithoutInventingABase()
+            throws Exception {
+        File directory = directory();
+        AndroidWorkJournals store = new AndroidWorkJournals(
+            new PrivateStateFiles(directory, () -> {}));
+        byte[] key = new byte[32];
+        Arrays.fill(key, (byte)17);
+        byte[] candidate = "encrypted candidate".getBytes(StandardCharsets.UTF_8);
+        store.writePendingCreate(DOCUMENT, TARGET, key, candidate, "");
+        JSONObject envelope = new JSONObject(Files.readString(
+            new File(directory, DOCUMENT + ".work-journal").toPath()));
+        assertArrayEquals(candidate, android.util.Base64.decode(
+            envelope.getJSONObject("bootstrap").getString("createCandidate"),
+            android.util.Base64.NO_WRAP));
+        AndroidWorkJournals.Recovery recovered = store.recover(DOCUMENT, TARGET, key);
+        assertEquals(AndroidWorkJournals.Attention.PENDING_PUBLICATION,
+            recovered.attention);
+        JSONObject publication = recovered.record.getJSONObject("publication");
+        assertTrue(publication.getBoolean("creation"));
+        assertEquals("", publication.getString("base"));
+        assertArrayEquals(candidate, android.util.Base64.decode(
+            publication.getString("candidate"), android.util.Base64.NO_WRAP));
+        store.clear(DOCUMENT);
+        assertEquals(AndroidWorkJournals.Attention.NONE,
+            store.recover(DOCUMENT, TARGET, key).attention);
+    }
+
     @Test public void profileAndSettingsUseSharedShapeAndRejectSecrets() throws Exception {
         File directory = directory();
         AndroidProfileSettings store = new AndroidProfileSettings(

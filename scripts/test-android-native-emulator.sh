@@ -61,7 +61,11 @@ if [[ "$("$sdk_dir/platform-tools/adb" shell getprop sys.boot_completed | tr -d 
     echo 'Android emulator failed to boot' >&2
     exit 1
 fi
-gradle -p apps/android/native-smoke --no-daemon connectedDebugAndroidTest
+android_project="${SCPEFE_ANDROID_PROJECT:-apps/android/native-smoke}"
+gradle -p "$android_project" --no-daemon connectedDebugAndroidTest
+if [[ "$android_project" != apps/android/native-smoke ]]; then
+    exit 0
+fi
 
 # Exercise a real process boundary in two separate instrumentation invocations.
 # The first invocation persists state, force-stop kills the target process, and

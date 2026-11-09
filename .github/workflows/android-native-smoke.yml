@@ -6,13 +6,16 @@ on:
       - codex/issue-179-android-native
       - codex/issue-180-provider-target
       - codex/issue-181-android-state
+      - codex/issue-182-capacitor-webview
   pull_request:
     paths:
       - 'CMakeLists.txt'
       - 'src/**'
       - 'include/**'
       - 'apps/android/native-smoke/**'
+      - 'apps/android/web/**'
       - 'scripts/build-android-native.sh'
+      - 'scripts/test-android-native-emulator.sh'
       - 'tests/vectors/draft-v3/**'
       - 'tests/android_fixture_writer.c'
       - '.github/workflows/android-native-smoke.yml'
@@ -97,4 +100,61 @@ jobs:
           path: |
             apps/android/native-smoke/app/build/outputs/androidTest-results/connected/
             apps/android/native-smoke/app/build/reports/androidTests/connected/
+          if-no-files-found: warn
+
+  webview-emulator:
+    if: github.ref == 'refs/heads/codex/issue-182-capacitor-webview' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: windows-fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-windows-fixture
+          path: apps/android/web/android/app/src/androidTest/assets/windows
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check preinstalled Android toolchain and accepted SDK licence
+        run: |
+          test -f "$ANDROID_HOME/ndk/27.3.13750724/source.properties"
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          test -f "$ANDROID_HOME/licenses/android-sdk-license"
+      - name: Build shared React WebView bundle and plugin contract
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck --workspace @scpefe/android-web
+          npm run test --workspace @scpefe/android-web
+          npm run build --workspace @scpefe/android-web
+          cd apps/android/web
+          ../../../node_modules/.bin/cap sync android
+      - name: Build core and JNI from clean source
+        run: bash scripts/build-android-native.sh x86_64
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Drive real Capacitor WebView and picker on emulator
+        env:
+          SCPEFE_ANDROID_PROJECT: apps/android/web/android
+        run: bash scripts/test-android-native-emulator.sh
+      - name: Preserve WebView test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-webview-failure
+          path: |
+            apps/android/web/android/app/build/outputs/androidTest-results/connected/
+            apps/android/web/android/app/build/reports/androidTests/connected/
           if-no-files-found: warn

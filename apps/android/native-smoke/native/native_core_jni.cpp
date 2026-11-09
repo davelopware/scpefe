@@ -178,17 +178,19 @@ extern "C" JNIEXPORT jobject JNICALL
 Java_org_scpefe_nativecore_NativeCore_nativeCreateDocument(
     JNIEnv *env, jclass, jlong handle, jbyteArray name, jbyteArray email,
     jbyteArray device, jbyteArray content, jlong timestamp,
-    jbyteArray password, jint content_type) {
+    jbyteArray password, jbyteArray recovery_password, jint content_type) {
     try {
         const auto session = lookup(handle);
         if (!session) return result(env, SCPEFE_STATUS_INVALID_STATE);
         if (content_type < 0 || content_type > 255)
             return result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
-        Bytes name_bytes, email_bytes, device_bytes, content_bytes, password_bytes;
+        Bytes name_bytes, email_bytes, device_bytes, content_bytes, password_bytes,
+            recovery_bytes;
         if (!copy_array(env, name, name_bytes) || !copy_array(env, email, email_bytes)
             || !copy_array(env, device, device_bytes)
             || !copy_array(env, content, content_bytes)
-            || !copy_array(env, password, password_bytes)) {
+            || !copy_array(env, password, password_bytes)
+            || (recovery_password && !copy_array(env, recovery_password, recovery_bytes))) {
             return env->ExceptionCheck() ? nullptr : result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
         }
         scpefe_container_create_v1 request{};
@@ -207,6 +209,10 @@ Java_org_scpefe_nativecore_NativeCore_nativeCreateDocument(
         document.timestamp_ms = static_cast<uint64_t>(timestamp);
         document.owner_password = password_bytes.value.data();
         document.owner_password_size = password_bytes.value.size();
+        if (recovery_password) {
+            document.recovery_password = recovery_bytes.value.data();
+            document.recovery_password_size = recovery_bytes.value.size();
+        }
         document.content_type = static_cast<uint8_t>(content_type);
         std::lock_guard lock(session->mutex);
         scpefe_container *created = nullptr;
@@ -214,6 +220,50 @@ Java_org_scpefe_nativecore_NativeCore_nativeCreateDocument(
         if (status == SCPEFE_STATUS_OK) session->container = created;
         return result(env, status);
     } catch (const std::bad_alloc &) { return failure(env); }
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeCopyEncrypted(JNIEnv *env, jclass,
+                                                          jlong handle) {
+    try {
+        const auto session = lookup(handle);
+        if (!session) return result(env, SCPEFE_STATUS_INVALID_STATE);
+        std::lock_guard lock(session->mutex);
+        if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+        size_t size = 0;
+        auto status = scpefe_container_copy_bytes(session->container, nullptr, 0, &size);
+        if (status != SCPEFE_STATUS_BUFFER_TOO_SMALL || size > 33 * 1024 * 1024)
+            return result(env, status == SCPEFE_STATUS_BUFFER_TOO_SMALL
+                ? SCPEFE_STATUS_LIMIT_EXCEEDED : status);
+        Bytes bytes;
+        bytes.value.resize(size);
+        status = scpefe_container_copy_bytes(session->container, bytes.value.data(),
+                                             bytes.value.size(), &size);
+        return status == SCPEFE_STATUS_OK
+            ? result(env, status, 0, bytes.value.data(), size) : result(env, status);
+    } catch (const std::bad_alloc &) { return failure(env); }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeAssessPassword(JNIEnv *env, jclass,
+                                                           jbyteArray password) {
+    try {
+        Bytes bytes;
+        if (!copy_array(env, password, bytes)) return SCPEFE_PASSWORD_POLICY_INVALID;
+        return scpefe_assess_password_policy(bytes.value.data(), bytes.value.size());
+    } catch (const std::bad_alloc &) { return SCPEFE_PASSWORD_POLICY_INVALID; }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeContentType(JNIEnv *, jclass,
+                                                       jlong handle) {
+    const auto session = lookup(handle);
+    if (!session) return -1;
+    std::lock_guard lock(session->mutex);
+    if (!session->container) return -1;
+    uint8_t type = 0;
+    return scpefe_container_content_type(session->container, &type) == SCPEFE_STATUS_OK
+        ? static_cast<jint>(type) : -1;
 }
 
 extern "C" JNIEXPORT jobject JNICALL

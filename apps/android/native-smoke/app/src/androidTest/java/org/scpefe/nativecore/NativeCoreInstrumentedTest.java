@@ -157,11 +157,14 @@ public final class NativeCoreInstrumentedTest {
             try {
                 NativeCore.Result created = NativeCore.nativeCreateDocument(context.handle,
                     utf8("Ada"), utf8("ada@example.org"), utf8("Android"),
-                    utf8("first line"), 123, password, 0);
+                    utf8("first line"), 123, password, null, 0);
                 assertEquals(NativeCore.OK, created.status);
                 assertEquals(NativeCore.INVALID_STATE, NativeCore.nativeCreateDocument(
                     context.handle, utf8("Ada"), utf8("ada@example.org"),
-                    utf8("Android"), utf8("another line"), 124, password, 0).status);
+                    utf8("Android"), utf8("another line"), 124, password, null, 0).status);
+                NativeCore.Result encrypted = NativeCore.nativeCopyEncrypted(context.handle);
+                assertEquals(NativeCore.OK, encrypted.status);
+                assertTrue(encrypted.data.length > 0);
                 NativeCore.Result read = NativeCore.nativeRead(context.handle);
                 assertEquals(NativeCore.OK, read.status);
                 assertArrayEquals(utf8("first line"), read.data);

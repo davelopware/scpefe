@@ -42,7 +42,13 @@ public final class NativeCore {
     /** Creates a document using exact UTF-8 byte arrays and the core's policy. */
     public static native Result nativeCreateDocument(long handle, byte[] name,
         byte[] email, byte[] device, byte[] content, long timestamp,
-        byte[] ownerPassword, int contentType);
+        byte[] ownerPassword, byte[] recoveryPassword, int contentType);
+    /** Copies the current encrypted container for exact provider publication. */
+    public static native Result nativeCopyEncrypted(long handle);
+    /** Returns the core's stable proposed-password policy code. */
+    public static native int nativeAssessPassword(byte[] password);
+    /** Reports authenticated Plain Text or CSV content type for the active container. */
+    public static native int nativeContentType(long handle);
     /** Copies authenticated text and document ID into owned Java arrays. */
     public static native Result nativeRead(long handle);
     /** Copies the core-derived journal key; the caller must erase the returned array. */
