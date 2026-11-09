@@ -5,11 +5,27 @@ set -euo pipefail
 sdk_dir="${ANDROID_HOME:?ANDROID_HOME must name a preinstalled SDK}"
 test -f "$sdk_dir/licenses/android-sdk-license"
 test -f "$sdk_dir/platforms/android-35/android.jar"
+# Give avdmanager and the emulator the same explicit profile location.
+export ANDROID_USER_HOME="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/scpefe-android-user"
+export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+mkdir -p "$ANDROID_AVD_HOME"
 timeout 300s "$sdk_dir/cmdline-tools/latest/bin/sdkmanager" --install \
     'emulator' 'system-images;android-35;google_apis;x86_64' </dev/null
 echo no | "$sdk_dir/cmdline-tools/latest/bin/avdmanager" create avd \
     --force --name scpefe-native-smoke \
-    --package 'system-images;android-35;google_apis;x86_64'
+    --package 'system-images;android-35;google_apis;x86_64' \
+    --path "$ANDROID_AVD_HOME/scpefe-native-smoke.avd"
+if [[ ! -f "$ANDROID_AVD_HOME/scpefe-native-smoke.ini" ]]; then
+    echo "AVD index missing from $ANDROID_AVD_HOME" >&2
+    exit 1
+fi
+available_avds="$("$sdk_dir/emulator/emulator" -list-avds)"
+printf 'Available Android AVDs:\n%s\n' "$available_avds"
+if ! grep -Fxq scpefe-native-smoke <<< "$available_avds"; then
+    echo 'Emulator cannot find the created scpefe-native-smoke AVD' >&2
+    exit 1
+fi
 
 "$sdk_dir/emulator/emulator" -avd scpefe-native-smoke -no-window -no-audio \
     -no-boot-anim -no-snapshot -gpu software -verbose \
