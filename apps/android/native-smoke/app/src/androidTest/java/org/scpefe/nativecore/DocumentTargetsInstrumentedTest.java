@@ -10,12 +10,17 @@ import android.net.Uri;
 import android.provider.DocumentsContract;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
+import androidx.test.uiautomator.By;
+import androidx.test.uiautomator.UiDevice;
+import androidx.test.uiautomator.UiObject2;
+import androidx.test.uiautomator.Until;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.regex.Pattern;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -113,12 +118,37 @@ public final class DocumentTargetsInstrumentedTest {
             assertNotNull(output);
             output.write(windows);
         }
-        int grants = Intent.FLAG_GRANT_READ_URI_PERMISSION
-            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION;
-        testContext.grantUriPermission(targetContext.getPackageName(), uri, grants);
+        PickerHostActivity.clearResults();
+        Uri root = DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY,
+            TestDocumentsProvider.ROOT_ID);
+        Intent launch = new Intent(targetContext, PickerHostActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra(DocumentsContract.EXTRA_INITIAL_URI, root);
+        InstrumentationRegistry.getInstrumentation().startActivitySync(launch);
+        UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        UiObject2 file = device.wait(Until.findObject(By.text("test.scpefe")), 20_000);
+        if (file == null) {
+            UiObject2 roots = device.findObject(By.descContains("Show roots"));
+            if (roots != null) roots.click();
+            UiObject2 provider = device.wait(
+                Until.findObject(By.text("SCPEFE test provider")), 10_000);
+            assertNotNull("local document provider must appear in system picker", provider);
+            provider.click();
+            file = device.wait(Until.findObject(By.text("test.scpefe")), 10_000);
+        }
+        assertNotNull("Windows fixture must appear in system picker", file);
+        file.click();
+        Intent selected = PickerHostActivity.awaitResult(2_000);
+        if (selected == null) {
+            UiObject2 open = device.findObject(By.text(Pattern.compile("(?i)open")));
+            assertNotNull("system picker must offer Open", open);
+            open.click();
+            selected = PickerHostActivity.awaitResult(10_000);
+        }
+        assertNotNull("system picker did not return", selected);
+        assertEquals(uri, selected.getData());
         AndroidDocumentTargets targets = new AndroidDocumentTargets(targetContext);
-        String key = targets.registerPicked(new Intent().setData(uri).addFlags(grants));
+        String key = targets.registerPicked(selected);
         assertTrue(targets.owns(key));
         assertFalse(key.contains(uri.toString()));
         boolean retained = false;
@@ -162,7 +192,6 @@ public final class DocumentTargetsInstrumentedTest {
         assertArrayEquals(candidate, reopened.read(key));
         reopened.forget(key);
         assertFalse(reopened.owns(key));
-        testContext.revokeUriPermission(targetContext.getPackageName(), uri, grants);
     }
 
     @Test public void pickerContractsRequestOnlyDocumentGrants() throws Exception {
