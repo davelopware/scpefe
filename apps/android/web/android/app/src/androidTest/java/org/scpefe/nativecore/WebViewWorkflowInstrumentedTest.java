@@ -4,9 +4,12 @@ import static org.junit.Assert.*;
 
 import android.os.SystemClock;
 import android.content.Context;
+import android.content.ContentValues;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
+import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
@@ -20,6 +23,7 @@ import androidx.test.uiautomator.Until;
 import java.util.concurrent.CountDownLatch;
 import java.io.File;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -275,11 +279,37 @@ public final class WebViewWorkflowInstrumentedTest {
                 (id.toString() + "\n").getBytes(StandardCharsets.US_ASCII));
             Files.write(new File(dir, name + "-content.txt").toPath(),
                 expectedText.getBytes(StandardCharsets.UTF_8));
+            exportInterop(context, name + ".scpefe", encrypted);
+            exportInterop(context, name + "-id.txt",
+                (id.toString() + "\n").getBytes(StandardCharsets.US_ASCII));
+            exportInterop(context, name + "-content.txt",
+                expectedText.getBytes(StandardCharsets.UTF_8));
             Arrays.fill(read.data, (byte)0);
         } finally {
             assertEquals(NativeCore.OK,
                 NativeCore.nativeCloseContext(owner.handle).status);
         }
+    }
+
+    private static void exportInterop(Context context, String fileName, byte[] bytes)
+            throws Exception {
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream");
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH,
+            Environment.DIRECTORY_DOWNLOADS + "/scpefe-interop");
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri uri = context.getContentResolver().insert(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        assertNotNull("Android could not create interop download", uri);
+        try (OutputStream output = context.getContentResolver().openOutputStream(uri)) {
+            assertNotNull("Android could not write interop download", output);
+            output.write(bytes);
+        }
+        ContentValues ready = new ContentValues();
+        ready.put(MediaStore.MediaColumns.IS_PENDING, 0);
+        assertEquals("Android did not publish interop download", 1,
+            context.getContentResolver().update(uri, ready, null, null));
     }
 
     private static Uri fixtureUri(String id) {
