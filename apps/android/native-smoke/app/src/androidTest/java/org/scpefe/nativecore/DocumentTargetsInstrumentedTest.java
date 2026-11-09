@@ -6,10 +6,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.UriPermission;
 import android.net.Uri;
+import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
+import androidx.test.uiautomator.BySelector;
+import androidx.test.uiautomator.StaleObjectException;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
@@ -105,6 +108,24 @@ public final class DocumentTargetsInstrumentedTest {
         }
     }
 
+    private static boolean clickFresh(UiDevice device, BySelector selector, long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            try {
+                long remaining = deadline - SystemClock.uptimeMillis();
+                UiObject2 current = device.wait(Until.findObject(selector),
+                    Math.min(1_000, Math.max(1, remaining)));
+                if (current != null) {
+                    current.click();
+                    return true;
+                }
+            } catch (StaleObjectException ignored) {
+                // DocumentsUI can replace a row between query and click.
+            }
+        }
+        return false;
+    }
+
     @Test public void localDocumentsProviderReadsWindowsFixtureAndVerifiesWrite() throws Exception {
         Context targetContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
         Uri uri = DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY,
@@ -118,23 +139,21 @@ public final class DocumentTargetsInstrumentedTest {
             .putExtra(DocumentsContract.EXTRA_INITIAL_URI, root);
         InstrumentationRegistry.getInstrumentation().startActivitySync(launch);
         UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-        UiObject2 file = device.wait(Until.findObject(By.text("test.scpefe")), 20_000);
-        if (file == null) {
-            UiObject2 roots = device.findObject(By.descContains("Show roots"));
-            if (roots != null) roots.click();
-            UiObject2 provider = device.wait(
-                Until.findObject(By.text("SCPEFE test provider")), 10_000);
-            assertNotNull("local document provider must appear in system picker", provider);
-            provider.click();
-            file = device.wait(Until.findObject(By.text("test.scpefe")), 10_000);
+        boolean fileSelected = clickFresh(device, By.text("test.scpefe"), 20_000);
+        if (!fileSelected) {
+            clickFresh(device, By.descContains("Show roots"), 2_000);
+            assertTrue("local document provider must appear in system picker; package="
+                    + device.getCurrentPackageName(),
+                clickFresh(device, By.text("SCPEFE test provider"), 10_000));
+            fileSelected = clickFresh(device, By.text("test.scpefe"), 10_000);
         }
-        assertNotNull("Windows fixture must appear in system picker", file);
-        file.click();
+        assertTrue("Windows fixture must appear in system picker; package="
+            + device.getCurrentPackageName(), fileSelected);
         Intent selected = PickerHostActivity.awaitResult(2_000);
         if (selected == null) {
-            UiObject2 open = device.findObject(By.text(Pattern.compile("(?i)open")));
-            assertNotNull("system picker must offer Open", open);
-            open.click();
+            assertTrue("system picker must offer Open; package="
+                    + device.getCurrentPackageName(),
+                clickFresh(device, By.text(Pattern.compile("(?i)open")), 10_000));
             selected = PickerHostActivity.awaitResult(10_000);
         }
         assertNotNull("system picker did not return", selected);
