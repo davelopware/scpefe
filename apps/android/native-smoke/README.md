@@ -24,6 +24,27 @@ SAF deletion lacks compare-and-delete, so `removeCreated` explicitly reports
 unsupported cleanup and leaves a matching created document intact rather than
 risking deletion of a concurrent update.
 
+`AndroidProfileSettings` persists the existing `{name,email,deviceName}` profile
+and regular-save settings JSON shapes in app-private storage, validating the same
+field bounds and defaults as the shared frontend contract. `AndroidWorkJournals`
+stores the same version-1 AES-GCM journal envelope used by Windows, with the
+core-derived 32-byte journal key returned by `nativeJournalKey`. Callers must
+erase that Java byte array after use. Exact candidate bytes and publication
+metadata remain inside the authenticated ciphertext; the envelope's optional
+bootstrap holds only the already encrypted base container and a target hash.
+The journal is keyed by authenticated document ID and rejects a different opaque
+target. `AndroidHeadWitnesses` MACs client-local revision observations and
+returns structured rollback, divergence, replacement, or unreadable attention.
+Private records use a synced temporary file and atomic replacement. A failed
+write keeps the previous record, and unreadable journals remain on disk for
+explicit recovery decisions. The application manifest sets `allowBackup=false`
+so app-private profile, settings, grants, journals, witness key, and witness
+records are excluded from Android cloud backup.
+The emulator gate runs one instrumentation phase to write state, force-stops the
+app process, then starts a second instrumentation phase to verify recovery under
+a different process ID. This also avoids adding a process-isolated component to
+the production APK solely for test orchestration.
+
 ## Pinned toolchain and clean build
 
 - JDK 17, Android Gradle Plugin 8.11.1, Gradle 8.13.

@@ -65,6 +65,11 @@ public final class NativeCoreInstrumentedTest {
                 assertEquals(NativeCore.AUTHENTICATION_FAILED,
                     NativeCore.nativeUnlock(handle, wrong).status);
                 assertEquals(NativeCore.OK, NativeCore.nativeUnlock(handle, password).status);
+                NativeCore.Result journalKey = NativeCore.nativeJournalKey(handle);
+                assertEquals(NativeCore.OK, journalKey.status);
+                assertArrayEquals(fixtureDocumentId(), journalKey.documentId);
+                assertEquals(32, journalKey.data.length);
+                Arrays.fill(journalKey.data, (byte)0);
                 NativeCore.Result read = NativeCore.nativeRead(handle);
                 assertEquals(NativeCore.OK, read.status);
                 assertArrayEquals(utf8("alpha\n"), read.data);
