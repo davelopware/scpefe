@@ -45,6 +45,8 @@ public final class NativeCore {
         byte[] ownerPassword, int contentType);
     /** Copies authenticated text and document ID into owned Java arrays. */
     public static native Result nativeRead(long handle);
+    /** Copies the core-derived journal key; the caller must erase the returned array. */
+    public static native Result nativeJournalKey(long handle);
     /** Closes the active container while retaining its context. */
     public static native Result nativeCloseContainer(long handle);
 }

@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
         <activity android:name=".PickerHostActivity" android:exported="false" />
+        <activity android:name=".StateRestartActivity" android:exported="false"
+            android:process=":state-restart" />
     </application>
 </manifest>

@@ -239,6 +239,31 @@ Java_org_scpefe_nativecore_NativeCore_nativeRead(JNIEnv *env, jclass, jlong hand
 }
 
 extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeJournalKey(JNIEnv *env, jclass,
+                                                       jlong handle) {
+    const auto session = lookup(handle);
+    if (!session) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    std::lock_guard lock(session->mutex);
+    if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    scpefe_owned_authenticated_state *raw = nullptr;
+    const auto status = scpefe_container_authenticated_state(session->container, &raw);
+    if (status != SCPEFE_STATUS_OK) return result(env, status);
+    const std::unique_ptr<scpefe_owned_authenticated_state,
+        decltype(&scpefe_owned_authenticated_state_destroy)> state(
+            raw, scpefe_owned_authenticated_state_destroy);
+    scpefe_owned_authenticated_state_view_v1 view{};
+    view.struct_size = sizeof(view);
+    view.abi_version = SCPEFE_ABI_VERSION;
+    const auto viewed = scpefe_owned_authenticated_state_view(state.get(), &view);
+    jobject answer = viewed == SCPEFE_STATUS_OK
+        ? result(env, SCPEFE_STATUS_OK, 0, view.work_journal_key,
+            SCPEFE_WORK_JOURNAL_KEY_SIZE, view.document_id)
+        : result(env, viewed);
+    sodium_memzero(view.work_journal_key, sizeof(view.work_journal_key));
+    return answer;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
 Java_org_scpefe_nativecore_NativeCore_nativeCloseContainer(JNIEnv *env, jclass,
                                                             jlong handle) {
     const auto session = lookup(handle);
