@@ -691,7 +691,7 @@ SCPEFE_API scpefe_status scpefe_container_revision_graph(
 /* Borrows immutable spans from the owned snapshot until its destruction. */
 SCPEFE_API scpefe_status scpefe_owned_snapshot_view(
     const scpefe_owned_snapshot *snapshot, scpefe_owned_snapshot_view_v1 *view);
-/* Releases one independently owned snapshot. */
+/* Releases one independently owned snapshot and erases its cleartext copy. */
 SCPEFE_API void scpefe_owned_snapshot_destroy(scpefe_owned_snapshot *snapshot);
 /* Copies the current encrypted image into caller storage. */
 SCPEFE_API scpefe_status scpefe_container_copy_bytes(

@@ -7,3 +7,10 @@
 /apps/windows/native/*.dll
 /apps/windows/native/*.node
 /apps/windows/release/
+/apps/android/native-smoke/.build/
+/apps/android/native-smoke/.gradle/
+/apps/android/native-smoke/build/
+/apps/android/native-smoke/app/build/
+/apps/android/native-smoke/app/src/main/jniLibs/
+/apps/android/native-smoke/app/src/main/assets/licenses/
+/apps/android/native-smoke/app/src/androidTest/assets/windows/
