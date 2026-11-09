@@ -178,6 +178,8 @@ public final class AndroidWorkJournals {
         try {
             if (value == null || !target.equals(value.getString("target"))
                     || !value.getString("baseRevision").matches("[0-9a-f]{64}")
+                    || (value.has("targetHash")
+                        && !value.getString("targetHash").matches("[0-9a-f]{64}"))
                     || value.getLong("updateTime") < 0
                     || !value.has("text") || !(value.get("text") instanceof String)) {
                 throw new JSONException("record identity");

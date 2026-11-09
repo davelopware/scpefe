@@ -25,6 +25,12 @@ export interface AndroidPluginContract {
   lock(): Promise<{ locked: true; journalSaved: true; warningCode: null }>;
   closeDocument(): Promise<{ closed: true }>;
   getUnresolvedJournalSummary(): Promise<{ total: number; pendingPublications: number }>;
+  enterEditMode(): Promise<PluginOpened>;
+  restoreRecoveredWork(): Promise<{ opened: DocumentOpened & {
+    recoveredUnsaved: true; cursor: { start: number; end: number } } }>;
+  updateWorkingCopy(value: { update: { content: string;
+    cursor: { start: number; end: number }; journalScope: string;
+    revision: number } }): Promise<{ accepted: true }>;
 }
 
 export const native = registerPlugin<AndroidPluginContract>("Scpefe");
@@ -32,16 +38,34 @@ export const native = registerPlugin<AndroidPluginContract>("Scpefe");
 function opened(value: unknown): DocumentOpened {
   if (!value || typeof value !== "object") throw new TypeError("Invalid native document");
   const candidate = value as Partial<DocumentOpened>;
-  if (candidate.readOnly !== true || candidate.canEdit !== false
+  if (typeof candidate.readOnly !== "boolean" || typeof candidate.canEdit !== "boolean"
+      || (candidate.readOnly === false && candidate.canEdit !== true)
       || typeof candidate.content !== "string"
       || new TextEncoder().encode(candidate.content).length > 1024 * 1024
       || !["plain-text", "csv"].includes(candidate.contentType ?? "")
-      || candidate.publicationState !== "target-published") {
+      || !["target-published", "pending-publication"].includes(
+        candidate.publicationState ?? "")) {
     throw new TypeError("Invalid native document");
   }
-  return Object.freeze({ content: candidate.content, readOnly: true, canEdit: false,
+  const recovery = candidate.recovery;
+  if (recovery && (recovery.state !== "unsaved"
+      || typeof recovery.content !== "string"
+      || !Number.isSafeInteger(recovery.updateTime)
+      || !recovery.cursor || !Number.isSafeInteger(recovery.cursor.start)
+      || !Number.isSafeInteger(recovery.cursor.end)
+      || recovery.cursor.start < 0 || recovery.cursor.end < recovery.cursor.start
+      || recovery.cursor.end > recovery.content.length)) {
+    throw new TypeError("Invalid native recovery");
+  }
+  return Object.freeze({ content: candidate.content, readOnly: candidate.readOnly,
+    canEdit: candidate.canEdit,
     contentType: candidate.contentType,
-    publicationState: "target-published", targetName: "Selected document" });
+    publicationState: candidate.publicationState!, targetName: "Selected document",
+    ...(recovery ? { recovery: Object.freeze({ content: recovery.content,
+      state: "unsaved" as const, updateTime: recovery.updateTime,
+      cursor: Object.freeze({ start: recovery.cursor.start, end: recovery.cursor.end }),
+      ...(recovery.baseMismatch ? { baseMismatch: true as const } : {}) }) } : {}),
+    ...(candidate.unreadableJournal ? { unreadableJournal: true as const } : {}) });
 }
 
 function profile(value: unknown): Profile {
@@ -55,12 +79,51 @@ function profile(value: unknown): Profile {
   return { name: candidate.name!, email: candidate.email!, deviceName: candidate.deviceName! };
 }
 
+function workingUpdate(value: unknown): { content: string;
+    cursor: { start: number; end: number }; journalScope: string;
+    revision: number } {
+  if (!value || typeof value !== "object") throw new TypeError("Invalid working copy");
+  const update = value as { content?: unknown; cursor?: { start?: unknown; end?: unknown };
+    journalScope?: unknown; revision?: unknown };
+  const start = update.cursor?.start, end = update.cursor?.end;
+  if (typeof update.content !== "string"
+      || new TextEncoder().encode(update.content).length > 1024 * 1024
+      || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+      || (start as number) < 0 || (end as number) < (start as number)
+      || (end as number) > update.content.length
+      || typeof update.journalScope !== "string"
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(update.journalScope)
+      || !Number.isSafeInteger(update.revision) || (update.revision as number) < 1) {
+    throw new TypeError("Invalid working copy");
+  }
+  return { content: update.content,
+    cursor: { start: start as number, end: end as number },
+    journalScope: update.journalScope, revision: update.revision as number };
+}
+
+function recovered(value: unknown) {
+  if (!value || typeof value !== "object") throw new TypeError("Invalid recovery");
+  const candidate = value as { content?: unknown; readOnly?: unknown; canEdit?: unknown;
+    recoveredUnsaved?: unknown; cursor?: { start?: unknown; end?: unknown } };
+  const start = candidate.cursor?.start, end = candidate.cursor?.end;
+  if (candidate.readOnly !== false || candidate.canEdit !== true
+      || candidate.recoveredUnsaved !== true || typeof candidate.content !== "string"
+      || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+      || (start as number) < 0 || (end as number) < (start as number)
+      || (end as number) > candidate.content.length) {
+    throw new TypeError("Invalid recovery");
+  }
+  return Object.freeze({ content: candidate.content, readOnly: false as const,
+    canEdit: true as const, recoveredUnsaved: true as const,
+    cursor: Object.freeze({ start: start as number, end: end as number }) });
+}
+
 const unsupported = async (): Promise<never> => {
   throw Object.assign(new Error("This action is not available on Android yet."),
     { code: "OPERATION_FAILED" });
 };
 
-/** Shared-UI host, limited to profile and read-only admission in this issue. */
+/** Shared-UI host for native admission, edit lease, and encrypted local checkpoints. */
 export function createHost(plugin: AndroidPluginContract) { return {
   getProfile: async () => { const value = (await plugin.getProfile()).profile;
     return value === null ? null : profile(value); },
@@ -91,7 +154,11 @@ export function createHost(plugin: AndroidPluginContract) { return {
   getUnresolvedJournalSummary: async () => plugin.getUnresolvedJournalSummary(),
   assessPasswordPolicy: async (password: string) =>
     (await plugin.assessPasswordPolicy({ password: validatePassword(password) })).assessment,
-  updateWorkingCopy: async () => undefined,
+  createJournalScope: () => crypto.randomUUID(),
+  updateWorkingCopy: async (update: object) => {
+    const result = await plugin.updateWorkingCopy({ update: workingUpdate(update) });
+    if (result.accepted !== true) throw new TypeError("Invalid checkpoint result");
+  },
   activity: async () => undefined,
   onLocked: () => () => {},
   onJournalWarning: () => () => {},
@@ -100,9 +167,10 @@ export function createHost(plugin: AndroidPluginContract) { return {
   onUnresolvedJournalSummary: () => () => {},
   onSwitchRetained: () => () => {},
   copyInvitationPassphrase: async () => false,
-  enterEditMode: unsupported,
+  enterEditMode: async () => opened((await plugin.enterEditMode()).opened),
   cancelLeaseTakeover: unsupported,
-  restoreRecoveredWork: unsupported,
+  restoreRecoveredWork: async () => recovered(
+    (await plugin.restoreRecoveredWork()).opened),
   saveDocument: unsupported,
   saveDivergenceResolution: unsupported,
   reconnectPendingPublication: unsupported,
@@ -115,6 +183,7 @@ export function createHost(plugin: AndroidPluginContract) { return {
 } as unknown as SessionHost & ShellHost & CreationTargetHost & JournalTransportHost
   & SessionEventsHost & SecurityClipboardHost & {
     createDocument: NonNullable<SessionHost["createDocument"]>;
+    createJournalScope(): string;
     assessPasswordPolicy(password: string): Promise<string> };
 }
 

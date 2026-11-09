@@ -14,7 +14,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
 
-/** Narrow, bounded Capacitor bridge for profile and read-only document admission. */
+/** Narrow, serial Capacitor bridge for document admission and local editing. */
 @CapacitorPlugin(name = "Scpefe")
 public final class ScpefePlugin extends Plugin {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -160,5 +160,25 @@ public final class ScpefePlugin extends Plugin {
         dispatch(call, () -> new JSObject()
             .put("total", session.unresolvedJournalCount())
             .put("pendingPublications", session.unresolvedJournalCount()));
+    }
+
+    @PluginMethod public void enterEditMode(PluginCall call) {
+        final long expected = session.generation();
+        dispatch(call, () -> new JSObject().put("opened", session.enterEdit(expected)));
+    }
+
+    @PluginMethod public void restoreRecoveredWork(PluginCall call) {
+        final long expected = session.generation();
+        dispatch(call, () -> new JSObject().put("opened", session.restoreRecovered(expected)));
+    }
+
+    @PluginMethod public void updateWorkingCopy(PluginCall call) {
+        final long expected = session.generation();
+        JSONObject update = call.getObject("update");
+        if (update == null || update.toString().length() > 2 * 1024 * 1024) {
+            call.reject("Invalid working copy.", "INVALID_ARGUMENT"); return;
+        }
+        dispatch(call, () -> { session.updateWorkingCopy(update, expected);
+            return new JSObject().put("accepted", true); });
     }
 }

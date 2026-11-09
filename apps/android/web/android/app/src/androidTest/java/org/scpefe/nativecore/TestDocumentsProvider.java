@@ -9,9 +9,11 @@ import android.provider.DocumentsProvider;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /** Debug-only local document provider for emulator storage verification. */
@@ -19,17 +21,39 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     public static final String AUTHORITY = "org.scpefe.nativecore.smoke.test.documents";
     public static final String ROOT_ID = "root";
     public static final String DOCUMENT_ID = "fixture";
+    public static final String VIEW_ONLY_ID = "reader-fixture";
 
     @Override public boolean onCreate() {
-        try (InputStream input = getContext().getAssets().open("windows/windows-container.bin");
-                OutputStream output = new FileOutputStream(file())) {
-            byte[] chunk = new byte[8192];
-            for (int count; (count = input.read(chunk)) != -1;) {
-                output.write(chunk, 0, count);
-            }
+        try {
+            seed(DOCUMENT_ID, "windows/windows-container.bin");
+            seed(VIEW_ONLY_ID, "vectors/multi-slot-container.hex");
             return true;
         } catch (IOException error) {
-            throw new IllegalStateException("Windows fixture unavailable to test provider", error);
+            throw new IllegalStateException("Android fixture unavailable to test provider", error);
+        }
+    }
+
+    private void seed(String id, String asset) throws IOException {
+        try (InputStream input = getContext().getAssets().open(asset);
+                OutputStream output = new FileOutputStream(file(id))) {
+            byte[] chunk = new byte[8192];
+            if (!asset.endsWith(".hex")) {
+                for (int count; (count = input.read(chunk)) != -1;)
+                    output.write(chunk, 0, count);
+                return;
+            }
+            ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+            for (int count; (count = input.read(chunk)) != -1;)
+                encoded.write(chunk, 0, count);
+            String hex = new String(encoded.toByteArray(), StandardCharsets.US_ASCII)
+                .replaceAll("(?m)^#.*$", "").replaceAll("\\s", "");
+            if ((hex.length() & 1) != 0) throw new IOException("invalid hex fixture");
+            for (int index = 0; index < hex.length(); index += 2) {
+                int high = Character.digit(hex.charAt(index), 16);
+                int low = Character.digit(hex.charAt(index + 1), 16);
+                if (high < 0 || low < 0) throw new IOException("invalid hex fixture");
+                output.write((high << 4) | low);
+            }
         }
     }
 
@@ -98,6 +122,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
         MatrixCursor result = new MatrixCursor(columns);
         if (ROOT_ID.equals(parentDocumentId)) {
             addDocumentRow(result, columns, DOCUMENT_ID);
+            addDocumentRow(result, columns, VIEW_ONLY_ID);
             File[] children = getContext().getFilesDir().listFiles(
                 (dir, name) -> name.startsWith("provider-created-") && name.endsWith(".scpefe"));
             if (children != null) for (File child : children) {
@@ -128,7 +153,8 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     private File file() { return file(DOCUMENT_ID); }
 
     private File file(String id) {
-        if (!DOCUMENT_ID.equals(id) && !id.matches("created-[0-9a-f-]{36}"))
+        if (!DOCUMENT_ID.equals(id) && !VIEW_ONLY_ID.equals(id)
+                && !id.matches("created-[0-9a-f-]{36}"))
             return new File(getContext().getFilesDir(), "no-such-provider-document");
         return new File(getContext().getFilesDir(), "provider-" + id + ".scpefe");
     }
