@@ -8,6 +8,7 @@ import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
+import androidx.test.uiautomator.StaleObjectException;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
@@ -59,20 +60,38 @@ public final class WebViewWorkflowInstrumentedTest {
     }
 
     private static void click(UiDevice device, Pattern label) {
-        UiObject2 item = device.wait(Until.findObject(By.text(label)), 10_000);
-        assertNotNull("Picker item missing: " + label, item);
-        item.click();
+        long deadline = SystemClock.uptimeMillis() + 10_000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            UiObject2 item = device.wait(Until.findObject(By.text(label)), 1_000);
+            if (item == null) continue;
+            try {
+                item.click();
+                return;
+            } catch (StaleObjectException ignored) {
+                // DocumentsUI rebuilt its row; reacquire the live accessibility node.
+            }
+        }
+        fail("Picker item missing or stale: " + label);
     }
 
     private static void provider(UiDevice device) {
-        UiObject2 root = device.wait(Until.findObject(By.text("SCPEFE test provider")), 2_000);
-        if (root == null) {
-            UiObject2 roots = device.wait(Until.findObject(By.descContains("Show roots")), 5_000);
-            if (roots != null) roots.click();
-            root = device.wait(Until.findObject(By.text("SCPEFE test provider")), 10_000);
+        long deadline = SystemClock.uptimeMillis() + 15_000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (device.hasObject(By.text("SCPEFE test provider"))
+                    && device.hasObject(By.text("test.scpefe"))) return;
+            UiObject2 roots = device.wait(Until.findObject(By.descContains("Show roots")), 1_000);
+            if (roots != null) {
+                try { roots.click(); }
+                catch (StaleObjectException ignored) { continue; }
+            }
+            UiObject2 root = device.wait(
+                Until.findObject(By.text("SCPEFE test provider")), 1_000);
+            if (root == null) continue;
+            try { root.click(); }
+            catch (StaleObjectException ignored) { continue; }
+            device.wait(Until.hasObject(By.text("test.scpefe")), 2_000);
         }
-        assertNotNull("Test provider not visible in system picker", root);
-        root.click();
+        fail("System picker did not enter the test provider destination");
     }
 
     private static void setInput(ActivityScenario<MainActivity> scenario, String name,

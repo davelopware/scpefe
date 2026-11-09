@@ -69,8 +69,9 @@ public final class PrivateStateInstrumentedTest {
         Arrays.fill(key, (byte)17);
         byte[] candidate = "encrypted candidate".getBytes(StandardCharsets.UTF_8);
         store.writePendingCreate(DOCUMENT, TARGET, key, candidate, "");
-        JSONObject envelope = new JSONObject(Files.readString(
-            new File(directory, DOCUMENT + ".work-journal").toPath()));
+        JSONObject envelope = new JSONObject(new String(Files.readAllBytes(
+            new File(directory, DOCUMENT + ".work-journal").toPath()),
+            StandardCharsets.UTF_8));
         assertArrayEquals(candidate, android.util.Base64.decode(
             envelope.getJSONObject("bootstrap").getString("createCandidate"),
             android.util.Base64.NO_WRAP));
