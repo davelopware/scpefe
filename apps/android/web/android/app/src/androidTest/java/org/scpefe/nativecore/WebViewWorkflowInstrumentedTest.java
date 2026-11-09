@@ -299,6 +299,8 @@ public final class WebViewWorkflowInstrumentedTest {
             fixtureSelected = true;
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
             unlockSelected(scenario, WINDOWS);
+            until(scenario, "document.querySelector('textarea[aria-label=\"Document text\"]')"
+                + ".value==='alpha\\n'", 20_000);
             assertEquals("\"alpha\\n\"", eval(scenario,
                 "document.querySelector('textarea[aria-label=\"Document text\"]').value"));
             menu(scenario, "Edit", "Edit Contents");
@@ -407,6 +409,8 @@ public final class WebViewWorkflowInstrumentedTest {
             setInput(scenario, "password", OWNER);
             eval(scenario, "document.querySelector('input[name=password]').form.requestSubmit()");
             until(scenario, "!document.querySelector('input[name=password]')", 15_000);
+            until(scenario, "document.querySelector('[aria-label=\"Document state\"]')"
+                + ".textContent==='Read-only'", 15_000);
 
             menu(scenario, "File", "Close");
             menu(scenario, "File", "Open…");

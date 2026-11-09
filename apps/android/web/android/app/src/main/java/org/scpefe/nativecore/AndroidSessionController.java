@@ -149,7 +149,7 @@ public final class AndroidSessionController {
                 check(read.status);
                 NativeCore.Result key = NativeCore.nativeJournalKey(nativeHandle);
                 check(key.status);
-                String documentId = hex(read.documentId);
+                String documentId = hex(read.documentId, 16);
                 try {
                     journals.writePendingCreate(documentId, target, key.data,
                         encrypted.data, content);
@@ -275,7 +275,7 @@ public final class AndroidSessionController {
     private String documentId() throws Failure {
         NativeCore.Result read = NativeCore.nativeRead(nativeHandle);
         check(read.status);
-        try { return hex(read.documentId); }
+        try { return hex(read.documentId, 16); }
         finally { if (read.data != null) Arrays.fill(read.data, (byte)0); }
     }
 
@@ -317,7 +317,7 @@ public final class AndroidSessionController {
         if (recovery.attention != AndroidWorkJournals.Attention.UNSAVED)
             throw new Failure("RECOVERY_UNAVAILABLE", "No recoverable work is available.");
         JSONObject record = recovery.record;
-        if (!hex(leaseState().revisionHead).equals(record.optString("baseRevision"))
+        if (!hex(leaseState().revisionHead, 32).equals(record.optString("baseRevision"))
                 || !hash(activeEncrypted).equals(record.optString("targetHash"))) {
             throw new Failure("TARGET_CHANGED", "The document changed since the checkpoint.");
         }
@@ -373,7 +373,7 @@ public final class AndroidSessionController {
         try {
             check(NativeCore.nativeSubmitContent(nativeHandle, clear).status);
             JSONObject record = new JSONObject().put("target", activeTarget)
-                .put("baseRevision", hex(state.revisionHead))
+                .put("baseRevision", hex(state.revisionHead, 32))
                 .put("targetHash", hash(activeEncrypted))
                 .put("updateTime", System.currentTimeMillis())
                 .put("text", content).put("state", "unsaved")
@@ -433,7 +433,7 @@ public final class AndroidSessionController {
             if (prepared.data == null || prepared.data.length == 0)
                 throw new Failure("OPERATION_FAILED", "Lease candidate unavailable.");
             JSONObject pending = existing == null ? new JSONObject()
-                .put("target", activeTarget).put("baseRevision", hex(state.revisionHead))
+                .put("target", activeTarget).put("baseRevision", hex(state.revisionHead, 32))
                 .put("updateTime", System.currentTimeMillis())
                 .put("text", baseText).put("state", "pending-publication")
                 .put("cursor", new JSONObject().put("start", 0).put("end", 0))
@@ -564,7 +564,7 @@ public final class AndroidSessionController {
                 AndroidWorkJournals.Recovery recovery = recovery();
                 if (recovery.attention == AndroidWorkJournals.Attention.UNSAVED) {
                     JSONObject record = recovery.record;
-                    boolean mismatch = state.active || !hex(state.revisionHead).equals(
+                    boolean mismatch = state.active || !hex(state.revisionHead, 32).equals(
                         record.optString("baseRevision"))
                         || !hash(activeEncrypted).equals(record.optString("targetHash"));
                     value.put("recovery", new JSONObject()
@@ -614,10 +614,10 @@ public final class AndroidSessionController {
         throw new Failure("OPERATION_FAILED", "Document operation failed.");
     }
 
-    private static String hex(byte[] bytes) throws Failure {
-        if (bytes == null || bytes.length != 16)
-            throw new Failure("OPERATION_FAILED", "Document identity unavailable.");
-        StringBuilder output = new StringBuilder(32);
+    private static String hex(byte[] bytes, int expectedLength) throws Failure {
+        if (bytes == null || bytes.length != expectedLength)
+            throw new Failure("OPERATION_FAILED", "Native identifier unavailable.");
+        StringBuilder output = new StringBuilder(expectedLength * 2);
         for (byte value : bytes) output.append(String.format("%02x", value & 0xff));
         return output.toString();
     }
