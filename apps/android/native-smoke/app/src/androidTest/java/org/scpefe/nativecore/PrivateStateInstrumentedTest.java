@@ -3,7 +3,6 @@ package org.scpefe.nativecore;
 import static org.junit.Assert.*;
 
 import android.content.Context;
-import android.content.Intent;
 import android.os.Process;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -13,6 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
@@ -136,6 +138,37 @@ public final class PrivateStateInstrumentedTest {
             StandardCharsets.UTF_8));
     }
 
+    @Test public void presentNonObjectPublicationIsUnreadableNotSilentlyUnsaved()
+            throws Exception {
+        File directory = directory();
+        byte[] key = new byte[32];
+        AndroidWorkJournals journals = new AndroidWorkJournals(
+            new PrivateStateFiles(directory, () -> {}));
+        JSONObject invalid = journal("pending-publication").put("publication", "corrupt");
+        try { journals.write(DOCUMENT, TARGET, key, invalid);
+            fail("malformed publication was accepted for writing"); }
+        catch (IOException expected) { assertNotNull(expected); }
+        byte[] nonce = new byte[12];
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"),
+            new GCMParameterSpec(128, nonce));
+        cipher.updateAAD(("scpefe-work-journal-v1:" + DOCUMENT)
+            .getBytes(StandardCharsets.US_ASCII));
+        byte[] encrypted = cipher.doFinal(invalid.toString().getBytes(StandardCharsets.UTF_8));
+        JSONObject envelope = new JSONObject().put("version", 1)
+            .put("nonce", android.util.Base64.encodeToString(nonce,
+                android.util.Base64.NO_WRAP))
+            .put("tag", android.util.Base64.encodeToString(Arrays.copyOfRange(encrypted,
+                encrypted.length - 16, encrypted.length), android.util.Base64.NO_WRAP))
+            .put("ciphertext", android.util.Base64.encodeToString(Arrays.copyOf(encrypted,
+                encrypted.length - 16), android.util.Base64.NO_WRAP));
+        File record = new File(directory, DOCUMENT + ".work-journal");
+        Files.write(record.toPath(), envelope.toString().getBytes(StandardCharsets.UTF_8));
+        assertEquals(AndroidWorkJournals.Attention.UNREADABLE,
+            journals.recover(DOCUMENT, TARGET, key).attention);
+        assertTrue(record.isFile());
+    }
+
     @Test public void witnessPersistsAndFlagsReplacementWithoutOverwriting() throws Exception {
         File directory = directory();
         AndroidHeadWitnesses store = new AndroidHeadWitnesses(
@@ -155,35 +188,42 @@ public final class PrivateStateInstrumentedTest {
             restarted.inspect(TARGET, first));
     }
 
-    @Test public void separateAppProcessRecoversPendingStateAfterDeath() throws Exception {
+    @Test public void writeBeforeForcedProcessRestart() throws Exception {
+        if (!"write".equals(InstrumentationRegistry.getArguments().getString("restartPhase"))) {
+            return;
+        }
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        File status = new File(context.getFilesDir(), "state-restart-status");
-        Files.deleteIfExists(status.toPath());
-        context.startActivity(new Intent(context, StateRestartActivity.class)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("first", true));
-        String first = awaitStatus(status, "first:");
-        int process = Integer.parseInt(first.substring("first:".length()));
-        assertNotEquals(Process.myPid(), process);
-        Process.killProcess(process);
-        Files.deleteIfExists(status.toPath());
-        context.startActivity(new Intent(context, StateRestartActivity.class)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("first", false));
-        String second = awaitStatus(status, "second:");
-        assertNotEquals(process, Integer.parseInt(second.substring("second:".length())));
+        new AndroidProfileSettings(context).saveProfile(new JSONObject()
+            .put("name", "Ada").put("email", "ada@example.org")
+            .put("deviceName", "Android"));
+        new AndroidProfileSettings(context).saveSettings(new JSONObject()
+            .put("regularSaveEnabled", true).put("regularSaveIntervalMs", 10000));
+        new AndroidWorkJournals(context).write(DOCUMENT, TARGET, new byte[32],
+            journal("pending-publication"));
+        new AndroidHeadWitnesses(context).accept(TARGET, witness(DOCUMENT, REVISION));
+        Files.write(new File(context.getFilesDir(), "state-restart-pid").toPath(),
+            Integer.toString(Process.myPid()).getBytes(StandardCharsets.US_ASCII));
     }
 
-    private static String awaitStatus(File file, String prefix) throws Exception {
-        long deadline = System.currentTimeMillis() + 10000;
-        while (System.currentTimeMillis() < deadline) {
-            if (file.isFile()) {
-                String state = new String(Files.readAllBytes(file.toPath()),
-                    StandardCharsets.US_ASCII);
-                if (state.startsWith(prefix)) return state;
-                if (state.equals("error")) fail("state restart helper failed");
-            }
-            Thread.sleep(50);
+    @Test public void recoverAfterForcedProcessRestart() throws Exception {
+        if (!"read".equals(InstrumentationRegistry.getArguments().getString("restartPhase"))) {
+            return;
         }
-        throw new AssertionError("state restart helper timed out");
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        int previous = Integer.parseInt(new String(Files.readAllBytes(new File(
+            context.getFilesDir(), "state-restart-pid").toPath()), StandardCharsets.US_ASCII));
+        assertNotEquals(previous, Process.myPid());
+        assertEquals("Ada", new AndroidProfileSettings(context).loadProfile().getString("name"));
+        assertTrue(new AndroidProfileSettings(context).loadSettings()
+            .getBoolean("regularSaveEnabled"));
+        AndroidWorkJournals.Recovery journal = new AndroidWorkJournals(context)
+            .recover(DOCUMENT, TARGET, new byte[32]);
+        assertEquals(AndroidWorkJournals.Attention.PENDING_PUBLICATION, journal.attention);
+        assertEquals(journal("pending-publication").getJSONObject("publication")
+            .getString("candidate"), journal.record.getJSONObject("publication")
+            .getString("candidate"));
+        assertEquals(DOCUMENT, new AndroidHeadWitnesses(context)
+            .read(TARGET).getString("documentId"));
     }
 
     private static JSONObject witness(String documentId, String revision) throws Exception {

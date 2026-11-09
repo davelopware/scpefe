@@ -149,12 +149,36 @@ public final class AndroidWorkJournals {
             String state = value.getString("state");
             if (!Arrays.asList("unsaved", "pending-publication", "conflict",
                     "activity-outcome").contains(state)) throw new JSONException("state");
+            JSONObject activity = value.optJSONObject("activity");
+            if ((value.has("activity") && activity == null)
+                    || ("activity-outcome".equals(state) && activity == null)) {
+                throw new JSONException("activity");
+            }
+            if (activity != null && (!Arrays.asList("backup", "export")
+                    .contains(activity.getString("kind"))
+                    || activity.getLong("attemptOperationId") < 1
+                    || !activity.getString("attemptHead").matches("[0-9a-f]{64}")
+                    || !(activity.get("succeeded") instanceof Boolean))) {
+                throw new JSONException("activity");
+            }
+            JSONObject merge = value.optJSONObject("merge");
+            if ((value.has("merge") && merge == null)
+                    || (merge != null && (!"conflict".equals(state)
+                        || !(merge.get("localContent") instanceof String)
+                        || !merge.getString("ancestorRevision").matches("[0-9a-f]{64}")
+                        || !merge.getString("localRevision").matches("[0-9a-f]{64}")
+                        || !merge.getString("currentRevision").matches("[0-9a-f]{64}")))) {
+                throw new JSONException("merge");
+            }
             JSONObject cursor = value.getJSONObject("cursor");
             int start = cursor.getInt("start"), end = cursor.getInt("end");
             if (start < 0 || end < start || end > value.getString("text").length()) {
                 throw new JSONException("cursor");
             }
             JSONObject publication = value.optJSONObject("publication");
+            if (value.has("publication") && publication == null) {
+                throw new JSONException("publication");
+            }
             if (publication != null) {
                 if (!target.equals(publication.getString("target"))
                         || !publication.getString("id").matches("[0-9a-f]{32}")

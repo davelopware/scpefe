@@ -62,3 +62,25 @@ if [[ "$("$sdk_dir/platform-tools/adb" shell getprop sys.boot_completed | tr -d 
     exit 1
 fi
 gradle -p apps/android/native-smoke --no-daemon connectedDebugAndroidTest
+
+# Exercise a real process boundary in two separate instrumentation invocations.
+# The first invocation persists state, force-stop kills the target process, and
+# the second verifies a different PID and exact pending candidate recovery.
+run_restart_phase() {
+    local phase="$1" method="$2" output
+    if ! output="$(timeout 180s "$sdk_dir/platform-tools/adb" shell am instrument -w \
+        -e restartPhase "$phase" \
+        -e class "org.scpefe.nativecore.PrivateStateInstrumentedTest#$method" \
+        org.scpefe.nativecore.smoke.test/androidx.test.runner.AndroidJUnitRunner)"; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    printf '%s\n' "$output"
+    if ! grep -Fq 'OK (1 test)' <<< "$output"; then
+        echo "Android $phase restart phase did not pass exactly one test" >&2
+        exit 1
+    fi
+}
+run_restart_phase write writeBeforeForcedProcessRestart
+"$sdk_dir/platform-tools/adb" shell am force-stop org.scpefe.nativecore.smoke
+run_restart_phase read recoverAfterForcedProcessRestart

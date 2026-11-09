@@ -40,6 +40,10 @@ write keeps the previous record, and unreadable journals remain on disk for
 explicit recovery decisions. The application manifest sets `allowBackup=false`
 so app-private profile, settings, grants, journals, witness key, and witness
 records are excluded from Android cloud backup.
+The emulator gate runs one instrumentation phase to write state, force-stops the
+app process, then starts a second instrumentation phase to verify recovery under
+a different process ID. This also avoids adding a process-isolated component to
+the production APK solely for test orchestration.
 
 ## Pinned toolchain and clean build
 
