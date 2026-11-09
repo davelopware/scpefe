@@ -1,4 +1,4 @@
-# Android WebView editing slice
+# Android WebView create, edit, and save workflow
 
 This Capacitor 7 app packages the shared `frontend-core` and React UI. Its
 `Scpefe` plugin calls the Android JNI core, SAF target adapter, and app-private
@@ -20,8 +20,17 @@ The exact candidate remains in that journal if provider publication is ambiguous
 Only an exact reread clears it. On an intentional Activity restart, a verified
 lease release leaves the encrypted unsaved journal for the next authenticated
 open. Recovery requires the same document ID, exact target image, revision head,
-and a free native lease. A local checkpoint does not publish document content;
-user save and broader process-death handling remain in later issues.
+and a free native lease. A local checkpoint does not publish document content.
+
+Manual save asks the core for one sealed candidate, writes its exact bytes to
+the encrypted journal, and claims publication only after provider read-back.
+Enabled regular saves use the same path but remain provisional until a manual
+save seals the revision. An unavailable or changed provider leaves the exact
+candidate for the shared pending/conflict decision; retry uses those journaled
+bytes. The CI emulator exports both an Android-created save and a Windows-created
+container edited on Android; a Windows core job reopens both and checks identity,
+content, sealed revision state, and lease metadata. Background, screen-lock,
+low-storage, and broader process-death recovery remain in #26.
 
 From the repository root, with an already licensed API 35 Android SDK and NDK
 r27d, JDK 21, Gradle 8.13, and a running API 35 emulator:

@@ -12,21 +12,45 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.json.JSONObject;
 
 /** Narrow, serial Capacitor bridge for document admission and local editing. */
 @CapacitorPlugin(name = "Scpefe")
 public final class ScpefePlugin extends Plugin {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService clock = Executors.newSingleThreadScheduledExecutor();
     private AndroidSessionController session;
     private volatile boolean createPicker;
 
     @Override public void load() {
         session = new AndroidSessionController(getContext());
+        clock.scheduleAtFixedRate(() -> {
+            try {
+                worker.execute(() -> {
+                    try {
+                        JSONObject saved = session.regularSaveIfDue(System.currentTimeMillis());
+                        if (saved != null) notifyListeners("regularSave", new JSObject()
+                            .put("published", true).put("provisional", true)
+                            .put("content", saved.optString("content"))
+                            .put("journalScope", saved.optString("journalScope"))
+                            .put("revision", saved.optLong("revision")));
+                    } catch (AndroidSessionController.Failure error) {
+                        notifyListeners("journalWarning", new JSObject()
+                            .put("code", error.code));
+                    }
+                });
+            } catch (RejectedExecutionException ignored) {
+                // Activity teardown already stopped the serial native worker.
+            }
+        }, 5, 5, TimeUnit.SECONDS);
     }
 
     @Override protected void handleOnDestroy() {
         session.replaceGeneration();
+        clock.shutdownNow();
         worker.execute(() -> session.closeNow());
         worker.shutdown();
         super.handleOnDestroy();
@@ -180,5 +204,21 @@ public final class ScpefePlugin extends Plugin {
         }
         dispatch(call, () -> { session.updateWorkingCopy(update, expected);
             return new JSObject().put("accepted", true); });
+    }
+
+    @PluginMethod public void saveDocument(PluginCall call) {
+        final long expected = session.generation();
+        JSONObject request = call.getObject("request");
+        if (request == null || request.toString().length() > 2 * 1024 * 1024) {
+            call.reject("Invalid save request.", "INVALID_ARGUMENT"); return;
+        }
+        dispatch(call, () -> new JSObject().put("result",
+            session.save(request, true, expected)));
+    }
+
+    @PluginMethod public void reconnectPendingPublication(PluginCall call) {
+        final long expected = session.generation();
+        dispatch(call, () -> new JSObject().put("result",
+            session.reconnectPending(expected)));
     }
 }

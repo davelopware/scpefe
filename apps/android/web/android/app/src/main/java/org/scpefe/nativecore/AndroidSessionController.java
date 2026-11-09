@@ -36,6 +36,10 @@ public final class AndroidSessionController {
     private byte[] leaseSession;
     private String journalScope;
     private long journalRevision;
+    private boolean pendingSave;
+    private long pendingSaveOperationId;
+    private long lastRegularSaveAt;
+    private long lastRegularSaveRevision;
     private long nativeHandle;
 
     /** Uses the Android target and private profile adapters as the only host state. */
@@ -246,6 +250,9 @@ public final class AndroidSessionController {
         clearPassword();
         journalScope = null;
         journalRevision = 0;
+        pendingSave = false;
+        pendingSaveOperationId = 0;
+        lastRegularSaveRevision = 0;
     }
 
     private void clearPassword() {
@@ -306,6 +313,8 @@ public final class AndroidSessionController {
         leaseSession = session;
         journalScope = null;
         journalRevision = 0;
+        lastRegularSaveAt = System.currentTimeMillis();
+        lastRegularSaveRevision = 0;
         requireCurrent(expected);
         return opened(false);
     }
@@ -338,6 +347,8 @@ public final class AndroidSessionController {
         finally { Arrays.fill(clear, (byte)0); }
         journalScope = null;
         journalRevision = 0;
+        lastRegularSaveAt = System.currentTimeMillis();
+        lastRegularSaveRevision = 0;
         requireCurrent(expected);
         try {
             return opened(false).put("content", content)
@@ -390,6 +401,251 @@ public final class AndroidSessionController {
         } finally {
             Arrays.fill(clear, (byte)0);
             Arrays.fill(key, (byte)0);
+        }
+    }
+
+    /** Journals the exact native save candidate before conditional provider publication. */
+    public JSONObject save(JSONObject request, boolean manual, long expected) throws Failure {
+        requireCurrent(expected);
+        if (activeTarget == null || activeEncrypted == null || activePassword == null
+                || leaseSession == null || pendingSave)
+            throw new Failure("INVALID_STATE", "No available editing session.");
+        AndroidWorkJournals.Recovery prior = recovery();
+        if (prior.attention == AndroidWorkJournals.Attention.PENDING_PUBLICATION
+                || prior.attention == AndroidWorkJournals.Attention.CONFLICT)
+            throw new Failure("PUBLICATION_PENDING", "Resolve the prior candidate first.");
+        NativeCore.LeaseState state = leaseState();
+        if (!state.active || !state.editing
+                || !Arrays.equals(state.sessionId, leaseSession))
+            throw new Failure("LEASE_CHANGED", "The editing lease changed.");
+        String content = text(request, "content", MAX_WEB_TEXT, true);
+        String scope = request.optString("journalScope", "");
+        long revision = request.optLong("revision", 0);
+        if ((!scope.isEmpty() && !scope.matches("[A-Za-z0-9_-]{1,128}"))
+                || (scope.isEmpty() != (revision == 0))
+                || (revision > 0 && (journalScope == null
+                    || !journalScope.equals(scope) || revision > journalRevision)))
+            throw new Failure("STALE_OPERATION", "The working copy version is unavailable.");
+        JSONObject newer = revision > 0 && journalRevision > revision
+                && prior.attention == AndroidWorkJournals.Attention.UNSAVED
+            ? prior.record : null;
+        if (revision > 0 && journalRevision > revision && newer == null)
+            throw new Failure("STALE_OPERATION", "The newer checkpoint is unavailable.");
+        JSONObject profile;
+        try { profile = profiles.loadProfile(); }
+        catch (IOException error) { throw new Failure("PROFILE_UNAVAILABLE", "Profile unavailable."); }
+        if (profile == null) throw new Failure("PROFILE_REQUIRED", "Configure a profile first.");
+        byte[] name = profile.optString("name").getBytes(StandardCharsets.UTF_8);
+        byte[] email = profile.optString("email").getBytes(StandardCharsets.UTF_8);
+        byte[] device = profile.optString("deviceName").getBytes(StandardCharsets.UTF_8);
+        byte[] clear = content.getBytes(StandardCharsets.UTF_8);
+        byte[] key = journalKey();
+        byte[] base = activeEncrypted.clone();
+        NativeCore.Result prepared = null;
+        try {
+            check(NativeCore.nativeSubmitContent(nativeHandle, clear).status);
+            prepared = NativeCore.nativePrepareSave(nativeHandle, manual ? 1 : 2,
+                System.nanoTime() & Long.MAX_VALUE, activePassword, name, email,
+                device, System.currentTimeMillis());
+            check(prepared.status);
+            if (prepared.data == null || prepared.data.length == 0)
+                throw new Failure("OPERATION_FAILED", "Save candidate unavailable.");
+            JSONObject publication = new JSONObject()
+                .put("target", activeTarget).put("id", randomId())
+                .put("candidateHash", hash(prepared.data))
+                .put("baseHash", hash(base))
+                .put("kind", "host-target").put("stage", "prepared")
+                .put("purpose", manual ? "manual-save" : "regular-save")
+                .put("candidateText", content)
+                .put("base", Base64.encodeToString(base, Base64.NO_WRAP))
+                .put("candidate", Base64.encodeToString(prepared.data, Base64.NO_WRAP));
+            JSONObject record = new JSONObject().put("target", activeTarget)
+                .put("baseRevision", hex(state.revisionHead, 32))
+                .put("targetHash", hash(base))
+                .put("updateTime", System.currentTimeMillis())
+                .put("text", newer == null ? content : newer.getString("text"))
+                .put("state", "pending-publication")
+                .put("cursor", new JSONObject().put("start", 0).put("end", 0))
+                .put("publication", publication);
+            String id = documentId();
+            try { journals.write(id, activeTarget, key, record); }
+            catch (IOException error) {
+                check(NativeCore.nativeAcknowledgeSave(nativeHandle,
+                    prepared.handle, 2).status);
+                throw error;
+            }
+            pendingSave = true;
+            pendingSaveOperationId = prepared.handle;
+            requireCurrent(expected);
+            TargetPublication.Outcome outcome = targets.publish(activeTarget,
+                base, prepared.data);
+            int code = outcome == TargetPublication.Outcome.VERIFIED ? 1
+                : outcome == TargetPublication.Outcome.DEFINITE_FAILURE ? 2 : 3;
+            check(NativeCore.nativeAcknowledgeSave(nativeHandle,
+                prepared.handle, code).status);
+            if (outcome == TargetPublication.Outcome.DEFINITE_FAILURE) {
+                pendingSaveOperationId = 0;
+                if (newer != null) {
+                    journals.write(id, activeTarget, key, newer);
+                    restoreNativeText(newer.getString("text"));
+                } else {
+                    record.put("state", "unsaved").remove("publication");
+                    journals.write(id, activeTarget, key, record);
+                }
+                pendingSave = false;
+                throw new Failure("PUBLICATION_FAILED", "The provider refused the save.");
+            }
+            if (outcome == TargetPublication.Outcome.AMBIGUOUS) {
+                return saveResult(content, scope, revision, "pending-publication");
+            }
+            pendingSaveOperationId = 0;
+            Arrays.fill(activeEncrypted, (byte)0);
+            activeEncrypted = prepared.data.clone();
+            if (newer == null) journals.clear(id);
+            else {
+                NativeCore.LeaseState saved = leaseState();
+                newer.put("baseRevision", hex(saved.revisionHead, 32))
+                    .put("targetHash", hash(activeEncrypted));
+                journals.write(id, activeTarget, key, newer);
+                restoreNativeText(newer.getString("text"));
+            }
+            lastRegularSaveAt = System.currentTimeMillis();
+            lastRegularSaveRevision = revision;
+            pendingSave = false;
+            return saveResult(content, scope, revision, "target-published");
+        } catch (IOException | JSONException error) {
+            throw new Failure("PRIVATE_STATE_UNAVAILABLE",
+                "Could not preserve the encrypted save candidate.");
+        } finally {
+            Arrays.fill(name, (byte)0); Arrays.fill(email, (byte)0);
+            Arrays.fill(device, (byte)0); Arrays.fill(clear, (byte)0);
+            Arrays.fill(key, (byte)0); Arrays.fill(base, (byte)0);
+            if (prepared != null && prepared.data != null)
+                Arrays.fill(prepared.data, (byte)0);
+        }
+    }
+
+    private static JSONObject saveResult(String content, String scope, long revision,
+            String publicationState) throws JSONException {
+        JSONObject result = new JSONObject().put("saved", true)
+            .put("content", content).put("publicationState", publicationState);
+        if (revision > 0) result.put("journalScope", scope).put("revision", revision);
+        return result;
+    }
+
+    private void restoreNativeText(String content) throws Failure {
+        byte[] latest = content.getBytes(StandardCharsets.UTF_8);
+        try { check(NativeCore.nativeSubmitContent(nativeHandle, latest).status); }
+        finally { Arrays.fill(latest, (byte)0); }
+    }
+
+    /** Publishes a provisional revision only when settings and a newer checkpoint allow it. */
+    public JSONObject regularSaveIfDue(long now) throws Failure {
+        if (leaseSession == null || pendingSave || journalScope == null
+                || journalRevision <= lastRegularSaveRevision) return null;
+        JSONObject settings;
+        try { settings = profiles.loadSettings(); }
+        catch (IOException error) { return null; }
+        long interval = settings.optLong("regularSaveIntervalMs", 120_000);
+        if (!settings.optBoolean("regularSaveEnabled")
+                || now - lastRegularSaveAt < interval) return null;
+        String scope = journalScope;
+        long revision = journalRevision;
+        JSONObject request = new JSONObject();
+        try {
+            request.put("content", openedText()).put("journalScope", scope)
+                .put("revision", revision);
+        } catch (JSONException error) { throw new AssertionError(error); }
+        JSONObject result = save(request, false, generation.get());
+        if (!"target-published".equals(result.optString("publicationState"))) return null;
+        try { return new JSONObject().put("published", true)
+            .put("provisional", true).put("content", result.getString("content"))
+            .put("journalScope", scope).put("revision", revision); }
+        catch (JSONException error) { throw new AssertionError(error); }
+    }
+
+    /** Reuses the journaled candidate byte-for-byte after an ambiguous provider result. */
+    public JSONObject reconnectPending(long expected) throws Failure {
+        requireCurrent(expected);
+        if (activeTarget == null || activePassword == null)
+            throw new Failure("INVALID_STATE", "Open the affected document first.");
+        AndroidWorkJournals.Recovery recovery = recovery();
+        if (recovery.attention != AndroidWorkJournals.Attention.PENDING_PUBLICATION
+                && recovery.attention != AndroidWorkJournals.Attention.CONFLICT)
+            throw new Failure("PUBLICATION_MISSING", "No pending candidate is available.");
+        JSONObject record = recovery.record;
+        byte[] base, candidate;
+        String publishedText;
+        try {
+            JSONObject publication = record.getJSONObject("publication");
+            publishedText = publication.optString("candidateText",
+                record.getString("text"));
+            base = Base64.decode(publication.getString("base"), Base64.DEFAULT);
+            candidate = Base64.decode(publication.getString("candidate"), Base64.DEFAULT);
+            if (!hash(base).equals(publication.getString("baseHash"))
+                    || !hash(candidate).equals(publication.getString("candidateHash")))
+                throw new Failure("RECOVERY_UNAVAILABLE", "Pending candidate is invalid.");
+        } catch (JSONException | IllegalArgumentException error) {
+            throw new Failure("RECOVERY_UNAVAILABLE", "Pending candidate is invalid.");
+        }
+        try {
+            TargetPublication.Outcome outcome = targets.publish(activeTarget,
+                base, candidate);
+            if (outcome != TargetPublication.Outcome.VERIFIED) {
+                try {
+                    byte[] observed = targets.read(activeTarget);
+                    if (!Arrays.equals(observed, base)
+                            && !Arrays.equals(observed, candidate)) {
+                        record.put("state", "conflict");
+                        byte[] key = journalKey();
+                        try { journals.write(documentId(), activeTarget, key, record); }
+                        finally { Arrays.fill(key, (byte)0); }
+                        return new JSONObject().put("content", publishedText)
+                            .put("publicationState", "conflict");
+                    }
+                } catch (IOException ignored) {
+                    // The provider is still unavailable; retain the exact candidate.
+                }
+                return new JSONObject().put("content", publishedText)
+                    .put("publicationState", "pending-publication");
+            }
+            if (pendingSaveOperationId > 0)
+                check(NativeCore.nativeResolveSave(nativeHandle,
+                    pendingSaveOperationId, true).status);
+            else {
+                closeNative();
+                openContext();
+                check(NativeCore.nativeOpen(nativeHandle, candidate).status);
+                check(NativeCore.nativeUnlock(nativeHandle, activePassword).status);
+            }
+            Arrays.fill(activeEncrypted, (byte)0);
+            activeEncrypted = candidate.clone();
+            boolean newer = !record.getString("text").equals(publishedText);
+            if (newer) {
+                NativeCore.LeaseState saved = leaseState();
+                record.put("state", "unsaved")
+                    .put("baseRevision", hex(saved.revisionHead, 32))
+                    .put("targetHash", hash(activeEncrypted)).remove("publication");
+                byte[] key = journalKey();
+                try { journals.write(documentId(), activeTarget, key, record); }
+                finally { Arrays.fill(key, (byte)0); }
+                if (pendingSaveOperationId > 0)
+                    restoreNativeText(record.getString("text"));
+            } else journals.clear(documentId());
+            pendingSave = false;
+            pendingSaveOperationId = 0;
+            NativeCore.LeaseState state = leaseState();
+            leaseSession = state.active ? state.sessionId.clone() : null;
+            if (leaseSession != null) releaseLease();
+            requireCurrent(expected);
+            return new JSONObject().put("content", publishedText)
+                .put("publicationState", "target-published");
+        } catch (IOException | JSONException error) {
+            throw new Failure("PRIVATE_STATE_UNAVAILABLE",
+                "Could not reconcile the encrypted save candidate.");
+        } finally {
+            Arrays.fill(base, (byte)0);
+            Arrays.fill(candidate, (byte)0);
         }
     }
 
@@ -482,7 +738,7 @@ public final class AndroidSessionController {
     }
 
     private void releaseLease() {
-        if (nativeHandle == 0 || activeTarget == null || leaseSession == null
+        if (pendingSave || nativeHandle == 0 || activeTarget == null || leaseSession == null
                 || activePassword == null) return;
         try {
             AndroidWorkJournals.Recovery recovery = recovery();
@@ -560,6 +816,7 @@ public final class AndroidSessionController {
                 .put("contentType", type == 1 ? "csv" : "plain-text")
                 .put("publicationState", "target-published")
                 .put("targetName", "Selected document");
+            if (!state.manuallySealed) value.put("provisional", true);
             if (includeRecovery && activeTarget != null) {
                 AndroidWorkJournals.Recovery recovery = recovery();
                 if (recovery.attention == AndroidWorkJournals.Attention.UNSAVED) {
@@ -577,6 +834,8 @@ public final class AndroidSessionController {
                     value.put("unreadableJournal", true);
                 } else if (recovery.attention == AndroidWorkJournals.Attention.PENDING_PUBLICATION) {
                     value.put("publicationState", "pending-publication");
+                } else if (recovery.attention == AndroidWorkJournals.Attention.CONFLICT) {
+                    value.put("publicationState", "conflict");
                 }
             }
             return value;

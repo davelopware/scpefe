@@ -28,6 +28,12 @@ function fake(overrides: Partial<AndroidPluginContract> = {}): AndroidPluginCont
     restoreRecoveredWork: async () => ({ opened: { ...opened, readOnly: false,
       canEdit: true, recoveredUnsaved: true, cursor: { start: 0, end: 0 } } }),
     updateWorkingCopy: async () => ({ accepted: true }),
+    saveDocument: async ({ request }) => ({ result: { saved: true,
+      content: request.content, publicationState: "target-published",
+      ...(request.revision ? { journalScope: request.journalScope,
+        revision: request.revision } : {}) } }),
+    reconnectPendingPublication: async () => ({ result: { content: "alpha\n",
+      publicationState: "target-published" } }),
     ...overrides,
   };
 }
@@ -50,6 +56,16 @@ test("profile and open/unlock use the typed plugin without exposing a target", a
   assert.equal(result.content, "alpha\n");
   assert.equal(password, "correct horse battery staple");
   assert.equal("target" in (await host.unlockDocument(password)), false);
+});
+
+test("manual save keeps the submitted working revision and exact content", async () => {
+  const host = createHost(fake());
+  const version = { journalScope: "renderer-1", revision: 2 };
+  assert.deepEqual(await host.saveDocument("alpha\nsecond\n", version), {
+    saved: true, content: "alpha\nsecond\n", publicationState: "target-published",
+    ...version,
+  });
+  await assert.rejects(host.saveDocument("x".repeat(1024 * 1024 + 1), version));
 });
 
 test("invalid input is rejected before calling native plugin", async () => {

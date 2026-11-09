@@ -30,6 +30,7 @@ public final class NativeCore {
         public final boolean mustChangePassword;
         public final boolean active;
         public final boolean editing;
+        public final boolean manuallySealed;
         public final byte[] sessionId;
         public final long counter;
         public final long holderUtcMs;
@@ -37,11 +38,13 @@ public final class NativeCore {
         public final byte[] revisionHead;
 
         private LeaseState(int status, boolean canEdit, boolean mustChangePassword,
-                boolean active, boolean editing, byte[] sessionId, long counter,
+                boolean active, boolean editing, boolean manuallySealed,
+                byte[] sessionId, long counter,
                 long holderUtcMs, long durationMs, byte[] revisionHead) {
             this.status = status; this.canEdit = canEdit;
             this.mustChangePassword = mustChangePassword; this.active = active;
-            this.editing = editing; this.sessionId = sessionId; this.counter = counter;
+            this.editing = editing; this.manuallySealed = manuallySealed;
+            this.sessionId = sessionId; this.counter = counter;
             this.holderUtcMs = holderUtcMs; this.durationMs = durationMs;
             this.revisionHead = revisionHead;
         }
@@ -86,6 +89,16 @@ public final class NativeCore {
     /** Acknowledges the provider's exact candidate result to the core. */
     public static native Result nativeAcknowledgeLease(long handle, long operationId,
         int outcome);
+    /** Prepares exact manual or provisional save bytes from the native editor. */
+    public static native Result nativePrepareSave(long handle, int kind, long operationId,
+        byte[] password, byte[] holderName, byte[] holderEmail, byte[] deviceName,
+        long nowUtcMs);
+    /** Applies the provider's verified, failed, or ambiguous save outcome. */
+    public static native Result nativeAcknowledgeSave(long handle, long operationId,
+        int outcome);
+    /** Resolves a retained ambiguous candidate after exact provider reread. */
+    public static native Result nativeResolveSave(long handle, long operationId,
+        boolean published);
     /** Makes native edit text authoritative before a local checkpoint is accepted. */
     public static native Result nativeSubmitContent(long handle, byte[] content);
     /** Closes the active container while retaining its context. */

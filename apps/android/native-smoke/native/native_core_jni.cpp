@@ -340,7 +340,7 @@ Java_org_scpefe_nativecore_NativeCore_nativeLeaseState(JNIEnv *env, jclass,
     if (status != SCPEFE_STATUS_OK) return nullptr;
     jclass type = env->FindClass("org/scpefe/nativecore/NativeCore$LeaseState");
     if (!type) return nullptr;
-    jmethodID constructor = env->GetMethodID(type, "<init>", "(IZZZZ[BJJJ[B)V");
+    jmethodID constructor = env->GetMethodID(type, "<init>", "(IZZZZZ[BJJJ[B)V");
     if (!constructor) return nullptr;
     jbyteArray id = env->NewByteArray(SCPEFE_LEASE_SESSION_ID_SIZE);
     jbyteArray head = env->NewByteArray(SCPEFE_REVISION_ID_SIZE);
@@ -354,7 +354,8 @@ Java_org_scpefe_nativecore_NativeCore_nativeLeaseState(JNIEnv *env, jclass,
         static_cast<jboolean>(permissions.can_edit),
         static_cast<jboolean>(permissions.must_change_password),
         static_cast<jboolean>(view.lease_active),
-        static_cast<jboolean>(mode.is_editing), id,
+        static_cast<jboolean>(mode.is_editing),
+        static_cast<jboolean>(view.manually_sealed), id,
         static_cast<jlong>(view.lease_heartbeat_counter),
         static_cast<jlong>(view.lease_holder_utc_ms),
         static_cast<jlong>(view.lease_duration_ms), head);
@@ -443,6 +444,80 @@ Java_org_scpefe_nativecore_NativeCore_nativeAcknowledgeLease(JNIEnv *env, jclass
     return result(env, scpefe_container_acknowledge_save(session->container,
         static_cast<uint64_t>(operation_id),
         static_cast<scpefe_publication_outcome>(outcome), &effects),
+        static_cast<jlong>(effects));
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativePrepareSave(JNIEnv *env, jclass,
+    jlong handle, jint kind, jlong operation_id, jbyteArray password,
+    jbyteArray name, jbyteArray email, jbyteArray device, jlong now_utc_ms) {
+    try {
+        const auto session = lookup(handle);
+        if (!session || (kind != SCPEFE_SAVE_MANUAL && kind != SCPEFE_SAVE_REGULAR)
+            || operation_id <= 0 || now_utc_ms < 0)
+            return result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
+        Bytes secret, holder_name, holder_email, device_name;
+        if (!copy_array(env, password, secret) || !copy_array(env, name, holder_name)
+            || !copy_array(env, email, holder_email)
+            || !copy_array(env, device, device_name))
+            return env->ExceptionCheck() ? nullptr : result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
+        std::lock_guard lock(session->mutex);
+        if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+        scpefe_container_save_v1 save{};
+        save.struct_size = sizeof(save);
+        save.abi_version = SCPEFE_ABI_VERSION;
+        save.operation_id = static_cast<uint64_t>(operation_id);
+        save.kind = static_cast<scpefe_save_kind>(kind);
+        save.password = secret.value.data();
+        save.password_size = secret.value.size();
+        save.profile_name = reinterpret_cast<const char *>(holder_name.value.data());
+        save.profile_name_size = holder_name.value.size();
+        save.profile_email = reinterpret_cast<const char *>(holder_email.value.data());
+        save.profile_email_size = holder_email.value.size();
+        save.device_name = reinterpret_cast<const char *>(device_name.value.data());
+        save.device_name_size = device_name.value.size();
+        save.timestamp_ms = static_cast<uint64_t>(now_utc_ms);
+        scpefe_candidate_info_v1 info{sizeof(info), SCPEFE_ABI_VERSION};
+        auto status = scpefe_container_prepare_save(session->container, &save, &info);
+        if (status != SCPEFE_STATUS_OK) return result(env, status);
+        Bytes candidate;
+        candidate.value.resize(info.byte_size);
+        size_t size = 0;
+        status = scpefe_container_copy_candidate(session->container,
+            info.operation_id, candidate.value.data(), candidate.value.size(), &size);
+        return status == SCPEFE_STATUS_OK
+            ? result(env, status, static_cast<jlong>(info.operation_id),
+                candidate.value.data(), size) : result(env, status);
+    } catch (const std::bad_alloc &) { return failure(env); }
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeAcknowledgeSave(JNIEnv *env, jclass,
+    jlong handle, jlong operation_id, jint outcome) {
+    const auto session = lookup(handle);
+    if (!session || operation_id <= 0 || outcome < SCPEFE_PUBLICATION_VERIFIED
+        || outcome > SCPEFE_PUBLICATION_AMBIGUOUS)
+        return result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
+    std::lock_guard lock(session->mutex);
+    if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    uint32_t effects = 0;
+    return result(env, scpefe_container_acknowledge_save(session->container,
+        static_cast<uint64_t>(operation_id),
+        static_cast<scpefe_publication_outcome>(outcome), &effects),
+        static_cast<jlong>(effects));
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeResolveSave(JNIEnv *env, jclass,
+    jlong handle, jlong operation_id, jboolean published) {
+    const auto session = lookup(handle);
+    if (!session || operation_id <= 0)
+        return result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
+    std::lock_guard lock(session->mutex);
+    if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    uint32_t effects = 0;
+    return result(env, scpefe_container_resolve_save(session->container,
+        static_cast<uint64_t>(operation_id), published ? 1 : 0, &effects),
         static_cast<jlong>(effects));
 }
 
