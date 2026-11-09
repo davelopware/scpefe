@@ -62,7 +62,11 @@ if [[ "$("$sdk_dir/platform-tools/adb" shell getprop sys.boot_completed | tr -d 
     exit 1
 fi
 android_project="${SCPEFE_ANDROID_PROJECT:-apps/android/native-smoke}"
-gradle -p "$android_project" --no-daemon connectedDebugAndroidTest
+gradle_task=connectedDebugAndroidTest
+if [[ "$android_project" != apps/android/native-smoke ]]; then
+    gradle_task=:app:connectedDebugAndroidTest
+fi
+gradle -p "$android_project" --no-daemon "$gradle_task"
 if [[ "$android_project" != apps/android/native-smoke ]]; then
     exit 0
 fi
