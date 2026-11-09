@@ -126,6 +126,37 @@ public final class DocumentTargetsInstrumentedTest {
         return false;
     }
 
+    private static boolean visible(UiDevice device, BySelector selector, long timeoutMs) {
+        try {
+            return Boolean.TRUE.equals(device.wait(Until.hasObject(selector), timeoutMs));
+        } catch (StaleObjectException ignored) {
+            return false;
+        }
+    }
+
+    private static boolean fixtureVisible(UiDevice device, long timeoutMs) {
+        return visible(device, By.text("test.scpefe"), timeoutMs);
+    }
+
+    private static boolean selectFixture(UiDevice device) {
+        if (fixtureVisible(device, 2_000)
+            && clickFresh(device, By.text("test.scpefe"), 2_000)) return true;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            device.waitForIdle(1_000);
+            if (fixtureVisible(device, 500)
+                && clickFresh(device, By.text("test.scpefe"), 2_000)) return true;
+            if (!visible(device, By.text("SCPEFE test provider"), 500)) {
+                clickFresh(device, By.descContains("Show roots"), 3_000);
+            }
+            device.waitForIdle(1_000);
+            if (!clickFresh(device, By.text("SCPEFE test provider"), 4_000)) continue;
+            // A root row can move after a successful tap. Confirm the destination.
+            if (fixtureVisible(device, 6_000)
+                && clickFresh(device, By.text("test.scpefe"), 2_000)) return true;
+        }
+        return false;
+    }
+
     @Test public void localDocumentsProviderReadsWindowsFixtureAndVerifiesWrite() throws Exception {
         Context targetContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
         Uri uri = DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY,
@@ -139,16 +170,8 @@ public final class DocumentTargetsInstrumentedTest {
             .putExtra(DocumentsContract.EXTRA_INITIAL_URI, root);
         InstrumentationRegistry.getInstrumentation().startActivitySync(launch);
         UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-        boolean fileSelected = clickFresh(device, By.text("test.scpefe"), 20_000);
-        if (!fileSelected) {
-            clickFresh(device, By.descContains("Show roots"), 2_000);
-            assertTrue("local document provider must appear in system picker; package="
-                    + device.getCurrentPackageName(),
-                clickFresh(device, By.text("SCPEFE test provider"), 10_000));
-            fileSelected = clickFresh(device, By.text("test.scpefe"), 10_000);
-        }
         assertTrue("Windows fixture must appear in system picker; package="
-            + device.getCurrentPackageName(), fileSelected);
+            + device.getCurrentPackageName(), selectFixture(device));
         Intent selected = PickerHostActivity.awaitResult(2_000);
         if (selected == null) {
             assertTrue("system picker must offer Open; package="
