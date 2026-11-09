@@ -1,6 +1,9 @@
 name: Android native smoke
 
 on:
+  push:
+    branches:
+      - codex/issue-179-android-native
   pull_request:
     paths:
       - 'CMakeLists.txt'

@@ -98,10 +98,20 @@ Java_org_scpefe_nativecore_NativeCore_nativeCreateContext(JNIEnv *env, jclass) {
             sizeof(host), SCPEFE_ABI_VERSION, nullptr, read_clock};
         const auto status = scpefe_context_create(&host, &session->context);
         if (status != SCPEFE_STATUS_OK) return result(env, status);
-        std::lock_guard lock(sessions_mutex);
-        const jlong handle = next_handle++;
-        sessions.emplace(handle, std::move(session));
-        return result(env, SCPEFE_STATUS_OK, handle);
+        jlong handle;
+        {
+            std::lock_guard lock(sessions_mutex);
+            handle = next_handle++;
+        }
+        // A failed class lookup or Java constructor must leave the context
+        // owned here, so Session's destructor closes it on the null return.
+        jobject created = result(env, SCPEFE_STATUS_OK, handle);
+        if (!created) return nullptr;
+        {
+            std::lock_guard lock(sessions_mutex);
+            sessions.emplace(handle, std::move(session));
+        }
+        return created;
     } catch (const std::bad_alloc &) { return failure(env); }
 }
 
