@@ -66,6 +66,19 @@ gradle -p apps/android/native-smoke --no-daemon connectedDebugAndroidTest
 # Exercise a real process boundary in two separate instrumentation invocations.
 # The first invocation persists state, force-stop kills the target process, and
 # the second verifies a different PID and exact pending candidate recovery.
+# Gradle removes its managed test installation after connectedDebugAndroidTest.
+app_apk=apps/android/native-smoke/app/build/outputs/apk/debug/app-debug.apk
+test_apk=apps/android/native-smoke/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+test -f "$app_apk"
+test -f "$test_apk"
+"$sdk_dir/platform-tools/adb" install -r -t "$app_apk"
+"$sdk_dir/platform-tools/adb" install -r -t "$test_apk"
+instrumentation="$("$sdk_dir/platform-tools/adb" shell pm list instrumentation | tr -d '\r')"
+printf 'Available instrumentation:\n%s\n' "$instrumentation"
+if ! grep -Fq 'instrumentation:org.scpefe.nativecore.smoke.test/androidx.test.runner.AndroidJUnitRunner (target=org.scpefe.nativecore.smoke)' <<< "$instrumentation"; then
+    echo 'SCPEFE Android test runner is not installed for the target app' >&2
+    exit 1
+fi
 run_restart_phase() {
     local phase="$1" method="$2" output
     if ! output="$(timeout 180s "$sdk_dir/platform-tools/adb" shell am instrument -w \
