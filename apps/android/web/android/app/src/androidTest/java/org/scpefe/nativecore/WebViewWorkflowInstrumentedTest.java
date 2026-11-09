@@ -202,6 +202,13 @@ public final class WebViewWorkflowInstrumentedTest {
             + ".readOnly", 20_000);
     }
 
+    private static void closeCleanDocument(ActivityScenario<MainActivity> scenario)
+            throws Exception {
+        menu(scenario, "File", "Close");
+        until(scenario, "document.querySelector('[aria-label=\"Document state\"]')"
+            + ".textContent==='No document'", 20_000);
+    }
+
     private static void chooseFixture(ActivityScenario<MainActivity> scenario,
             UiDevice device, String name) throws Exception {
         menu(scenario, "File", "Open…");
@@ -505,11 +512,14 @@ public final class WebViewWorkflowInstrumentedTest {
         Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
         Context test = InstrumentationRegistry.getInstrumentation().getContext();
         byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
+        boolean fixtureSelected = false;
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
+            chooseFixture(scenario, UiDevice.getInstance(
+                InstrumentationRegistry.getInstrumentation()), "test.scpefe");
+            fixtureSelected = true;
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
-            openFixture(scenario, UiDevice.getInstance(
-                InstrumentationRegistry.getInstrumentation()));
+            unlockSelected(scenario, WINDOWS);
             until(scenario, "document.querySelector('textarea[aria-label=\"Document text\"]')"
                 + ".value==='alpha\\n'", 20_000);
             enterEdit(scenario);
@@ -528,14 +538,17 @@ public final class WebViewWorkflowInstrumentedTest {
                 "windows/windows-document-id.txt")), StandardCharsets.US_ASCII).trim(),
                 new String(Files.readAllBytes(new File(target.getFilesDir(),
                     "interop-windows-edited-id.txt").toPath()), StandardCharsets.US_ASCII).trim());
+            closeCleanDocument(scenario);
         } finally {
-            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+            if (fixtureSelected)
+                replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
         }
     }
 
     @Test public void createAndSaveAndroidDocumentForWindowsOpen() throws Exception {
         Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        File[] before = target.getFilesDir().listFiles(
+        Context test = InstrumentationRegistry.getInstrumentation().getContext();
+        File[] before = test.getFilesDir().listFiles(
             (dir, name) -> name.startsWith("provider-created-")
                 && name.endsWith(".scpefe"));
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
@@ -558,7 +571,7 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
                 + ".textContent==='Clean'", 30_000);
-            File[] after = target.getFilesDir().listFiles(
+            File[] after = test.getFilesDir().listFiles(
                 (dir, name) -> name.startsWith("provider-created-")
                     && name.endsWith(".scpefe"));
             assertNotNull(after);
@@ -572,6 +585,7 @@ public final class WebViewWorkflowInstrumentedTest {
             assertNotNull("New provider document was not found", created);
             writeInterop(target, "interop-android-created",
                 Files.readAllBytes(created.toPath()), "Android created and saved\n");
+            closeCleanDocument(scenario);
         }
     }
 
@@ -582,11 +596,14 @@ public final class WebViewWorkflowInstrumentedTest {
         AndroidProfileSettings settings = new AndroidProfileSettings(target);
         settings.saveSettings(new JSONObject().put("regularSaveEnabled", true)
             .put("regularSaveIntervalMs", 10_000));
+        boolean fixtureSelected = false;
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
+            chooseFixture(scenario, UiDevice.getInstance(
+                InstrumentationRegistry.getInstrumentation()), "test.scpefe");
+            fixtureSelected = true;
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
-            openFixture(scenario, UiDevice.getInstance(
-                InstrumentationRegistry.getInstrumentation()));
+            unlockSelected(scenario, WINDOWS);
             enterEdit(scenario);
             setDocumentText(scenario, "alpha\nregular save draft\n");
             until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
@@ -600,10 +617,63 @@ public final class WebViewWorkflowInstrumentedTest {
                 + ".textContent==='Published'", 30_000);
             until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
                 + ".textContent==='Clean'", 10_000);
+            closeCleanDocument(scenario);
         } finally {
             settings.saveSettings(new JSONObject().put("regularSaveEnabled", false)
                 .put("regularSaveIntervalMs", 120_000));
+            if (fixtureSelected)
+                replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+        }
+    }
+
+    @Test public void changedProviderRetainsAndRetriesExactSaveCandidate() throws Exception {
+        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        Context test = InstrumentationRegistry.getInstrumentation().getContext();
+        byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
+        String id = new String(readAll(test.getAssets().open(
+            "windows/windows-document-id.txt")), StandardCharsets.US_ASCII).trim();
+        File journal = new File(new File(target.getFilesDir(), "work-journals"),
+            id + ".work-journal");
+        Files.deleteIfExists(journal.toPath());
+        boolean fixtureSelected = false;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            ensureProfile(scenario);
+            chooseFixture(scenario, UiDevice.getInstance(
+                InstrumentationRegistry.getInstrumentation()), "test.scpefe");
+            fixtureSelected = true;
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+            unlockSelected(scenario, WINDOWS);
+            enterEdit(scenario);
+            byte[] leased = readProvider(target, TestDocumentsProvider.DOCUMENT_ID);
+            setDocumentText(scenario, "alpha\npending Android save\n");
+            until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                + ".textContent.includes('Checkpoint ready')", 15_000);
+            byte[] foreign = leased.clone();
+            foreign[foreign.length - 1] ^= 1;
+            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, foreign);
+            menu(scenario, "File", "Save");
+            until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
+                + ".textContent==='Pending publication'", 20_000);
+            assertArrayEquals("Changed provider image was overwritten", foreign,
+                readProvider(target, TestDocumentsProvider.DOCUMENT_ID));
+            assertTrue("Exact candidate journal was not retained", journal.isFile());
+            assertFalse(new String(Files.readAllBytes(journal.toPath()),
+                StandardCharsets.UTF_8).contains("pending Android save"));
+            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, leased);
+            until(scenario, "[...document.querySelectorAll('button')]"
+                + ".some(x=>x.textContent==='Retry publication'&&!x.disabled)", 10_000);
+            eval(scenario, "[...document.querySelectorAll('button')]"
+                + ".find(x=>x.textContent==='Retry publication').click()");
+            until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
+                + ".textContent==='Published'", 20_000);
+            assertFalse(Arrays.equals(leased,
+                readProvider(target, TestDocumentsProvider.DOCUMENT_ID)));
+            assertFalse("Verified candidate journal remains", journal.exists());
+            closeCleanDocument(scenario);
+        } finally {
+            Files.deleteIfExists(journal.toPath());
+            if (fixtureSelected)
+                replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
         }
     }
 }
