@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - codex/issue-179-android-native
+      - codex/issue-180-provider-target
   pull_request:
     paths:
       - 'CMakeLists.txt'

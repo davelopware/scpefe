@@ -1,12 +1,25 @@
 # Android native core smoke
 
 This small Android application packages the existing `libscpefe` C ABI and a
-JNI byte-array adapter in one shared library. It has no document picker, persistence, or UI; those
-belong to the later Android issues. The adapter keeps one C context per opaque
+JNI byte-array adapter in one shared library. It has no user-facing activity; the
+real WebView integration belongs to later Android issues. The adapter keeps one C context per opaque
 Java handle, returns the C ABI status codes, and closes the context and active
 container on `nativeCloseContext`. Password and content copies in native memory
 are erased before each JNI call returns. Java owns returned cleartext arrays and
 must erase them after use. Calls are synchronous and belong off the UI thread.
+
+`AndroidDocumentTargets` provides SAF create/open picker intents and retains only
+the granted read/write permissions needed for later operations. It returns random
+opaque keys; provider URIs stay in app-private target metadata. `read` rereads
+complete bytes, bounded by the core's 33 MiB container limit. `publish` compares
+the current complete image with the authenticated base, attempts a provider write
+only when the grant and document flags permit it, and reports verified only after
+an exact-byte reread. A provider write is **best effort**, not an atomic replace or
+compare-and-swap. The host must journal the candidate before calling it and keep
+that candidate for any ambiguous result, including a partial write or lost read
+permission. Provider display names, timestamps, sizes, and revision tokens are
+never used as authenticated freshness evidence. The debug build includes a local
+document provider for emulator I/O tests; release builds omit it.
 
 ## Pinned toolchain and clean build
 
