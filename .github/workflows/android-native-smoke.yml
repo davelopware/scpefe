@@ -150,14 +150,12 @@ jobs:
       - name: Drive real Capacitor WebView and picker on emulator
         env:
           SCPEFE_ANDROID_PROJECT: apps/android/web/android
+          SCPEFE_ANDROID_INTEROP_OUTPUT: build/android-save-interoperability
         run: bash scripts/test-android-native-emulator.sh
       - name: Export Android provider images for Windows verification
         run: |
-          mkdir -p build/android-save-interoperability
           for name in interop-android-created interop-windows-edited; do
             for suffix in .scpefe -id.txt -content.txt; do
-              adb exec-out run-as org.scpefe.nativecore.smoke \
-                cat "files/$name$suffix" > "build/android-save-interoperability/$name$suffix"
               test -s "build/android-save-interoperability/$name$suffix"
             done
           done

@@ -68,6 +68,17 @@ if [[ "$android_project" != apps/android/native-smoke ]]; then
 fi
 gradle -p "$android_project" --no-daemon "$gradle_task"
 if [[ "$android_project" != apps/android/native-smoke ]]; then
+    if [[ -n "${SCPEFE_ANDROID_INTEROP_OUTPUT:-}" ]]; then
+        mkdir -p "$SCPEFE_ANDROID_INTEROP_OUTPUT"
+        for name in interop-android-created interop-windows-edited; do
+            for suffix in .scpefe -id.txt -content.txt; do
+                "$sdk_dir/platform-tools/adb" exec-out run-as org.scpefe.nativecore.smoke \
+                    cat "files/$name$suffix" \
+                    > "$SCPEFE_ANDROID_INTEROP_OUTPUT/$name$suffix"
+                test -s "$SCPEFE_ANDROID_INTEROP_OUTPUT/$name$suffix"
+            done
+        done
+    fi
     exit 0
 fi
 
