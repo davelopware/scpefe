@@ -6,6 +6,7 @@ import android.os.SystemClock;
 import android.content.Context;
 import android.net.Uri;
 import android.provider.DocumentsContract;
+import android.os.ParcelFileDescriptor;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -154,12 +155,16 @@ public final class WebViewWorkflowInstrumentedTest {
             + "e.dispatchEvent(new Event('input',{bubbles:true}));return true})()"));
     }
 
-    private static void openFixture(ActivityScenario<MainActivity> scenario,
-            UiDevice device, String password) throws Exception {
+    private static void chooseFixture(ActivityScenario<MainActivity> scenario,
+            UiDevice device, String name) throws Exception {
         menu(scenario, "File", "Open…");
         provider(device);
-        click(device, Pattern.compile("test\\.scpefe"));
+        click(device, Pattern.compile(Pattern.quote(name)));
         finishOpenPicker(scenario, device);
+    }
+
+    private static void unlockSelected(ActivityScenario<MainActivity> scenario,
+            String password) throws Exception {
         setInput(scenario, "password", password);
         eval(scenario, "document.querySelector('input[name=password]').form.requestSubmit()");
         until(scenario, "!document.querySelector('input[name=password]')"
@@ -168,7 +173,15 @@ public final class WebViewWorkflowInstrumentedTest {
     }
 
     private static void openFixture(ActivityScenario<MainActivity> scenario,
-            UiDevice device) throws Exception { openFixture(scenario, device, WINDOWS); }
+            UiDevice device, String name, String password) throws Exception {
+        chooseFixture(scenario, device, name);
+        unlockSelected(scenario, password);
+    }
+
+    private static void openFixture(ActivityScenario<MainActivity> scenario,
+            UiDevice device) throws Exception {
+        openFixture(scenario, device, "test.scpefe", WINDOWS);
+    }
 
     private static byte[] readAll(InputStream input) throws Exception {
         try (InputStream source = input; java.io.ByteArrayOutputStream output =
@@ -181,10 +194,33 @@ public final class WebViewWorkflowInstrumentedTest {
         }
     }
 
-    private static void waitForChange(File file, byte[] before) throws Exception {
+    private static Uri fixtureUri(String id) {
+        return DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY, id);
+    }
+
+    private static byte[] readProvider(Context context, String id) throws Exception {
+        InputStream input = context.getContentResolver().openInputStream(fixtureUri(id));
+        assertNotNull("SAF grant did not permit provider read", input);
+        return readAll(input);
+    }
+
+    private static void replaceProvider(Context context, String id, byte[] content)
+            throws Exception {
+        ParcelFileDescriptor descriptor = context.getContentResolver()
+            .openFileDescriptor(fixtureUri(id), "rwt");
+        assertNotNull("SAF grant did not permit provider write", descriptor);
+        try (java.io.OutputStream output = new ParcelFileDescriptor
+                .AutoCloseOutputStream(descriptor)) {
+            output.write(content);
+            output.flush();
+        }
+    }
+
+    private static void waitForChange(Context context, String id, byte[] before)
+            throws Exception {
         long deadline = SystemClock.uptimeMillis() + 15_000;
         while (SystemClock.uptimeMillis() < deadline) {
-            if (!Arrays.equals(before, Files.readAllBytes(file.toPath()))) return;
+            if (!Arrays.equals(before, readProvider(context, id))) return;
             SystemClock.sleep(50);
         }
         fail("Native lease release did not finish before restart");
@@ -201,35 +237,12 @@ public final class WebViewWorkflowInstrumentedTest {
         fail("Lease release did not restore the encrypted unsaved journal");
     }
 
-    private static byte[] hexAsset(Context context, String path) throws Exception {
-        String encoded = new String(readAll(context.getAssets().open(path)),
-            StandardCharsets.US_ASCII).replaceAll("(?m)^#.*$", "")
-            .replaceAll("\\s", "");
-        assertEquals(0, encoded.length() % 2);
-        byte[] result = new byte[encoded.length() / 2];
-        for (int index = 0; index < result.length; index++) {
-            int high = Character.digit(encoded.charAt(index * 2), 16);
-            int low = Character.digit(encoded.charAt(index * 2 + 1), 16);
-            assertTrue(high >= 0 && low >= 0);
-            result[index] = (byte)((high << 4) | low);
-        }
-        return result;
-    }
-
     @Test public void viewOnlySlotCannotAcquireNativeLease() throws Exception {
-        Context test = InstrumentationRegistry.getInstrumentation().getContext();
-        Uri fixtureUri = DocumentsContract.buildDocumentUri(
-            TestDocumentsProvider.AUTHORITY, TestDocumentsProvider.DOCUMENT_ID);
-        try (android.database.Cursor ignored = test.getContentResolver().query(
-                fixtureUri, null, null, null, null)) { assertNotNull(ignored); }
-        File fixture = new File(test.getFilesDir(), "provider-fixture.scpefe");
-        byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
-        Files.write(fixture.toPath(), hexAsset(test,
-            "vectors/multi-slot-container.hex"));
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
             UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-            openFixture(scenario, device, "reader test password");
+            openFixture(scenario, device, "reader-fixture.scpefe",
+                "reader test password");
             assertEquals("true", eval(scenario,
                 "document.querySelector('[aria-label=\"Edit document contents\"]').disabled"));
             eval(scenario, "window.__denied='pending';"
@@ -238,8 +251,6 @@ public final class WebViewWorkflowInstrumentedTest {
                 + ".catch(e=>window.__denied=e.code)");
             until(scenario, "window.__denied!=='pending'", 10_000);
             assertEquals("\"EDIT_DENIED\"", eval(scenario, "window.__denied"));
-        } finally {
-            Files.write(fixture.toPath(), original);
         }
     }
 
@@ -251,24 +262,21 @@ public final class WebViewWorkflowInstrumentedTest {
         File journalDirectory = new File(target.getFilesDir(), "work-journals");
         File journal = new File(journalDirectory, documentId + ".work-journal");
         Files.deleteIfExists(journal.toPath());
-        Uri fixtureUri = DocumentsContract.buildDocumentUri(
-            TestDocumentsProvider.AUTHORITY, TestDocumentsProvider.DOCUMENT_ID);
-        // Start the provider before replacing a fixture left by another test.
-        try (android.database.Cursor ignored = test.getContentResolver().query(
-                fixtureUri, null, null, null, null)) { assertNotNull(ignored); }
-        File fixture = new File(test.getFilesDir(), "provider-fixture.scpefe");
         byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
-        Files.write(fixture.toPath(), original);
+        boolean fixtureSelected = false;
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
             UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-            openFixture(scenario, device);
+            chooseFixture(scenario, device, "test.scpefe");
+            fixtureSelected = true;
+            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+            unlockSelected(scenario, WINDOWS);
             assertEquals("\"alpha\\n\"", eval(scenario,
                 "document.querySelector('textarea[aria-label=\"Document text\"]').value"));
             menu(scenario, "Edit", "Edit Contents");
             until(scenario, "!document.querySelector('textarea[aria-label=\"Document text\"]')"
                 + ".readOnly", 20_000);
-            byte[] leased = Files.readAllBytes(fixture.toPath());
+            byte[] leased = readProvider(target, TestDocumentsProvider.DOCUMENT_ID);
             assertFalse(Arrays.equals(original, leased));
 
             File hidden = new File(target.getFilesDir(), "work-journals-hidden-" +
@@ -299,7 +307,7 @@ public final class WebViewWorkflowInstrumentedTest {
             assertFalse("Local checkpoint claimed target publication",
                 envelope.contains("bootstrap"));
             assertArrayEquals("Checkpoint changed the selected document", leased,
-                Files.readAllBytes(fixture.toPath()));
+                readProvider(target, TestDocumentsProvider.DOCUMENT_ID));
             String denied = eval(scenario, "(()=>{window.__lease='pending';"
                 + "window.Capacitor.Plugins.Scpefe.enterEditMode().then(() => "
                 + "window.__lease='unexpected').catch(e=>window.__lease=e.code);"
@@ -309,7 +317,7 @@ public final class WebViewWorkflowInstrumentedTest {
             assertEquals("\"LEASE_ACTIVE\"", eval(scenario, "window.__lease"));
 
             scenario.recreate();
-            waitForChange(fixture, leased);
+            waitForChange(target, TestDocumentsProvider.DOCUMENT_ID, leased);
             waitForStableJournal(journal);
             until(scenario, "document.querySelector('[aria-label=\"Document state\"]')",
                 15_000);
@@ -323,11 +331,11 @@ public final class WebViewWorkflowInstrumentedTest {
             assertEquals("false", eval(scenario,
                 "document.querySelector('textarea[aria-label=\"Document text\"]').readOnly"));
 
-            byte[] restoredLease = Files.readAllBytes(fixture.toPath());
+            byte[] restoredLease = readProvider(target, TestDocumentsProvider.DOCUMENT_ID);
             scenario.recreate();
-            waitForChange(fixture, restoredLease);
+            waitForChange(target, TestDocumentsProvider.DOCUMENT_ID, restoredLease);
             waitForStableJournal(journal);
-            Files.write(fixture.toPath(), original);
+            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
             openFixture(scenario, device);
             until(scenario, "document.body.textContent.includes('earlier authenticated head')",
                 15_000);
@@ -336,7 +344,8 @@ public final class WebViewWorkflowInstrumentedTest {
                 + ".some(x=>x.textContent==='Restore unsaved work')"));
         } finally {
             Files.deleteIfExists(journal.toPath());
-            Files.write(fixture.toPath(), original);
+            if (fixtureSelected)
+                replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
         }
     }
 
