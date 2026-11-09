@@ -11,7 +11,7 @@ import java.io.FileNotFoundException;
 
 /** Debug-only local document provider for emulator storage verification. */
 public final class TestDocumentsProvider extends DocumentsProvider {
-    public static final String AUTHORITY = "org.scpefe.nativecore.smoke.testdocuments";
+    public static final String AUTHORITY = "org.scpefe.nativecore.smoke.test.documents";
     public static final String DOCUMENT_ID = "fixture";
 
     @Override public boolean onCreate() { return true; }

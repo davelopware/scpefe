@@ -14,6 +14,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
 
@@ -25,6 +26,9 @@ public final class AndroidDocumentTargets implements TargetPublication.Store {
     private final ContentResolver resolver;
     private final SharedPreferences targets;
     private final TargetPublication publication;
+
+    /** Outcome of a create rollback when a provider offers no conditional delete. */
+    public enum CleanupOutcome { UNSUPPORTED, CHANGED, AMBIGUOUS }
 
     /** Opens app-private target metadata; the application disables Android backup. */
     public AndroidDocumentTargets(Context context) {
@@ -171,6 +175,19 @@ public final class AndroidDocumentTargets implements TargetPublication.Store {
     /** Publishes a journaled candidate against the previously authenticated bytes. */
     public TargetPublication.Outcome publish(String target, byte[] base, byte[] candidate) {
         return publication.publish(target, base, candidate);
+    }
+
+    /** Refuses to delete a created document without provider compare-and-delete. */
+    public CleanupOutcome removeCreated(String target, byte[] expected) {
+        if (expected == null || expected.length == 0) {
+            throw new IllegalArgumentException("expected candidate is required");
+        }
+        try {
+            return Arrays.equals(read(target), expected)
+                ? CleanupOutcome.UNSUPPORTED : CleanupOutcome.CHANGED;
+        } catch (IOException | SecurityException error) {
+            return CleanupOutcome.AMBIGUOUS;
+        }
     }
 
     /** Drops a retained grant when no target or pending work still needs it. */

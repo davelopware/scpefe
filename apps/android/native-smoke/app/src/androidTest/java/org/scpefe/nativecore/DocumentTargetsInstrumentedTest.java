@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.UriPermission;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -102,8 +103,9 @@ public final class DocumentTargetsInstrumentedTest {
     }
 
     @Test public void localDocumentsProviderReadsWindowsFixtureAndVerifiesWrite() throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        ContentResolver resolver = context.getContentResolver();
+        Context testContext = InstrumentationRegistry.getInstrumentation().getContext();
+        Context targetContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        ContentResolver resolver = testContext.getContentResolver();
         Uri uri = DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY,
             TestDocumentsProvider.DOCUMENT_ID);
         byte[] windows = asset("windows/windows-container.bin");
@@ -111,36 +113,56 @@ public final class DocumentTargetsInstrumentedTest {
             assertNotNull(output);
             output.write(windows);
         }
-        TargetPublication.Store store = new TargetPublication.Store() {
-            @Override public byte[] read(String target) throws IOException {
-                assertEquals(TARGET, target);
-                try (InputStream input = resolver.openInputStream(uri)) {
-                    if (input == null) throw new IOException("missing provider document");
-                    ByteArrayOutputStream output = new ByteArrayOutputStream();
-                    byte[] chunk = new byte[8192];
-                    for (int count; (count = input.read(chunk)) != -1;)
-                        output.write(chunk, 0, count);
-                    return output.toByteArray();
-                }
-            }
-            @Override public boolean canReplace(String target) { return true; }
-            @Override public void replace(String target, byte[] candidate) throws IOException {
-                try (OutputStream output = resolver.openOutputStream(uri, "rwt")) {
-                    if (output == null) throw new IOException("provider cannot write");
-                    output.write(candidate);
-                }
-            }
-        };
-        TargetPublication workflow = new TargetPublication(store);
-        assertArrayEquals(windows, workflow.read(TARGET));
+        int grants = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION;
+        testContext.grantUriPermission(targetContext.getPackageName(), uri, grants);
+        AndroidDocumentTargets targets = new AndroidDocumentTargets(targetContext);
+        String key = targets.registerPicked(new Intent().setData(uri).addFlags(grants));
+        assertTrue(targets.owns(key));
+        assertFalse(key.contains(uri.toString()));
+        boolean retained = false;
+        for (UriPermission grant : targetContext.getContentResolver()
+                .getPersistedUriPermissions()) {
+            if (grant.getUri().equals(uri) && grant.isReadPermission()
+                && grant.isWritePermission()) retained = true;
+        }
+        assertTrue("read and write grant must survive picker registration", retained);
+        assertArrayEquals(windows, targets.read(key));
+        assertTrue(targets.canReplace(key));
+        assertEquals(AndroidDocumentTargets.CleanupOutcome.UNSUPPORTED,
+            targets.removeCreated(key, windows));
+        assertArrayEquals(windows, targets.read(key));
+
+        NativeCore.Result nativeContext = NativeCore.nativeCreateContext();
+        assertEquals(NativeCore.OK, nativeContext.status);
+        try {
+            assertEquals(NativeCore.OK,
+                NativeCore.nativeOpen(nativeContext.handle, targets.read(key)).status);
+            assertEquals(NativeCore.OK, NativeCore.nativeUnlock(nativeContext.handle,
+                "0b4e79c5-7cfe-4b7c-b4f3-d89129cb7b5e"
+                    .getBytes(StandardCharsets.UTF_8)).status);
+            assertArrayEquals("alpha\n".getBytes(StandardCharsets.UTF_8),
+                NativeCore.nativeRead(nativeContext.handle).data);
+        } finally {
+            assertEquals(NativeCore.OK,
+                NativeCore.nativeCloseContext(nativeContext.handle).status);
+        }
+
         byte[] candidate = Arrays.copyOf(windows, windows.length);
         candidate[candidate.length - 1] ^= 1;
         assertEquals(TargetPublication.Outcome.VERIFIED,
-            workflow.publish(TARGET, windows, candidate));
-        assertArrayEquals(candidate, workflow.read(TARGET));
+            targets.publish(key, windows, candidate));
+        AndroidDocumentTargets reopened = new AndroidDocumentTargets(targetContext);
+        assertArrayEquals(candidate, reopened.read(key));
         assertEquals(TargetPublication.Outcome.AMBIGUOUS,
-            workflow.publish(TARGET, windows, "other".getBytes(StandardCharsets.UTF_8)));
-        assertArrayEquals(candidate, workflow.read(TARGET));
+            reopened.publish(key, windows, "other".getBytes(StandardCharsets.UTF_8)));
+        assertEquals(AndroidDocumentTargets.CleanupOutcome.CHANGED,
+            reopened.removeCreated(key, windows));
+        assertArrayEquals(candidate, reopened.read(key));
+        reopened.forget(key);
+        assertFalse(reopened.owns(key));
+        testContext.revokeUriPermission(targetContext.getPackageName(), uri, grants);
     }
 
     @Test public void pickerContractsRequestOnlyDocumentGrants() throws Exception {

@@ -18,8 +18,11 @@ an exact-byte reread. A provider write is **best effort**, not an atomic replace
 compare-and-swap. The host must journal the candidate before calling it and keep
 that candidate for any ambiguous result, including a partial write or lost read
 permission. Provider display names, timestamps, sizes, and revision tokens are
-never used as authenticated freshness evidence. The debug build includes a local
-document provider for emulator I/O tests; release builds omit it.
+never used as authenticated freshness evidence. The instrumented test APK includes
+a local document provider for emulator I/O tests; release builds omit it. Generic
+SAF deletion lacks compare-and-delete, so `removeCreated` explicitly reports
+unsupported cleanup and leaves a matching created document intact rather than
+risking deletion of a concurrent update.
 
 ## Pinned toolchain and clean build
 
