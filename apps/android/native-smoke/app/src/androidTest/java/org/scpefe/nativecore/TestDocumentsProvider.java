@@ -8,6 +8,10 @@ import android.provider.DocumentsContract;
 import android.provider.DocumentsProvider;
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 /** Debug-only local document provider for emulator storage verification. */
 public final class TestDocumentsProvider extends DocumentsProvider {
@@ -15,7 +19,18 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     public static final String ROOT_ID = "root";
     public static final String DOCUMENT_ID = "fixture";
 
-    @Override public boolean onCreate() { return true; }
+    @Override public boolean onCreate() {
+        try (InputStream input = getContext().getAssets().open("windows/windows-container.bin");
+                OutputStream output = new FileOutputStream(file())) {
+            byte[] chunk = new byte[8192];
+            for (int count; (count = input.read(chunk)) != -1;) {
+                output.write(chunk, 0, count);
+            }
+            return true;
+        } catch (IOException error) {
+            throw new IllegalStateException("Windows fixture unavailable to test provider", error);
+        }
+    }
 
     @Override public Cursor queryRoots(String[] projection) {
         String[] columns = projection == null ? new String[] {

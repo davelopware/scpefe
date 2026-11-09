@@ -2,7 +2,6 @@ package org.scpefe.nativecore;
 
 import static org.junit.Assert.*;
 
-import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.UriPermission;
@@ -17,7 +16,6 @@ import androidx.test.uiautomator.Until;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.regex.Pattern;
@@ -108,16 +106,10 @@ public final class DocumentTargetsInstrumentedTest {
     }
 
     @Test public void localDocumentsProviderReadsWindowsFixtureAndVerifiesWrite() throws Exception {
-        Context testContext = InstrumentationRegistry.getInstrumentation().getContext();
         Context targetContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        ContentResolver resolver = testContext.getContentResolver();
         Uri uri = DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY,
             TestDocumentsProvider.DOCUMENT_ID);
         byte[] windows = asset("windows/windows-container.bin");
-        try (OutputStream output = resolver.openOutputStream(uri, "rwt")) {
-            assertNotNull(output);
-            output.write(windows);
-        }
         PickerHostActivity.clearResults();
         Uri root = DocumentsContract.buildDocumentUri(TestDocumentsProvider.AUTHORITY,
             TestDocumentsProvider.ROOT_ID);
