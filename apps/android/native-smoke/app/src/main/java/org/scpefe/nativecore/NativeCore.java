@@ -86,6 +86,13 @@ public final class NativeCore {
     /** Acknowledges the provider's exact candidate result to the core. */
     public static native Result nativeAcknowledgeLease(long handle, long operationId,
         int outcome);
+    /** Prepares exact manual or provisional save bytes from the native editor. */
+    public static native Result nativePrepareSave(long handle, int kind, long operationId,
+        byte[] password, byte[] holderName, byte[] holderEmail, byte[] deviceName,
+        long nowUtcMs);
+    /** Applies the provider's verified, failed, or ambiguous save outcome. */
+    public static native Result nativeAcknowledgeSave(long handle, long operationId,
+        int outcome);
     /** Makes native edit text authoritative before a local checkpoint is accepted. */
     public static native Result nativeSubmitContent(long handle, byte[] content);
     /** Closes the active container while retaining its context. */

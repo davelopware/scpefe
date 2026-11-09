@@ -31,6 +31,10 @@ export interface AndroidPluginContract {
   updateWorkingCopy(value: { update: { content: string;
     cursor: { start: number; end: number }; journalScope: string;
     revision: number } }): Promise<{ accepted: true }>;
+  saveDocument(value: { request: { content: string; journalScope?: string;
+    revision?: number } }): Promise<{ result: { saved: true; content: string;
+    journalScope?: string; revision?: number;
+    publicationState: "target-published" | "pending-publication" } }>;
 }
 
 export const native = registerPlugin<AndroidPluginContract>("Scpefe");
@@ -171,7 +175,22 @@ export function createHost(plugin: AndroidPluginContract) { return {
   cancelLeaseTakeover: unsupported,
   restoreRecoveredWork: async () => recovered(
     (await plugin.restoreRecoveredWork()).opened),
-  saveDocument: unsupported,
+  saveDocument: async (content: string, version?: { journalScope: string;
+      revision: number } | null) => {
+    if (typeof content !== "string"
+        || new TextEncoder().encode(content).length > 1024 * 1024)
+      throw new TypeError("Invalid save content");
+    const request = { content, ...(version ? {
+      journalScope: version.journalScope, revision: version.revision } : {}) };
+    const result = (await plugin.saveDocument({ request })).result;
+    if (result.saved !== true || result.content !== content
+        || !["target-published", "pending-publication"].includes(
+          result.publicationState)
+        || (version && (result.journalScope !== version.journalScope
+          || result.revision !== version.revision)))
+      throw new TypeError("Invalid native save result");
+    return result;
+  },
   saveDivergenceResolution: unsupported,
   reconnectPendingPublication: unsupported,
   discardPendingPublication: unsupported,

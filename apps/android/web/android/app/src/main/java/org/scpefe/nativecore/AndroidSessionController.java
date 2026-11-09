@@ -36,6 +36,7 @@ public final class AndroidSessionController {
     private byte[] leaseSession;
     private String journalScope;
     private long journalRevision;
+    private boolean pendingSave;
     private long nativeHandle;
 
     /** Uses the Android target and private profile adapters as the only host state. */
@@ -246,6 +247,7 @@ public final class AndroidSessionController {
         clearPassword();
         journalScope = null;
         journalRevision = 0;
+        pendingSave = false;
     }
 
     private void clearPassword() {
@@ -393,6 +395,100 @@ public final class AndroidSessionController {
         }
     }
 
+    /** Journals the exact native save candidate before conditional provider publication. */
+    public JSONObject save(JSONObject request, boolean manual, long expected) throws Failure {
+        requireCurrent(expected);
+        if (activeTarget == null || activeEncrypted == null || activePassword == null
+                || leaseSession == null || pendingSave)
+            throw new Failure("INVALID_STATE", "No available editing session.");
+        NativeCore.LeaseState state = leaseState();
+        if (!state.active || !state.editing
+                || !Arrays.equals(state.sessionId, leaseSession))
+            throw new Failure("LEASE_CHANGED", "The editing lease changed.");
+        String content = text(request, "content", MAX_WEB_TEXT, true);
+        String scope = request.optString("journalScope", "");
+        long revision = request.optLong("revision", 0);
+        if ((!scope.isEmpty() && !scope.matches("[A-Za-z0-9_-]{1,128}"))
+                || (scope.isEmpty() != (revision == 0))
+                || (revision > 0 && (journalScope == null
+                    || !journalScope.equals(scope) || revision > journalRevision)))
+            throw new Failure("STALE_OPERATION", "The working copy version is unavailable.");
+        JSONObject profile;
+        try { profile = profiles.loadProfile(); }
+        catch (IOException error) { throw new Failure("PROFILE_UNAVAILABLE", "Profile unavailable."); }
+        if (profile == null) throw new Failure("PROFILE_REQUIRED", "Configure a profile first.");
+        byte[] name = profile.optString("name").getBytes(StandardCharsets.UTF_8);
+        byte[] email = profile.optString("email").getBytes(StandardCharsets.UTF_8);
+        byte[] device = profile.optString("deviceName").getBytes(StandardCharsets.UTF_8);
+        byte[] clear = content.getBytes(StandardCharsets.UTF_8);
+        byte[] key = journalKey();
+        byte[] base = activeEncrypted.clone();
+        NativeCore.Result prepared = null;
+        try {
+            check(NativeCore.nativeSubmitContent(nativeHandle, clear).status);
+            prepared = NativeCore.nativePrepareSave(nativeHandle, manual ? 1 : 2,
+                System.nanoTime() & Long.MAX_VALUE, activePassword, name, email,
+                device, System.currentTimeMillis());
+            check(prepared.status);
+            if (prepared.data == null || prepared.data.length == 0)
+                throw new Failure("OPERATION_FAILED", "Save candidate unavailable.");
+            JSONObject publication = new JSONObject()
+                .put("target", activeTarget).put("id", randomId())
+                .put("candidateHash", hash(prepared.data))
+                .put("baseHash", hash(base))
+                .put("kind", "host-target").put("stage", "prepared")
+                .put("purpose", manual ? "manual-save" : "regular-save")
+                .put("base", Base64.encodeToString(base, Base64.NO_WRAP))
+                .put("candidate", Base64.encodeToString(prepared.data, Base64.NO_WRAP));
+            JSONObject record = new JSONObject().put("target", activeTarget)
+                .put("baseRevision", hex(state.revisionHead, 32))
+                .put("targetHash", hash(base))
+                .put("updateTime", System.currentTimeMillis())
+                .put("text", content).put("state", "pending-publication")
+                .put("cursor", new JSONObject().put("start", 0).put("end", 0))
+                .put("publication", publication);
+            String id = documentId();
+            journals.write(id, activeTarget, key, record);
+            requireCurrent(expected);
+            TargetPublication.Outcome outcome = targets.publish(activeTarget,
+                base, prepared.data);
+            int code = outcome == TargetPublication.Outcome.VERIFIED ? 1
+                : outcome == TargetPublication.Outcome.DEFINITE_FAILURE ? 2 : 3;
+            check(NativeCore.nativeAcknowledgeSave(nativeHandle,
+                prepared.handle, code).status);
+            if (outcome == TargetPublication.Outcome.DEFINITE_FAILURE) {
+                record.put("state", "unsaved").remove("publication");
+                journals.write(id, activeTarget, key, record);
+                throw new Failure("PUBLICATION_FAILED", "The provider refused the save.");
+            }
+            if (outcome == TargetPublication.Outcome.AMBIGUOUS) {
+                pendingSave = true;
+                return saveResult(content, scope, revision, "pending-publication");
+            }
+            Arrays.fill(activeEncrypted, (byte)0);
+            activeEncrypted = prepared.data.clone();
+            journals.clear(id);
+            return saveResult(content, scope, revision, "target-published");
+        } catch (IOException | JSONException error) {
+            throw new Failure("PRIVATE_STATE_UNAVAILABLE",
+                "Could not preserve the encrypted save candidate.");
+        } finally {
+            Arrays.fill(name, (byte)0); Arrays.fill(email, (byte)0);
+            Arrays.fill(device, (byte)0); Arrays.fill(clear, (byte)0);
+            Arrays.fill(key, (byte)0); Arrays.fill(base, (byte)0);
+            if (prepared != null && prepared.data != null)
+                Arrays.fill(prepared.data, (byte)0);
+        }
+    }
+
+    private static JSONObject saveResult(String content, String scope, long revision,
+            String publicationState) throws JSONException {
+        JSONObject result = new JSONObject().put("saved", true)
+            .put("content", content).put("publicationState", publicationState);
+        if (revision > 0) result.put("journalScope", scope).put("revision", revision);
+        return result;
+    }
+
     private void verifyTarget() throws Failure {
         try {
             byte[] observed = targets.read(activeTarget);
@@ -482,7 +578,7 @@ public final class AndroidSessionController {
     }
 
     private void releaseLease() {
-        if (nativeHandle == 0 || activeTarget == null || leaseSession == null
+        if (pendingSave || nativeHandle == 0 || activeTarget == null || leaseSession == null
                 || activePassword == null) return;
         try {
             AndroidWorkJournals.Recovery recovery = recovery();

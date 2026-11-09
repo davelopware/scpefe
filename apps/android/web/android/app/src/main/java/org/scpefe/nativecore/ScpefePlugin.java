@@ -181,4 +181,14 @@ public final class ScpefePlugin extends Plugin {
         dispatch(call, () -> { session.updateWorkingCopy(update, expected);
             return new JSObject().put("accepted", true); });
     }
+
+    @PluginMethod public void saveDocument(PluginCall call) {
+        final long expected = session.generation();
+        JSONObject request = call.getObject("request");
+        if (request == null || request.toString().length() > 2 * 1024 * 1024) {
+            call.reject("Invalid save request.", "INVALID_ARGUMENT"); return;
+        }
+        dispatch(call, () -> new JSObject().put("result",
+            session.save(request, true, expected)));
+    }
 }
