@@ -23,6 +23,7 @@ import org.scpefe.nativecore.smoke.MainActivity;
 /** Drives the real Capacitor WebView and Android picker against a local provider. */
 @RunWith(AndroidJUnit4.class)
 public final class WebViewWorkflowInstrumentedTest {
+    private static final String APP_PACKAGE = "org.scpefe.nativecore.smoke";
     private static final String OWNER = "0b4e79c5-7cfe-4b7c-b4f3-d89129cb7b5e";
     private static final String WINDOWS = OWNER;
 
@@ -94,6 +95,25 @@ public final class WebViewWorkflowInstrumentedTest {
         fail("System picker did not enter the test provider destination");
     }
 
+    private static void finishOpenPicker(ActivityScenario<MainActivity> scenario,
+            UiDevice device) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 15_000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (APP_PACKAGE.equals(device.getCurrentPackageName())) {
+                until(scenario, "document.querySelector('input[name=password]')", 10_000);
+                return;
+            }
+            UiObject2 open = device.wait(Until.findObject(
+                By.text(Pattern.compile("(?i)^open$"))), 1_000);
+            if (open == null) continue;
+            try { open.click(); }
+            catch (StaleObjectException ignored) {
+                // The picker changed while selecting; the next loop checks its live state.
+            }
+        }
+        fail("System picker neither returned a document nor offered Open");
+    }
+
     private static void setInput(ActivityScenario<MainActivity> scenario, String name,
             String value) throws Exception {
         eval(scenario, "(()=>{const e=document.querySelector('input[name=\"" + name
@@ -130,8 +150,7 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Open…");
             provider(device);
             click(device, Pattern.compile("created-.*\\.scpefe"));
-            click(device, Pattern.compile("(?i)open"));
-            until(scenario, "document.querySelector('input[name=password]')", 10_000);
+            finishOpenPicker(scenario, device);
             setInput(scenario, "password", "wrong password");
             eval(scenario, "document.querySelector('input[name=password]').form.requestSubmit()");
             until(scenario, "document.querySelector('[role=alert]')", 15_000);
@@ -143,8 +162,7 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Open…");
             provider(device);
             click(device, Pattern.compile("test\\.scpefe"));
-            click(device, Pattern.compile("(?i)open"));
-            until(scenario, "document.querySelector('input[name=password]')", 10_000);
+            finishOpenPicker(scenario, device);
             setInput(scenario, "password", WINDOWS);
             eval(scenario, "document.querySelector('input[name=password]').form.requestSubmit()");
             until(scenario, "document.querySelector('textarea[aria-label=\"Document text\"]')"
