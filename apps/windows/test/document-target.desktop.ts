@@ -26,7 +26,8 @@ async function fixture(t) {
       assert.equal(reference, target);
       if (access !== "available" || image === null) {
         const error = new Error("Provider target cannot be read");
-        error.code = access === "unavailable" ? "EIO" : "ENOENT";
+        error.code = access === "unavailable" ? "EIO"
+          : access === "revoked" ? "EACCES" : "ENOENT";
         throw error;
       }
       return Buffer.from(image);
@@ -49,6 +50,10 @@ async function fixture(t) {
       candidate = Buffer.from(bytes);
       if (publication === "changed") {
         image = Buffer.from("saved:foreign work");
+        return "ambiguous";
+      }
+      if (publication === "partial") {
+        image = Buffer.from(bytes.subarray(0, Math.max(1, bytes.length - 2)));
         return "ambiguous";
       }
       if (publication === "ambiguous") return "ambiguous";
@@ -116,7 +121,7 @@ test("opaque target publishes and verifies the exact candidate through DocumentS
       f.service.active.journalKey)), null);
   });
 
-for (const access of ["missing", "unavailable"]) {
+for (const access of ["missing", "unavailable", "revoked"]) {
   test(`opaque target ${access} preserves a pending exact candidate`, async (t) => {
     const f = await fixture(t);
     f.access = access;
@@ -148,6 +153,19 @@ test("opaque target change preserves candidate and enters conflict", async (t) =
     f.service.active.journalKey);
   assert.equal(conflict.state, "conflict");
   assert.equal(conflict.publication.candidate, journal.publication.candidate);
+});
+
+test("opaque target partial write preserves the full journaled candidate", async (t) => {
+  const f = await fixture(t);
+  f.publication = "partial";
+  await assert.rejects(f.service.saveDocument("local work"),
+    (error) => error.publicationPrepared === true);
+  const journal = await f.service.journals.read(f.service.active.documentId,
+    f.service.active.journalKey);
+  assert.deepEqual(Buffer.from(journal.publication.candidate, "base64"), f.candidate);
+  assert.notDeepEqual(f.image, f.candidate);
+  assert.equal((await f.service.reconnectPendingPublication()).publicationState,
+    "conflict");
 });
 
 test("opaque target uncertain write is confirmed by byte reread", async (t) => {

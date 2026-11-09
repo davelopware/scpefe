@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - codex/issue-179-android-native
+      - codex/issue-180-provider-target
   pull_request:
     paths:
       - 'CMakeLists.txt'
@@ -87,3 +88,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Run instrumented JNI smoke on emulator
         run: bash scripts/test-android-native-emulator.sh
+      - name: Preserve instrumented test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-instrumented-failure
+          path: |
+            apps/android/native-smoke/app/build/outputs/androidTest-results/connected/
+            apps/android/native-smoke/app/build/reports/androidTests/connected/
+          if-no-files-found: warn
