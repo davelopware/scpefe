@@ -84,6 +84,7 @@ function validateRecord(value) {
       currentRevision: value.merge.currentRevision };
   }
   if (value.publication !== undefined) {
+    const hostTarget = value.publication?.kind === "host-target";
     const candidate = value.publication?.candidate;
     const base = value.publication?.base;
     const mergeAncestor = value.publication?.mergeAncestor;
@@ -94,10 +95,11 @@ function validateRecord(value) {
         || typeof value.publication.id !== "string"
         || !/^[0-9a-f]{32}$/.test(value.publication.id)
         || value.publication.target !== value.target
-        || typeof value.publication.transactionFile !== "string"
-        || !value.publication.transactionFile
-        || typeof value.publication.baseFile !== "string"
-        || !value.publication.baseFile
+        || (value.publication.kind !== undefined && !hostTarget)
+        || (!hostTarget && (typeof value.publication.transactionFile !== "string"
+          || !value.publication.transactionFile
+          || typeof value.publication.baseFile !== "string"
+          || !value.publication.baseFile))
         || !/^[0-9a-f]{64}$/.test(value.publication.candidateHash)
         || !/^[0-9a-f]{64}$/.test(value.publication.baseHash)
         || !TRANSACTION_STAGES.has(value.publication.stage)
@@ -142,8 +144,9 @@ function validateRecord(value) {
     publication = {
       id: value.publication.id,
       target: value.publication.target,
-      transactionFile: value.publication.transactionFile,
-      baseFile: value.publication.baseFile,
+      ...(hostTarget ? { kind: "host-target" } : {
+        transactionFile: value.publication.transactionFile,
+        baseFile: value.publication.baseFile }),
       candidateHash: value.publication.candidateHash,
       baseHash: value.publication.baseHash,
       base,
