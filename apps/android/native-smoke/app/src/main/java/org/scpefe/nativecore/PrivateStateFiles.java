@@ -6,6 +6,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 
@@ -34,8 +35,8 @@ final class PrivateStateFiles {
     }
 
     byte[] read(String name) throws IOException {
-        File target = file(name);
-        return target.exists() ? Files.readAllBytes(target.toPath()) : null;
+        try { return Files.readAllBytes(file(name).toPath()); }
+        catch (NoSuchFileException missing) { return null; }
     }
 
     void write(String name, byte[] data) throws IOException {

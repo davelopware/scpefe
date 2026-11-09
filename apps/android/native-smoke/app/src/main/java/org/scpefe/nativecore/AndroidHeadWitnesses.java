@@ -8,6 +8,9 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -44,7 +47,12 @@ public final class AndroidHeadWitnesses {
         Comparison comparison = compare(prior, observation);
         if (comparison == Comparison.FIRST || comparison == Comparison.UNCHANGED
                 || comparison == Comparison.DESCENDANT) {
-            try { all.put(key, observation); }
+            try {
+                JSONObject retained = new JSONObject(observation.toString());
+                retained.put("graph", mergedGraph(prior == null ? null
+                    : prior.optJSONArray("graph"), observation.optJSONArray("graph")));
+                all.put(key, retained);
+            }
             catch (JSONException error) { throw new IOException("invalid head witness", error); }
             save(all);
         }
@@ -76,13 +84,45 @@ public final class AndroidHeadWitnesses {
         String previousHead = prior.optString("headRevision");
         String currentHead = current.optString("headRevision");
         if (previousHead.equals(currentHead)) return Comparison.UNCHANGED;
-        if (reaches(current.optJSONArray("graph"), currentHead, previousHead)) {
+        JSONArray graph = mergedGraph(prior.optJSONArray("graph"),
+            current.optJSONArray("graph"));
+        if (reaches(graph, currentHead, previousHead)) {
             return Comparison.DESCENDANT;
         }
-        if (reaches(prior.optJSONArray("graph"), previousHead, currentHead)) {
+        if (reaches(graph, previousHead, currentHead)) {
             return Comparison.ROLLBACK;
         }
         return Comparison.DIVERGENCE;
+    }
+
+    private static JSONArray mergedGraph(JSONArray previous, JSONArray observed)
+            throws IOException {
+        Map<String, Set<String>> nodes = new LinkedHashMap<>();
+        for (JSONArray source : new JSONArray[] { previous, observed }) {
+            if (source == null) continue;
+            for (int index = 0; index < source.length(); index++) {
+                JSONObject node = source.optJSONObject(index);
+                String id = node.optString("revisionId");
+                Set<String> parents = nodes.computeIfAbsent(id, ignored -> new LinkedHashSet<>());
+                JSONArray listed = node.optJSONArray("parentRevisionIds");
+                for (int parent = 0; parent < listed.length(); parent++) {
+                    parents.add(listed.optString(parent));
+                }
+                if (parents.size() > 8 || nodes.size() > 1025) {
+                    throw new IOException("head witness graph exceeds its limit");
+                }
+            }
+        }
+        JSONArray merged = new JSONArray();
+        try {
+            for (Map.Entry<String, Set<String>> node : nodes.entrySet()) {
+                JSONArray parents = new JSONArray();
+                for (String parent : node.getValue()) parents.put(parent);
+                merged.put(new JSONObject().put("revisionId", node.getKey())
+                    .put("parentRevisionIds", parents));
+            }
+        } catch (JSONException error) { throw new IOException("invalid head graph", error); }
+        return merged;
     }
 
     private static boolean reaches(JSONArray graph, String from, String sought) {
