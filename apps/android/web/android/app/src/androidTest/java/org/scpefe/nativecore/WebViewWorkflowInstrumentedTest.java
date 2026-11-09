@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
+import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.scpefe.nativecore.smoke.MainActivity;
@@ -64,7 +65,8 @@ public final class WebViewWorkflowInstrumentedTest {
         eval(scenario, "document.querySelector('[aria-label=\"" + menu
             + "\"][aria-haspopup=\"menu\"]').click()");
         until(scenario, "[...document.querySelectorAll('[role=menu] button')]"
-            + ".some(x=>x.querySelector('span')?.textContent.trim()==='" + action + "')", 5_000);
+            + ".some(x=>x.querySelector('span')?.textContent.trim()==='" + action
+            + "'&&!x.disabled)", 10_000);
         eval(scenario, "[...document.querySelectorAll('[role=menu] button')]"
             + ".find(x=>x.querySelector('span')?.textContent.trim()==='" + action
             + "').click()");
@@ -136,13 +138,30 @@ public final class WebViewWorkflowInstrumentedTest {
             throws Exception {
         until(scenario, "document.querySelector('input[name=name]')"
             + "||document.querySelector('[aria-label=\"File\"]')", 15_000);
-        if (!"true".equals(eval(scenario,
-                "Boolean(document.querySelector('input[name=name]'))"))) return;
-        setInput(scenario, "name", "Ada");
-        setInput(scenario, "email", "ada@example.org");
-        setInput(scenario, "deviceName", "Android emulator");
-        eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
-        until(scenario, "!document.querySelector('input[name=name]')", 10_000);
+        long deadline = SystemClock.uptimeMillis() + 20_000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if ("true".equals(eval(scenario,
+                    "Boolean(document.querySelector('input[name=name]'))"))) {
+                setInput(scenario, "name", "Ada");
+                setInput(scenario, "email", "ada@example.org");
+                setInput(scenario, "deviceName", "Android emulator");
+                eval(scenario, "document.querySelector('input[name=name]').form.requestSubmit()");
+                until(scenario, "!document.querySelector('input[name=name]')", 10_000);
+            }
+            if ("true".equals(eval(scenario, "Boolean([...document.querySelectorAll"
+                    + "('[role=menu] button')].some(x=>x.querySelector('span')"
+                    + "?.textContent.trim()==='New'&&!x.disabled))"))) {
+                eval(scenario, "document.querySelector('[aria-label=\"File\"]"
+                    + "[aria-expanded=true]')?.click()");
+                until(scenario, "!document.querySelector('[role=menu][aria-label=\"File\"]')",
+                    5_000);
+                return;
+            }
+            eval(scenario, "if(!document.querySelector('[role=menu][aria-label=\"File\"]'))"
+                + "document.querySelector('[aria-label=\"File\"]')?.click()");
+            SystemClock.sleep(100);
+        }
+        fail("Profile did not reach an enabled File > New command");
     }
 
     private static void setDocumentText(ActivityScenario<MainActivity> scenario,
@@ -235,6 +254,15 @@ public final class WebViewWorkflowInstrumentedTest {
             SystemClock.sleep(50);
         }
         fail("Lease release did not restore the encrypted unsaved journal");
+    }
+
+    @After public void dismissPickerAfterFailure() {
+        UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        for (int attempt = 0; attempt < 4; attempt++) {
+            String foreground = device.getCurrentPackageName();
+            if (foreground == null || !foreground.contains("documentsui")) return;
+            device.pressBack();
+        }
     }
 
     @Test public void viewOnlySlotCannotAcquireNativeLease() throws Exception {
