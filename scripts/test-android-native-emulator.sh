@@ -12,11 +12,29 @@ echo no | "$sdk_dir/cmdline-tools/latest/bin/avdmanager" create avd \
     --package 'system-images;android-35;google_apis;x86_64'
 
 "$sdk_dir/emulator/emulator" -avd scpefe-native-smoke -no-window -no-audio \
-    -no-boot-anim -no-snapshot -gpu swiftshader_indirect \
+    -no-boot-anim -no-snapshot -gpu software -verbose \
     > /tmp/scpefe-android-emulator.log 2>&1 &
 emulator_pid=$!
-trap 'kill "$emulator_pid" 2>/dev/null || true' EXIT
-timeout 180s "$sdk_dir/platform-tools/adb" wait-for-device
+cleanup_emulator() {
+    local status=$?
+    trap - EXIT
+    if (( status != 0 )); then
+        echo 'Android emulator diagnostics:' >&2
+        "$sdk_dir/emulator/emulator" -accel-check >&2 || true
+        "$sdk_dir/platform-tools/adb" devices -l >&2 || true
+        if kill -0 "$emulator_pid" 2>/dev/null; then
+            echo "Emulator process $emulator_pid is still running" >&2
+        else
+            echo "Emulator process $emulator_pid exited before the test completed" >&2
+        fi
+        tail -n 200 /tmp/scpefe-android-emulator.log >&2 || true
+    fi
+    kill "$emulator_pid" 2>/dev/null || true
+    wait "$emulator_pid" 2>/dev/null || true
+    exit "$status"
+}
+trap cleanup_emulator EXIT
+timeout 300s "$sdk_dir/platform-tools/adb" wait-for-device
 for attempt in $(seq 1 120); do
     if [[ "$("$sdk_dir/platform-tools/adb" shell getprop sys.boot_completed | tr -d '\r')" == 1 ]]; then
         break
@@ -24,7 +42,6 @@ for attempt in $(seq 1 120); do
     sleep 2
 done
 if [[ "$("$sdk_dir/platform-tools/adb" shell getprop sys.boot_completed | tr -d '\r')" != 1 ]]; then
-    cat /tmp/scpefe-android-emulator.log >&2
     echo 'Android emulator failed to boot' >&2
     exit 1
 fi
