@@ -32,6 +32,8 @@ function fake(overrides: Partial<AndroidPluginContract> = {}): AndroidPluginCont
       content: request.content, publicationState: "target-published",
       ...(request.revision ? { journalScope: request.journalScope,
         revision: request.revision } : {}) } }),
+    reconnectPendingPublication: async () => ({ result: { content: "alpha\n",
+      publicationState: "target-published" } }),
     ...overrides,
   };
 }

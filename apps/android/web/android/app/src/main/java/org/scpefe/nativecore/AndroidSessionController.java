@@ -37,6 +37,9 @@ public final class AndroidSessionController {
     private String journalScope;
     private long journalRevision;
     private boolean pendingSave;
+    private long pendingSaveOperationId;
+    private long lastRegularSaveAt;
+    private long lastRegularSaveRevision;
     private long nativeHandle;
 
     /** Uses the Android target and private profile adapters as the only host state. */
@@ -248,6 +251,8 @@ public final class AndroidSessionController {
         journalScope = null;
         journalRevision = 0;
         pendingSave = false;
+        pendingSaveOperationId = 0;
+        lastRegularSaveRevision = 0;
     }
 
     private void clearPassword() {
@@ -308,6 +313,8 @@ public final class AndroidSessionController {
         leaseSession = session;
         journalScope = null;
         journalRevision = 0;
+        lastRegularSaveAt = System.currentTimeMillis();
+        lastRegularSaveRevision = 0;
         requireCurrent(expected);
         return opened(false);
     }
@@ -340,6 +347,8 @@ public final class AndroidSessionController {
         finally { Arrays.fill(clear, (byte)0); }
         journalScope = null;
         journalRevision = 0;
+        lastRegularSaveAt = System.currentTimeMillis();
+        lastRegularSaveRevision = 0;
         requireCurrent(expected);
         try {
             return opened(false).put("content", content)
@@ -401,6 +410,10 @@ public final class AndroidSessionController {
         if (activeTarget == null || activeEncrypted == null || activePassword == null
                 || leaseSession == null || pendingSave)
             throw new Failure("INVALID_STATE", "No available editing session.");
+        AndroidWorkJournals.Recovery prior = recovery();
+        if (prior.attention == AndroidWorkJournals.Attention.PENDING_PUBLICATION
+                || prior.attention == AndroidWorkJournals.Attention.CONFLICT)
+            throw new Failure("PUBLICATION_PENDING", "Resolve the prior candidate first.");
         NativeCore.LeaseState state = leaseState();
         if (!state.active || !state.editing
                 || !Arrays.equals(state.sessionId, leaseSession))
@@ -463,11 +476,14 @@ public final class AndroidSessionController {
             }
             if (outcome == TargetPublication.Outcome.AMBIGUOUS) {
                 pendingSave = true;
+                pendingSaveOperationId = prepared.handle;
                 return saveResult(content, scope, revision, "pending-publication");
             }
             Arrays.fill(activeEncrypted, (byte)0);
             activeEncrypted = prepared.data.clone();
             journals.clear(id);
+            lastRegularSaveAt = System.currentTimeMillis();
+            lastRegularSaveRevision = revision;
             return saveResult(content, scope, revision, "target-published");
         } catch (IOException | JSONException error) {
             throw new Failure("PRIVATE_STATE_UNAVAILABLE",
@@ -487,6 +503,104 @@ public final class AndroidSessionController {
             .put("content", content).put("publicationState", publicationState);
         if (revision > 0) result.put("journalScope", scope).put("revision", revision);
         return result;
+    }
+
+    /** Publishes a provisional revision only when settings and a newer checkpoint allow it. */
+    public JSONObject regularSaveIfDue(long now) throws Failure {
+        if (leaseSession == null || pendingSave || journalScope == null
+                || journalRevision <= lastRegularSaveRevision) return null;
+        JSONObject settings;
+        try { settings = profiles.loadSettings(); }
+        catch (IOException error) { return null; }
+        long interval = settings.optLong("regularSaveIntervalMs", 120_000);
+        if (!settings.optBoolean("regularSaveEnabled")
+                || now - lastRegularSaveAt < interval) return null;
+        String scope = journalScope;
+        long revision = journalRevision;
+        JSONObject request = new JSONObject();
+        try {
+            request.put("content", openedText()).put("journalScope", scope)
+                .put("revision", revision);
+        } catch (JSONException error) { throw new AssertionError(error); }
+        JSONObject result = save(request, false, generation.get());
+        if (!"target-published".equals(result.optString("publicationState"))) return null;
+        try { return new JSONObject().put("published", true)
+            .put("provisional", true).put("content", result.getString("content"))
+            .put("journalScope", scope).put("revision", revision); }
+        catch (JSONException error) { throw new AssertionError(error); }
+    }
+
+    /** Reuses the journaled candidate byte-for-byte after an ambiguous provider result. */
+    public JSONObject reconnectPending(long expected) throws Failure {
+        requireCurrent(expected);
+        if (activeTarget == null || activePassword == null)
+            throw new Failure("INVALID_STATE", "Open the affected document first.");
+        AndroidWorkJournals.Recovery recovery = recovery();
+        if (recovery.attention != AndroidWorkJournals.Attention.PENDING_PUBLICATION
+                && recovery.attention != AndroidWorkJournals.Attention.CONFLICT)
+            throw new Failure("PUBLICATION_MISSING", "No pending candidate is available.");
+        JSONObject record = recovery.record;
+        byte[] base, candidate;
+        try {
+            JSONObject publication = record.getJSONObject("publication");
+            base = Base64.decode(publication.getString("base"), Base64.DEFAULT);
+            candidate = Base64.decode(publication.getString("candidate"), Base64.DEFAULT);
+            if (!hash(base).equals(publication.getString("baseHash"))
+                    || !hash(candidate).equals(publication.getString("candidateHash")))
+                throw new Failure("RECOVERY_UNAVAILABLE", "Pending candidate is invalid.");
+        } catch (JSONException | IllegalArgumentException error) {
+            throw new Failure("RECOVERY_UNAVAILABLE", "Pending candidate is invalid.");
+        }
+        try {
+            TargetPublication.Outcome outcome = targets.publish(activeTarget,
+                base, candidate);
+            if (outcome != TargetPublication.Outcome.VERIFIED) {
+                try {
+                    byte[] observed = targets.read(activeTarget);
+                    if (!Arrays.equals(observed, base)
+                            && !Arrays.equals(observed, candidate)) {
+                        record.put("state", "conflict");
+                        byte[] key = journalKey();
+                        try { journals.write(documentId(), activeTarget, key, record); }
+                        finally { Arrays.fill(key, (byte)0); }
+                        return new JSONObject().put("content", record.getString("text"))
+                            .put("publicationState", "conflict");
+                    }
+                } catch (IOException ignored) {
+                    // The provider is still unavailable; retain the exact candidate.
+                }
+                return new JSONObject().put("content", record.getString("text"))
+                    .put("publicationState", "pending-publication");
+            }
+            if (pendingSaveOperationId > 0)
+                check(NativeCore.nativeResolveSave(nativeHandle,
+                    pendingSaveOperationId, true).status);
+            else {
+                closeNative();
+                openContext();
+                check(NativeCore.nativeOpen(nativeHandle, candidate).status);
+                check(NativeCore.nativeUnlock(nativeHandle, activePassword).status);
+            }
+            Arrays.fill(activeEncrypted, (byte)0);
+            activeEncrypted = candidate.clone();
+            byte[] key = journalKey();
+            try { journals.clear(documentId()); }
+            finally { Arrays.fill(key, (byte)0); }
+            pendingSave = false;
+            pendingSaveOperationId = 0;
+            NativeCore.LeaseState state = leaseState();
+            leaseSession = state.active ? state.sessionId.clone() : null;
+            if (leaseSession != null) releaseLease();
+            requireCurrent(expected);
+            return new JSONObject().put("content", record.getString("text"))
+                .put("publicationState", "target-published");
+        } catch (IOException | JSONException error) {
+            throw new Failure("PRIVATE_STATE_UNAVAILABLE",
+                "Could not reconcile the encrypted save candidate.");
+        } finally {
+            Arrays.fill(base, (byte)0);
+            Arrays.fill(candidate, (byte)0);
+        }
     }
 
     private void verifyTarget() throws Failure {
@@ -656,6 +770,7 @@ public final class AndroidSessionController {
                 .put("contentType", type == 1 ? "csv" : "plain-text")
                 .put("publicationState", "target-published")
                 .put("targetName", "Selected document");
+            if (!state.manuallySealed) value.put("provisional", true);
             if (includeRecovery && activeTarget != null) {
                 AndroidWorkJournals.Recovery recovery = recovery();
                 if (recovery.attention == AndroidWorkJournals.Attention.UNSAVED) {
@@ -673,6 +788,8 @@ public final class AndroidSessionController {
                     value.put("unreadableJournal", true);
                 } else if (recovery.attention == AndroidWorkJournals.Attention.PENDING_PUBLICATION) {
                     value.put("publicationState", "pending-publication");
+                } else if (recovery.attention == AndroidWorkJournals.Attention.CONFLICT) {
+                    value.put("publicationState", "conflict");
                 }
             }
             return value;

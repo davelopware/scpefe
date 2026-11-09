@@ -340,7 +340,7 @@ Java_org_scpefe_nativecore_NativeCore_nativeLeaseState(JNIEnv *env, jclass,
     if (status != SCPEFE_STATUS_OK) return nullptr;
     jclass type = env->FindClass("org/scpefe/nativecore/NativeCore$LeaseState");
     if (!type) return nullptr;
-    jmethodID constructor = env->GetMethodID(type, "<init>", "(IZZZZ[BJJJ[B)V");
+    jmethodID constructor = env->GetMethodID(type, "<init>", "(IZZZZZ[BJJJ[B)V");
     if (!constructor) return nullptr;
     jbyteArray id = env->NewByteArray(SCPEFE_LEASE_SESSION_ID_SIZE);
     jbyteArray head = env->NewByteArray(SCPEFE_REVISION_ID_SIZE);
@@ -354,7 +354,8 @@ Java_org_scpefe_nativecore_NativeCore_nativeLeaseState(JNIEnv *env, jclass,
         static_cast<jboolean>(permissions.can_edit),
         static_cast<jboolean>(permissions.must_change_password),
         static_cast<jboolean>(view.lease_active),
-        static_cast<jboolean>(mode.is_editing), id,
+        static_cast<jboolean>(mode.is_editing),
+        static_cast<jboolean>(view.manually_sealed), id,
         static_cast<jlong>(view.lease_heartbeat_counter),
         static_cast<jlong>(view.lease_holder_utc_ms),
         static_cast<jlong>(view.lease_duration_ms), head);
@@ -503,6 +504,20 @@ Java_org_scpefe_nativecore_NativeCore_nativeAcknowledgeSave(JNIEnv *env, jclass,
     return result(env, scpefe_container_acknowledge_save(session->container,
         static_cast<uint64_t>(operation_id),
         static_cast<scpefe_publication_outcome>(outcome), &effects),
+        static_cast<jlong>(effects));
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeResolveSave(JNIEnv *env, jclass,
+    jlong handle, jlong operation_id, jboolean published) {
+    const auto session = lookup(handle);
+    if (!session || operation_id <= 0)
+        return result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
+    std::lock_guard lock(session->mutex);
+    if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    uint32_t effects = 0;
+    return result(env, scpefe_container_resolve_save(session->container,
+        static_cast<uint64_t>(operation_id), published ? 1 : 0, &effects),
         static_cast<jlong>(effects));
 }
 

@@ -151,6 +151,22 @@ jobs:
         env:
           SCPEFE_ANDROID_PROJECT: apps/android/web/android
         run: bash scripts/test-android-native-emulator.sh
+      - name: Export Android provider images for Windows verification
+        run: |
+          mkdir -p build/android-save-interoperability
+          for name in interop-android-created interop-windows-edited; do
+            for suffix in .scpefe -id.txt -content.txt; do
+              adb exec-out run-as org.scpefe.nativecore.smoke \
+                cat "files/$name$suffix" > "build/android-save-interoperability/$name$suffix"
+              test -s "build/android-save-interoperability/$name$suffix"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-save-interoperability
+          path: build/android-save-interoperability/
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve WebView test results on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -160,3 +176,38 @@ jobs:
             apps/android/web/android/app/build/outputs/androidTest-results/connected/
             apps/android/web/android/app/build/reports/androidTests/connected/
           if-no-files-found: warn
+
+  windows-interop:
+    needs: webview-emulator
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-save-interoperability
+          path: build/android-save-interoperability
+      - name: Build Windows core and reopen both Android provider images
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { $env:VCPKG_INSTALLATION_ROOT }
+          if (-not $vcpkg) { throw 'Windows runner has no vcpkg checkout' }
+          & "$vcpkg/vcpkg.exe" install libsodium:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+          cmake -S . -B build/android-windows-interop -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows -DBUILD_TESTING=OFF `
+            -DSCPEFE_BUILD_ANDROID_FIXTURE_WRITER=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build build/android-windows-interop --config Release `
+            --target scpefe_android_fixture_writer --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Windows interop build failed' }
+          $env:PATH = "$vcpkg/installed/x64-windows/bin;build/android-windows-interop/Release;$env:PATH"
+          foreach ($name in @('interop-android-created', 'interop-windows-edited')) {
+            & ./build/android-windows-interop/Release/scpefe_android_fixture_writer.exe `
+              --verify "build/android-save-interoperability/$name.scpefe" `
+              "build/android-save-interoperability/$name-id.txt" `
+              "build/android-save-interoperability/$name-content.txt"
+            if ($LASTEXITCODE -ne 0) { throw "Windows could not reopen $name" }
+          }

@@ -9,6 +9,9 @@ type PluginOpened = { opened: DocumentOpened };
 
 /** Native methods exposed to the WebView; opaque target keys never cross it. */
 export interface AndroidPluginContract {
+  addListener?(name: "regularSave" | "journalWarning",
+    listener: (event: Record<string, unknown>) => void): Promise<{
+      remove(): Promise<void> }>;
   getProfile(): Promise<{ profile: Profile | null }>;
   saveProfile(value: { profile: Profile }): Promise<{ profile: Profile }>;
   getClientSettings(): Promise<{ settings: ClientSettings }>;
@@ -35,6 +38,8 @@ export interface AndroidPluginContract {
     revision?: number } }): Promise<{ result: { saved: true; content: string;
     journalScope?: string; revision?: number;
     publicationState: "target-published" | "pending-publication" } }>;
+  reconnectPendingPublication(): Promise<{ result: { content: string;
+    publicationState: "target-published" | "pending-publication" | "conflict" } }>;
 }
 
 export const native = registerPlugin<AndroidPluginContract>("Scpefe");
@@ -45,9 +50,10 @@ function opened(value: unknown): DocumentOpened {
   if (typeof candidate.readOnly !== "boolean" || typeof candidate.canEdit !== "boolean"
       || (candidate.readOnly === false && candidate.canEdit !== true)
       || typeof candidate.content !== "string"
+      || (candidate.provisional !== undefined && candidate.provisional !== true)
       || new TextEncoder().encode(candidate.content).length > 1024 * 1024
       || !["plain-text", "csv"].includes(candidate.contentType ?? "")
-      || !["target-published", "pending-publication"].includes(
+      || !["target-published", "pending-publication", "conflict"].includes(
         candidate.publicationState ?? "")) {
     throw new TypeError("Invalid native document");
   }
@@ -65,6 +71,7 @@ function opened(value: unknown): DocumentOpened {
     canEdit: candidate.canEdit,
     contentType: candidate.contentType,
     publicationState: candidate.publicationState!, targetName: "Selected document",
+    ...(candidate.provisional ? { provisional: true as const } : {}),
     ...(recovery ? { recovery: Object.freeze({ content: recovery.content,
       state: "unsaved" as const, updateTime: recovery.updateTime,
       cursor: Object.freeze({ start: recovery.cursor.start, end: recovery.cursor.end }),
@@ -127,6 +134,18 @@ const unsupported = async (): Promise<never> => {
     { code: "OPERATION_FAILED" });
 };
 
+function subscribe(plugin: AndroidPluginContract,
+    name: "regularSave" | "journalWarning",
+    listener: (event: Record<string, unknown>) => void) {
+  let disposed = false;
+  let handle: { remove(): Promise<void> } | null = null;
+  void plugin.addListener?.(name, listener).then((registered) => {
+    if (disposed) void registered.remove();
+    else handle = registered;
+  }).catch(() => {});
+  return () => { disposed = true; if (handle) void handle.remove(); };
+}
+
 /** Shared-UI host for native admission, edit lease, and encrypted local checkpoints. */
 export function createHost(plugin: AndroidPluginContract) { return {
   getProfile: async () => { const value = (await plugin.getProfile()).profile;
@@ -165,8 +184,20 @@ export function createHost(plugin: AndroidPluginContract) { return {
   },
   activity: async () => undefined,
   onLocked: () => () => {},
-  onJournalWarning: () => () => {},
-  onRegularSave: () => () => {},
+  onJournalWarning: (listener: (code: string, scope: string | null) => void) =>
+    subscribe(plugin, "journalWarning", (event) => {
+      if (typeof event.code === "string") listener(event.code, null);
+    }),
+  onRegularSave: (listener: (result: { published: true; provisional: true;
+      content: string; journalScope: string; revision: number }) => void) =>
+    subscribe(plugin, "regularSave", (event) => {
+      if (event.published === true && event.provisional === true
+          && typeof event.content === "string"
+          && typeof event.journalScope === "string"
+          && Number.isSafeInteger(event.revision) && (event.revision as number) > 0)
+        listener({ published: true, provisional: true, content: event.content,
+          journalScope: event.journalScope, revision: event.revision as number });
+    }),
   onExternalOpenRequested: () => () => {},
   onUnresolvedJournalSummary: () => () => {},
   onSwitchRetained: () => () => {},
@@ -192,7 +223,14 @@ export function createHost(plugin: AndroidPluginContract) { return {
     return result;
   },
   saveDivergenceResolution: unsupported,
-  reconnectPendingPublication: unsupported,
+  reconnectPendingPublication: async () => {
+    const result = (await plugin.reconnectPendingPublication()).result;
+    if (typeof result.content !== "string"
+        || !["target-published", "pending-publication", "conflict"].includes(
+          result.publicationState))
+      throw new TypeError("Invalid native publication result");
+    return result;
+  },
   discardPendingPublication: unsupported,
   discardRecoveredWork: unsupported,
   acceptHeadMismatch: unsupported,
