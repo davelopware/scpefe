@@ -1,0 +1,89 @@
+name: Android native smoke
+
+on:
+  push:
+    branches:
+      - codex/issue-179-android-native
+  pull_request:
+    paths:
+      - 'CMakeLists.txt'
+      - 'src/**'
+      - 'include/**'
+      - 'apps/android/native-smoke/**'
+      - 'scripts/build-android-native.sh'
+      - 'tests/vectors/draft-v3/**'
+      - 'tests/android_fixture_writer.c'
+      - '.github/workflows/android-native-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-fixture:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build a revised-v3 document with the Windows core
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { $env:VCPKG_INSTALLATION_ROOT }
+          if (-not $vcpkg) { throw 'Windows runner has no vcpkg checkout' }
+          & "$vcpkg/vcpkg.exe" install libsodium:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+          cmake -S . -B build/android-windows-fixture -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows -DBUILD_TESTING=OFF `
+            -DSCPEFE_BUILD_ANDROID_FIXTURE_WRITER=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build build/android-windows-fixture --config Release `
+            --target scpefe_android_fixture_writer --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Windows fixture build failed' }
+          New-Item -ItemType Directory -Force build/android-windows-fixture/artifact | Out-Null
+          $env:PATH = "$vcpkg/installed/x64-windows/bin;build/android-windows-fixture/Release;$env:PATH"
+          & ./build/android-windows-fixture/Release/scpefe_android_fixture_writer.exe `
+            build/android-windows-fixture/artifact/windows-container.bin `
+            build/android-windows-fixture/artifact/windows-document-id.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Windows fixture generation failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-windows-fixture
+          path: build/android-windows-fixture/artifact/
+          if-no-files-found: error
+          retention-days: 7
+
+  native-emulator:
+    needs: windows-fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-windows-fixture
+          path: apps/android/native-smoke/app/src/androidTest/assets/windows
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Check preinstalled Android toolchain and accepted SDK licence
+        run: |
+          test -f "$ANDROID_HOME/ndk/27.3.13750724/source.properties"
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          test -f "$ANDROID_HOME/licenses/android-sdk-license"
+      - name: Build core and JNI from clean source
+        run: bash scripts/build-android-native.sh x86_64
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run instrumented JNI smoke on emulator
+        run: bash scripts/test-android-native-emulator.sh
