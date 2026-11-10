@@ -544,7 +544,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
     await user.click(ui.getByRole(document.body, "menuitem", { name: menu }));
     const action = () => ui.getByRole(ui.getByRole(document.body,
       "menu", { name: menu }), "menuitem", { name });
-    if (menu === "File" && /^(New|Open)/.test(action().textContent?.trim() ?? "")) {
+    if (menu === "File" && ui.queryByRole(document.body, "dialog") === null
+        && /^(New|Open)/.test(action().textContent?.trim() ?? "")) {
       await ui.waitFor(() => assert.equal(action().disabled, false),
         { timeout: 5_000 });
     }
