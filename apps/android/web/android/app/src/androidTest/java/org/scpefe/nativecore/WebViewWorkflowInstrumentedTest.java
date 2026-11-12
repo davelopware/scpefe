@@ -11,6 +11,7 @@ import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
+import android.view.WindowInsets;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -36,6 +37,7 @@ import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import org.scpefe.nativecore.smoke.MainActivity;
 
 /** Drives the real Capacitor WebView and Android picker against a local provider. */
@@ -361,6 +363,39 @@ public final class WebViewWorkflowInstrumentedTest {
             String foreground = device.getCurrentPackageName();
             if (foreground == null || !foreground.contains("documentsui")) return;
             device.pressBack();
+        }
+    }
+
+    @Test public void menuStaysOutsideSystemBarsAndAcceptsTouch() throws Exception {
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            ensureProfile(scenario);
+            int[] webLocation = new int[2];
+            int[] systemTop = new int[1];
+            scenario.onActivity(activity -> {
+                activity.getBridge().getWebView().getLocationOnScreen(webLocation);
+                WindowInsets insets = activity.getWindow().getDecorView().getRootWindowInsets();
+                assertNotNull("Window insets unavailable", insets);
+                systemTop[0] = insets.getInsets(WindowInsets.Type.statusBars()
+                    | WindowInsets.Type.displayCutout()).top;
+            });
+            String geometry = eval(scenario, "(()=>{const button=document.querySelector("
+                + "'[aria-label=\"File\"][aria-haspopup=\"menu\"]');"
+                + "const r=button.getBoundingClientRect();return JSON.stringify(["
+                + "r.left+r.width/2,r.top+r.height/2,r.top,r.height,"
+                + "parseFloat(getComputedStyle(button).fontSize),devicePixelRatio])})()");
+            JSONArray values = new JSONArray(new JSONArray("[" + geometry + "]").getString(0));
+            double scale = values.getDouble(5);
+            double menuTop = webLocation[1] + values.getDouble(2) * scale;
+            assertTrue("Menu starts inside the system status bar: menu=" + menuTop
+                + ", inset=" + systemTop[0], menuTop >= systemTop[0]);
+            assertTrue("Menu trigger is smaller than 48 CSS px", values.getDouble(3) >= 48);
+            assertTrue("Menu font is smaller than 16 CSS px", values.getDouble(4) >= 16);
+            UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            assertTrue("A real screen tap did not hit File",
+                device.click((int) Math.round(webLocation[0] + values.getDouble(0) * scale),
+                    (int) Math.round(webLocation[1] + values.getDouble(1) * scale)));
+            until(scenario, "document.querySelector('[aria-label=\"File\"]')"
+                + ".getAttribute('aria-expanded')==='true'", 5_000);
         }
     }
 
