@@ -8,6 +8,7 @@ import { RendererLifecycleCompletion } from "../../../windows/src/renderer-lifec
 import { catalogText, safeRendererErrorMessage } from "../../../windows/src/error-boundary.mjs";
 import { host } from "./bridge.ts";
 import "../../../windows/src/styles.css";
+import "./styles.css";
 
 declare global { interface Window { scpefe: typeof host } }
 
