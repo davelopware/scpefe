@@ -135,8 +135,13 @@ public final class WebViewWorkflowInstrumentedTest {
             if (open == null) {
                 if (SystemClock.uptimeMillis() >= nextRetry) {
                     UiObject2 row = device.findObject(By.text(selected));
-                    if (row != null) try { row.click(); }
-                    catch (StaleObjectException ignored) { /* Retry a live row. */ }
+                    if (row != null) try {
+                        UiObject2 action = row;
+                        while (action != null && !action.isClickable())
+                            action = action.getParent();
+                        if (action != null) action.click();
+                        else row.click();
+                    } catch (StaleObjectException ignored) { /* Retry a live row. */ }
                     nextRetry = SystemClock.uptimeMillis() + 3_000;
                 }
                 continue;
@@ -694,7 +699,7 @@ public final class WebViewWorkflowInstrumentedTest {
         }
     }
 
-    @Test public void changedProviderRetainsAndRetriesExactSaveCandidate() throws Exception {
+    @Test public void changedProviderPreservesConflictCandidate() throws Exception {
         Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
         Context test = InstrumentationRegistry.getInstrumentation().getContext();
         byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
@@ -721,26 +726,61 @@ public final class WebViewWorkflowInstrumentedTest {
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, foreign);
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
-                + ".textContent==='Pending publication'", 20_000);
+                + ".textContent==='Publication conflict'", 20_000);
             assertArrayEquals("Changed provider image was overwritten", foreign,
                 readProvider(target, TestDocumentsProvider.DOCUMENT_ID));
             assertTrue("Exact candidate journal was not retained", journal.isFile());
             assertFalse(new String(Files.readAllBytes(journal.toPath()),
                 StandardCharsets.UTF_8).contains("pending Android save"));
-            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, leased);
+        } finally {
+            Files.deleteIfExists(journal.toPath());
+            if (fixtureSelected)
+                replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+        }
+    }
+
+    @Test public void unavailableProviderKeepsManualSavePendingUntilRetry() throws Exception {
+        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        Context test = InstrumentationRegistry.getInstrumentation().getContext();
+        byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
+        String id = new String(readAll(test.getAssets().open(
+            "windows/windows-document-id.txt")), StandardCharsets.US_ASCII).trim();
+        File journal = new File(new File(target.getFilesDir(), "work-journals"),
+            id + ".work-journal");
+        File providerFile = new File(target.getFilesDir(), "provider-fixture.scpefe");
+        File unavailable = new File(target.getFilesDir(), "provider-fixture.unavailable");
+        Files.deleteIfExists(journal.toPath());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            ensureProfile(scenario);
+            chooseFixture(scenario, UiDevice.getInstance(
+                InstrumentationRegistry.getInstrumentation()), "test.scpefe");
+            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+            unlockSelected(scenario, WINDOWS);
+            enterEdit(scenario);
+            setDocumentText(scenario, "alpha\npending provider save\n");
+            until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                + ".textContent.includes('Checkpoint ready')", 15_000);
+            Files.move(providerFile.toPath(), unavailable.toPath(),
+                StandardCopyOption.REPLACE_EXISTING);
+            menu(scenario, "File", "Save");
+            until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
+                + ".textContent==='Pending publication'", 20_000);
+            assertTrue("Exact candidate journal was not retained", journal.isFile());
+            Files.move(unavailable.toPath(), providerFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING);
             until(scenario, "[...document.querySelectorAll('button')]"
                 + ".some(x=>x.textContent==='Retry publication'&&!x.disabled)", 10_000);
             eval(scenario, "[...document.querySelectorAll('button')]"
                 + ".find(x=>x.textContent==='Retry publication').click()");
             until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
                 + ".textContent==='Published'", 20_000);
-            assertFalse(Arrays.equals(leased,
-                readProvider(target, TestDocumentsProvider.DOCUMENT_ID)));
             assertFalse("Verified candidate journal remains", journal.exists());
             closeCleanDocument(scenario);
         } finally {
+            if (unavailable.isFile()) Files.move(unavailable.toPath(), providerFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING);
             Files.deleteIfExists(journal.toPath());
-            if (fixtureSelected)
+            if (providerFile.isFile())
                 replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
         }
     }

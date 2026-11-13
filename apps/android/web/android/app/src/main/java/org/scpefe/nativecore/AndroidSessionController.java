@@ -31,7 +31,7 @@ public final class AndroidSessionController {
     private final AndroidWorkJournals journals;
     private final AtomicLong generation = new AtomicLong();
     private String selectedTarget;
-    private String activeTarget;
+    private volatile String activeTarget;
     private byte[] activeEncrypted;
     private byte[] activePassword;
     private byte[] leaseSession;
@@ -44,7 +44,7 @@ public final class AndroidSessionController {
     private long lastLeaseRefreshAt;
     private long nativeHandle;
     private boolean checkpointFailed;
-    private boolean screenLocked;
+    private volatile boolean screenLocked;
 
     /** Uses the Android target and private profile adapters as the only host state. */
     public AndroidSessionController(Context context) {

@@ -267,6 +267,7 @@ public final class ScpefePlugin extends Plugin {
     }
 
     @PluginMethod public void closeDocument(PluginCall call) {
+        if (session.isLocked()) session.replaceGeneration();
         dispatch(call, () -> {
             String warning = session.forceCheckpoint();
             if (warning != null) notifyListeners("journalWarning",
