@@ -1,0 +1,5 @@
+:root { font-size: 16px; }
+
+.menu-bar, .menu > button, .menu [role="menu"] button { min-height: 48px; }
+
+.menu [role="menu"] { max-height: calc(100dvh - 48px); overflow-y: auto; }

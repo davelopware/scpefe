@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
+import { classifyTargetImage, readDocumentTarget, validateOpaqueTarget,
+  validateTargetCapabilities } from "./document-target.mjs";
 
 function hash(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -83,16 +85,82 @@ function publicationError(error) {
 /* Tracks and completes crash-safe candidate-container publication. */
 export class PublicationService {
   constructor({ fs, journals, capabilities, now = () => Date.now(),
-    platform = process.platform }) {
+    platform = process.platform, documentTargets = null }) {
     this.fs = fs;
     this.journals = journals;
     this.now = now;
-    this.capabilities = validateCapabilities(capabilities);
+    this.documentTargets = documentTargets;
+    if (documentTargets) validateTargetCapabilities(documentTargets.capabilities);
+    this.capabilities = capabilities === undefined && documentTargets
+      ? null : validateCapabilities(capabilities);
     this.caseInsensitivePaths = platform === "win32";
   }
 
+  #isOpaque(target) {
+    return this.documentTargets?.owns(target) === true;
+  }
+
+  async #observeOpaque(target, base, candidate) {
+    try {
+      return classifyTargetImage(await readDocumentTarget(this.documentTargets, target),
+        base, candidate);
+    } catch (error) {
+      if (targetUnavailable(error)) return "unavailable";
+      throw error;
+    }
+  }
+
+  async #completeOpaque(documentId, journalKey, record) {
+    const publication = record.publication;
+    const target = validateOpaqueTarget(publication.target);
+    const base = Buffer.from(publication.base, "base64");
+    const candidate = Buffer.from(publication.candidate, "base64");
+    if (!this.#isOpaque(target) || record.target !== target
+        || hash(base) !== publication.baseHash
+        || hash(candidate) !== publication.candidateHash) {
+      return { completed: false, reason: "ambiguous" };
+    }
+    const before = await this.#observeOpaque(target, base, candidate);
+    if (before === "verified") {
+      await this.#cleanupOpaque(documentId, journalKey, record);
+      return { completed: true, recovered: true };
+    }
+    if (before !== "unchanged") return { completed: false, reason: before };
+    let outcome;
+    try {
+      outcome = await this.documentTargets.publish(target, base, candidate);
+    } catch {
+      outcome = "ambiguous";
+    }
+    if (!["verified", "definite-failure", "ambiguous"].includes(outcome)) {
+      throw new TypeError("invalid host target publication outcome");
+    }
+    const after = await this.#observeOpaque(target, base, candidate);
+    if (after === "verified") {
+      await this.#cleanupOpaque(documentId, journalKey, record);
+      return { completed: true };
+    }
+    if (after === "changed") return { completed: false, reason: "changed" };
+    if (outcome === "definite-failure" && after === "unchanged") {
+      return { completed: false, reason: "definite-failure" };
+    }
+    return { completed: false, reason: "ambiguous" };
+  }
+
+  async #cleanupOpaque(documentId, journalKey, record) {
+    if (record.activity) {
+      const { publication: _publication, ...pendingActivity } = record;
+      await this.journals.write(documentId, journalKey, pendingActivity);
+    } else if (record.publication.preserveWork) {
+      await this.journals.write(documentId, journalKey, {
+        text: record.text, baseRevision: record.baseRevision,
+        cursor: record.cursor, target: record.target, state: "unsaved",
+        updateTime: record.updateTime });
+    } else await this.journals.clear(documentId);
+  }
+
   replacementCapabilities() {
-    return this.capabilities;
+    return this.capabilities ?? this.documentTargets.capabilities;
   }
 
   #comparablePath(value) {
@@ -225,7 +293,8 @@ export class PublicationService {
     preserveWork = false,
     state = "pending-publication", journalRecord = null }) {
     const id = randomBytes(16).toString("hex");
-    const transactionFile = path.join(path.dirname(target),
+    const opaque = this.#isOpaque(target);
+    const transactionFile = opaque ? null : path.join(path.dirname(target),
       `.${path.basename(target)}.scpefe-txn-${id}`);
     const record = {
       ...(journalRecord ?? {}),
@@ -236,7 +305,7 @@ export class PublicationService {
       state,
       updateTime: this.now(),
       publication: {
-        id, target, transactionFile,
+        id, target, ...(opaque ? { kind: "host-target" } : { transactionFile }),
         candidateHash: hash(candidate),
         baseHash: hash(base),
         base: base.toString("base64"),
@@ -244,7 +313,7 @@ export class PublicationService {
           mergeAncestorHash: hash(mergeAncestor),
           mergeAncestor: mergeAncestor.toString("base64"),
         } : {}),
-        baseFile: recoveryBasePath(target),
+        ...(!opaque ? { baseFile: recoveryBasePath(target) } : {}),
         candidate: candidate.toString("base64"),
         stage: "prepared",
         ...(purpose ? { purpose } : {}),
@@ -260,14 +329,32 @@ export class PublicationService {
     baseRevision, purpose, reopenPassword, mergeAncestor, preserveWork, state,
     journalRecord }) {
     let record;
+    const priorRecord = this.#isOpaque(target)
+      ? await this.journals.read(documentId, journalKey) : null;
     try {
       record = await this.prepare({ documentId, journalKey, target, base,
         candidate, text, cursor, baseRevision, purpose, reopenPassword,
         mergeAncestor, preserveWork, state, journalRecord });
+      if (record.publication.kind === "host-target") {
+        const result = await this.#completeOpaque(documentId, journalKey, record);
+        if (!result.completed) {
+          const failure = new Error(`Host target publication ${result.reason}`);
+          failure.code = `TARGET_PUBLICATION_${result.reason.toUpperCase().replaceAll("-", "_")}`;
+          failure.definitePublicationFailure = result.reason === "definite-failure";
+          if (failure.definitePublicationFailure) {
+            if (priorRecord) await this.journals.write(documentId, journalKey, priorRecord);
+            else await this.journals.clear(documentId);
+          }
+          throw failure;
+        }
+        return { completed: true, record,
+          replacementCapabilities: this.documentTargets.capabilities };
+      }
       record = await this.#complete(documentId, journalKey, record);
       return { completed: true, record,
         replacementCapabilities: this.capabilities };
     } catch (error) {
+      if (error?.definitePublicationFailure) throw error;
       if (!record) {
         const persisted = await this.journals.read(documentId, journalKey).catch(() => null);
         if (!persisted?.publication) throw error;
@@ -279,6 +366,10 @@ export class PublicationService {
   async resume(documentId, journalKey, record) {
     if (!record?.publication) return { completed: false, reason: "none" };
     const publication = record.publication;
+    if (publication.kind === "host-target") {
+      return { ...await this.#completeOpaque(documentId, journalKey, record),
+        replacementCapabilities: this.documentTargets.capabilities };
+    }
     const candidate = Buffer.from(publication.candidate, "base64");
     if (hash(candidate) !== publication.candidateHash
         || path.dirname(publication.transactionFile) !== path.dirname(publication.target)
@@ -320,6 +411,15 @@ export class PublicationService {
     if (!record?.publication) throw new Error("No pending publication is available");
     if (record.activity) throw new Error(
       "Pending activity publication must be reconciled");
+    if (record.publication.kind === "host-target") {
+      if (record.publication.preserveWork) {
+        await this.journals.write(documentId, journalKey, {
+          text: record.text, baseRevision: record.baseRevision,
+          cursor: record.cursor, target: record.target, state: "unsaved",
+          updateTime: record.updateTime });
+      } else await this.journals.clear(documentId);
+      return;
+    }
     let transaction;
     try {
       transaction = await readIfPresent(this.fs, record.publication.transactionFile);
@@ -349,10 +449,12 @@ export class PublicationService {
   }
 
   async readRecoveryBase(target) {
+    if (this.#isOpaque(target)) return null;
     return readIfPresent(this.fs, recoveryBasePath(target));
   }
 
   async cleanupOrphanedRecoveryBase(target) {
+    if (this.#isOpaque(target)) return;
     const recoveryBase = await readIfPresent(this.fs, recoveryBasePath(target));
     if (recoveryBase) await this.fs.unlink(recoveryBasePath(target));
   }

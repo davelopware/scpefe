@@ -171,8 +171,9 @@ working copy ──recovery checkpoint──> local work journal
 | Document session | The runtime state for the single document currently open in an instance. |
 | Head witness | The last sealed revision ID remembered by a client for rollback/replacement detection. |
 | `libscpefe` | The platform-neutral C++ library exposing format, cryptography, session, configuration, and orchestration APIs through a versioned C ABI. |
-| Host-services interface | The public `libscpefe` function-table contract for document I/O, app-private storage, clocks, preferences, lifecycle input, and storage capabilities. |
-| Platform adapter | A Windows, POSIX/Linux, Android, test, or third-party implementation of the host-services interface. |
+| Host-services interface | The versioned per-context `libscpefe` function table. Its current version supplies the host monotonic clock. |
+| Document-target adapter | A host implementation that reads and publishes a container at an opaque target and reports its storage capabilities and publication outcome. |
+| Platform adapter | A Windows, POSIX/Linux, Android, test, or third-party implementation of a host seam such as the host-services interface or document-target adapter. |
 | Frontend | The Electron, Capacitor, CLI, or embedding UI that creates an adapter and SCPEFE context and presents structured library results. |
 | Frontend application core | Portable TypeScript session and presentation-orchestration behavior shared by supported TypeScript frontends. It consumes narrow host capabilities and does not implement document, storage, cryptographic, or security policy. |
 | Shared React UI | Reusable React rendering and DOM interaction behavior for WebView-based graphical frontends. It presents frontend application-core state but does not own document-session policy. |

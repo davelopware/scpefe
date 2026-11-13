@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+extern "C" void sodium_memzero(void *buffer, std::size_t size);
+
 namespace {
 
 constexpr const char *library_version = SCPEFE_VERSION_STRING;
@@ -108,6 +110,12 @@ struct scpefe_owned_snapshot {
     std::array<std::uint8_t, SCPEFE_SLOT_ID_SIZE> slot_id{};
     std::vector<std::uint8_t> encoded_revision;
     std::string content;
+    ~scpefe_owned_snapshot()
+    {
+        if (!encoded_revision.empty())
+            sodium_memzero(encoded_revision.data(), encoded_revision.size());
+        if (!content.empty()) sodium_memzero(content.data(), content.size());
+    }
 };
 
 struct scpefe_owned_slots {

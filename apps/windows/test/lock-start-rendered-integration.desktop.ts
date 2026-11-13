@@ -540,9 +540,17 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
   await ui.waitFor(() => assert.ok(ui.getByRole(document.body, "menubar")));
   await ui.waitFor(() => assert.ok(
     ipcListeners.get("document:external-open-requested")?.size));
-  const command = async (menu, name) => { await user.click(ui.getByRole(document.body,
-    "menuitem", { name: menu })); await user.click(ui.getByRole(
-    ui.getByRole(document.body, "menu", { name: menu }), "menuitem", { name })); };
+  const command = async (menu, name) => {
+    await user.click(ui.getByRole(document.body, "menuitem", { name: menu }));
+    const action = () => ui.getByRole(ui.getByRole(document.body,
+      "menu", { name: menu }), "menuitem", { name });
+    if (menu === "File" && ui.queryByRole(document.body, "dialog") === null
+        && /^(New|Open)/.test(action().textContent?.trim() ?? "")) {
+      await ui.waitFor(() => assert.equal(action().disabled, false),
+        { timeout: 5_000 });
+    }
+    await user.click(action());
+  };
   const awaitLifecycleCompletion = async (label) => {
     assert.equal(typeof mountedCompletion?.waitForIdle, "function",
       `mounted lifecycle completion is available for ${label}`);
@@ -1461,8 +1469,8 @@ async function runMountedLockScenario(t, origin, nativeOverride = null, options 
     await user.click(ui.getByRole(opened, "button", { name: "Open" }));
     const protection = await ui.findByRole(document.body, "dialog", { name: /before Open/ });
     await user.click(ui.getByRole(protection, "button", { name: "Discard and continue" }));
-    await ui.waitFor(() => assert.deepEqual(acks.map(({ status }) => status),
-      ["queued", "presented", "opened"]));
+    await awaitLifecycleCompletion("external Open after discard");
+    assert.deepEqual(acks.map(({ status }) => status), ["queued", "presented", "opened"]);
     assert.equal(host.externalRequests.current(request.token), null);
     assert.equal(host.service === service, false);
     await ui.waitFor(() => assert.equal(editor.value, "other plaintext"));

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "license": "GPL-3.0-or-later",
-  "workspaces": ["apps/windows", "packages/frontend-core", "packages/react-ui"],
+  "workspaces": ["apps/windows", "apps/android/web", "packages/frontend-core", "packages/react-ui"],
   "scripts": {
     "typecheck": "npm run typecheck --workspace @scpefe/windows",
     "test:frontend": "npm run test:frontend --workspace @scpefe/windows"

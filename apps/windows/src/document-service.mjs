@@ -9,6 +9,7 @@ import { canonicalizeDocumentText, validateCreateRequest, validateEditMode,
 import { serializeCsvSource } from "../../../packages/frontend-core/src/csv-source.mjs";
 import { WorkJournalStore } from "./work-journal.mjs";
 import { PublicationService } from "./publication.mjs";
+import { readDocumentTarget, validateOpaqueTarget, validateTargetCapabilities } from "./document-target.mjs";
 import { CandidatePublication } from "./candidate-publication.mjs";
 import { ActivityEventWorkflow } from "./activity-event.mjs";
 import { HeadWitnessStore, compareHeadWitness } from "./head-witness.mjs";
@@ -73,7 +74,7 @@ function mergeDecisionError(error) {
 
 export class DocumentService {
   constructor({ native, fs, profilePath, settingsPath, journalDirectory,
-    publicationCapabilities, witnessDirectory,
+    publicationCapabilities, witnessDirectory, documentTargets = null,
     platform = process.platform,
     nativeLineEnding = process.platform === "win32" ? "\r\n" : "\n",
     checkpointIdleMs = 10_000, checkpointContinuousMs = 30_000,
@@ -88,13 +89,15 @@ export class DocumentService {
     this.containerBytes = null;
     this.nextCandidateOperation = 1;
     this.fs = fs;
+    this.documentTargets = documentTargets;
+    if (documentTargets) validateTargetCapabilities(documentTargets.capabilities);
     this.profilePath = profilePath;
     this.settingsPath = settingsPath ?? path.join(path.dirname(profilePath), "settings.json");
     this.nativeLineEnding = nativeLineEnding;
     this.journals = new WorkJournalStore({ fs,
       directory: journalDirectory ?? path.join(path.dirname(profilePath), "work-journals") });
     this.publications = new PublicationService({ fs, journals: this.journals,
-      capabilities: publicationCapabilities, now, platform });
+      capabilities: publicationCapabilities, now, platform, documentTargets });
     this.candidates = new CandidatePublication(this.publications);
     this.activities = new ActivityEventWorkflow({ host: this,
       inspect: (bytes, password) => this.#validateNativeOpened(
@@ -240,6 +243,31 @@ export class DocumentService {
     return this.lifecycle.runExclusive(operation);
   }
 
+  #isOpaqueTarget(target) {
+    return this.documentTargets?.owns(target) === true;
+  }
+
+  async #readTarget(target) {
+    return this.#isOpaqueTarget(target)
+      ? readDocumentTarget(this.documentTargets, validateOpaqueTarget(target))
+      : this.fs.readFile(target);
+  }
+
+  async #createTarget(target, candidate) {
+    if (this.#isOpaqueTarget(target)) {
+      const outcome = await this.documentTargets.create(target, candidate);
+      if (outcome !== "verified") {
+        throw new Error(`Host target creation ${outcome ?? "ambiguous"}`);
+      }
+    } else await this.#atomicWrite(target, candidate, false);
+  }
+
+  async #removeCreatedTarget(target, expected) {
+    if (this.#isOpaqueTarget(target)) {
+      await this.documentTargets.removeCreated(target, expected);
+    } else await this.fs.unlink(target);
+  }
+
   async createDocument(target, request) {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
@@ -263,8 +291,8 @@ export class DocumentService {
     this.containerBytes = Buffer.from(candidate);
     try {
       await this.#queuePublication(async () => {
-        await this.#atomicWrite(target, candidate, false);
-        const published = await this.fs.readFile(target);
+        await this.#createTarget(target, candidate);
+        const published = await this.#readTarget(target);
         if (!published.equals(candidate)) throw new Error("Published container verification failed");
         this.createdTarget = target;
         this.createdBytes = Buffer.from(published);
@@ -283,7 +311,7 @@ export class DocumentService {
   async revalidateTargetForReplacement() {
     const active = this.active;
     if (!active) throw new Error("Open the replacement candidate first");
-    const current = await this.fs.readFile(active.target);
+    const current = await this.#readTarget(active.target);
     if (!current.equals(active.baseContainer)) {
       const error = new Error("The selected target changed before replacement completed");
       error.code = "DOCUMENT_REPLACEMENT_TARGET_CHANGED";
@@ -324,11 +352,11 @@ export class DocumentService {
         this.active = null;
       }
     }
-    const current = await this.fs.readFile(target);
+    const current = await this.#readTarget(target);
     if (!current.equals(expected)) {
       throw new Error("Created target changed; refusing unsafe cleanup");
     }
-    await this.fs.unlink(target);
+    await this.#removeCreatedTarget(target, expected);
     this.createdTarget = null;
     this.createdBytes.fill(0);
     this.createdBytes = null;
@@ -351,7 +379,7 @@ export class DocumentService {
         return await this.#openPendingDocument(target, validatedPassword, bootstrap);
       } catch (bootstrapError) {
         try {
-          bytes = await this.fs.readFile(target);
+          bytes = await this.#readTarget(target);
           nativeOpened = this.#validateNativeOpened(
             this.native.inspectDocument(bytes, validatedPassword));
         } catch {
@@ -359,7 +387,7 @@ export class DocumentService {
         }
       }
     }
-    bytes ??= await this.fs.readFile(target);
+    bytes ??= await this.#readTarget(target);
     let activePassword = validatedPassword;
     let recoveredPublication = false;
     try {
@@ -382,7 +410,7 @@ export class DocumentService {
         }
         activePassword = journal.publication.reopenPassword ?? validatedPassword;
         nativeOpened = this.#validateNativeOpened(this.native.inspectDocument(
-          await this.fs.readFile(target), activePassword));
+          await this.#readTarget(target), activePassword));
         recoveredPublication = true;
         this.onJournalWarning("PUBLICATION_RECOVERED");
       } finally {
@@ -417,7 +445,7 @@ export class DocumentService {
           pendingRecord = null;
           publicationState = "target-published";
           unresolvedJournal = false;
-          const published = await this.fs.readFile(target);
+          const published = await this.#readTarget(target);
           bytes = published;
           nativeOpened.journalKey.fill(0);
           nativeOpened = this.#validateNativeOpened(
@@ -681,7 +709,7 @@ export class DocumentService {
         throw error;
       }
     }
-    return this.fs.readFile(active.target);
+    return this.#readTarget(active.target);
   }
 
   #finishSaveCandidate(operationId, outcome) {
@@ -805,7 +833,7 @@ export class DocumentService {
     let reopened;
     let published;
     await this.#queuePublication(async () => {
-      const current = await this.fs.readFile(active.target);
+      const current = await this.#readTarget(active.target);
       const inspected = this.#validateNativeOpened(
         this.native.inspectDocument(current, currentPassword));
       try {
@@ -871,7 +899,7 @@ export class DocumentService {
     let reopened;
     let published;
     await this.#queuePublication(async () => {
-      const current = await this.fs.readFile(active.target);
+      const current = await this.#readTarget(active.target);
       const inspected = this.#validateNativeOpened(
         this.native.inspectDocument(current, active.password));
       if (!inspected.lease.active || !active.leaseSessionId
@@ -916,7 +944,7 @@ export class DocumentService {
     let reopened;
     let published;
     await this.#queuePublication(async () => {
-      const current = await this.fs.readFile(active.target);
+      const current = await this.#readTarget(active.target);
       published = await this.#publishSlotCandidate(active, current, "claim",
         active.password, { newPassword: replacement,
           name: profile.name, email: profile.email },
@@ -974,7 +1002,7 @@ export class DocumentService {
     let reopened;
     try {
       await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
+        const current = await this.#readTarget(active.target);
         const inspected = this.#validateNativeOpened(
           this.native.inspectDocument(current, active.password));
         if (!inspected.lease.active || !active.leaseSessionId
@@ -1057,7 +1085,7 @@ export class DocumentService {
     let reopened;
     let published;
     await this.#queuePublication(async () => {
-      const current = await this.fs.readFile(active.target);
+      const current = await this.#readTarget(active.target);
       const inspected = this.#validateNativeOpened(
         this.native.inspectDocument(current, active.password));
       if (!inspected.lease.active || !active.leaseSessionId
@@ -1167,7 +1195,7 @@ export class DocumentService {
     }
     let target;
     try {
-      target = await this.fs.readFile(active.target);
+      target = await this.#readTarget(active.target);
     } catch (error) {
       if (targetUnavailable(error)) {
         return validatePublicationResult({ publicationState: "pending-publication",
@@ -1196,7 +1224,7 @@ export class DocumentService {
     if (resumed.completed) {
       if (active.pendingRecord.activity) {
         const pendingActivity = active.pendingRecord.activity;
-        const published = await this.fs.readFile(active.target);
+        const published = await this.#readTarget(active.target);
         this.containerBytes = Buffer.from(published);
         await this.#adoptActivityImage(active, published);
         active.pendingPublication = false;
@@ -1243,7 +1271,7 @@ export class DocumentService {
     this.#validateCandidate(active.pendingRecord, localPassword, active.documentId);
     // Authenticate lineage and current target rights before changing its lease.
     // A denied merge leaves the encrypted conflict journal exactly as it was.
-    const preflightTarget = await this.fs.readFile(active.target);
+    const preflightTarget = await this.#readTarget(active.target);
     const preflightLocal = Buffer.from(
       active.pendingRecord.publication.candidate, "base64");
     const profile = await this.loadProfile();
@@ -1277,7 +1305,7 @@ export class DocumentService {
     }
     active.editMode = true;
     try {
-      const currentBytes = await this.fs.readFile(active.target);
+      const currentBytes = await this.#readTarget(active.target);
       const current = this.#validateNativeOpened(
         this.native.inspectDocument(currentBytes, active.password));
       const localBytes = Buffer.from(active.pendingRecord.publication.candidate, "base64");
@@ -1362,7 +1390,7 @@ export class DocumentService {
     await this.flushChain.catch(() => {});
     try {
       await this.#queuePublication(async () => {
-        const currentBytes = await this.fs.readFile(active.target);
+        const currentBytes = await this.#readTarget(active.target);
         const current = this.#validateNativeOpened(
           this.native.inspectDocument(currentBytes, active.password));
         try {
@@ -1462,7 +1490,7 @@ export class DocumentService {
       const checked = await this.reconnectPendingPublication();
       if (checked.publicationState === "target-published") return active.opened;
       if (checked.publicationState !== "conflict") {
-        const target = await this.fs.readFile(active.target);
+        const target = await this.#readTarget(active.target);
         if (!target.equals(Buffer.from(active.pendingRecord.publication.base, "base64"))) {
           throw new Error("Resolve the pending candidate before discarding it");
         }
@@ -1638,7 +1666,7 @@ export class DocumentService {
     await this.#stopHeartbeat();
     await this.#flushActive(active);
     try { await this.#queuePublication(async () => {
-      const current = await this.fs.readFile(active.target);
+      const current = await this.#readTarget(active.target);
       this.#requireNativeLease(active);
       this.#syncNativeLeaseSource(active, current);
       const lease = this.container.authenticatedLease();
@@ -1757,7 +1785,7 @@ export class DocumentService {
           }
           nativeEffects = resumed.nativeEffects;
         } else {
-          const current = await this.fs.readFile(target);
+          const current = await this.#readTarget(target);
           if (!current.equals(release.base)) {
             const changed = new Error("Suspended lease target changed before release");
             changed.code = "TARGET_CHANGED";
@@ -1826,7 +1854,7 @@ export class DocumentService {
     let reopened;
     try {
       await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
+        const current = await this.#readTarget(active.target);
         const inspected = this.#validateNativeOpened(
           this.native.inspectDocument(current, active.password));
         try {
@@ -1851,7 +1879,7 @@ export class DocumentService {
             purpose: "regular-save", state: "unsaved",
             ...(mergeAncestor ? { mergeAncestor } : {}) });
           this.containerBytes = this.container.bytes();
-          published = await this.fs.readFile(active.target);
+          published = await this.#readTarget(active.target);
           reopened = this.#validateNativeOpened(
             this.native.inspectDocument(published, active.password));
           if (reopened.opened.content !== canonical || reopened.manuallySealed) {
@@ -1873,7 +1901,7 @@ export class DocumentService {
           active.documentId, active.journalKey);
         if (active.pendingRecord?.publication) {
           let target = null;
-          try { target = await this.fs.readFile(active.target); } catch {}
+          try { target = await this.#readTarget(active.target); } catch {}
           const expectedBase = Buffer.from(active.pendingRecord.publication.base, "base64");
           const expectedCandidate = Buffer.from(
             active.pendingRecord.publication.candidate, "base64");
@@ -1946,7 +1974,7 @@ export class DocumentService {
       reopened = await this.#queuePublication(async () => {
         let current;
         try {
-          current = await this.fs.readFile(active.target);
+          current = await this.#readTarget(active.target);
         } catch (error) {
           if (!targetUnavailable(error)) throw error;
           const prepared = this.#prepareSaveCandidate(
@@ -1992,7 +2020,7 @@ export class DocumentService {
           baseRevision: active.baseRevision,
         });
         this.containerBytes = this.container.bytes();
-        published = await this.fs.readFile(active.target);
+        published = await this.#readTarget(active.target);
         return this.#validateNativeOpened(
           this.native.inspectDocument(published, active.password));
       });
@@ -2083,7 +2111,7 @@ export class DocumentService {
         throw error;
       }
       let observed;
-      try { observed = await this.fs.readFile(target); }
+      try { observed = await this.#readTarget(target); }
       catch (cause) { throw unknownPlaintextResult(cause); }
       if (!observed.equals(plaintext)) {
         throw new Error("Plaintext export differs from expected bytes");
@@ -2124,7 +2152,7 @@ export class DocumentService {
   async #runBackupActivity(target) {
     const active = this.active;
     const action = async () => {
-      const candidate = await this.fs.readFile(active.target);
+      const candidate = await this.#readTarget(active.target);
       if (!candidate.equals(active.baseContainer)) {
         throw new Error("Backup source changed after its activity attempt");
       }
@@ -2215,7 +2243,7 @@ export class DocumentService {
     let published;
     let previousHead;
     try {
-      const before = await this.fs.readFile(active.target);
+      const before = await this.#readTarget(active.target);
       const beforeOpened = this.#validateNativeOpened(
         this.native.inspectDocument(before, active.password));
       try {
@@ -2252,7 +2280,7 @@ export class DocumentService {
       const backup = backupResult.actionResult;
       previousHead = active.baseRevision;
       await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
+        const current = await this.#readTarget(active.target);
         const inspected = this.#validateNativeOpened(
           this.native.inspectDocument(current, active.password));
         try {
@@ -2315,7 +2343,7 @@ export class DocumentService {
             cursor: { start: 0, end: 0 }, baseRevision: previousHead,
             purpose: "compaction" });
           this.containerBytes = this.container.bytes();
-          published = await this.fs.readFile(active.target);
+          published = await this.#readTarget(active.target);
           reopened = this.#validateNativeOpened(
             this.native.inspectDocument(published, active.password));
           this.#verifyCompaction(active, inspected, reopened, previousHead);
@@ -2434,7 +2462,7 @@ export class DocumentService {
     const profile = await this.loadProfile();
     if (!profile) throw new Error("Configure name, email, and device name first");
     await this.#queuePublication(async () => {
-      const bytes = await this.fs.readFile(active.target);
+      const bytes = await this.#readTarget(active.target);
       const latest = this.#validateNativeOpened(
         this.native.inspectDocument(bytes, active.password));
       this.#requireNativeLease(active);
@@ -2736,7 +2764,7 @@ export class DocumentService {
         || generation !== this.leaseGeneration) return;
     await this.#queuePublication(async () => {
       this.#requireCurrentHeartbeat(active, generation);
-      const bytes = await this.fs.readFile(active.target);
+      const bytes = await this.#readTarget(active.target);
       this.#requireCurrentHeartbeat(active, generation);
       this.#requireNativeLease(active);
       this.#syncNativeLeaseSource(active, bytes);
@@ -2866,7 +2894,7 @@ export class DocumentService {
     let invalidTarget = false;
     let unavailable = false;
     try {
-      targetBytes = await this.fs.readFile(target);
+      targetBytes = await this.#readTarget(target);
       try {
         targetOpened = this.#validateNativeOpened(
           this.native.inspectDocument(targetBytes, password));
@@ -2900,7 +2928,7 @@ export class DocumentService {
         else throw error;
       }
       if (resumed?.completed) {
-        const published = await this.fs.readFile(target);
+        const published = await this.#readTarget(target);
         const reopened = this.#validateNativeOpened(
           this.native.inspectDocument(published, reopenPassword));
         const { headMismatch, slotCanEdit } = await this.#observeHead(target, reopened);
@@ -2991,7 +3019,7 @@ export class DocumentService {
   }
 
   async #adoptPublishedCandidate(active) {
-    const published = await this.fs.readFile(active.target);
+    const published = await this.#readTarget(active.target);
     const reopened = this.#validateNativeOpened(
       this.native.inspectDocument(published, active.password));
     const { headMismatch, slotCanEdit } = await this.#observeHead(
@@ -3042,7 +3070,7 @@ export class DocumentService {
     if (!profile) throw new Error("Configure name, email, and device name first");
     try {
       await this.#queuePublication(async () => {
-        const current = await this.fs.readFile(active.target);
+        const current = await this.#readTarget(active.target);
         const inspected = this.#validateNativeOpened(
           this.native.inspectDocument(current, active.password));
         try {
@@ -3091,7 +3119,7 @@ export class DocumentService {
           active.documentId, active.journalKey);
         if (active.pendingRecord?.publication) {
           let target = null;
-          try { target = await this.fs.readFile(active.target); } catch {}
+          try { target = await this.#readTarget(active.target); } catch {}
           const expectedBase = Buffer.from(active.pendingRecord.publication.base, "base64");
           const expectedCandidate = Buffer.from(
             active.pendingRecord.publication.candidate, "base64");
@@ -3318,7 +3346,7 @@ export class DocumentService {
         throw error;
       }
       if (expectedTarget !== null) {
-        const observed = await this.fs.readFile(target);
+        const observed = await this.#readTarget(target);
         if (!observed.equals(expectedTarget)) {
           const error = new Error("Publication target changed before replacement");
           error.code = "TARGET_CHANGED";

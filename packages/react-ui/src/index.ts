@@ -13,6 +13,7 @@ export { usePasswordEntry, clearMountedPasswordFields } from "./security/passwor
 export { randomPassphrase, generateAcceptedPassphrase } from "./security/passphrase-generator.ts";
 export { PasswordField } from "./security/password-field.tsx";
 export type { SharedAppProps } from "./session/session-app.tsx";
+export type { Profile, ClientSettings, DocumentOpened } from "./session/types.ts";
 export type { SessionHost, JournalTransportHost, SessionEventsHost,
   SecurityClipboardHost } from "./session/host-roles.ts";
 export type { ShellHost } from "./shell/shell-dialogs.tsx";

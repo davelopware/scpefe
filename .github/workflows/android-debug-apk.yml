@@ -1,0 +1,90 @@
+name: Android debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - codex/android-debug-apk
+    paths:
+      - '.github/workflows/android-debug-apk.yml'
+      - 'apps/android/**'
+      - 'packages/**'
+      - 'scripts/build-android-native.sh'
+      - 'src/**'
+      - 'include/**'
+      - 'third_party/**'
+      - 'CMakeLists.txt'
+      - 'package.json'
+      - 'package-lock.json'
+  pull_request:
+    paths:
+      - '.github/workflows/android-debug-apk.yml'
+      - 'apps/android/**'
+      - 'packages/**'
+      - 'scripts/build-android-native.sh'
+      - 'src/**'
+      - 'include/**'
+      - 'third_party/**'
+      - 'CMakeLists.txt'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Android toolchain and SDK licence
+        run: |
+          test -f "$ANDROID_HOME/ndk/27.3.13750724/source.properties"
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          test -f "$ANDROID_HOME/licenses/android-sdk-license"
+      - name: Build shared WebView assets
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck --workspace @scpefe/android-web
+          npm run test --workspace @scpefe/android-web
+          npm run build --workspace @scpefe/android-web
+          (cd apps/android/web && ../../../node_modules/.bin/cap sync android)
+      - name: Build native core for emulator and phone
+        run: bash scripts/build-android-native.sh x86_64 arm64-v8a
+      - name: Assemble debug APK
+        run: gradle -p apps/android/web/android --no-daemon :app:assembleDebug
+      - name: Check packaged ABIs and app ID
+        run: |
+          apk=apps/android/web/android/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$apk"
+          unzip -Z1 "$apk" | grep -Fx 'lib/x86_64/libscpefe.so'
+          unzip -Z1 "$apk" | grep -Fx 'lib/arm64-v8a/libscpefe.so'
+          unzip -Z1 "$apk" | grep -Fx 'assets/public/index.html'
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" \
+            | grep -F "package: name='org.scpefe.nativecore.smoke'"
+          sha256sum "$apk"
+      - name: Upload Android debug APK
+        id: apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCPEFE-Android-debug
+          path: apps/android/web/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Show download link
+        run: |
+          echo "Commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Download Android debug APK](${{ steps.apk.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"

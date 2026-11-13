@@ -10,6 +10,7 @@ project(
 include(CTest)
 
 option(SCPEFE_BUILD_NODE_ADDON "Build the Electron Node-API bridge" OFF)
+option(SCPEFE_BUILD_ANDROID_FIXTURE_WRITER "Build the cross-platform Android smoke fixture producer" OFF)
 option(SCPEFE_STATIC_DIAGNOSTIC "Link the Windows diagnostic with a static core, sodium and CRT" OFF)
 if(SCPEFE_STATIC_DIAGNOSTIC AND (NOT WIN32 OR NOT MSVC OR EMSCRIPTEN))
     message(FATAL_ERROR "SCPEFE_STATIC_DIAGNOSTIC requires native Windows with MSVC")
@@ -60,6 +61,11 @@ else()
 endif()
 add_library(SCPEFE::scpefe ALIAS scpefe)
 
+if(SCPEFE_BUILD_ANDROID_FIXTURE_WRITER)
+    add_executable(scpefe_android_fixture_writer tests/android_fixture_writer.c)
+    target_link_libraries(scpefe_android_fixture_writer PRIVATE SCPEFE::scpefe)
+endif()
+
 target_compile_features(scpefe PUBLIC cxx_std_20)
 target_compile_definitions(scpefe
     PRIVATE
@@ -82,6 +88,17 @@ if(NOT EMSCRIPTEN)
     if(NOT MSVC)
         target_link_libraries(scpefe PRIVATE m)
     endif()
+endif()
+
+# Android embeds the same shared C ABI as desktop. JNI only owns byte arrays
+# and opaque context handles; target access and publication belong to the host.
+if(ANDROID)
+    if(NOT SODIUM_INCLUDE_DIR OR NOT EXISTS "${SODIUM_INCLUDE_DIR}/sodium.h")
+        message(FATAL_ERROR "Set SODIUM_INCLUDE_DIR to the Android libsodium headers")
+    endif()
+    target_sources(scpefe PRIVATE
+        apps/android/native-smoke/native/native_core_jni.cpp)
+    target_include_directories(scpefe PRIVATE ${SODIUM_INCLUDE_DIR})
 endif()
 set_target_properties(scpefe PROPERTIES
     CXX_EXTENSIONS OFF
@@ -159,7 +176,7 @@ if(EMSCRIPTEN)
     target_compile_options(scpefe PRIVATE -fexceptions)
 endif()
 
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT ANDROID)
     add_executable(scpefe_diagnostic
         tools/scpefe_diagnostic.cpp
         tools/password_input.cpp
@@ -225,7 +242,7 @@ if(NOT EMSCRIPTEN)
     )
 endif()
 
-if(BUILD_TESTING)
+if(BUILD_TESTING AND NOT ANDROID)
     if(EMSCRIPTEN)
         set(SCPEFE_CONFORMANCE_TARGET scpefe_wasm_conformance)
         set(SCPEFE_CONFORMANCE_ROOT /)
