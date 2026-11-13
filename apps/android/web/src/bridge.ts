@@ -9,7 +9,7 @@ type PluginOpened = { opened: DocumentOpened };
 
 /** Native methods exposed to the WebView; opaque target keys never cross it. */
 export interface AndroidPluginContract {
-  addListener?(name: "regularSave" | "journalWarning",
+  addListener?(name: "regularSave" | "journalWarning" | "lockStarted" | "locked",
     listener: (event: Record<string, unknown>) => void): Promise<{
       remove(): Promise<void> }>;
   getProfile(): Promise<{ profile: Profile | null }>;
@@ -25,7 +25,8 @@ export interface AndroidPluginContract {
   cancelOpenTarget(): Promise<void>;
   openSelectedDocument(value: { password: string }): Promise<PluginOpened>;
   unlockDocument(value: { password: string }): Promise<PluginOpened>;
-  lock(): Promise<{ locked: true; journalSaved: true; warningCode: null }>;
+  lock(): Promise<{ locked: true; journalSaved: boolean; warningCode: string | null }>;
+  activity(): Promise<void>;
   closeDocument(): Promise<{ closed: true }>;
   getUnresolvedJournalSummary(): Promise<{ total: number; pendingPublications: number }>;
   enterEditMode(): Promise<PluginOpened>;
@@ -37,7 +38,7 @@ export interface AndroidPluginContract {
   saveDocument(value: { request: { content: string; journalScope?: string;
     revision?: number } }): Promise<{ result: { saved: true; content: string;
     journalScope?: string; revision?: number;
-    publicationState: "target-published" | "pending-publication" } }>;
+    publicationState: "target-published" | "pending-publication" | "conflict" } }>;
   reconnectPendingPublication(): Promise<{ result: { content: string;
     publicationState: "target-published" | "pending-publication" | "conflict" } }>;
 }
@@ -135,7 +136,7 @@ const unsupported = async (): Promise<never> => {
 };
 
 function subscribe(plugin: AndroidPluginContract,
-    name: "regularSave" | "journalWarning",
+    name: "regularSave" | "journalWarning" | "lockStarted" | "locked",
     listener: (event: Record<string, unknown>) => void) {
   let disposed = false;
   let handle: { remove(): Promise<void> } | null = null;
@@ -182,8 +183,18 @@ export function createHost(plugin: AndroidPluginContract) { return {
     const result = await plugin.updateWorkingCopy({ update: workingUpdate(update) });
     if (result.accepted !== true) throw new TypeError("Invalid checkpoint result");
   },
-  activity: async () => undefined,
-  onLocked: () => () => {},
+  activity: async () => { await plugin.activity(); },
+  onLockStarted: (listener: (result: { causeCode: "LEASE_REFRESH_FAILED" | null }) => void) =>
+    subscribe(plugin, "lockStarted", (event) => listener({
+      causeCode: event.causeCode === "LEASE_REFRESH_FAILED"
+        ? "LEASE_REFRESH_FAILED" : null })),
+  onLocked: (listener: (result: { locked: true; journalSaved: boolean;
+      warningCode: string | null }) => void) =>
+    subscribe(plugin, "locked", (event) => {
+      if (event.locked === true) listener({ locked: true,
+        journalSaved: event.journalSaved === true,
+        warningCode: typeof event.warningCode === "string" ? event.warningCode : null });
+    }),
   onJournalWarning: (listener: (code: string, scope: string | null) => void) =>
     subscribe(plugin, "journalWarning", (event) => {
       if (typeof event.code === "string") listener(event.code, null);
@@ -215,7 +226,7 @@ export function createHost(plugin: AndroidPluginContract) { return {
       journalScope: version.journalScope, revision: version.revision } : {}) };
     const result = (await plugin.saveDocument({ request })).result;
     if (result.saved !== true || result.content !== content
-        || !["target-published", "pending-publication"].includes(
+        || !["target-published", "pending-publication", "conflict"].includes(
           result.publicationState)
         || (version && (result.journalScope !== version.journalScope
           || result.revision !== version.revision)))

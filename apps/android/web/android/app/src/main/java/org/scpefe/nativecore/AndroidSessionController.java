@@ -1,6 +1,7 @@
 package org.scpefe.nativecore;
 
 import android.content.Context;
+import android.os.SystemClock;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -30,7 +31,7 @@ public final class AndroidSessionController {
     private final AndroidWorkJournals journals;
     private final AtomicLong generation = new AtomicLong();
     private String selectedTarget;
-    private String activeTarget;
+    private volatile String activeTarget;
     private byte[] activeEncrypted;
     private byte[] activePassword;
     private byte[] leaseSession;
@@ -40,7 +41,10 @@ public final class AndroidSessionController {
     private long pendingSaveOperationId;
     private long lastRegularSaveAt;
     private long lastRegularSaveRevision;
+    private long lastLeaseRefreshAt;
     private long nativeHandle;
+    private boolean checkpointFailed;
+    private volatile boolean screenLocked;
 
     /** Uses the Android target and private profile adapters as the only host state. */
     public AndroidSessionController(Context context) {
@@ -91,6 +95,69 @@ public final class AndroidSessionController {
 
     /** Reports app-private records that still require a recovery decision. */
     public int unresolvedJournalCount() { return journals.unresolvedCount(); }
+
+    /** Reports whether a document still exposes plaintext to the renderer. */
+    public boolean isUnlocked() {
+        return activeTarget != null && nativeHandle != 0 && !screenLocked;
+    }
+
+    /** Reports a retained document whose renderer must stay in the locked view. */
+    public boolean isLocked() { return activeTarget != null && screenLocked; }
+
+    /** Returns a visible lock warning after a failed mandatory checkpoint. */
+    public String lockWarning() {
+        return checkpointFailed ? "LOCK_CHECKPOINT_FAILED" : null;
+    }
+
+    /** Force-flushes current native text after queued renderer edits have settled. */
+    public String forceCheckpoint() {
+        if (screenLocked || nativeHandle == 0 || leaseSession == null || pendingSave)
+            return checkpointFailed ? "RECOVERY_CHECKPOINT_FAILED" : null;
+        try {
+            AndroidWorkJournals.Recovery recovery = recovery();
+            if (recovery.attention == AndroidWorkJournals.Attention.UNSAVED
+                    || (checkpointFailed && recovery.attention == AndroidWorkJournals.Attention.NONE)) {
+                String content = openedText();
+                NativeCore.LeaseState state = leaseState();
+                JSONObject cursor = recovery.record == null ? null
+                    : recovery.record.optJSONObject("cursor");
+                int start = cursor == null ? content.length()
+                    : Math.min(cursor.optInt("start", content.length()), content.length());
+                int end = cursor == null ? start
+                    : Math.max(start, Math.min(cursor.optInt("end", start), content.length()));
+                JSONObject record = new JSONObject().put("target", activeTarget)
+                    .put("baseRevision", hex(state.revisionHead, 32))
+                    .put("targetHash", hash(activeEncrypted))
+                    .put("updateTime", System.currentTimeMillis())
+                    .put("text", content).put("state", "unsaved")
+                    .put("cursor", new JSONObject().put("start", start).put("end", end));
+                byte[] key = journalKey();
+                try { journals.write(documentId(), activeTarget, key, record); }
+                finally { Arrays.fill(key, (byte)0); }
+                checkpointFailed = false;
+            }
+        } catch (Failure | IOException | JSONException error) {
+            checkpointFailed = true;
+        }
+        return checkpointFailed ? "RECOVERY_CHECKPOINT_FAILED" : null;
+    }
+
+    /** Refreshes an active editing lease while the unlocked session is still current. */
+    public void refreshLeaseIfDue(long now) throws Failure {
+        if (screenLocked || leaseSession == null || pendingSave
+                || now - lastLeaseRefreshAt < 60_000) return;
+        NativeCore.LeaseState state = leaseState();
+        if (!state.editing || !state.active
+                || !Arrays.equals(state.sessionId, leaseSession))
+            throw new Failure("LEASE_REFRESH_FAILED", "The editing lease changed.");
+        verifyTarget();
+        AndroidWorkJournals.Recovery recovery = recovery();
+        if (recovery.attention == AndroidWorkJournals.Attention.PENDING_PUBLICATION
+                || recovery.attention == AndroidWorkJournals.Attention.CONFLICT
+                || recovery.attention == AndroidWorkJournals.Attention.UNREADABLE)
+            throw new Failure("LEASE_REFRESH_FAILED", "Recovery must be resolved first.");
+        publishLease(2, leaseSession, recovery.record, generation.get());
+    }
 
     /** Applies core password policy to bounded UTF-8 without retaining the bytes. */
     public String assessPassword(String password) throws Failure {
@@ -219,29 +286,60 @@ public final class AndroidSessionController {
         } finally { Arrays.fill(bytes, (byte)0); }
     }
 
-    /** Reopens the retained encrypted image for a locked document. */
+    /** Reauthenticates the retained session and resumes its unchanged editing lease. */
     public JSONObject unlock(String password, long expected) throws Failure {
         requireCurrent(expected);
         if (activeEncrypted == null) throw new Failure("INVALID_STATE", "No locked document.");
-        closeNative();
-        openContext();
-        check(NativeCore.nativeOpen(nativeHandle, activeEncrypted).status);
+        if (nativeHandle == 0) {
+            openContext();
+            check(NativeCore.nativeOpen(nativeHandle, activeEncrypted).status);
+        }
         try {
             unlockBytes(password);
+            screenLocked = false;
+            clearPassword();
             activePassword = secret(password);
             requireCurrent(expected);
+            if (leaseSession != null && !pendingSave) {
+                NativeCore.LeaseState state = leaseState();
+                if (state.active && Arrays.equals(state.sessionId, leaseSession)) {
+                    try {
+                        verifyTarget();
+                        AndroidWorkJournals.Recovery recovery = recovery();
+                        if (recovery.attention == AndroidWorkJournals.Attention.NONE)
+                            publishLease(4, leaseSession, null, expected);
+                    } catch (Failure ignored) {
+                        // Keep the verified image available read-only and retain recovery.
+                    }
+                }
+            }
             return opened();
         } catch (Failure error) {
-            closeNative();
             throw error;
         }
     }
 
-    /** Drops cleartext native state but retains the encrypted image for unlock. */
-    public void lockNow() { releaseLease(); closeNative(); clearPassword(); }
+    /** Hides the session without publishing a lease release; checkpoints are already serial. */
+    public String lockNow() {
+        if (screenLocked) return lockWarning();
+        forceCheckpoint();
+        if (nativeHandle != 0) {
+            if (pendingSave || NativeCore.nativeLock(nativeHandle).status != NativeCore.OK) {
+                closeNative();
+                pendingSaveOperationId = 0;
+            }
+        }
+        screenLocked = true;
+        return lockWarning();
+    }
 
     /** Closes native ownership and erases the retained encrypted image. */
     public void closeNow() {
+        if (screenLocked && nativeHandle != 0 && activePassword != null
+                && !pendingSave) {
+            NativeCore.nativeUnlock(nativeHandle, activePassword);
+        }
+        screenLocked = false;
         releaseLease();
         closeNative();
         if (activeEncrypted != null) Arrays.fill(activeEncrypted, (byte)0);
@@ -253,6 +351,8 @@ public final class AndroidSessionController {
         pendingSave = false;
         pendingSaveOperationId = 0;
         lastRegularSaveRevision = 0;
+        lastLeaseRefreshAt = 0;
+        checkpointFailed = false;
     }
 
     private void clearPassword() {
@@ -303,13 +403,24 @@ public final class AndroidSessionController {
         NativeCore.LeaseState state = leaseState();
         if (!state.canEdit || state.mustChangePassword)
             throw new Failure("EDIT_DENIED", "This password slot cannot edit.");
-        if (state.active || state.editing)
+        boolean resuming = leaseSession != null && state.active
+            && Arrays.equals(state.sessionId, leaseSession);
+        if ((state.active && !resuming) || state.editing)
             throw new Failure("LEASE_ACTIVE", "Another editing lease is active.");
         verifyTarget();
-        byte[] session = new byte[16];
-        RANDOM.nextBytes(session);
-        if (allZero(session)) session[0] = 1;
-        publishLease(1, session, null, expected);
+        byte[] session = resuming ? leaseSession : new byte[16];
+        if (!resuming) {
+            RANDOM.nextBytes(session);
+            if (allZero(session)) session[0] = 1;
+        }
+        AndroidWorkJournals.Recovery recovery = recovery();
+        if (recovery.attention == AndroidWorkJournals.Attention.UNSAVED)
+            throw new Failure("RECOVERY_REQUIRED", "Restore or discard recovered work first.");
+        if (recovery.attention == AndroidWorkJournals.Attention.PENDING_PUBLICATION
+                || recovery.attention == AndroidWorkJournals.Attention.CONFLICT
+                || recovery.attention == AndroidWorkJournals.Attention.UNREADABLE)
+            throw new Failure("PUBLICATION_PENDING", "Resolve local recovery first.");
+        publishLease(resuming ? 4 : 1, session, null, expected);
         leaseSession = session;
         journalScope = null;
         journalRevision = 0;
@@ -333,13 +444,17 @@ public final class AndroidSessionController {
         NativeCore.LeaseState state = leaseState();
         if (!state.canEdit || state.mustChangePassword)
             throw new Failure("EDIT_DENIED", "This password slot cannot edit.");
-        if (state.active || state.editing)
+        boolean resuming = leaseSession != null && state.active
+            && Arrays.equals(state.sessionId, leaseSession);
+        if ((state.active && !resuming) || state.editing)
             throw new Failure("LEASE_ACTIVE", "The editing lease changed.");
         verifyTarget();
-        byte[] session = new byte[16];
-        RANDOM.nextBytes(session);
-        if (allZero(session)) session[0] = 1;
-        publishLease(1, session, record, expected);
+        byte[] session = resuming ? leaseSession : new byte[16];
+        if (!resuming) {
+            RANDOM.nextBytes(session);
+            if (allZero(session)) session[0] = 1;
+        }
+        publishLease(resuming ? 4 : 1, session, record, expected);
         leaseSession = session;
         String content = record.optString("text", "");
         byte[] clear = content.getBytes(StandardCharsets.UTF_8);
@@ -392,10 +507,12 @@ public final class AndroidSessionController {
                     .put("end", cursor.getInt("end")));
             requireCurrent(expected);
             journals.write(documentId(), activeTarget, key, record);
+            checkpointFailed = false;
             journalScope = scope;
             journalRevision = revision;
             requireCurrent(expected);
         } catch (IOException | JSONException error) {
+            checkpointFailed = true;
             throw new Failure("RECOVERY_CHECKPOINT_FAILED",
                 "Could not preserve the encrypted working copy.");
         } finally {
@@ -479,12 +596,32 @@ public final class AndroidSessionController {
             requireCurrent(expected);
             TargetPublication.Outcome outcome = targets.publish(activeTarget,
                 base, prepared.data);
+            boolean conflict = false;
+            if (outcome != TargetPublication.Outcome.VERIFIED) {
+                try {
+                    byte[] observed = targets.read(activeTarget);
+                    if (Arrays.equals(observed, prepared.data))
+                        outcome = TargetPublication.Outcome.VERIFIED;
+                    else conflict = !Arrays.equals(observed, base);
+                    Arrays.fill(observed, (byte)0);
+                } catch (IOException ignored) {
+                    // Keep the candidate pending until the actual target can be reread.
+                }
+            }
             int code = outcome == TargetPublication.Outcome.VERIFIED ? 1
-                : outcome == TargetPublication.Outcome.DEFINITE_FAILURE ? 2 : 3;
+                : outcome == TargetPublication.Outcome.DEFINITE_FAILURE && !conflict ? 2 : 3;
             check(NativeCore.nativeAcknowledgeSave(nativeHandle,
                 prepared.handle, code).status);
+            if (conflict) {
+                record.put("state", "conflict");
+                journals.write(id, activeTarget, key, record);
+                pendingSaveOperationId = code == 2 ? 0 : prepared.handle;
+                return saveResult(content, scope, revision, "conflict");
+            }
             if (outcome == TargetPublication.Outcome.DEFINITE_FAILURE) {
                 pendingSaveOperationId = 0;
+                if (manual) return saveResult(content, scope, revision,
+                    "pending-publication");
                 if (newer != null) {
                     journals.write(id, activeTarget, key, newer);
                     restoreNativeText(newer.getString("text"));
@@ -541,7 +678,7 @@ public final class AndroidSessionController {
 
     /** Publishes a provisional revision only when settings and a newer checkpoint allow it. */
     public JSONObject regularSaveIfDue(long now) throws Failure {
-        if (leaseSession == null || pendingSave || journalScope == null
+        if (screenLocked || leaseSession == null || pendingSave || journalScope == null
                 || journalRevision <= lastRegularSaveRevision) return null;
         JSONObject settings;
         try { settings = profiles.loadSettings(); }
@@ -652,8 +789,10 @@ public final class AndroidSessionController {
     private void verifyTarget() throws Failure {
         try {
             byte[] observed = targets.read(activeTarget);
-            if (!Arrays.equals(observed, activeEncrypted))
-                throw new Failure("TARGET_CHANGED", "The selected document changed.");
+            try {
+                if (!Arrays.equals(observed, activeEncrypted))
+                    throw new Failure("TARGET_CHANGED", "The selected document changed.");
+            } finally { Arrays.fill(observed, (byte)0); }
         } catch (IOException error) {
             throw new Failure("TARGET_UNAVAILABLE", "Selected document is unavailable.");
         }
@@ -725,6 +864,7 @@ public final class AndroidSessionController {
                     .put("targetHash", hash(activeEncrypted));
                 journals.write(id, activeTarget, key, restored);
             }
+            if (action != 3) lastLeaseRefreshAt = SystemClock.elapsedRealtime();
         } catch (IOException | JSONException error) {
             throw new Failure("PRIVATE_STATE_UNAVAILABLE",
                 "Could not preserve lease publication state.");
@@ -821,7 +961,9 @@ public final class AndroidSessionController {
                 AndroidWorkJournals.Recovery recovery = recovery();
                 if (recovery.attention == AndroidWorkJournals.Attention.UNSAVED) {
                     JSONObject record = recovery.record;
-                    boolean mismatch = state.active || !hex(state.revisionHead, 32).equals(
+                    boolean mismatch = (state.active && (leaseSession == null
+                        || !Arrays.equals(state.sessionId, leaseSession)))
+                        || !hex(state.revisionHead, 32).equals(
                         record.optString("baseRevision"))
                         || !hash(activeEncrypted).equals(record.optString("targetHash"));
                     value.put("recovery", new JSONObject()

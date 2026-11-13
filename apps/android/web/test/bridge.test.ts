@@ -22,6 +22,7 @@ function fake(overrides: Partial<AndroidPluginContract> = {}): AndroidPluginCont
     openSelectedDocument: async () => ({ opened: { ...opened } }),
     unlockDocument: async () => ({ opened: { ...opened } }),
     lock: async () => ({ locked: true, journalSaved: true, warningCode: null }),
+    activity: async () => {},
     closeDocument: async () => ({ closed: true }),
     getUnresolvedJournalSummary: async () => ({ total: 0, pendingPublications: 0 }),
     enterEditMode: async () => ({ opened: { ...opened, readOnly: false, canEdit: true } }),
@@ -66,6 +67,36 @@ test("manual save keeps the submitted working revision and exact content", async
     ...version,
   });
   await assert.rejects(host.saveDocument("x".repeat(1024 * 1024 + 1), version));
+});
+
+test("native lock events clear the shared session and retain checkpoint warnings", async () => {
+  const listeners = new Map<string, (event: Record<string, unknown>) => void>();
+  const host = createHost(fake({ addListener: async (name, listener) => {
+    listeners.set(name, listener);
+    return { remove: async () => { listeners.delete(name); } };
+  } }));
+  const started: unknown[] = [], locked: unknown[] = [];
+  const stopStarted = host.onLockStarted?.((value) => started.push(value));
+  const stopLocked = host.onLocked((value) => locked.push(value));
+  await Promise.resolve();
+  listeners.get("lockStarted")?.({ causeCode: null });
+  listeners.get("locked")?.({ locked: true, journalSaved: false,
+    warningCode: "LOCK_CHECKPOINT_FAILED" });
+  assert.deepEqual(started, [{ causeCode: null }]);
+  assert.deepEqual(locked, [{ locked: true, journalSaved: false,
+    warningCode: "LOCK_CHECKPOINT_FAILED" }]);
+  stopStarted?.(); stopLocked();
+  await Promise.resolve();
+  assert.equal(listeners.size, 0);
+});
+
+test("provider divergence is passed through as a conflict", async () => {
+  const host = createHost(fake({ saveDocument: async ({ request }) => ({ result: {
+    saved: true, content: request.content, publicationState: "conflict",
+  } }) }));
+  assert.deepEqual(await host.saveDocument("local changes"), {
+    saved: true, content: "local changes", publicationState: "conflict",
+  });
 });
 
 test("invalid input is rejected before calling native plugin", async () => {

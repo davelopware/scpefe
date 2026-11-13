@@ -166,6 +166,33 @@ public final class PrivateStateInstrumentedTest {
             StandardCharsets.UTF_8));
     }
 
+    @Test public void privateQuotaAndStoragePressureKeepPreviousCheckpoint()
+            throws Exception {
+        File directory = directory();
+        PrivateStateFiles files = new PrivateStateFiles(directory, () -> {},
+            64, 96, 0);
+        files.write("checkpoint", "first".getBytes(StandardCharsets.UTF_8));
+        try {
+            files.write("checkpoint", new byte[65]);
+            fail("oversized replacement was accepted");
+        } catch (IOException expected) { assertNotNull(expected); }
+        assertEquals("first", new String(files.read("checkpoint"),
+            StandardCharsets.UTF_8));
+        files.write("another", new byte[64]);
+        try {
+            files.write("third", new byte[33]);
+            fail("directory quota was exceeded");
+        } catch (IOException expected) { assertNotNull(expected); }
+        PrivateStateFiles pressured = new PrivateStateFiles(directory, () -> {},
+            64, 96, Long.MAX_VALUE);
+        try {
+            pressured.write("checkpoint", "new".getBytes(StandardCharsets.UTF_8));
+            fail("low-storage replacement was accepted");
+        } catch (IOException expected) { assertNotNull(expected); }
+        assertEquals("first", new String(files.read("checkpoint"),
+            StandardCharsets.UTF_8));
+    }
+
     @Test public void presentNonObjectPublicationIsUnreadableNotSilentlyUnsaved()
             throws Exception {
         File directory = directory();

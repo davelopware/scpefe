@@ -1,8 +1,12 @@
 package org.scpefe.nativecore;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
+import android.os.SystemClock;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -15,6 +19,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.json.JSONObject;
 
 /** Narrow, serial Capacitor bridge for document admission and local editing. */
@@ -24,12 +29,31 @@ public final class ScpefePlugin extends Plugin {
     private final ScheduledExecutorService clock = Executors.newSingleThreadScheduledExecutor();
     private AndroidSessionController session;
     private volatile boolean createPicker;
+    private volatile long lastActivityAt = SystemClock.elapsedRealtime();
+    private final AtomicBoolean automaticLockQueued = new AtomicBoolean();
+    private final BroadcastReceiver screenOff = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            automaticLock(null);
+        }
+    };
 
     @Override public void load() {
         session = new AndroidSessionController(getContext());
+        getContext().registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF));
         clock.scheduleAtFixedRate(() -> {
             try {
                 worker.execute(() -> {
+                    if (session.isUnlocked() && SystemClock.elapsedRealtime()
+                            - lastActivityAt >= 120_000) {
+                        automaticLock(null);
+                        return;
+                    }
+                    try {
+                        session.refreshLeaseIfDue(SystemClock.elapsedRealtime());
+                    } catch (AndroidSessionController.Failure error) {
+                        automaticLock("LEASE_REFRESH_FAILED");
+                        return;
+                    }
                     try {
                         JSONObject saved = session.regularSaveIfDue(System.currentTimeMillis());
                         if (saved != null) notifyListeners("regularSave", new JSObject()
@@ -49,11 +73,55 @@ public final class ScpefePlugin extends Plugin {
     }
 
     @Override protected void handleOnDestroy() {
-        session.replaceGeneration();
+        getContext().unregisterReceiver(screenOff);
         clock.shutdownNow();
-        worker.execute(() -> session.closeNow());
+        worker.execute(() -> {
+            session.forceCheckpoint();
+            session.replaceGeneration();
+            session.closeNow();
+        });
         worker.shutdown();
         super.handleOnDestroy();
+    }
+
+    @Override protected void handleOnPause() {
+        worker.execute(() -> {
+            String warning = session.forceCheckpoint();
+            if (warning != null) notifyListeners("journalWarning",
+                new JSObject().put("code", warning));
+        });
+    }
+
+    @Override protected void handleOnResume() {
+        worker.execute(() -> {
+            if (session.isUnlocked() && SystemClock.elapsedRealtime()
+                    - lastActivityAt >= 120_000) automaticLock(null);
+            else if (session.isLocked()) {
+                String warning = session.lockWarning();
+                notifyListeners("locked", new JSObject()
+                    .put("locked", true).put("journalSaved", warning == null)
+                    .put("warningCode", warning == null ? JSONObject.NULL : warning));
+            }
+        });
+    }
+
+    private void automaticLock(String causeCode) {
+        if (!automaticLockQueued.compareAndSet(false, true)) return;
+        notifyListeners("lockStarted", new JSObject().put("causeCode",
+            causeCode == null ? JSONObject.NULL : causeCode));
+        try {
+            worker.execute(() -> {
+                try {
+                    session.replaceGeneration();
+                    String warning = session.lockNow();
+                    notifyListeners("locked", new JSObject().put("locked", true)
+                        .put("journalSaved", warning == null)
+                        .put("warningCode", warning == null ? JSONObject.NULL : warning));
+                } finally { automaticLockQueued.set(false); }
+            });
+        } catch (RejectedExecutionException ignored) {
+            automaticLockQueued.set(false);
+        }
     }
 
     private interface Work { JSObject run() throws Exception; }
@@ -63,6 +131,9 @@ public final class ScpefePlugin extends Plugin {
         worker.execute(() -> {
             try { call.resolve(work.run()); }
             catch (AndroidSessionController.Failure error) {
+                if ("RECOVERY_CHECKPOINT_FAILED".equals(error.code))
+                    notifyListeners("journalWarning", new JSObject()
+                        .put("code", error.code));
                 call.reject(error.getMessage(), error.code);
             } catch (IOException error) {
                 call.reject("App-private state is unavailable.", "PRIVATE_STATE_UNAVAILABLE");
@@ -99,14 +170,24 @@ public final class ScpefePlugin extends Plugin {
     }
 
     @PluginMethod public void chooseCreateTarget(PluginCall call) {
-        session.replaceGeneration();
+        worker.execute(() -> {
+            String warning = session.forceCheckpoint();
+            if (warning != null) notifyListeners("journalWarning",
+                new JSObject().put("code", warning));
+            session.replaceGeneration();
+        });
         createPicker = true;
         startActivityForResult(call,
             AndroidDocumentTargets.createPicker("Untitled.scpefe"), "pickedTarget");
     }
 
     @PluginMethod public void chooseOpenTarget(PluginCall call) {
-        session.replaceGeneration();
+        worker.execute(() -> {
+            String warning = session.forceCheckpoint();
+            if (warning != null) notifyListeners("journalWarning",
+                new JSObject().put("code", warning));
+            session.replaceGeneration();
+        });
         createPicker = false;
         startActivityForResult(call, AndroidDocumentTargets.openPicker(), "pickedTarget");
     }
@@ -130,13 +211,13 @@ public final class ScpefePlugin extends Plugin {
     }
 
     @PluginMethod public void cancelCreateTarget(PluginCall call) {
-        session.replaceGeneration();
-        dispatch(call, () -> { session.clearSelection(); return new JSObject(); });
+        dispatch(call, () -> { session.replaceGeneration();
+            session.clearSelection(); return new JSObject(); });
     }
 
     @PluginMethod public void cancelOpenTarget(PluginCall call) {
-        session.replaceGeneration();
-        dispatch(call, () -> { session.clearSelection(); return new JSObject(); });
+        dispatch(call, () -> { session.replaceGeneration();
+            session.clearSelection(); return new JSObject(); });
     }
 
     @PluginMethod public void createDocument(PluginCall call) {
@@ -170,14 +251,31 @@ public final class ScpefePlugin extends Plugin {
     }
 
     @PluginMethod public void lock(PluginCall call) {
-        session.replaceGeneration();
-        dispatch(call, () -> { session.lockNow(); return new JSObject().put("locked", true)
-            .put("journalSaved", true).put("warningCode", JSONObject.NULL); });
+        notifyListeners("lockStarted", new JSObject().put("causeCode", JSONObject.NULL));
+        dispatch(call, () -> {
+            session.replaceGeneration();
+            String warning = session.lockNow();
+            return new JSObject().put("locked", true)
+                .put("journalSaved", warning == null)
+                .put("warningCode", warning == null ? JSONObject.NULL : warning);
+        });
+    }
+
+    @PluginMethod public void activity(PluginCall call) {
+        lastActivityAt = SystemClock.elapsedRealtime();
+        call.resolve(new JSObject());
     }
 
     @PluginMethod public void closeDocument(PluginCall call) {
-        session.replaceGeneration();
-        dispatch(call, () -> { session.closeNow(); return new JSObject().put("closed", true); });
+        if (session.isLocked()) session.replaceGeneration();
+        dispatch(call, () -> {
+            String warning = session.forceCheckpoint();
+            if (warning != null) notifyListeners("journalWarning",
+                new JSObject().put("code", warning));
+            session.replaceGeneration();
+            session.closeNow();
+            return new JSObject().put("closed", true);
+        });
     }
 
     @PluginMethod public void getUnresolvedJournalSummary(PluginCall call) {
