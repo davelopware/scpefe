@@ -16,16 +16,31 @@ final class PrivateStateFiles {
     interface BeforeReplace { void run() throws IOException; }
 
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final long MIB = 1024L * 1024L;
     private final File directory;
     private final BeforeReplace beforeReplace;
+    private final long maxRecordBytes;
+    private final long maxDirectoryBytes;
+    private final long freeSpaceReserve;
 
     PrivateStateFiles(Context context, String subdirectory) {
-        this(new File(context.getFilesDir(), subdirectory), () -> {});
+        this(new File(context.getFilesDir(), subdirectory), () -> {},
+            "work-journals".equals(subdirectory) ? 160 * MIB : MIB,
+            "work-journals".equals(subdirectory) ? 512 * MIB : 4 * MIB,
+            16 * MIB);
     }
 
     PrivateStateFiles(File directory, BeforeReplace beforeReplace) {
+        this(directory, beforeReplace, 160 * MIB, 512 * MIB, 16 * MIB);
+    }
+
+    PrivateStateFiles(File directory, BeforeReplace beforeReplace,
+            long maxRecordBytes, long maxDirectoryBytes, long freeSpaceReserve) {
         this.directory = directory;
         this.beforeReplace = beforeReplace;
+        this.maxRecordBytes = maxRecordBytes;
+        this.maxDirectoryBytes = maxDirectoryBytes;
+        this.freeSpaceReserve = freeSpaceReserve;
     }
 
     File file(String name) {
@@ -35,7 +50,10 @@ final class PrivateStateFiles {
     }
 
     byte[] read(String name) throws IOException {
-        try { return Files.readAllBytes(file(name).toPath()); }
+        File target = file(name);
+        if (target.exists() && target.length() > maxRecordBytes)
+            throw new IOException("private state record exceeds quota");
+        try { return Files.readAllBytes(target.toPath()); }
         catch (NoSuchFileException missing) { return null; }
     }
 
@@ -45,6 +63,23 @@ final class PrivateStateFiles {
             throw new IOException("private state directory unavailable");
         }
         File target = file(name);
+        if (data.length > maxRecordBytes)
+            throw new IOException("private state record exceeds quota");
+        File[] records = directory.listFiles();
+        if (records == null) throw new IOException("private state directory unavailable");
+        long used = 0;
+        for (File record : records) {
+            if (record.isFile() && !record.equals(target)) {
+                used += record.length();
+                if (used > maxDirectoryBytes) break;
+            }
+        }
+        if (used > maxDirectoryBytes - data.length)
+            throw new IOException("private state directory exceeds quota");
+        long available = directory.getUsableSpace();
+        if (available < freeSpaceReserve
+                || data.length > available - freeSpaceReserve)
+            throw new IOException("insufficient private storage for recovery checkpoint");
         byte[] suffix = new byte[8];
         RANDOM.nextBytes(suffix);
         StringBuilder hex = new StringBuilder();
