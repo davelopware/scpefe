@@ -747,27 +747,29 @@ public final class WebViewWorkflowInstrumentedTest {
             "windows/windows-document-id.txt")), StandardCharsets.US_ASCII).trim();
         File journal = new File(new File(target.getFilesDir(), "work-journals"),
             id + ".work-journal");
-        File providerFile = new File(test.getFilesDir(), "provider-fixture.scpefe");
-        File unavailable = new File(test.getFilesDir(), "provider-fixture.unavailable");
         Files.deleteIfExists(journal.toPath());
+        boolean fixtureSelected = false;
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
             chooseFixture(scenario, UiDevice.getInstance(
                 InstrumentationRegistry.getInstrumentation()), "test.scpefe");
+            fixtureSelected = true;
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
             unlockSelected(scenario, WINDOWS);
             enterEdit(scenario);
             setDocumentText(scenario, "alpha\npending provider save\n");
             until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
                 + ".textContent.includes('Checkpoint ready')", 15_000);
-            Files.move(providerFile.toPath(), unavailable.toPath(),
-                StandardCopyOption.REPLACE_EXISTING);
+            assertNotNull(target.getContentResolver().call(
+                fixtureUri(TestDocumentsProvider.DOCUMENT_ID),
+                "scpefe-test-unavailable", "true", null));
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
                 + ".textContent==='Pending publication'", 20_000);
             assertTrue("Exact candidate journal was not retained", journal.isFile());
-            Files.move(unavailable.toPath(), providerFile.toPath(),
-                StandardCopyOption.REPLACE_EXISTING);
+            assertNotNull(target.getContentResolver().call(
+                fixtureUri(TestDocumentsProvider.DOCUMENT_ID),
+                "scpefe-test-unavailable", "false", null));
             until(scenario, "[...document.querySelectorAll('button')]"
                 + ".some(x=>x.textContent==='Retry publication'&&!x.disabled)", 10_000);
             eval(scenario, "[...document.querySelectorAll('button')]"
@@ -777,10 +779,11 @@ public final class WebViewWorkflowInstrumentedTest {
             assertFalse("Verified candidate journal remains", journal.exists());
             closeCleanDocument(scenario);
         } finally {
-            if (unavailable.isFile()) Files.move(unavailable.toPath(), providerFile.toPath(),
-                StandardCopyOption.REPLACE_EXISTING);
+            if (fixtureSelected) target.getContentResolver().call(
+                fixtureUri(TestDocumentsProvider.DOCUMENT_ID),
+                "scpefe-test-unavailable", "false", null);
             Files.deleteIfExists(journal.toPath());
-            if (providerFile.isFile())
+            if (fixtureSelected)
                 replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
         }
     }
