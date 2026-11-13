@@ -747,8 +747,8 @@ public final class WebViewWorkflowInstrumentedTest {
             "windows/windows-document-id.txt")), StandardCharsets.US_ASCII).trim();
         File journal = new File(new File(target.getFilesDir(), "work-journals"),
             id + ".work-journal");
-        File providerFile = new File(target.getFilesDir(), "provider-fixture.scpefe");
-        File unavailable = new File(target.getFilesDir(), "provider-fixture.unavailable");
+        File providerFile = new File(test.getFilesDir(), "provider-fixture.scpefe");
+        File unavailable = new File(test.getFilesDir(), "provider-fixture.unavailable");
         Files.deleteIfExists(journal.toPath());
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ensureProfile(scenario);
