@@ -659,6 +659,11 @@ public final class WebViewWorkflowInstrumentedTest {
             writeInterop(target, "interop-android-created",
                 readProvider(target, created), "Android created and saved\n");
             closeCleanDocument(scenario);
+            openFixture(scenario, device, created + ".scpefe", OWNER);
+            enterEdit(scenario);
+            assertEquals("false", eval(scenario,
+                "document.querySelector('textarea[aria-label=\"Document text\"]').readOnly"));
+            closeCleanDocument(scenario);
         }
     }
 
