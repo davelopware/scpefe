@@ -3,6 +3,7 @@ import type { SessionHost, ShellHost, CreationTargetHost,
   JournalTransportHost, SessionEventsHost, SecurityClipboardHost,
   DocumentOpened, Profile, ClientSettings } from "@scpefe/react-ui";
 import { validateCreateFormRequest, validatePassword } from "../../../windows/src/contracts.mjs";
+import { boundaryError } from "../../../windows/src/error-boundary.mjs";
 
 type CreationRequest = ReturnType<typeof validateCreateFormRequest>;
 type PluginOpened = { opened: DocumentOpened };
@@ -135,6 +136,11 @@ const unsupported = async (): Promise<never> => {
     { code: "OPERATION_FAILED" });
 };
 
+async function nativeOperation<T>(operation: string, run: () => Promise<T>): Promise<T> {
+  try { return await run(); }
+  catch (error) { throw boundaryError(error, operation); }
+}
+
 function subscribe(plugin: AndroidPluginContract,
     name: "regularSave" | "journalWarning" | "lockStarted" | "locked",
     listener: (event: Record<string, unknown>) => void) {
@@ -180,7 +186,8 @@ export function createHost(plugin: AndroidPluginContract) { return {
     (await plugin.assessPasswordPolicy({ password: validatePassword(password) })).assessment,
   createJournalScope: () => crypto.randomUUID(),
   updateWorkingCopy: async (update: object) => {
-    const result = await plugin.updateWorkingCopy({ update: workingUpdate(update) });
+    const result = await nativeOperation("journal:update", () =>
+      plugin.updateWorkingCopy({ update: workingUpdate(update) }));
     if (result.accepted !== true) throw new TypeError("Invalid checkpoint result");
   },
   activity: async () => { await plugin.activity(); },
@@ -213,7 +220,8 @@ export function createHost(plugin: AndroidPluginContract) { return {
   onUnresolvedJournalSummary: () => () => {},
   onSwitchRetained: () => () => {},
   copyInvitationPassphrase: async () => false,
-  enterEditMode: async () => opened((await plugin.enterEditMode()).opened),
+  enterEditMode: () => nativeOperation("document:enter-edit", async () =>
+    opened((await plugin.enterEditMode()).opened)),
   cancelLeaseTakeover: unsupported,
   restoreRecoveredWork: async () => recovered(
     (await plugin.restoreRecoveredWork()).opened),
@@ -224,7 +232,8 @@ export function createHost(plugin: AndroidPluginContract) { return {
       throw new TypeError("Invalid save content");
     const request = { content, ...(version ? {
       journalScope: version.journalScope, revision: version.revision } : {}) };
-    const result = (await plugin.saveDocument({ request })).result;
+    const result = (await nativeOperation("document:save", () =>
+      plugin.saveDocument({ request }))).result;
     if (result.saved !== true || result.content !== content
         || !["target-published", "pending-publication", "conflict"].includes(
           result.publicationState)
@@ -235,7 +244,8 @@ export function createHost(plugin: AndroidPluginContract) { return {
   },
   saveDivergenceResolution: unsupported,
   reconnectPendingPublication: async () => {
-    const result = (await plugin.reconnectPendingPublication()).result;
+    const result = (await nativeOperation("document:reconnect-publication", () =>
+      plugin.reconnectPendingPublication())).result;
     if (typeof result.content !== "string"
         || !["target-published", "pending-publication", "conflict"].includes(
           result.publicationState))
