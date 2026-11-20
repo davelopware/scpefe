@@ -14,10 +14,13 @@ export interface WorkingCopyUpdate {
 
 /** Schedules recovery-journal work without making the frontend a storage owner. */
 export interface WorkingCopyJournalHost {
-  /** Returns a unique opaque scope for each adoption, including after lock or reset. */
+  /** Returns a unique opaque scope for each adoption and publication seal. */
   createJournalScope(): string;
   /** Applies calls in invocation order, even if acknowledgements settle out of order.
-   * An acknowledgement is not durable checkpoint proof. */
+   * After the session seals a submitted revision, the next edit starts at
+   * revision 1 in a new scope. A host that permits editing after clearing the
+   * prior journal must accept that transition. An acknowledgement is not
+   * durable checkpoint proof. */
   updateWorkingCopy(update: WorkingCopyUpdate): Promise<unknown>;
   /** Reports later checkpoint failures with the scope of the update that scheduled them. */
   onJournalWarning(listener: (code: string, journalScope: string | null) => void): () => void;

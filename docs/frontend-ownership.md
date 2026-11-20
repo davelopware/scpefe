@@ -58,6 +58,10 @@ checkpoint warning. The platform adapter supplies a fresh opaque journal
 scope for each adoption and passes it with updates. The host echoes that
 scope on delayed checkpoint warnings, so a warning from an earlier document
 cannot fail the current working copy.
+After the session seals the submitted revision, the working copy adopts a new
+scope and starts at revision 1 on its next edit. A host that permits editing
+after clearing the prior journal must accept that first update; it cannot
+require the old scope or revision.
 
 Shared React UI owns modal focus behavior through `FocusManager` and a
 small DOM capability. Shared dialog rendering and Windows composition decide
