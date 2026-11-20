@@ -69,6 +69,9 @@ public final class WebViewWorkflowInstrumentedTest {
         String state = eval(scenario, "JSON.stringify({document:document.querySelector("
             + "'[aria-label=\"Document state\"]')?.textContent,"
             + "alert:document.querySelector('[role=alert]')?.textContent,"
+            + "working:document.querySelector('[aria-label=\"Working copy state\"]')?.textContent,"
+            + "recovery:document.querySelector('[aria-label=\"Recovery journal state\"]')?.textContent,"
+            + "checkpointCode:window.__checkpointFailure,"
             + "editDisabled:document.querySelector('[aria-label=\"Edit document contents\"]')"
             + "?.disabled,menu:[...document.querySelectorAll('[role=menu] button')]"
             + ".map(x=>[x.querySelector('span')?.textContent.trim(),x.disabled])})");
@@ -646,6 +649,12 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
                 + ".textContent==='Clean'", 30_000);
+            assertEquals("true", eval(scenario,
+                "(()=>{const plugin=window.Capacitor.Plugins.Scpefe;"
+                + "const original=plugin.updateWorkingCopy.bind(plugin);"
+                + "plugin.updateWorkingCopy=async request=>{try{return await original(request)}"
+                + "catch(error){window.__checkpointFailure=error.code||'unknown';throw error}};"
+                + "return true})()"));
             setDocumentText(scenario, "Android created and saved twice\n");
             until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
                 + ".textContent.includes('Checkpoint ready')", 15_000);
