@@ -646,6 +646,12 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
                 + ".textContent==='Clean'", 30_000);
+            setDocumentText(scenario, "Android created and saved twice\n");
+            until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                + ".textContent.includes('Checkpoint ready')", 15_000);
+            menu(scenario, "File", "Save");
+            until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
+                + ".textContent==='Clean'", 30_000);
             String created = null;
             for (Map.Entry<String, ?> entry : targets.getAll().entrySet()) {
                 if (before.containsKey(entry.getKey())
@@ -657,7 +663,7 @@ public final class WebViewWorkflowInstrumentedTest {
             }
             assertNotNull("New provider document was not found", created);
             writeInterop(target, "interop-android-created",
-                readProvider(target, created), "Android created and saved\n");
+                readProvider(target, created), "Android created and saved twice\n");
             closeCleanDocument(scenario);
             openFixture(scenario, device, created + ".scpefe", OWNER);
             enterEdit(scenario);
