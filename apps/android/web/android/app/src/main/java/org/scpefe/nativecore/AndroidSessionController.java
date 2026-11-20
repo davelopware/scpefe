@@ -647,7 +647,14 @@ public final class AndroidSessionController {
                 restoreNativeText(newer.getString("text"));
             }
             lastRegularSaveAt = System.currentTimeMillis();
-            lastRegularSaveRevision = revision;
+            if (manual && newer == null) {
+                // A verified manual save starts a fresh frontend journal scope.
+                journalScope = null;
+                journalRevision = 0;
+                lastRegularSaveRevision = 0;
+            } else {
+                lastRegularSaveRevision = revision;
+            }
             pendingSave = false;
             return saveResult(content, scope, revision, "target-published");
         } catch (IOException | JSONException error) {
