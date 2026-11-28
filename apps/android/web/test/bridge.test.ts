@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DocumentSession } from "@scpefe/frontend-core";
+import { SessionPresentation } from "../../../../packages/react-ui/src/session/session-presentation.ts";
+import { catalogText } from "../../../windows/src/error-boundary.mjs";
 import { createHost, type AndroidPluginContract } from "../src/bridge.ts";
 
 const opened = { content: "alpha\n", readOnly: true, canEdit: false,
@@ -22,6 +25,7 @@ function fake(overrides: Partial<AndroidPluginContract> = {}): AndroidPluginCont
     openSelectedDocument: async () => ({ opened: { ...opened } }),
     unlockDocument: async () => ({ opened: { ...opened } }),
     lock: async () => ({ locked: true, journalSaved: true, warningCode: null }),
+    activity: async () => {},
     closeDocument: async () => ({ closed: true }),
     getUnresolvedJournalSummary: async () => ({ total: 0, pendingPublications: 0 }),
     enterEditMode: async () => ({ opened: { ...opened, readOnly: false, canEdit: true } }),
@@ -66,6 +70,79 @@ test("manual save keeps the submitted working revision and exact content", async
     ...version,
   });
   await assert.rejects(host.saveDocument("x".repeat(1024 * 1024 + 1), version));
+});
+
+test("native edit failure reaches the dialog as a specific safe cause", async () => {
+  const host = createHost(fake({ enterEditMode: async () => {
+    throw Object.assign(new Error("private lease path"), { code: "LEASE_ACTIVE" });
+  } }));
+  const session = new DocumentSession(host, host);
+  session.adopt({ ...opened, canEdit: true });
+  const presentation = new SessionPresentation(session, catalogText);
+  assert.deepEqual(await session.enterEditMode(), { status: "failed", code: "LEASE_ACTIVE" });
+  const snapshot = session.getSnapshot();
+  assert.equal(snapshot.attention?.kind, "edit-unavailable");
+  if (snapshot.attention?.kind === "edit-unavailable")
+    assert.match(catalogText(snapshot.attention.code), /another editing session/i);
+  assert.deepEqual(presentation.view().selectedDecision, {
+    kind: "edit-unavailable", message: catalogText("LEASE_ACTIVE"),
+  });
+  assert.equal(JSON.stringify(presentation.view()).includes("private lease path"), false);
+  session.dispose();
+});
+
+test("unknown native edit failure is safely identified as an edit check failure", async () => {
+  const host = createHost(fake({ enterEditMode: async () => {
+    throw Object.assign(new Error("private storage path"), { code: "OPERATION_FAILED" });
+  } }));
+  await assert.rejects(host.enterEditMode(), (error: unknown) => {
+    assert.equal((error as { name?: string }).name, "SafeBoundaryError");
+    assert.equal((error as { code?: string }).code, "EDIT_FAILED");
+    assert.equal(String(error).includes("private storage path"), false);
+    return true;
+  });
+  assert.match(catalogText("EDIT_FAILED"), /required document check failed/i);
+});
+
+test("native save refusal keeps a specific safe provider cause", async () => {
+  const host = createHost(fake({ saveDocument: async () => {
+    throw Object.assign(new Error("private provider uri"), { code: "PUBLICATION_FAILED" });
+  } }));
+  await assert.rejects(host.saveDocument("draft"), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "PUBLICATION_FAILED");
+    assert.equal(String(error).includes("private provider uri"), false);
+    return true;
+  });
+});
+
+test("native lock events clear the shared session and retain checkpoint warnings", async () => {
+  const listeners = new Map<string, (event: Record<string, unknown>) => void>();
+  const host = createHost(fake({ addListener: async (name, listener) => {
+    listeners.set(name, listener);
+    return { remove: async () => { listeners.delete(name); } };
+  } }));
+  const started: unknown[] = [], locked: unknown[] = [];
+  const stopStarted = host.onLockStarted?.((value) => started.push(value));
+  const stopLocked = host.onLocked((value) => locked.push(value));
+  await Promise.resolve();
+  listeners.get("lockStarted")?.({ causeCode: null });
+  listeners.get("locked")?.({ locked: true, journalSaved: false,
+    warningCode: "LOCK_CHECKPOINT_FAILED" });
+  assert.deepEqual(started, [{ causeCode: null }]);
+  assert.deepEqual(locked, [{ locked: true, journalSaved: false,
+    warningCode: "LOCK_CHECKPOINT_FAILED" }]);
+  stopStarted?.(); stopLocked();
+  await Promise.resolve();
+  assert.equal(listeners.size, 0);
+});
+
+test("provider divergence is passed through as a conflict", async () => {
+  const host = createHost(fake({ saveDocument: async ({ request }) => ({ result: {
+    saved: true, content: request.content, publicationState: "conflict",
+  } }) }));
+  assert.deepEqual(await host.saveDocument("local changes"), {
+    saved: true, content: "local changes", publicationState: "conflict",
+  });
 });
 
 test("invalid input is rejected before calling native plugin", async () => {

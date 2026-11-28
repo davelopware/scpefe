@@ -3,6 +3,7 @@ package org.scpefe.nativecore;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.os.CancellationSignal;
+import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsProvider;
@@ -22,6 +23,16 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     public static final String ROOT_ID = "root";
     public static final String DOCUMENT_ID = "fixture";
     public static final String VIEW_ONLY_ID = "reader-fixture";
+    private volatile boolean unavailable;
+
+    /** Toggles read availability only for the debug fixture used by recovery tests. */
+    @Override public Bundle call(String method, String arg, Bundle extras) {
+        if ("scpefe-test-unavailable".equals(method)) {
+            unavailable = Boolean.parseBoolean(arg);
+            return Bundle.EMPTY;
+        }
+        return super.call(method, arg, extras);
+    }
 
     @Override public boolean onCreate() {
         try {
@@ -146,6 +157,8 @@ public final class TestDocumentsProvider extends DocumentsProvider {
 
     @Override public ParcelFileDescriptor openDocument(String documentId, String mode,
             CancellationSignal signal) throws FileNotFoundException {
+        if (unavailable && DOCUMENT_ID.equals(documentId))
+            throw new FileNotFoundException("fixture temporarily unavailable");
         if (!file(documentId).isFile()) throw new FileNotFoundException(documentId);
         return ParcelFileDescriptor.open(file(documentId), ParcelFileDescriptor.parseMode(mode));
     }

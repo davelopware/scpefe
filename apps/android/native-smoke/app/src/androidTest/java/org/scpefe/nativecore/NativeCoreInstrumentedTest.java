@@ -75,6 +75,15 @@ public final class NativeCoreInstrumentedTest {
                 assertArrayEquals(utf8("alpha\n"), read.data);
                 assertArrayEquals(fixtureDocumentId(), read.documentId);
                 Arrays.fill(read.data, (byte)0);
+                assertEquals(NativeCore.OK, NativeCore.nativeLock(handle).status);
+                assertEquals(NativeCore.LOCKED, NativeCore.nativeRead(handle).status);
+                assertEquals(NativeCore.AUTHENTICATION_FAILED,
+                    NativeCore.nativeUnlock(handle, wrong).status);
+                assertEquals(NativeCore.OK, NativeCore.nativeUnlock(handle, password).status);
+                NativeCore.Result afterLock = NativeCore.nativeRead(handle);
+                assertEquals(NativeCore.OK, afterLock.status);
+                assertArrayEquals(utf8("alpha\n"), afterLock.data);
+                Arrays.fill(afterLock.data, (byte)0);
                 assertEquals(NativeCore.OK, NativeCore.nativeCloseContainer(handle).status);
                 assertEquals(NativeCore.INVALID_STATE, NativeCore.nativeRead(handle).status);
             } finally {

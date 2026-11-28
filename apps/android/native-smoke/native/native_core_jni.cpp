@@ -175,6 +175,16 @@ Java_org_scpefe_nativecore_NativeCore_nativeUnlock(JNIEnv *env, jclass,
 }
 
 extern "C" JNIEXPORT jobject JNICALL
+Java_org_scpefe_nativecore_NativeCore_nativeLock(JNIEnv *env, jclass,
+                                                 jlong handle) {
+    const auto session = lookup(handle);
+    if (!session) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    std::lock_guard lock(session->mutex);
+    if (!session->container) return result(env, SCPEFE_STATUS_INVALID_STATE);
+    return result(env, scpefe_container_lock(session->container));
+}
+
+extern "C" JNIEXPORT jobject JNICALL
 Java_org_scpefe_nativecore_NativeCore_nativeCreateDocument(
     JNIEnv *env, jclass, jlong handle, jbyteArray name, jbyteArray email,
     jbyteArray device, jbyteArray content, jlong timestamp,
@@ -369,7 +379,9 @@ Java_org_scpefe_nativecore_NativeCore_nativePrepareLease(JNIEnv *env, jclass,
     try {
         const auto session = lookup(handle);
         if (!session || (action != SCPEFE_LEASE_ACQUIRE
-            && action != SCPEFE_LEASE_RELEASE) || operation_id <= 0
+            && action != SCPEFE_LEASE_REFRESH
+            && action != SCPEFE_LEASE_RELEASE
+            && action != SCPEFE_LEASE_RESUME) || operation_id <= 0
             || now_utc_ms < 0) return result(env, SCPEFE_STATUS_INVALID_ARGUMENT);
         Bytes secret, id, holder_name, holder_email, device_name;
         if (!copy_array(env, password, secret) || !copy_array(env, session_id, id)

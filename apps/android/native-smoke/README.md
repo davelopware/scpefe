@@ -37,9 +37,15 @@ target. `AndroidHeadWitnesses` MACs client-local revision observations and
 returns structured rollback, divergence, replacement, or unreadable attention.
 Private records use a synced temporary file and atomic replacement. A failed
 write keeps the previous record, and unreadable journals remain on disk for
-explicit recovery decisions. The application manifest sets `allowBackup=false`
-so app-private profile, settings, grants, journals, witness key, and witness
-records are excluded from Android cloud backup.
+explicit recovery decisions. The WebView application manifest sets
+`allowBackup=false` and explicit cloud-backup and device-transfer exclusions,
+so app-private
+profile, settings, grants, journals, witness key, and witness records are
+excluded from Android backup and transfer. Private-state writes reserve 16 MiB
+of free space and preserve the prior record if replacement fails. Work journals
+are limited to 160 MiB per record and 512 MiB per directory; other private
+records have smaller limits. A failed checkpoint surfaces a warning, and
+mandatory locking still hides the document.
 The emulator gate runs one instrumentation phase to write state, force-stops the
 app process, then starts a second instrumentation phase to verify recovery under
 a different process ID. This also avoids adding a process-isolated component to

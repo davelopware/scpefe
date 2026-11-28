@@ -66,6 +66,8 @@ public final class NativeCore {
     public static native Result nativeOpen(long handle, byte[] encrypted);
     /** Authenticates a transient password on the active container. */
     public static native Result nativeUnlock(long handle, byte[] password);
+    /** Hides the active container while retaining its local editing lease session. */
+    public static native Result nativeLock(long handle);
     /** Creates a document using exact UTF-8 byte arrays and the core's policy. */
     public static native Result nativeCreateDocument(long handle, byte[] name,
         byte[] email, byte[] device, byte[] content, long timestamp,

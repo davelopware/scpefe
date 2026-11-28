@@ -69,6 +69,8 @@ public final class WebViewWorkflowInstrumentedTest {
         String state = eval(scenario, "JSON.stringify({document:document.querySelector("
             + "'[aria-label=\"Document state\"]')?.textContent,"
             + "alert:document.querySelector('[role=alert]')?.textContent,"
+            + "working:document.querySelector('[aria-label=\"Working copy state\"]')?.textContent,"
+            + "recovery:document.querySelector('[aria-label=\"Recovery journal state\"]')?.textContent,"
             + "editDisabled:document.querySelector('[aria-label=\"Edit document contents\"]')"
             + "?.disabled,menu:[...document.querySelectorAll('[role=menu] button')]"
             + ".map(x=>[x.querySelector('span')?.textContent.trim(),x.disabled])})");
@@ -135,8 +137,13 @@ public final class WebViewWorkflowInstrumentedTest {
             if (open == null) {
                 if (SystemClock.uptimeMillis() >= nextRetry) {
                     UiObject2 row = device.findObject(By.text(selected));
-                    if (row != null) try { row.click(); }
-                    catch (StaleObjectException ignored) { /* Retry a live row. */ }
+                    if (row != null) try {
+                        UiObject2 action = row;
+                        while (action != null && !action.isClickable())
+                            action = action.getParent();
+                        if (action != null) action.click();
+                        else row.click();
+                    } catch (StaleObjectException ignored) { /* Retry a live row. */ }
                     nextRetry = SystemClock.uptimeMillis() + 3_000;
                 }
                 continue;
@@ -641,6 +648,12 @@ public final class WebViewWorkflowInstrumentedTest {
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
                 + ".textContent==='Clean'", 30_000);
+            setDocumentText(scenario, "Android created and saved twice\n");
+            until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                + ".textContent.includes('Checkpoint ready')", 15_000);
+            menu(scenario, "File", "Save");
+            until(scenario, "document.querySelector('[aria-label=\"Working copy state\"]')"
+                + ".textContent==='Clean'", 30_000);
             String created = null;
             for (Map.Entry<String, ?> entry : targets.getAll().entrySet()) {
                 if (before.containsKey(entry.getKey())
@@ -652,7 +665,12 @@ public final class WebViewWorkflowInstrumentedTest {
             }
             assertNotNull("New provider document was not found", created);
             writeInterop(target, "interop-android-created",
-                readProvider(target, created), "Android created and saved\n");
+                readProvider(target, created), "Android created and saved twice\n");
+            closeCleanDocument(scenario);
+            openFixture(scenario, device, created + ".scpefe", OWNER);
+            enterEdit(scenario);
+            assertEquals("false", eval(scenario,
+                "document.querySelector('textarea[aria-label=\"Document text\"]').readOnly"));
             closeCleanDocument(scenario);
         }
     }
@@ -694,7 +712,7 @@ public final class WebViewWorkflowInstrumentedTest {
         }
     }
 
-    @Test public void changedProviderRetainsAndRetriesExactSaveCandidate() throws Exception {
+    @Test public void changedProviderPreservesConflictCandidate() throws Exception {
         Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
         Context test = InstrumentationRegistry.getInstrumentation().getContext();
         byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
@@ -721,24 +739,62 @@ public final class WebViewWorkflowInstrumentedTest {
             replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, foreign);
             menu(scenario, "File", "Save");
             until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
-                + ".textContent==='Pending publication'", 20_000);
+                + ".textContent==='Publication conflict'", 20_000);
             assertArrayEquals("Changed provider image was overwritten", foreign,
                 readProvider(target, TestDocumentsProvider.DOCUMENT_ID));
             assertTrue("Exact candidate journal was not retained", journal.isFile());
             assertFalse(new String(Files.readAllBytes(journal.toPath()),
                 StandardCharsets.UTF_8).contains("pending Android save"));
-            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, leased);
+        } finally {
+            Files.deleteIfExists(journal.toPath());
+            if (fixtureSelected)
+                replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+        }
+    }
+
+    @Test public void unavailableProviderKeepsManualSavePendingUntilRetry() throws Exception {
+        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        Context test = InstrumentationRegistry.getInstrumentation().getContext();
+        byte[] original = readAll(test.getAssets().open("windows/windows-container.bin"));
+        String id = new String(readAll(test.getAssets().open(
+            "windows/windows-document-id.txt")), StandardCharsets.US_ASCII).trim();
+        File journal = new File(new File(target.getFilesDir(), "work-journals"),
+            id + ".work-journal");
+        Files.deleteIfExists(journal.toPath());
+        boolean fixtureSelected = false;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            ensureProfile(scenario);
+            chooseFixture(scenario, UiDevice.getInstance(
+                InstrumentationRegistry.getInstrumentation()), "test.scpefe");
+            fixtureSelected = true;
+            replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);
+            unlockSelected(scenario, WINDOWS);
+            enterEdit(scenario);
+            setDocumentText(scenario, "alpha\npending provider save\n");
+            until(scenario, "document.querySelector('[aria-label=\"Recovery journal state\"]')"
+                + ".textContent.includes('Checkpoint ready')", 15_000);
+            assertNotNull(target.getContentResolver().call(
+                fixtureUri(TestDocumentsProvider.DOCUMENT_ID),
+                "scpefe-test-unavailable", "true", null));
+            menu(scenario, "File", "Save");
+            until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
+                + ".textContent==='Pending publication'", 20_000);
+            assertTrue("Exact candidate journal was not retained", journal.isFile());
+            assertNotNull(target.getContentResolver().call(
+                fixtureUri(TestDocumentsProvider.DOCUMENT_ID),
+                "scpefe-test-unavailable", "false", null));
             until(scenario, "[...document.querySelectorAll('button')]"
                 + ".some(x=>x.textContent==='Retry publication'&&!x.disabled)", 10_000);
             eval(scenario, "[...document.querySelectorAll('button')]"
                 + ".find(x=>x.textContent==='Retry publication').click()");
             until(scenario, "document.querySelector('[aria-label=\"Publication state\"]')"
                 + ".textContent==='Published'", 20_000);
-            assertFalse(Arrays.equals(leased,
-                readProvider(target, TestDocumentsProvider.DOCUMENT_ID)));
             assertFalse("Verified candidate journal remains", journal.exists());
             closeCleanDocument(scenario);
         } finally {
+            if (fixtureSelected) target.getContentResolver().call(
+                fixtureUri(TestDocumentsProvider.DOCUMENT_ID),
+                "scpefe-test-unavailable", "false", null);
             Files.deleteIfExists(journal.toPath());
             if (fixtureSelected)
                 replaceProvider(target, TestDocumentsProvider.DOCUMENT_ID, original);

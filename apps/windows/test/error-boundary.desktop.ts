@@ -1,7 +1,8 @@
 // @ts-nocheck -- preserve the legacy fixture shapes during the source-language cutover.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSafeIpc, decodeBoundaryError, safeRendererErrorMessage } from
+import { createSafeIpc, decodeBoundaryError, safeErrorDetails,
+  safeRendererErrorMessage } from
   "../src/error-boundary.mjs";
 
 const OPERATIONS = [
@@ -88,5 +89,22 @@ test("authoritative password preconditions retain specific safe correction guida
     assert.equal(decoded.code, code);
     assert.match(safeRendererErrorMessage(decoded), copy);
     assert.doesNotMatch(safeRendererErrorMessage(decoded), /status|SCPEFE operation/i);
+  }
+});
+
+test("Android edit and save failures retain a safe, actionable cause", () => {
+  for (const [code, reason] of [
+    ["STALE_OPERATION", /earlier save/i],
+    ["LEASE_ACTIVE", /editing session/i],
+    ["TARGET_UNAVAILABLE", /cannot be read/i],
+    ["PRIVATE_STATE_UNAVAILABLE", /local recovery state/i],
+    ["RECOVERY_CHECKPOINT_FAILED", /recovery checkpoint failed/i],
+    ["PUBLICATION_FAILED", /provider refused/i],
+  ]) {
+    const details = safeErrorDetails({ code,
+      message: "secret document path /home/ada/notes.scpefe" }, "document:save");
+    assert.equal(details.code, code);
+    assert.match(details.message, reason);
+    assert.doesNotMatch(`${details.message} ${details.nextAction}`, /secret|\/home\/ada/);
   }
 });
