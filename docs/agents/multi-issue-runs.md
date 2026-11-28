@@ -14,8 +14,8 @@ Each handoff names the issue number, branch and commit SHA, integration SHA, cur
 
 | Stage | Fresh agent's task | Completion gate |
 | --- | --- | --- |
-| Implement | Make and commit the issue's change on its own branch and worktree. | Commit SHA and focused verification result are recorded. |
-| Verify | Independently check the issue specification and repository rules against that commit; run relevant checks. | Explicit pass with commands and results, or a concrete failure report. |
+| Implement | Make and commit the issue's change, including affected documentation, on its own branch and worktree. | Commit SHA and focused verification result are recorded; documentation and ticket scope are reconciled under [PR completion](pr-completion.md). |
+| Verify | Independently check the issue specification, documentation, ticket scope, and repository rules against that commit; run relevant checks. | Explicit pass with commands and results, or a concrete failure report. |
 | Merge | Integrate the verified issue commit into `codex/dev-sub-agents`. | Integration SHA identifies the issue's committed work; conflicts are resolved and reviewed. |
 | Integration test | Run the complete applicable gate on the resulting integration SHA. | Passing commands, results, and resource measurements are recorded. |
 | Publish | Push that tested integration SHA, update the draft PR checkpoint, and close the issue with a comment naming the integration SHA, passing gate, and PR. | Remote SHA matches the tested SHA and the issue is closed. |
@@ -26,10 +26,14 @@ After publication, remove the completed issue branch and worktree. Preserve bran
 
 ## Finish the PR
 
+Complete [PR completion](pr-completion.md) before the final integration gate and preview. That procedure owns the documentation and ticket reconciliation requirements for this run.
+
 1. Assign a fresh agent to finish the PR. Keep its body reviewable: list covered issues, each issue's commit and closed checkpoint, the final integration gate, and the preview link. Confirm the final PR head is the tested integration SHA.
 2. Run the validated path of `.github/workflows/windows-preview.yml` at that **exact final PR SHA** with tests enabled. Verify the workflow's head SHA, successful test/build/package steps, and downloadable unsigned Windows ZIP. Record the artifact link and expiry in the PR. A preview produced with `skip_tests=true` does not meet this gate.
 3. Mark the draft PR ready for review only after the validated artifact is available at the final SHA. If the PR head changes, rerun the integration gate and preview for the new SHA.
 
 ## Close out after merge
+
+Follow the after-merge procedure in [PR completion](pr-completion.md) for GitHub status housekeeping. Repository documentation is completed before review.
 
 Assign a fresh agent to verify the PR merged and every covered issue is closed with its tested commit and gate recorded. Preserve the preview link and its download window for reviewers. Remove only merged run branches and worktrees after checking for uncommitted or unrelated work. Recheck dependent issues now unblocked by the merge and apply the repository's triage labels where appropriate.
