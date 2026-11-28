@@ -1,5 +1,13 @@
 ## Agent skills
 
+### Repository instructions and imported skills
+
+When updating or improving agentic files, establish which files are repository-owned before editing. Keep project-specific rules in this `AGENTS.md` and repository-owned `docs/agents/` files. Keep imported skills and their bundled files unchanged, including Matt Pocock skills vendored under `.agents/skills/` and skills supplied by plugins or external installations. Extend their workflows through repository instructions and context pointers so upstream skill updates preserve our project rules. Upstream package refreshes are separate from project instruction changes.
+
+### PR completion
+
+Before completing implementation, handing a PR over for review, or marking it ready, follow [PR completion](docs/agents/pr-completion.md). Include affected documentation in the implementation PR and reconcile related tickets before review. Apply this gate regardless of which skill initiated the work.
+
 ### Issue tracker
 
 Issues are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.

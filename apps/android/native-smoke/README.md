@@ -2,7 +2,8 @@
 
 This small Android application packages the existing `libscpefe` C ABI and a
 JNI byte-array adapter in one shared library. It has no user-facing activity; the
-real WebView integration belongs to later Android issues. The adapter keeps one C context per opaque
+real WebView integration is implemented in the [Capacitor application](../web/README.md).
+The adapter keeps one C context per opaque
 Java handle, returns the C ABI status codes, and closes the context and active
 container on `nativeCloseContext`. Password and content copies in native memory
 are erased before each JNI call returns. Java owns returned cleartext arrays and

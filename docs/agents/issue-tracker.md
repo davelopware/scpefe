@@ -13,6 +13,10 @@ Issues and specifications for this repository live as GitHub issues. Use the `gh
 
 Infer the repository from `git remote -v`; `gh` does this automatically inside the clone.
 
+## Reconcile tickets with a PR
+
+Before handing over an implementation PR, follow [PR completion](pr-completion.md) for acceptance evidence, follow-up scope, dependency status, and issue closure timing. Use its after-merge procedure when closing out a merged PR.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.**

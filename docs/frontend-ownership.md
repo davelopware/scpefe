@@ -1,9 +1,10 @@
 # Frontend ownership
 
 The frontend application core presents a document session; it does not replace
-the main-process `DocumentService` or the C++ `libscpefe` context. A frontend
+the Windows main-process `DocumentService`, Android's native
+`AndroidSessionController`, or the C++ `libscpefe` context. A frontend
 `DocumentSession` orchestrates presentation of the active target and owns a
-`WorkingCopy` while unlocked. The existing main-process services continue to
+`WorkingCopy` while unlocked. The existing platform host services continue to
 own lifecycle barriers, durable publication, storage, and security policy.
 
 | Concern | Authoritative owner | Boundary |
@@ -11,14 +12,24 @@ own lifecycle barriers, durable publication, storage, and security policy.
 | Open, replacement, lock, unlock, and close presentation; active target identity in the UI | Frontend `DocumentSession` | Host services perform the actual document operation; the frontend presents its structured result. |
 | Working text, manual-save baseline, dirty state, edit history, selection, and find/replace | `WorkingCopy` owned by frontend `DocumentSession` | Journal writes use a narrow host capability. |
 | Editing and lease command availability and takeover attention | Frontend `DocumentSession` | React maps attention and outcomes to dialogs and safe messages. |
-| Save and publication command availability, status, and semantic attention | Frontend `DocumentSession` | The session serializes commands and projects host results; main-process services retain publication authority. |
+| Save and publication command availability, status, and semantic attention | Frontend `DocumentSession` | The session serializes commands and projects host results; platform host services retain publication authority. |
 | Recovery decisions other than publication | Frontend `DocumentSession` | React presents semantic recovery attention and dispatches the selected action. |
 | Dialog rendering, focus, inert chrome, and form drafts | Shared React UI and platform frontend | These are presentation details, not document-session state. |
 | State-changing frontend command order and pending UI operations | Frontend `DocumentSession` | This ordering complements the main-process lifecycle barrier. |
-| Main-process lifecycle barrier, generation, and native work completion | Windows main-process lifecycle services | A frontend command cannot declare native work complete. |
-| Durable publication, pending-publication journal, conflict detection, and crash recovery | `DocumentService`, `PublicationService`, and app-private journal | Frontend state projects results; it does not independently publish or reconcile containers. |
-| Target I/O, app-private storage, clocks, and platform capabilities | Host-services implementations and Windows main process | Platform adapters implement the `libscpefe` host-services interface. |
-| Format, cryptography, password-slot and lease policy, and permission checks | `libscpefe` and existing main-process orchestration | TypeScript must not duplicate backend decisions. |
+| Host lifecycle barrier, generation, and native work completion | Windows main-process lifecycle services; Android `ScpefePlugin` and `AndroidSessionController` | A frontend command cannot declare native work complete. |
+| Durable publication, pending-publication journal, conflict detection, and crash recovery | Windows `DocumentService`, `PublicationService`, and app-private journal; Android `AndroidSessionController` and native storage adapters | Frontend state projects results; it does not independently publish or reconcile containers. |
+| Target I/O, app-private storage, clocks, and platform capabilities | Platform host implementations | The v1 `libscpefe` host-services interface supplies only the monotonic clock; target and private-record I/O remain host-owned. |
+| Format, cryptography, password-slot and lease policy, and permission checks | `libscpefe` and platform host orchestration | Frontend presentation must not duplicate backend decisions. |
+
+On Android, `AndroidSessionController` owns native lifecycle, editing-lease,
+journal, and provider-publication orchestration. `ScpefePlugin` serializes native
+work and delivers lifecycle events; the Capacitor bridge preserves recognized
+safe failure codes for shared session presentation. These host workflows still
+have separate Windows and Android implementations after merged
+[PR #189](https://github.com/davelopware/scpefe/pull/189).
+[Issue #190](https://github.com/davelopware/scpefe/issues/190) tracks moving all
+document workflow decisions into shared code behind low-level storage primitives,
+including open/create, editing leases, lock/unlock, save, recovery, and close.
 
 Each state concern has exactly one authoritative owner. React subscribes to
 the session snapshot and dispatches commands instead of maintaining a parallel
