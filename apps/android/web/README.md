@@ -29,8 +29,27 @@ save seals the revision. An unavailable or changed provider leaves the exact
 candidate for the shared pending/conflict decision; retry uses those journaled
 bytes. The CI emulator exports both an Android-created save and a Windows-created
 container edited on Android; a Windows core job reopens both and checks identity,
-content, sealed revision state, and lease metadata. Background, screen-lock,
-low-storage, and broader process-death recovery remain in #26.
+content, sealed revision state, and lease metadata.
+
+Lifecycle and recovery support from [#26](https://github.com/davelopware/scpefe/issues/26)
+is implemented in [PR #189](https://github.com/davelopware/scpefe/pull/189).
+Backgrounding forces a recovery checkpoint; screen-off and two minutes of
+inactivity hide the document, even if checkpointing fails. `FLAG_SECURE` hides
+task snapshots. Lock retains the editing lease and stops its heartbeat; unlock
+resumes or reacquires an unchanged lease, and close releases it when safe.
+App-private state has storage reserves, quotas, and explicit cloud-backup and
+device-transfer exclusions. Failed checkpoints remain visible, and the prior
+durable journal is preserved. Emulator checks cover a forced process restart,
+provider failure/reconciliation, and create -> first save -> edit -> second
+save -> close -> reopen -> edit. A verified manual save clears the prior journal
+and accepts the next working-copy scope starting at revision 1.
+
+Native edit and save failures retain recognized safe codes through the shared
+session so dialogs can explain editing-lease, target, permission, and publication
+failures. Unknown edit failures use `EDIT_FAILED` without exposing native text.
+The broader migration of all document workflows into shared logic behind minimal
+storage primitives remains tracked in [#190](https://github.com/davelopware/scpefe/issues/190).
+Production packaging and release checks remain in [#30](https://github.com/davelopware/scpefe/issues/30).
 
 From the repository root, with an already licensed API 35 Android SDK and NDK
 r27d, JDK 21, Gradle 8.13, and a running API 35 emulator:
